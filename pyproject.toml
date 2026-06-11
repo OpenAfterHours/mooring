@@ -34,6 +34,8 @@ dev = [
     # Pydantic-stewarded httpx successor); plain httpx still works behind a
     # deprecation warning and is kept here as the conservative choice.
     "httpx",
+    # builds the docs/ site (see zensical.toml); `uv run zensical serve|build`
+    "zensical>=0.0.45",
 ]
 
 [build-system]

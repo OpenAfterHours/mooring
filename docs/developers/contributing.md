@@ -1,0 +1,94 @@
+---
+icon: lucide/git-pull-request
+---
+
+# Contributing
+
+## Dev setup
+
+You need [uv](https://docs.astral.sh/uv/). Then:
+
+```bash
+uv sync                                  # install everything (incl. dev deps)
+uv run pytest                            # unit tests — no network needed
+uv run ruff check src tests              # lint
+uv run mooring hub                       # run the hub from source
+uv run python tests/manual_editor_check.py   # editor-subprocess smoke test
+```
+
+The unit tests mock GitHub with `responses`, so they run offline. `ruff` is
+configured with a line length of 100.
+
+## Running from source
+
+`uv run mooring <command>` runs the CLI exactly as the packaged app does — e.g.
+`uv run mooring hub`, `uv run mooring status`. See the
+[CLI reference](../users/cli.md) for all commands.
+
+## Integration testing
+
+To exercise the real sync engine against a live repo, point mooring at a scratch
+repository with environment variables instead of logging in:
+
+```bash
+export MOORING_TOKEN="ghp_..."        # a PAT works; skips device flow
+export MOORING_CLIENT_ID="Ov23li..."
+export MOORING_OWNER="your-org"
+export MOORING_REPO="scratch-notebooks"
+uv run mooring status
+uv run mooring pull
+```
+
+These `MOORING_*` variables override both config files for the run — see
+[Configuration](../admins/configuration.md#environment-variables). Use a
+throwaway repo; pushes create real commits.
+
+## Gotchas worth knowing
+
+- **PYTHONPATH for the marimo subprocess.** When packaged, moonlit activates its
+  extracted site-packages via `site.addsitedir()`, which child processes don't
+  inherit. `cli._ensure_child_pythonpath()` re-exposes them on `PYTHONPATH` so
+  the marimo server and its kernels can import the bundled stack. Don't remove
+  it.
+- **UTF-8 BOM breaks notebooks.** marimo rejects `.py` notebooks that start with
+  a UTF-8 BOM. PowerShell 5.1's `Out-File -Encoding utf8` writes one — use a
+  BOM-less writer when generating notebook files.
+- **`httpx` vs `httpx2`.** Starlette's test client now prefers `httpx2`; the
+  project pins plain `httpx` (behind a deprecation warning) as the conservative
+  choice. Swap when comfortable.
+
+## Working on the docs
+
+The documentation is a [zensical](https://zensical.org) site under `docs/`,
+configured by `zensical.toml` at the repo root.
+
+```bash
+uv run zensical serve     # live-reloading preview at a local URL
+uv run zensical build     # build the static site into ./site
+```
+
+`zensical` is already a dev dependency, so `uv sync` installs it. The pages use
+admonitions (`!!! note`), collapsible blocks (`??? info`), content tabs
+(`=== "Windows"`), task lists, and mermaid diagrams — all enabled in
+`zensical.toml`.
+
+### How the docs get published
+
+`.github/workflows/docs.yml` builds the site and deploys it to **GitHub Pages**
+on every push to the default branch (and on manual dispatch). Edits to `docs/**`
+or `zensical.toml` go live automatically.
+
+!!! note "One-time Pages setup"
+
+    For the first deploy to publish, a repo admin must set
+    **Settings → Pages → Source = GitHub Actions**. After that it's automatic.
+    Consider also setting `site_url` in `zensical.toml` to your Pages URL so
+    canonical links and the sitemap are correct.
+
+## Conventions
+
+- Keep modules small and single-purpose, matching the existing
+  [layout](index.md#code-layout).
+- Match surrounding style; run `ruff` before pushing.
+- Add or update tests under `tests/` for behavior changes — they should stay
+  offline (mock GitHub with `responses`).
