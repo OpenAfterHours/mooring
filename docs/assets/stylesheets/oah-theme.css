@@ -1,0 +1,125 @@
+/* ==========================================================================
+   OpenAfterHours design tokens + site-wide theming for mooring.
+   Night-sky slate surfaces, warm-orange accents, Space Grotesk display type.
+   Shared with the landing page (landing.css); loaded on every page.
+   ========================================================================== */
+
+@import url("https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&display=swap");
+
+:root {
+  /* Brand orange */
+  --oah-orange: #ff9100;
+  --oah-orange-bright: #ffa724;
+  --oah-orange-hover: #e68200;
+  --oah-orange-soft: #ffb74d;
+
+  /* Night-sky slate */
+  --oah-slate-900: #0d0e11;
+  --oah-slate-850: #11141a;
+  --oah-slate-800: #161719;
+  --oah-slate-700: #1f2430;
+  --oah-slate-600: #2a3142;
+  --oah-slate-500: #3b4356;
+  --oah-slate-400: #64748b;
+  --oah-slate-300: #a0a4ab;
+  --oah-slate-200: #cbd0d8;
+  --oah-slate-100: #e2e4e8;
+  --oah-slate-050: #f1f5f9;
+
+  /* Accents */
+  --oah-terminal-green: #3dd68c;
+  --oah-star-amber: #ffc857;
+  --oah-moon-1: #ffd388;
+  --oah-moon-2: #ffb04a;
+  --oah-moon-3: #c9442a;
+
+  /* Borders / radii / glow */
+  --oah-border: rgba(216, 222, 233, 0.12);
+  --oah-border-soft: rgba(216, 222, 233, 0.08);
+  --oah-radius-md: 8px;
+  --oah-radius-lg: 12px;
+  --oah-radius-xl: 16px;
+  --oah-glow: 0 4px 20px rgba(255, 145, 0, 0.12);
+
+  /* Type */
+  --oah-font-display: "Space Grotesk", var(--md-text-font, "Inter"), sans-serif;
+}
+
+/* --- Display headings across the whole site -------------------------------- */
+.md-typeset h1,
+.md-typeset h2,
+.md-typeset h3,
+.md-header__title,
+.md-nav__title {
+  font-family: var(--oah-font-display);
+  letter-spacing: -0.01em;
+}
+
+.md-typeset h1 {
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+/* --- Dark (default) scheme: deep night-sky surfaces ------------------------ */
+[data-md-color-scheme="slate"] {
+  --md-default-bg-color: var(--oah-slate-900);
+  --md-default-bg-color--light: var(--oah-slate-850);
+  --md-default-bg-color--lighter: var(--oah-slate-800);
+  --md-default-fg-color: var(--oah-slate-100);
+  --md-default-fg-color--light: var(--oah-slate-300);
+  --md-default-fg-color--lighter: var(--oah-slate-400);
+  --md-default-fg-color--lightest: rgba(216, 222, 233, 0.08);
+
+  /* Dark header (not orange); orange is reserved for accents/links */
+  --md-primary-fg-color: var(--oah-slate-900);
+  --md-primary-fg-color--light: var(--oah-slate-850);
+  --md-primary-fg-color--dark: var(--oah-slate-900);
+  --md-primary-bg-color: var(--oah-slate-100);
+  --md-primary-bg-color--light: var(--oah-slate-300);
+
+  --md-accent-fg-color: var(--oah-orange);
+  --md-accent-fg-color--transparent: rgba(255, 145, 0, 0.1);
+
+  --md-typeset-a-color: var(--oah-orange-soft);
+  --md-code-bg-color: var(--oah-slate-850);
+  --md-code-fg-color: var(--oah-slate-100);
+}
+
+[data-md-color-scheme="slate"] .md-header {
+  border-bottom: 1px solid var(--oah-border-soft);
+}
+
+[data-md-color-scheme="slate"] .md-typeset a:hover {
+  color: var(--oah-orange);
+}
+
+/* Inline code in orange, matching moonlit */
+[data-md-color-scheme="slate"] .md-typeset code {
+  color: var(--oah-orange-soft);
+  background: rgba(216, 222, 233, 0.06);
+}
+
+/* Admonition + table accents tuned to slate */
+[data-md-color-scheme="slate"] .md-typeset .md-typeset__table th {
+  background: var(--oah-slate-850);
+}
+
+/* --- Light scheme: keep it clean, orange accents -------------------------- */
+[data-md-color-scheme="default"] {
+  --md-primary-fg-color: var(--oah-slate-900);
+  --md-primary-bg-color: #ffffff;
+  --md-accent-fg-color: var(--oah-orange-hover);
+  --md-typeset-a-color: var(--oah-orange-hover);
+}
+
+[data-md-color-scheme="default"] .md-typeset code {
+  color: var(--oah-orange-hover);
+}
+
+/* Material "orange" primary would tint the header; we keep the brand mark
+   orange and the bar dark, so re-assert the logo image renders crisp. */
+.md-header__button.md-logo img,
+.md-header__button.md-logo svg {
+  height: 1.4rem;
+  width: auto;
+}

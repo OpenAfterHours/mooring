@@ -1,0 +1,126 @@
+{#-
+  mooring landing page — OpenAfterHours "night sky" theme.
+  Custom homepage: replaces the header with a bespoke nav, fills the hero
+  block with the anchor hero + feature shelf + start-here, hides the empty
+  docs shell, and renders a custom footer. Inner pages use the standard theme.
+-#}
+{% extends "main.html" %}
+
+{% set gh = config.repo_url | default("https://github.com/OpenAfterHours/mooring", true) %}
+{% set anchor_svg %}
+  <path d="M12 6v16M19 13l2-1a9 9 0 0 1-18 0l2 1M9 11h6"/><circle cx="12" cy="4" r="2"/>
+{% endset %}
+
+{% block extrahead %}
+  {{ super() }}
+  <style>
+    /* Homepage only (this template is used only by the index page). */
+    .md-main { display: none; }
+    .md-container { background: var(--oah-slate-900); }
+  </style>
+{% endblock %}
+
+{% block header %}
+<header class="mr-topnav">
+  <a class="mr-brand" href="{{ 'index.html' | url }}" aria-label="{{ config.site_name }}">
+    <svg viewBox="0 0 24 24" fill="none" stroke="#ff9100" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">{{ anchor_svg }}</svg>
+    <span class="mr-brand-name">mooring</span>
+    <span class="mr-brand-org">OpenAfterHours</span>
+  </a>
+  <nav class="mr-topnav-links" aria-label="Primary">
+    <a href="{{ 'users/' | url }}">Users</a>
+    <a href="{{ 'admins/' | url }}">Admins</a>
+    <a href="{{ 'developers/' | url }}">Developers</a>
+    <a class="mr-gh" href="{{ gh }}" rel="noopener">★ GitHub</a>
+  </nav>
+</header>
+{% endblock %}
+
+{% block hero %}
+<section class="mr-hero">
+  <div class="mr-stars" data-count="140" data-seed="7" aria-hidden="true"></div>
+  <div class="mr-hero-grid">
+    <div class="mr-hero-copy">
+      <p class="mr-eyebrow">Git-free · marimo notebook sharing</p>
+      <h1 class="mr-h1">Share <span class="mr-accent">marimo</span> notebooks via GitHub — <span class="mr-accent">no git</span> required.</h1>
+      <p class="mr-lede">
+        Analysts with only Python 3.12 pull, edit, and push a shared repo's
+        notebooks over the GitHub REST API. No git, no pip, no setup — just run
+        the app and log in.
+      </p>
+      <div class="mr-install" data-mr-install>
+        <span class="mr-prompt">$</span>
+        <code class="mr-cmd">python mooring.pyz</code>
+        <button class="mr-copy" type="button" aria-label="Copy command">COPY</button>
+      </div>
+      <div class="mr-cta">
+        <a class="mr-btn-primary" href="{{ 'users/' | url }}">Read the docs →</a>
+        <a class="mr-btn-ghost" href="{{ gh }}" rel="noopener">View on GitHub</a>
+      </div>
+    </div>
+    <div class="mr-hero-art">
+      <div class="mr-anchor-stage">
+        <div class="mr-anchor-glow" aria-hidden="true"></div>
+        <svg class="mr-anchor" viewBox="0 0 24 24" fill="none" role="img" aria-label="mooring anchor">
+          <defs>
+            <radialGradient id="mrAnchorGrad" cx="40%" cy="32%" r="85%">
+              <stop offset="0%" stop-color="#ffd388"/>
+              <stop offset="45%" stop-color="#ffb04a"/>
+              <stop offset="100%" stop-color="#c9442a"/>
+            </radialGradient>
+          </defs>
+          <g stroke="url(#mrAnchorGrad)" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 6v16M19 13l2-1a9 9 0 0 1-18 0l2 1M9 11h6"/><circle cx="12" cy="4" r="2"/>
+          </g>
+        </svg>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="mr-shelf-wrap">
+  <div class="mr-shelf">
+    <article class="mr-feat">
+      <span class="mr-feat-k">No git anywhere</span>
+      <p>Pull and push over the GitHub REST API. The only requirement on an analyst's machine is Python 3.12.</p>
+    </article>
+    <article class="mr-feat">
+      <span class="mr-feat-k">Conflicts are explicit</span>
+      <p>Three-way change detection. Pull never overwrites local edits; push is blocked on conflicts and resolved per file.</p>
+    </article>
+    <article class="mr-feat">
+      <span class="mr-feat-k">Frozen package stack</span>
+      <p>polars, altair, plotly, openpyxl, fastexcel and requests are bundled in. No pip at runtime.</p>
+    </article>
+  </div>
+</section>
+
+<section class="mr-start">
+  <div class="mr-start-inner">
+    <h2 class="mr-start-h">Where to start</h2>
+    <div class="mr-start-grid">
+      <a href="{{ 'users/' | url }}">
+        <strong>For users →</strong>
+        <span>Install Python, run the app, pull / edit / push notebooks.</span>
+      </a>
+      <a href="{{ 'admins/' | url }}">
+        <strong>For admins →</strong>
+        <span>Set up the repo, register the OAuth app, build &amp; distribute.</span>
+      </a>
+      <a href="{{ 'developers/' | url }}">
+        <strong>For developers →</strong>
+        <span>Architecture, dev setup, and contributing.</span>
+      </a>
+    </div>
+  </div>
+</section>
+{% endblock %}
+
+{% block container %}{% endblock %}
+
+{% block footer %}
+<footer class="mr-footer">
+  <span>© OpenAfterHours · MIT · Built with <a href="https://github.com/openafterhours/moonlit" rel="noopener">moonlit</a></span>
+  <span><a href="{{ gh }}" rel="noopener">GitHub</a> · <a href="{{ 'users/' | url }}">Docs</a></span>
+</footer>
+{% endblock %}

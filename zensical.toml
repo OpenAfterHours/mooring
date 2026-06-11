@@ -21,10 +21,17 @@ copyright = """
 Copyright &copy; 2026 The mooring authors
 """
 
-# If/when the source repo is public, set these to enable the "edit this page"
-# and "view source" buttons (also turn on the content.action.* features below).
-#repo_url = "https://github.com/your-org/mooring"
-#repo_name = "your-org/mooring"
+# Source repo (also used by the landing page's GitHub links). Adjust if the
+# repo moves; the OpenAfterHours/mooring slug keeps it sibling-consistent.
+repo_url = "https://github.com/OpenAfterHours/mooring"
+repo_name = "OpenAfterHours/mooring"
+
+# OpenAfterHours design system (night-sky theme) + the custom landing page.
+extra_css = [
+  "assets/stylesheets/oah-theme.css",
+  "assets/stylesheets/landing.css",
+]
+extra_javascript = ["assets/javascripts/landing.js"]
 
 # Explicit navigation so ordering and titles are deterministic rather than
 # derived from the docs/ directory layout.
@@ -54,6 +61,9 @@ nav = [
 [project.theme]
 
 language = "en"
+custom_dir = "overrides"
+logo = "assets/images/anchor-mark.svg"
+favicon = "assets/images/favicon.svg"
 
 features = [
     "announce.dismiss",
@@ -77,18 +87,27 @@ features = [
     "search.highlight",
 ]
 
-[project.theme.icon]
-logo = "lucide/anchor"
+# Inter (UI/body) + JetBrains Mono (code); Space Grotesk for display headings
+# is loaded via @import in oah-theme.css.
+[project.theme.font]
+text = "Inter"
+code = "JetBrains Mono"
+
+# slate first => the dark night-sky scheme is the default; light is the toggle.
+# primary/accent = orange; oah-theme.css keeps the header dark and links orange.
+[[project.theme.palette]]
+scheme = "slate"
+primary = "orange"
+accent = "orange"
+toggle.icon = "lucide/sun"
+toggle.name = "Switch to light mode"
 
 [[project.theme.palette]]
 scheme = "default"
-toggle.icon = "lucide/sun"
-toggle.name = "Switch to dark mode"
-
-[[project.theme.palette]]
-scheme = "slate"
+primary = "orange"
+accent = "orange"
 toggle.icon = "lucide/moon"
-toggle.name = "Switch to light mode"
+toggle.name = "Switch to dark mode"
 
 # ----------------------------------------------------------------------------
 # Markdown extensions — copied from the zensical default template so the pages
