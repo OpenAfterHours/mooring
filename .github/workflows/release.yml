@@ -1,0 +1,54 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Install Pythons (3.12 app target, 3.13 for moonlit)
+        run: |
+          uv python install 3.12
+          uv python install 3.13
+
+      - name: Sync dependencies
+        run: uv sync
+
+      - name: Lint
+        run: uv run ruff check src tests
+
+      - name: Test
+        run: uv run pytest -q
+
+      - name: Build artifacts
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          uvx --python 3.13 moonlit build -e mooring.cli:main -o dist/mooring.pyz --python-version 3.12
+          uvx --python 3.13 moonlit build -e mooring.cli:main -o dist/mooring.exe --windows-exe --python-version 3.12
+
+      - name: Smoke test artifact without git on PATH
+        # Strip PATH to the Python directory alone: proves the artifact works
+        # on a machine that has Python but no git or other dev tooling.
+        run: |
+          $py = (uv python find 3.12)
+          $env:PATH = (Split-Path $py)
+          & $py dist/mooring.pyz selftest
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      - name: Upload release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/mooring.pyz
+            dist/mooring.exe
+          generate_release_notes: true

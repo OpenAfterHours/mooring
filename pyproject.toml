@@ -1,0 +1,51 @@
+[project]
+name = "mooring"
+version = "0.1.0"
+description = "Git-free marimo notebook sharing via GitHub"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "marimo>=0.13",
+    "starlette",
+    "uvicorn",
+    "requests",
+    "keyring",
+    "platformdirs",
+    # notebook stack frozen into the distributed artifact
+    "polars",
+    "altair",
+    "plotly",
+    "openpyxl",
+    "fastexcel",
+]
+
+[project.scripts]
+mooring = "mooring.cli:main"
+
+# moonlit (the .pyz builder) is NOT a dev dependency: it needs Python >=3.13
+# while this project targets the team's 3.12. Invoke it isolated instead:
+#   uvx --python 3.13 moonlit build ...
+[dependency-groups]
+dev = [
+    "pytest",
+    "responses",
+    "ruff",
+    # starlette.testclient backend. starlette now prefers `httpx2` (the
+    # Pydantic-stewarded httpx successor); plain httpx still works behind a
+    # deprecation warning and is kept here as the conservative choice.
+    "httpx",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mooring"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]

@@ -1,0 +1,18 @@
+# Default configuration baked into the distributed artifact.
+# An admin edits this file before building, so teammates receive a
+# pre-configured app. Users can override any value in
+# %APPDATA%\mooring\config.toml or via MOORING_* environment variables.
+
+[github]
+client_id = ""   # OAuth app client id (device flow enabled); public, no secret
+owner = ""       # GitHub org or user that owns the shared notebooks repo
+repo = ""        # name of the shared notebooks repo
+branch = "main"
+
+[sync]
+folders = ["notebooks", "data"]
+warn_file_mb = 10
+max_file_mb = 45
+
+[workspace]
+path = ""        # empty = ~/Documents/mooring/<repo>

@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>mooring</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header>
+    <h1>&#9875; mooring</h1>
+    <div id="repo-info"></div>
+    <div id="user-info"></div>
+  </header>
+
+  <main>
+    <section id="setup-card" class="card hidden">
+      <h2>Set up your team repo</h2>
+      <p>This copy of mooring isn't configured yet. Ask your admin for these values:</p>
+      <label>OAuth client id <input id="setup-client-id" placeholder="Ov23li..."></label>
+      <label>Repo owner <input id="setup-owner" placeholder="your-org"></label>
+      <label>Repo name <input id="setup-repo" placeholder="notebooks"></label>
+      <label>Branch <input id="setup-branch" value="main"></label>
+      <button id="setup-save" class="primary">Save</button>
+    </section>
+
+    <section id="login-card" class="card hidden">
+      <h2>Connect to GitHub</h2>
+      <button id="login-start" class="primary">Log in with GitHub</button>
+      <div id="login-code-box" class="hidden">
+        <p>Enter this code at
+          <a id="login-link" href="https://github.com/login/device" target="_blank" rel="noopener">github.com/login/device</a>:
+        </p>
+        <div id="login-code" class="code"></div>
+        <p class="muted">Waiting for you to authorize&hellip;</p>
+      </div>
+    </section>
+
+    <section id="files-card" class="card hidden">
+      <div class="toolbar">
+        <button id="btn-refresh">&#8635; Refresh</button>
+        <button id="btn-pull" class="primary">&#8595; Pull</button>
+        <button id="btn-push" class="primary">&#8593; Push all</button>
+        <button id="btn-new">+ New notebook</button>
+      </div>
+      <div id="summary" class="muted"></div>
+      <table id="files-table">
+        <thead><tr><th>File</th><th>Status</th><th>Actions</th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <div id="empty-hint" class="muted hidden">
+        No notebooks yet &mdash; click <b>New notebook</b> to create one, or <b>Pull</b> to
+        fetch your team's notebooks.
+      </div>
+    </section>
+
+    <section id="log-card" class="card hidden">
+      <h3>Last operation</h3>
+      <pre id="log"></pre>
+    </section>
+
+    <div id="error-banner" class="hidden"></div>
+  </main>
+
+  <footer>
+    <div id="workspace-info" class="muted"></div>
+    <details><summary>Packages available in notebooks</summary>
+      <div id="packages" class="muted"></div>
+    </details>
+  </footer>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
