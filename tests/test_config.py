@@ -1,13 +1,16 @@
 from pathlib import Path
 
-from mooring.config import load_config
+import pytest
+
+from mooring import paths
+from mooring.config import load_app_config, load_config
 
 
 def test_defaults_when_no_user_config(tmp_path):
     cfg = load_config(user_config_path=tmp_path / "missing.toml", env={})
     assert not cfg.is_configured
     assert cfg.branch == "main"
-    assert cfg.folders == ("notebooks", "data")
+    assert cfg.folders == ("notebooks", "data", "reports")
     assert cfg.warn_file_mb == 10
 
 
@@ -23,7 +26,7 @@ def test_user_config_overrides_defaults(tmp_path):
     assert cfg.repo_slug == "acme/nbs"
     assert cfg.branch == "work"
     assert cfg.warn_file_mb == 2
-    assert cfg.folders == ("notebooks", "data")  # untouched sections keep defaults
+    assert cfg.folders == ("notebooks", "data", "reports")  # untouched sections keep defaults
 
 
 def test_env_overrides_everything(tmp_path):
@@ -35,3 +38,97 @@ def test_env_overrides_everything(tmp_path):
     )
     assert cfg.owner == "other"
     assert cfg.workspace() == Path(tmp_path / "ws")
+
+
+# -- multi-repo ([repos] tables and the legacy [github] section) -------------------
+
+
+REPOS_TOML = """
+[github]
+client_id = "cid"
+
+[repos]
+active = "sandbox"
+
+[repos.team]
+owner = "acme"
+repo = "notebooks"
+
+[repos.sandbox]
+owner = "phil"
+repo = "notebooks"
+branch = "dev"
+"""
+
+
+def test_legacy_github_section_synthesizes_single_repo(tmp_path):
+    user = tmp_path / "config.toml"
+    user.write_text(
+        '[github]\nclient_id = "cid"\nowner = "acme"\nrepo = "nbs"\nbranch = "work"\n', "utf-8"
+    )
+    app = load_app_config(user_config_path=user, env={})
+    assert app.aliases == ["nbs"]
+    assert app.active_alias == "nbs"
+    cfg = app.config_for(None)
+    assert cfg.is_configured
+    assert cfg.repo_slug == "acme/nbs"
+    assert cfg.branch == "work"
+
+
+def test_repos_tables_parse_and_active_selection(tmp_path):
+    user = tmp_path / "config.toml"
+    user.write_text(REPOS_TOML, "utf-8")
+    app = load_app_config(user_config_path=user, env={})
+    assert app.aliases == ["sandbox", "team"]
+    assert app.active_alias == "sandbox"
+    assert app.config_for(None).repo_slug == "phil/notebooks"
+    assert app.config_for(None).branch == "dev"
+    assert app.config_for("team").repo_slug == "acme/notebooks"
+
+
+def test_repos_present_disables_legacy_github_repo(tmp_path):
+    user = tmp_path / "config.toml"
+    user.write_text(
+        '[github]\nclient_id = "cid"\nowner = "old"\nrepo = "legacy"\n'
+        '[repos]\nactive = "team"\n[repos.team]\nowner = "acme"\nrepo = "nbs"\n',
+        "utf-8",
+    )
+    app = load_app_config(user_config_path=user, env={})
+    assert app.aliases == ["team"]  # "legacy" is not synthesized
+    assert app.client_id == "cid"  # but client_id is still read from [github]
+
+
+def test_unknown_active_falls_back_to_first_alias(tmp_path):
+    user = tmp_path / "config.toml"
+    user.write_text('[repos]\nactive = "nope"\n[repos.team]\nowner = "a"\nrepo = "b"\n', "utf-8")
+    app = load_app_config(user_config_path=user, env={})
+    assert app.active_alias == "team"
+
+
+def test_config_for_unknown_alias_raises(tmp_path):
+    user = tmp_path / "config.toml"
+    user.write_text(REPOS_TOML, "utf-8")
+    app = load_app_config(user_config_path=user, env={})
+    with pytest.raises(KeyError):
+        app.config_for("nope")
+
+
+def test_active_repo_env_override(tmp_path):
+    user = tmp_path / "config.toml"
+    user.write_text(REPOS_TOML, "utf-8")
+    app = load_app_config(user_config_path=user, env={"MOORING_ACTIVE_REPO": "team"})
+    assert app.active_alias == "team"
+    # field overrides apply to the env-selected active repo
+    app2 = load_app_config(
+        user_config_path=user,
+        env={"MOORING_ACTIVE_REPO": "team", "MOORING_BRANCH": "feature"},
+    )
+    assert app2.config_for(None).branch == "feature"
+    assert app2.config_for("sandbox").branch == "dev"  # untouched
+
+
+def test_default_workspace_keyed_by_owner():
+    a = paths.default_workspace("acme", "notebooks")
+    b = paths.default_workspace("phil", "notebooks")
+    assert a != b
+    assert a.name == "notebooks" and a.parent.name == "acme"

@@ -17,6 +17,7 @@ dependencies = [
     "plotly",
     "openpyxl",
     "fastexcel",
+    "tomli-w>=1.2.0",
 ]
 
 [project.scripts]

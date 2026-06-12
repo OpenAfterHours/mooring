@@ -22,5 +22,12 @@ def user_log_dir() -> Path:
     return Path(platformdirs.user_log_dir(APP_NAME, appauthor=False))
 
 
-def default_workspace(repo: str) -> Path:
+def default_workspace(owner: str, repo: str) -> Path:
+    # Keyed by owner AND repo so same-named repos under different owners
+    # don't share a workspace.
+    return Path(platformdirs.user_documents_dir()) / APP_NAME / owner / repo
+
+
+def legacy_workspace(repo: str) -> Path:
+    """The pre-multi-repo default (keyed by repo name only), kept for hints."""
     return Path(platformdirs.user_documents_dir()) / APP_NAME / repo

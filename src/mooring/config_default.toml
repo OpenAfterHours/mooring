@@ -9,10 +9,23 @@ owner = ""       # GitHub org or user that owns the shared notebooks repo
 repo = ""        # name of the shared notebooks repo
 branch = "main"
 
+# Several repos can be registered under [repos.<alias>] tables; one is active
+# at a time ("active" is reserved as the pointer key, not a valid alias).
+# When any [repos] section exists it replaces the [github] owner/repo above.
+#
+# [repos]
+# active = "team"
+#
+# [repos.team]
+# owner = "acme"
+# repo = "notebooks"
+# branch = "main"
+# workspace = ""   # optional override; empty = ~/Documents/mooring/<owner>/<repo>
+
 [sync]
-folders = ["notebooks", "data"]
+folders = ["notebooks", "data", "reports"]
 warn_file_mb = 10
 max_file_mb = 45
 
 [workspace]
-path = ""        # empty = ~/Documents/mooring/<repo>
+path = ""        # empty = ~/Documents/mooring/<owner>/<repo>

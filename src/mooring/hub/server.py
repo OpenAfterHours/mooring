@@ -22,8 +22,8 @@ from starlette.responses import FileResponse, JSONResponse
 from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
-from mooring import __version__, auth, config, paths, sync
-from mooring.cli import SELFTEST_PACKAGES
+from mooring import __version__, auth, config, config_store, pbip, sync
+from mooring.cli import SELFTEST_PACKAGES, legacy_workspace_hint
 from mooring.editor import EditorServer, _free_port
 from mooring.github import AuthFailed, GitHubClient, GitHubError
 
@@ -33,9 +33,11 @@ def _static_dir() -> Path:
 
 
 class Hub:
-    def __init__(self, cfg: config.Config) -> None:
-        self.cfg = cfg
-        self.editor: EditorServer | None = None
+    def __init__(self, app_cfg: config.AppConfig) -> None:
+        self.app_cfg = app_cfg
+        # One editor per workspace, created lazily: switching repos must not
+        # kill marimo tabs open against the previous workspace.
+        self.editors: dict[str, EditorServer] = {}
         self._device: auth.DeviceCode | None = None
         self._poll_interval = 5
         self._next_poll = 0.0
@@ -43,6 +45,14 @@ class Hub:
         self._lock = threading.Lock()
 
     # -- helpers -------------------------------------------------------------
+
+    @property
+    def cfg(self) -> config.Config:
+        return self.app_cfg.config_for(None)
+
+    def reload(self) -> None:
+        with self._lock:
+            self.app_cfg = config.load_app_config()
 
     def client(self) -> GitHubClient:
         token = auth.get_token()
@@ -56,39 +66,73 @@ class Hub:
         return self._user_login
 
     def ensure_editor(self) -> EditorServer:
-        if self.editor is None:
-            self.editor = EditorServer(self.cfg.workspace())
-        self.editor.ensure_started()
-        return self.editor
+        workspace = self.cfg.workspace()
+        editor = self.editors.setdefault(str(workspace), EditorServer(workspace))
+        editor.ensure_started()
+        return editor
 
     def shutdown(self) -> None:
-        if self.editor is not None:
-            self.editor.shutdown()
+        for editor in self.editors.values():
+            editor.shutdown()
 
     # -- endpoints -------------------------------------------------------------
 
     def api_state(self, request: Request) -> JSONResponse:
+        cfg = self.cfg
         body: dict = {
             "version": __version__,
-            "configured": self.cfg.is_configured,
-            "repo": self.cfg.repo_slug if self.cfg.is_configured else "",
-            "branch": self.cfg.branch,
-            "workspace": str(self.cfg.workspace()),
+            "configured": cfg.is_configured,
+            "repo": cfg.repo_slug if cfg.is_configured else "",
+            "branch": cfg.branch,
+            "workspace": str(cfg.workspace()),
+            "workspace_hint": legacy_workspace_hint(cfg),
+            "repos": [
+                {
+                    "alias": s.alias,
+                    "slug": s.slug,
+                    "branch": s.branch,
+                    "workspace": str(self.app_cfg.config_for(s.alias).workspace()),
+                    "active": s.alias == self.app_cfg.active_alias,
+                }
+                for s in self.app_cfg.repos
+            ],
+            "active_repo": self.app_cfg.active_alias,
             "packages": sorted(SELFTEST_PACKAGES),
             "logged_in": False,
             "user": "",
             "files": [],
+            "artifacts": [],
         }
-        if not self.cfg.is_configured:
+        if not cfg.is_configured:
             return JSONResponse(body)
         if not auth.get_token():
             return JSONResponse(body)
         try:
             body["user"] = self.username()
             body["logged_in"] = True
-            report = sync.status(self.client(), self.cfg)
+            report = sync.status(self.client(), cfg)
+            artifacts, _ = pbip.group(report.files)
+            artifact_of = {m.path: a.key for a in artifacts for m in a.members}
             body["files"] = [
-                {"path": f.path, "state": f.state.value} for f in report.files
+                {
+                    "path": f.path,
+                    "state": f.state.value,
+                    **({"artifact": artifact_of[f.path]} if f.path in artifact_of else {}),
+                }
+                for f in report.files
+            ]
+            body["artifacts"] = [
+                {
+                    "key": a.key,
+                    "name": a.name,
+                    "pointer": a.pointer,
+                    "state": pbip.aggregate_state(a.members),
+                    "members": [m.path for m in a.members],
+                    "to_push": sum(1 for m in a.members if m.state in sync.PUSH_STATES),
+                    "to_pull": sum(1 for m in a.members if m.state in sync.PULL_STATES),
+                    "conflicts": sum(1 for m in a.members if m.state is sync.FileState.CONFLICT),
+                }
+                for a in artifacts
             ]
             body["summary"] = report.summary()
         except AuthFailed:
@@ -101,22 +145,52 @@ class Hub:
         return JSONResponse(body)
 
     async def api_setup(self, request: Request) -> JSONResponse:
+        """Register a repo (and on first run, the OAuth client id); makes it active."""
         data = await request.json()
-        fields = {k: str(data.get(k, "")).strip() for k in ("client_id", "owner", "repo", "branch")}
-        if not (fields["client_id"] and fields["owner"] and fields["repo"]):
-            return JSONResponse({"error": "client_id, owner and repo are required"}, status_code=400)
-        path = paths.user_config_file()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            "[github]\n"
-            f'client_id = "{fields["client_id"]}"\n'
-            f'owner = "{fields["owner"]}"\n'
-            f'repo = "{fields["repo"]}"\n'
-            f'branch = "{fields["branch"] or "main"}"\n',
-            "utf-8",
+        fields = {
+            k: str(data.get(k, "")).strip()
+            for k in ("client_id", "owner", "repo", "branch", "alias")
+        }
+        if not (fields["owner"] and fields["repo"]):
+            return JSONResponse({"error": "owner and repo are required"}, status_code=400)
+        if not (fields["client_id"] or self.app_cfg.client_id):
+            return JSONResponse({"error": "client_id is required on first setup"}, status_code=400)
+        try:
+            config_store.add_repo(
+                fields["alias"] or fields["repo"],
+                fields["owner"],
+                fields["repo"],
+                branch=fields["branch"] or "main",
+                make_active=True,
+                client_id=fields["client_id"] or None,
+            )
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        self.reload()
+        return JSONResponse({"ok": True, "active_repo": self.app_cfg.active_alias})
+
+    async def api_repo_switch(self, request: Request) -> JSONResponse:
+        data = await request.json()
+        alias = str(data.get("alias", ""))
+        try:
+            config_store.set_active(alias)
+        except KeyError:
+            return JSONResponse({"error": f"Unknown repo alias {alias!r}."}, status_code=400)
+        self.reload()
+        return JSONResponse({"ok": True, "active_repo": alias})
+
+    async def api_repo_remove(self, request: Request) -> JSONResponse:
+        data = await request.json()
+        alias = str(data.get("alias", ""))
+        try:
+            workspace = self.app_cfg.config_for(alias).workspace()
+            config_store.remove_repo(alias)
+        except KeyError:
+            return JSONResponse({"error": f"Unknown repo alias {alias!r}."}, status_code=400)
+        self.reload()
+        return JSONResponse(
+            {"ok": True, "lines": [f"Removed {alias!r}; workspace folder kept at {workspace}"]}
         )
-        self.cfg = config.load_config()
-        return JSONResponse({"ok": True})
 
     def api_login_start(self, request: Request) -> JSONResponse:
         try:
@@ -200,11 +274,28 @@ class Hub:
         return self._open(data.get("path", ""))
 
     def _open(self, rel_path: str) -> JSONResponse:
-        target = self.cfg.workspace() / rel_path
+        workspace = self.cfg.workspace()
+        target = (workspace / rel_path).resolve()
+        try:
+            target.relative_to(workspace.resolve())
+        except ValueError:
+            return JSONResponse({"error": "Path escapes the workspace."}, status_code=400)
         if not target.is_file():
             return JSONResponse({"error": f"No such file: {rel_path}"}, status_code=404)
+        if rel_path.endswith(".pbip"):
+            try:
+                pbip.launch(target)
+            except pbip.PbipLaunchError as exc:
+                return JSONResponse({"error": str(exc)}, status_code=400)
+            name = rel_path.rsplit("/", 1)[-1]
+            return JSONResponse(
+                {"path": rel_path, "lines": [f"Opened {name} in Power BI Desktop"]}
+            )
         if not rel_path.endswith(".py"):
-            return JSONResponse({"error": "Only .py notebooks can be opened."}, status_code=400)
+            return JSONResponse(
+                {"error": "Only .py notebooks and .pbip projects can be opened."},
+                status_code=400,
+            )
         try:
             editor = self.ensure_editor()
         except Exception as exc:  # noqa: BLE001 - shown in the UI
@@ -227,6 +318,8 @@ def create_app(hub: Hub) -> Starlette:
             Route("/", lambda r: FileResponse(static / "index.html")),
             Route("/api/state", hub.api_state),
             Route("/api/setup", hub.api_setup, methods=["POST"]),
+            Route("/api/repo/switch", hub.api_repo_switch, methods=["POST"]),
+            Route("/api/repo/remove", hub.api_repo_remove, methods=["POST"]),
             Route("/api/login/start", hub.api_login_start, methods=["POST"]),
             Route("/api/login/poll", hub.api_login_poll),
             Route("/api/logout", hub.api_logout, methods=["POST"]),
@@ -241,8 +334,10 @@ def create_app(hub: Hub) -> Starlette:
     )
 
 
-def run_hub(cfg: config.Config, open_browser: bool = True, port: int | None = None) -> int:
-    hub = Hub(cfg)
+def run_hub(
+    app_cfg: config.AppConfig, open_browser: bool = True, port: int | None = None
+) -> int:
+    hub = Hub(app_cfg)
     app = create_app(hub)
     port = port or _free_port()
     url = f"http://127.0.0.1:{port}/"

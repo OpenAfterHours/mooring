@@ -56,7 +56,23 @@ def _build_parser() -> argparse.ArgumentParser:
     sub.add_parser("login", help="log in to GitHub via device flow")
     sub.add_parser("logout", help="forget the stored GitHub token")
     sub.add_parser("whoami", help="show the logged-in GitHub user")
-    sub.add_parser("status", help="show sync status of workspace files")
+    status = sub.add_parser("status", help="show sync status of workspace files")
+
+    repo = sub.add_parser("repo", help="manage registered team repos")
+    repo_sub = repo.add_subparsers(dest="repo_command", required=True)
+    repo_sub.add_parser("list", help="list registered repos ('*' marks the active one)")
+    repo_add = repo_sub.add_parser("add", help="register a repo and make it active")
+    repo_add.add_argument("slug", help="repo as owner/name (e.g. acme/notebooks)")
+    repo_add.add_argument("--alias", default=None, help="short name (default: repo name)")
+    repo_add.add_argument("--branch", default="main", help="branch to sync (default: main)")
+    repo_add.add_argument("--workspace", default="", help="custom local workspace path")
+    repo_add.add_argument(
+        "--no-use", action="store_true", help="register without switching to it"
+    )
+    repo_use = repo_sub.add_parser("use", help="switch the active repo")
+    repo_use.add_argument("alias")
+    repo_rm = repo_sub.add_parser("remove", help="forget a repo (local files are kept)")
+    repo_rm.add_argument("alias")
 
     pull = sub.add_parser("pull", help="download changes from the team repo")
     pull_grp = pull.add_mutually_exclusive_group()
@@ -79,6 +95,11 @@ def _build_parser() -> argparse.ArgumentParser:
     new = sub.add_parser("new", help="create a new notebook and open it")
     new.add_argument("name", help="notebook name (e.g. sales-analysis)")
 
+    for cmd in (status, pull, push, open_cmd, new):
+        cmd.add_argument(
+            "--repo", default=None, metavar="ALIAS", help="act on this repo instead of the active one"
+        )
+
     sub.add_parser("selftest", help="verify the bundled environment")
     sub.add_parser("version", help="print the version")
     return parser
@@ -88,6 +109,23 @@ def _print_paths(cfg: config.Config) -> None:
     print(f"  config file : {paths.user_config_file()}")
     print(f"  workspace   : {cfg.workspace()}")
     print(f"  logs        : {paths.user_log_dir()}")
+    hint = legacy_workspace_hint(cfg)
+    if hint:
+        print(f"  note        : {hint}")
+
+
+def legacy_workspace_hint(cfg: config.Config) -> str:
+    """Warn when a pre-multi-repo workspace exists but the new default doesn't."""
+    if not cfg.repo or cfg.workspace_path:
+        return ""
+    old = paths.legacy_workspace(cfg.repo)
+    new = cfg.workspace()
+    if old != new and (old / ".mooring").is_dir() and not (new / ".mooring").is_dir():
+        return (
+            f"Found an old workspace at {old} — move the folder to {new} "
+            "(or set its 'workspace' in the config) to keep your sync history."
+        )
+    return ""
 
 
 def cmd_selftest(cfg: config.Config) -> int:
@@ -222,6 +260,15 @@ def cmd_open(cfg: config.Config, rel_path: str) -> int:
     target = workspace / rel_path
     if not target.is_file():
         sys.exit(f"No such notebook: {target}")
+    if rel_path.endswith(".pbip"):
+        from mooring import pbip
+
+        try:
+            pbip.launch(target)
+        except pbip.PbipLaunchError as exc:
+            sys.exit(str(exc))
+        print(f"Opened {rel_path} in Power BI Desktop.")
+        return 0
     server = EditorServer(workspace)
     server.ensure_started()
     url = server.url_for(rel_path)
@@ -243,16 +290,74 @@ def cmd_new(cfg: config.Config, name: str) -> int:
     return cmd_open(cfg, rel_path)
 
 
+def cmd_repo(app_cfg: config.AppConfig, args: argparse.Namespace) -> int:
+    from mooring import config_store
+
+    if args.repo_command == "list":
+        if not app_cfg.repos:
+            print("No repos registered. Run `mooring repo add <owner>/<repo>`.")
+            return 0
+        width = max(len(s.alias) for s in app_cfg.repos)
+        for s in app_cfg.repos:
+            marker = "*" if s.alias == app_cfg.active_alias else " "
+            ws = app_cfg.config_for(s.alias).workspace()
+            print(f"  {marker} {s.alias:<{width}}  {s.slug} @ {s.branch}  ({ws})")
+        return 0
+    if args.repo_command == "add":
+        owner, _, repo = args.slug.partition("/")
+        if not owner or not repo or "/" in repo:
+            sys.exit(f"Expected owner/repo (e.g. acme/notebooks), got {args.slug!r}.")
+        alias = args.alias or repo
+        try:
+            config_store.add_repo(
+                alias, owner, repo,
+                branch=args.branch, workspace=args.workspace,
+                make_active=not args.no_use,
+            )
+        except ValueError as exc:
+            sys.exit(str(exc))
+        active = " (now active)" if not args.no_use else ""
+        print(f"Registered {owner}/{repo} as {alias!r}{active}.")
+        return 0
+    if args.repo_command == "use":
+        try:
+            config_store.set_active(args.alias)
+        except KeyError:
+            sys.exit(_unknown_alias(args.alias, app_cfg))
+        print(f"Active repo is now {args.alias!r}.")
+        return 0
+    if args.repo_command == "remove":
+        try:
+            ws = app_cfg.config_for(args.alias).workspace()
+            config_store.remove_repo(args.alias)
+        except KeyError:
+            sys.exit(_unknown_alias(args.alias, app_cfg))
+        print(f"Removed {args.alias!r}. Workspace folder {ws} was kept; delete it manually.")
+        return 0
+    return 2
+
+
+def _unknown_alias(alias: str, app_cfg: config.AppConfig) -> str:
+    known = ", ".join(app_cfg.aliases) or "(none)"
+    return f"Unknown repo alias {alias!r}. Known: {known}"
+
+
 def main(argv: list[str] | None = None) -> int:
     _ensure_child_pythonpath()
     parser = _build_parser()
     args = parser.parse_args(argv)
     command = args.command or "hub"
-    cfg = config.load_config()
+    app_cfg = config.load_app_config()
+    try:
+        cfg = app_cfg.config_for(getattr(args, "repo", None))
+    except KeyError:
+        sys.exit(_unknown_alias(args.repo, app_cfg))
 
     if command == "version":
         print(f"mooring {__version__}")
         return 0
+    if command == "repo":
+        return cmd_repo(app_cfg, args)
     if command == "selftest":
         return cmd_selftest(cfg)
     if command == "hub":
@@ -260,7 +365,7 @@ def main(argv: list[str] | None = None) -> int:
 
         no_browser = getattr(args, "no_browser", False)
         port = getattr(args, "port", None)
-        return run_hub(cfg, open_browser=not no_browser, port=port)
+        return run_hub(app_cfg, open_browser=not no_browser, port=port)
     if command == "login":
         return cmd_login(cfg)
     if command == "logout":

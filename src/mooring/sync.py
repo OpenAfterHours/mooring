@@ -22,6 +22,27 @@ from mooring.github import GitHubClient, RemoteConflict
 # remote versions ("keep both" resolution) and are never synced.
 REMOTE_COPY_MARKER = ".remote-"
 
+# Dotfiles are normally excluded, but Power BI project (PBIP) artifacts carry
+# a required ".platform" metadata file inside each artifact folder.
+KEEP_DOT_NAMES = {".platform"}
+
+
+def is_synced_path(rel_path: str) -> bool:
+    """Whether a workspace-relative POSIX path participates in sync.
+
+    Applied to both the local scan and the remote tree so the two sides agree:
+    a path invisible on one side must be invisible on both, otherwise pull
+    records it in the manifest and the next push deletes it remotely.
+    """
+    *dirs, name = rel_path.split("/")
+    if any(d.startswith(".") or d == "__pycache__" for d in dirs):
+        return False  # .mooring/, PBIP .pbi/ machine-local state, etc.
+    if name.startswith(".") and name not in KEEP_DOT_NAMES:
+        return False
+    if name == "__pycache__":
+        return False
+    return REMOTE_COPY_MARKER not in name
+
 
 class FileState(Enum):
     SYNCED = "synced"
@@ -122,12 +143,9 @@ def scan_local(workspace: Path, folders: tuple[str, ...]) -> dict[str, str]:
         for path in sorted(root.rglob("*")):
             if not path.is_file():
                 continue
-            if any(part.startswith(".") or part == "__pycache__" for part in
-                   path.relative_to(workspace).parts):
-                continue
-            if REMOTE_COPY_MARKER in path.name:
-                continue
             rel = path.relative_to(workspace).as_posix()
+            if not is_synced_path(rel):
+                continue
             out[rel] = gitsha.local_blob_sha(path, rel)
     return out
 
@@ -138,8 +156,8 @@ def _remote_entries(
     # If the branch head hasn't moved since our last sync, the remote tree is
     # exactly what the manifest recorded — no tree fetch needed.
     if head and head == mft.head_commit:
-        return dict(mft.files)
-    return {e.path: e.sha for e in client.get_tree(head, cfg.folders)}
+        return {p: s for p, s in mft.files.items() if is_synced_path(p)}
+    return {e.path: e.sha for e in client.get_tree(head, cfg.folders) if is_synced_path(e.path)}
 
 
 def compute_status(
