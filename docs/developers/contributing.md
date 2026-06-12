@@ -85,6 +85,30 @@ or `zensical.toml` go live automatically.
     Consider also setting `site_url` in `zensical.toml` to your Pages URL so
     canonical links and the sitemap are correct.
 
+## Cutting a release
+
+`scripts/release.ps1` does the whole dance — bump, check, commit, tag, push:
+
+```powershell
+.\scripts\release.ps1                  # patch: 0.1.0 -> 0.1.1
+.\scripts\release.ps1 minor            # 0.1.0 -> 0.2.0 (also: major)
+.\scripts\release.ps1 -Version 1.0.0   # set an explicit version
+.\scripts\release.ps1 minor -DryRun    # preview without changing anything
+```
+
+It refuses to run unless you are on a clean, up-to-date `main`; then it bumps
+the version in `pyproject.toml` + `uv.lock` (via `uv version`) and
+`src/mooring/__init__.py`, runs lint and tests, commits `release: vX.Y.Z`,
+tags `vX.Y.Z`, and pushes branch and tag together. It runs in Windows
+PowerShell 5.1 or [pwsh](https://github.com/PowerShell/PowerShell) (so it
+works on macOS/Linux too).
+
+The pushed tag triggers `.github/workflows/release.yml`, which re-runs the
+checks, builds `mooring.pyz` / `mooring.exe`, attaches them to a GitHub
+Release, and publishes the sdist + wheel to PyPI. A guard step fails the
+publish if the tag, `pyproject.toml`, and `__init__.py` versions disagree, so
+hand-rolled tags can't ship a mislabeled package.
+
 ## Conventions
 
 - Keep modules small and single-purpose, matching the existing
