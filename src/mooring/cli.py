@@ -6,6 +6,7 @@ import argparse
 import importlib.util
 import os
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 
 from mooring import __version__, config, paths
@@ -18,11 +19,30 @@ SELFTEST_PACKAGES = (
     "openpyxl",
     "fastexcel",
     "requests",
+    "truststore",
     "keyring",
     "starlette",
     "uvicorn",
     "platformdirs",
 )
+
+
+def _truststore_disabled(env: Mapping[str, str]) -> bool:
+    return env.get("MOORING_TRUSTSTORE", "1").strip().lower() in ("0", "false", "no", "off")
+
+
+def _inject_truststore(env: Mapping[str, str] | None = None) -> None:
+    """Verify TLS against the OS trust store (corporate SSL interception needs
+    the proxy's root CA, which IT installs there but not in certifi's bundle)."""
+    env = os.environ if env is None else env
+    if _truststore_disabled(env):
+        return
+    try:
+        import truststore
+
+        truststore.inject_into_ssl()
+    except Exception as exc:  # noqa: BLE001 - never let TLS setup brick the app
+        print(f"Warning: could not enable the OS trust store for TLS: {exc}")
 
 
 def _ensure_child_pythonpath() -> None:
@@ -66,6 +86,12 @@ def _build_parser() -> argparse.ArgumentParser:
     repo_add.add_argument("--alias", default=None, help="short name (default: repo name)")
     repo_add.add_argument("--branch", default="main", help="branch to sync (default: main)")
     repo_add.add_argument("--workspace", default="", help="custom local workspace path")
+    repo_add.add_argument(
+        "--host",
+        default=None,
+        help="GitHub host or URL for GitHub Enterprise (e.g. ghe.example.com); "
+        "stored as the global host",
+    )
     repo_add.add_argument(
         "--no-use", action="store_true", help="register without switching to it"
     )
@@ -151,8 +177,14 @@ def cmd_selftest(cfg: config.Config) -> int:
             print(f"  FAIL {name}: {exc}")
     _print_paths(cfg)
     print(f"  PYTHONPATH  : {os.environ.get('PYTHONPATH', '(not set)')}")
+    tls = (
+        "disabled via MOORING_TRUSTSTORE=0"
+        if _truststore_disabled(os.environ)
+        else "OS trust store (truststore)"
+    )
+    print(f"  tls trust   : {tls}")
     if cfg.is_configured:
-        print(f"  team repo   : {cfg.repo_slug} (branch {cfg.branch})")
+        print(f"  team repo   : {cfg.repo_slug} (branch {cfg.branch}, host {cfg.host})")
     else:
         print("  team repo   : not configured")
     if failures:
@@ -162,10 +194,10 @@ def cmd_selftest(cfg: config.Config) -> int:
     return 0
 
 
-def _require_token() -> str:
+def _require_token(cfg: config.Config) -> str:
     from mooring import auth
 
-    token = auth.get_token()
+    token = auth.get_token(host=cfg.host)
     if not token:
         sys.exit("Not logged in. Run `mooring login` first.")
     return token
@@ -179,7 +211,7 @@ def _client(cfg: config.Config):
             "No team repo configured. Set [github] owner/repo/client_id in "
             f"{paths.user_config_file()} (or run the hub for guided setup)."
         )
-    return GitHubClient(_require_token(), cfg.owner, cfg.repo)
+    return GitHubClient(_require_token(cfg), cfg.owner, cfg.repo, host=cfg.host)
 
 
 def cmd_login(cfg: config.Config) -> int:
@@ -190,22 +222,22 @@ def cmd_login(cfg: config.Config) -> int:
             "No OAuth client_id configured. Set [github] client_id in "
             f"{paths.user_config_file()}."
         )
-    device = auth.start_device_flow(cfg.client_id)
+    device = auth.start_device_flow(cfg.client_id, host=cfg.host)
     print(f"Open {device.verification_uri} and enter code: {device.user_code}")
     print("Waiting for authorization...")
     token = auth.poll_for_token(cfg.client_id, device)
-    auth.save_token(token)
+    auth.save_token(token, host=cfg.host)
     from mooring.github import GitHubClient
 
-    user = GitHubClient(token, cfg.owner, cfg.repo).get_user()
+    user = GitHubClient(token, cfg.owner, cfg.repo, host=cfg.host).get_user()
     print(f"Logged in as {user['login']}.")
     return 0
 
 
-def cmd_logout() -> int:
+def cmd_logout(cfg: config.Config) -> int:
     from mooring import auth
 
-    auth.delete_token()
+    auth.delete_token(host=cfg.host)
     print("Logged out.")
     return 0
 
@@ -213,7 +245,7 @@ def cmd_logout() -> int:
 def cmd_whoami(cfg: config.Config) -> int:
     from mooring.github import GitHubClient
 
-    user = GitHubClient(_require_token(), cfg.owner, cfg.repo).get_user()
+    user = GitHubClient(_require_token(cfg), cfg.owner, cfg.repo, host=cfg.host).get_user()
     print(user["login"])
     return 0
 
@@ -332,7 +364,7 @@ def cmd_repo(app_cfg: config.AppConfig, args: argparse.Namespace) -> int:
             config_store.add_repo(
                 alias, owner, repo,
                 branch=args.branch, workspace=args.workspace,
-                make_active=not args.no_use,
+                make_active=not args.no_use, host=args.host,
             )
         except ValueError as exc:
             sys.exit(str(exc))
@@ -363,11 +395,15 @@ def _unknown_alias(alias: str, app_cfg: config.AppConfig) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
+    _inject_truststore()
     _ensure_child_pythonpath()
     parser = _build_parser()
     args = parser.parse_args(argv)
     command = args.command or "hub"
-    app_cfg = config.load_app_config()
+    try:
+        app_cfg = config.load_app_config()
+    except ValueError as exc:  # e.g. a malformed [github] host
+        sys.exit(str(exc))
     try:
         cfg = app_cfg.config_for(getattr(args, "repo", None))
     except KeyError:
@@ -389,7 +425,7 @@ def main(argv: list[str] | None = None) -> int:
     if command == "login":
         return cmd_login(cfg)
     if command == "logout":
-        return cmd_logout()
+        return cmd_logout(cfg)
     if command == "whoami":
         return cmd_whoami(cfg)
     if command == "status":

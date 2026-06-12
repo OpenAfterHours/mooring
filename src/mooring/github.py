@@ -15,7 +15,8 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-API_ROOT = "https://api.github.com"
+from mooring import githost
+
 # Contents API caps: writes fail somewhere below 50 MB, blob reads at 100 MB.
 MAX_WRITE_BYTES = 45 * 1024 * 1024
 
@@ -44,9 +45,11 @@ class RefAlreadyExists(GitHubError):
     """Branch creation hit an existing ref (HTTP 422)."""
 
 
-def compare_url(owner: str, repo: str, base: str, branch: str) -> str:
+def compare_url(
+    owner: str, repo: str, base: str, branch: str, host: str = githost.DEFAULT_HOST
+) -> str:
     """GitHub's compare page for opening a pull request from `branch` into `base`."""
-    return f"https://github.com/{owner}/{repo}/compare/{base}...{branch}?expand=1"
+    return f"{githost.web_root(host)}/{owner}/{repo}/compare/{base}...{branch}?expand=1"
 
 
 @dataclass
@@ -62,10 +65,12 @@ class GitHubClient:
         token: str,
         owner: str,
         repo: str,
+        host: str = githost.DEFAULT_HOST,
         session: requests.Session | None = None,
     ) -> None:
         self.owner = owner
         self.repo = repo
+        self.api_root = githost.api_root(host)
         if session is None:
             session = requests.Session()
             # Auto-retry is safe for reads only; a retried PUT could double-commit.
@@ -88,7 +93,7 @@ class GitHubClient:
     # -- plumbing ----------------------------------------------------------
 
     def _repo_url(self, tail: str) -> str:
-        return f"{API_ROOT}/repos/{self.owner}/{self.repo}/{tail}"
+        return f"{self.api_root}/repos/{self.owner}/{self.repo}/{tail}"
 
     def _check(self, resp: requests.Response) -> dict:
         if resp.status_code == 401:
@@ -118,7 +123,7 @@ class GitHubClient:
     # -- reads ---------------------------------------------------------------
 
     def get_user(self) -> dict:
-        return self._check(self._session.get(f"{API_ROOT}/user", timeout=30))
+        return self._check(self._session.get(f"{self.api_root}/user", timeout=30))
 
     def get_branch_head(self, branch: str) -> str:
         data = self._check(

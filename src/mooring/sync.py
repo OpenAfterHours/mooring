@@ -520,7 +520,9 @@ def propose(
     if branch_name:
         mft.review_branch = branch_name
         result.review_branch = branch_name
-        result.compare_url = compare_url(cfg.owner, cfg.repo, cfg.branch, branch_name)
+        result.compare_url = compare_url(
+            cfg.owner, cfg.repo, cfg.branch, branch_name, host=cfg.host
+        )
         result.lines.append(f"open a pull request: {result.compare_url}")
     manifest_mod.save(workspace, mft)
     return result

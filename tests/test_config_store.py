@@ -11,7 +11,8 @@ from mooring import config, config_store, paths
 def isolated_config(tmp_path, monkeypatch):
     monkeypatch.setattr(paths, "user_config_dir", lambda: tmp_path / "appdata")
     for var in ("MOORING_CLIENT_ID", "MOORING_OWNER", "MOORING_REPO",
-                "MOORING_BRANCH", "MOORING_WORKSPACE", "MOORING_ACTIVE_REPO"):
+                "MOORING_BRANCH", "MOORING_WORKSPACE", "MOORING_ACTIVE_REPO",
+                "MOORING_GITHUB_HOST"):
         monkeypatch.delenv(var, raising=False)
     return tmp_path
 
@@ -24,6 +25,19 @@ def test_add_repo_round_trip():
     app = config.load_app_config()
     assert app.client_id == "cid"
     assert app.config_for(None).repo_slug == "acme/nbs"
+
+
+def test_add_repo_with_host_round_trip():
+    config_store.add_repo("team", "acme", "nbs", host="https://GHE.Example/")
+    data = tomllib.loads(paths.user_config_file().read_text("utf-8"))
+    assert data["github"]["host"] == "ghe.example"
+    assert config.load_app_config().host == "ghe.example"
+
+
+def test_add_repo_without_host_keeps_existing():
+    config_store.add_repo("team", "acme", "nbs", host="ghe.example")
+    config_store.add_repo("lab", "acme", "lab", make_active=False)
+    assert config.load_app_config().host == "ghe.example"
 
 
 def test_add_preserves_unrelated_sections():

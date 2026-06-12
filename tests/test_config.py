@@ -29,6 +29,32 @@ def test_user_config_overrides_defaults(tmp_path):
     assert cfg.folders == ("notebooks", "data", "reports")  # untouched sections keep defaults
 
 
+def test_host_defaults_and_normalizes_on_load(tmp_path):
+    assert load_config(user_config_path=tmp_path / "missing.toml", env={}).host == "github.com"
+    user = tmp_path / "config.toml"
+    user.write_text('[github]\nhost = "https://GHE.Service.Group/"\n', "utf-8")
+    cfg = load_config(user_config_path=user, env={})
+    assert cfg.host == "ghe.service.group"
+
+
+def test_host_env_override_and_config_for_passthrough(tmp_path):
+    user = tmp_path / "config.toml"
+    user.write_text(
+        REPOS_TOML.replace('client_id = "cid"', 'client_id = "cid"\nhost = "ghe.example"'),
+        "utf-8",
+    )
+    app = load_app_config(user_config_path=user, env={"MOORING_GITHUB_HOST": "other.example"})
+    assert app.host == "other.example"
+    assert app.config_for("team").host == "other.example"
+
+
+def test_invalid_host_raises_value_error(tmp_path):
+    user = tmp_path / "config.toml"
+    user.write_text('[github]\nhost = "not a host"\n', "utf-8")
+    with pytest.raises(ValueError, match="Not a valid GitHub host"):
+        load_config(user_config_path=user, env={})
+
+
 def test_env_overrides_everything(tmp_path):
     user = tmp_path / "config.toml"
     user.write_text('[github]\nowner = "acme"\n', "utf-8")

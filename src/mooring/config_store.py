@@ -14,7 +14,7 @@ import tomllib
 
 import tomli_w
 
-from mooring import config, paths
+from mooring import config, githost, paths
 
 # "active" is the pointer key inside [repos], so it can't be an alias.
 ALIAS_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
@@ -67,6 +67,7 @@ def add_repo(
     workspace: str = "",
     make_active: bool = True,
     client_id: str | None = None,
+    host: str | None = None,
 ) -> None:
     validate_alias(alias)
     data = _materialized(read_user_data())
@@ -77,6 +78,8 @@ def add_repo(
         data["repos"]["active"] = alias
     if client_id is not None:
         data.setdefault("github", {})["client_id"] = client_id
+    if host is not None:
+        data.setdefault("github", {})["host"] = githost.normalize_host(host)
     write_user_data(data)
 
 

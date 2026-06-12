@@ -206,6 +206,19 @@ def test_propose_happy_path(cfg):
     assert "1 in review" in report.summary()
 
 
+def test_propose_compare_url_uses_enterprise_host(cfg):
+    import dataclasses
+
+    ghes_cfg = dataclasses.replace(cfg, host="ghe.example")
+    client = FakeClient({"notebooks/a.py": b"v1\n"})
+    sync.pull(client, ghes_cfg)
+    write_local(ghes_cfg, "notebooks/a.py", "v2\n")
+    result = sync.propose(client, ghes_cfg, sleep=lambda s: None, now=NOW1)
+    assert result.compare_url == (
+        f"https://ghe.example/acme/nbs/compare/main...{BRANCH1}?expand=1"
+    )
+
+
 def test_repeat_propose_reuses_branch(cfg):
     client = FakeClient({"notebooks/a.py": b"v1\n"})
     sync.pull(client, cfg)

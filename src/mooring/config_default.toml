@@ -8,6 +8,7 @@ client_id = ""   # OAuth app client id (device flow enabled); public, no secret
 owner = ""       # GitHub org or user that owns the shared notebooks repo
 repo = ""        # name of the shared notebooks repo
 branch = "main"
+host = "github.com"  # GitHub Enterprise: your instance's host, e.g. ghe.example.com
 
 # Several repos can be registered under [repos.<alias>] tables; one is active
 # at a time ("active" is reserved as the pointer key, not a valid alias).

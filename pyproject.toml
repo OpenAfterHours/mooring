@@ -1,6 +1,6 @@
 [project]
 name = "mooring"
-version = "0.1.2"
+version = "0.2.0"
 description = "Git-free marimo notebook sharing via GitHub"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
@@ -9,6 +9,7 @@ dependencies = [
     "starlette",
     "uvicorn",
     "requests",
+    "truststore",
     "keyring",
     "platformdirs",
     # notebook stack frozen into the distributed artifact

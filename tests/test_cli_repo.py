@@ -11,8 +11,11 @@ from mooring import cli, paths
 def isolated_config(tmp_path, monkeypatch):
     monkeypatch.setattr(paths, "user_config_dir", lambda: tmp_path / "appdata")
     for var in ("MOORING_CLIENT_ID", "MOORING_OWNER", "MOORING_REPO",
-                "MOORING_BRANCH", "MOORING_WORKSPACE", "MOORING_ACTIVE_REPO"):
+                "MOORING_BRANCH", "MOORING_WORKSPACE", "MOORING_ACTIVE_REPO",
+                "MOORING_GITHUB_HOST"):
         monkeypatch.delenv(var, raising=False)
+    # main() injects truststore into global ssl; keep the test process hermetic.
+    monkeypatch.setenv("MOORING_TRUSTSTORE", "0")
     return tmp_path
 
 
@@ -57,6 +60,18 @@ def test_repo_use_unknown_alias_exits():
 def test_repo_add_malformed_slug_exits():
     with pytest.raises(SystemExit):
         cli.main(["repo", "add", "just-a-name"])
+
+
+def test_repo_add_with_host_persists_normalized_host():
+    assert cli.main(["repo", "add", "acme/nbs", "--host", "https://GHE.Example/"]) == 0
+    data = tomllib.loads(paths.user_config_file().read_text("utf-8"))
+    assert data["github"]["host"] == "ghe.example"
+
+
+def test_repo_add_with_invalid_host_exits():
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["repo", "add", "acme/nbs", "--host", "not a host"])
+    assert "Not a valid GitHub host" in str(exc.value)
 
 
 def test_status_with_unknown_repo_alias_exits():

@@ -13,6 +13,7 @@ from mooring.hub.server import Hub, create_app
 def unconfigured_client(tmp_path, monkeypatch):
     monkeypatch.setattr(paths, "user_config_dir", lambda: tmp_path / "appdata")
     monkeypatch.delenv("MOORING_TOKEN", raising=False)
+    monkeypatch.delenv("MOORING_GITHUB_HOST", raising=False)
     # No client_id, so unconfigured — but with a tmp workspace to keep file
     # endpoints away from the real Documents folder.
     spec = config.RepoSpec(alias="ws", owner="", repo="", workspace_path=str(tmp_path / "ws"))
@@ -46,6 +47,28 @@ def test_setup_writes_user_config_and_reloads(unconfigured_client):
     assert paths.user_config_file().is_file()
     assert hub.cfg.repo_slug == "acme/nbs"
     assert hub.cfg.branch == "main"
+
+
+def test_setup_with_host_persists_normalized(unconfigured_client):
+    client, hub = unconfigured_client
+    resp = client.post(
+        "/api/setup",
+        json={"client_id": "cid", "owner": "acme", "repo": "nbs", "host": "https://GHE.Example/"},
+    )
+    assert resp.status_code == 200
+    assert hub.cfg.host == "ghe.example"
+    data = tomllib.loads(paths.user_config_file().read_text("utf-8"))
+    assert data["github"]["host"] == "ghe.example"
+
+
+def test_setup_with_invalid_host_400s(unconfigured_client):
+    client, _ = unconfigured_client
+    resp = client.post(
+        "/api/setup",
+        json={"client_id": "cid", "owner": "acme", "repo": "nbs", "host": "not a host"},
+    )
+    assert resp.status_code == 400
+    assert "Not a valid GitHub host" in resp.json()["error"]
 
 
 def test_setup_requires_fields(unconfigured_client):
@@ -86,7 +109,8 @@ workspace = '{ws2}'
 def configured(tmp_path, monkeypatch):
     monkeypatch.setattr(paths, "user_config_dir", lambda: tmp_path / "appdata")
     for var in ("MOORING_TOKEN", "MOORING_CLIENT_ID", "MOORING_OWNER", "MOORING_REPO",
-                "MOORING_BRANCH", "MOORING_WORKSPACE", "MOORING_ACTIVE_REPO"):
+                "MOORING_BRANCH", "MOORING_WORKSPACE", "MOORING_ACTIVE_REPO",
+                "MOORING_GITHUB_HOST"):
         monkeypatch.delenv(var, raising=False)
     (tmp_path / "appdata").mkdir()
     paths.user_config_file().write_text(
@@ -94,7 +118,7 @@ def configured(tmp_path, monkeypatch):
     )
     fake = FakeClient()
     monkeypatch.setattr(Hub, "client", lambda self: fake)
-    monkeypatch.setattr(server.auth, "get_token", lambda: "t")
+    monkeypatch.setattr(server.auth, "get_token", lambda host=None: "t")
     hub = Hub(config.load_app_config())
     with TestClient(create_app(hub)) as client:
         yield client, hub, fake, tmp_path
@@ -111,6 +135,7 @@ def test_state_lists_repos_and_active(configured):
     state = client.get("/api/state").json()
     assert state["active_repo"] == "team"
     assert state["repo"] == "acme/nbs"
+    assert state["host"] == "github.com"
     assert [(r["alias"], r["active"]) for r in state["repos"]] == [
         ("sandbox", False),
         ("team", True),
@@ -215,6 +240,32 @@ def test_propose_endpoint_and_state_review(configured):
     assert state["review"]["branch"] == body["review_branch"]
     assert state["review"]["compare_url"] == body["compare_url"]
     assert fake.tree == {}  # nothing reached main
+
+
+def test_propose_compare_url_on_enterprise_host(tmp_path, monkeypatch):
+    monkeypatch.setattr(paths, "user_config_dir", lambda: tmp_path / "appdata")
+    for var in ("MOORING_TOKEN", "MOORING_CLIENT_ID", "MOORING_OWNER", "MOORING_REPO",
+                "MOORING_BRANCH", "MOORING_WORKSPACE", "MOORING_ACTIVE_REPO",
+                "MOORING_GITHUB_HOST"):
+        monkeypatch.delenv(var, raising=False)
+    (tmp_path / "appdata").mkdir()
+    paths.user_config_file().write_text(
+        CONFIG_TEMPLATE.format(ws1=tmp_path / "ws1", ws2=tmp_path / "ws2").replace(
+            'client_id = "cid"', 'client_id = "cid"\nhost = "ghe.example"'
+        ),
+        "utf-8",
+    )
+    fake = FakeClient()
+    monkeypatch.setattr(Hub, "client", lambda self: fake)
+    monkeypatch.setattr(server.auth, "get_token", lambda host=None: "t")
+    hub = Hub(config.load_app_config())
+    with TestClient(create_app(hub)) as client:
+        write_ws(tmp_path, "ws1", "notebooks/a.py", "a")
+        body = client.post("/api/propose", json={}).json()
+        assert body["compare_url"].startswith("https://ghe.example/acme/nbs/compare/main...")
+        state = client.get("/api/state").json()
+        assert state["host"] == "ghe.example"
+        assert state["review"]["compare_url"] == body["compare_url"]
 
 
 def test_state_pbip_artifact_fully_proposed_shows_in_review(configured):

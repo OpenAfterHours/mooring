@@ -55,10 +55,11 @@ class Hub:
             self.app_cfg = config.load_app_config()
 
     def client(self) -> GitHubClient:
-        token = auth.get_token()
+        cfg = self.cfg
+        token = auth.get_token(host=cfg.host)
         if not token:
             raise AuthFailed("Not logged in.")
-        return GitHubClient(token, self.cfg.owner, self.cfg.repo)
+        return GitHubClient(token, cfg.owner, cfg.repo, host=cfg.host)
 
     def username(self) -> str:
         if not self._user_login:
@@ -84,6 +85,7 @@ class Hub:
             "configured": cfg.is_configured,
             "repo": cfg.repo_slug if cfg.is_configured else "",
             "branch": cfg.branch,
+            "host": cfg.host,
             "workspace": str(cfg.workspace()),
             "workspace_hint": legacy_workspace_hint(cfg),
             "repos": [
@@ -105,7 +107,7 @@ class Hub:
         }
         if not cfg.is_configured:
             return JSONResponse(body)
-        if not auth.get_token():
+        if not auth.get_token(host=cfg.host):
             return JSONResponse(body)
         try:
             body["user"] = self.username()
@@ -139,11 +141,11 @@ class Hub:
                 body["review"] = {
                     "branch": report.review_branch,
                     "compare_url": compare_url(
-                        cfg.owner, cfg.repo, cfg.branch, report.review_branch
+                        cfg.owner, cfg.repo, cfg.branch, report.review_branch, host=cfg.host
                     ),
                 }
         except AuthFailed:
-            auth.delete_token()
+            auth.delete_token(host=cfg.host)
             self._user_login = ""
             body["logged_in"] = False
             body["error"] = "Your GitHub login expired. Please log in again."
@@ -156,7 +158,7 @@ class Hub:
         data = await request.json()
         fields = {
             k: str(data.get(k, "")).strip()
-            for k in ("client_id", "owner", "repo", "branch", "alias")
+            for k in ("client_id", "owner", "repo", "branch", "alias", "host")
         }
         if not (fields["owner"] and fields["repo"]):
             return JSONResponse({"error": "owner and repo are required"}, status_code=400)
@@ -170,6 +172,7 @@ class Hub:
                 branch=fields["branch"] or "main",
                 make_active=True,
                 client_id=fields["client_id"] or None,
+                host=fields["host"] or None,
             )
         except ValueError as exc:
             return JSONResponse({"error": str(exc)}, status_code=400)
@@ -201,7 +204,7 @@ class Hub:
 
     def api_login_start(self, request: Request) -> JSONResponse:
         try:
-            device = auth.start_device_flow(self.cfg.client_id)
+            device = auth.start_device_flow(self.cfg.client_id, host=self.cfg.host)
         except Exception as exc:  # noqa: BLE001 - shown in the UI
             return JSONResponse({"error": str(exc)}, status_code=502)
         with self._lock:
@@ -226,7 +229,9 @@ class Hub:
                 self._device = None
             return JSONResponse({"status": "error", "message": str(exc)})
         if result.token:
-            auth.save_token(result.token)
+            # device.host, not self.cfg.host: the token belongs to the host the
+            # flow was started against, even if the config changed mid-login.
+            auth.save_token(result.token, host=device.host)
             with self._lock:
                 self._device = None
             self._user_login = ""
@@ -237,7 +242,7 @@ class Hub:
         return JSONResponse({"status": "pending"})
 
     def api_logout(self, request: Request) -> JSONResponse:
-        auth.delete_token()
+        auth.delete_token(host=self.cfg.host)
         self._user_login = ""
         return JSONResponse({"ok": True})
 
