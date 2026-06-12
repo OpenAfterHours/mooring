@@ -1,93 +1,11 @@
 """Sync engine tests against an in-memory fake of the GitHub client."""
 
 import pytest
+from conftest import FakeClient, read_local, write_local
 
-from mooring import gitsha, manifest, sync
+from mooring import manifest, sync
 from mooring.config import Config
-from mooring.github import RemoteConflict, TreeEntry
 from mooring.sync import ConflictStrategy, FileState, classify
-
-
-class FakeClient:
-    def __init__(self, files: dict[str, bytes] | None = None):
-        self.blobs: dict[str, bytes] = {}
-        self.tree: dict[str, str] = {}
-        self.commit_count = 0
-        self.head = "head-0"
-        for path, data in (files or {}).items():
-            self.seed(path, data)
-
-    def seed(self, path: str, data: bytes) -> None:
-        """Simulate someone else pushing to the repo."""
-        sha = gitsha.blob_sha(data)
-        self.blobs[sha] = data
-        self.tree[path] = sha
-        self._advance()
-
-    def remove(self, path: str) -> None:
-        del self.tree[path]
-        self._advance()
-
-    def _advance(self) -> str:
-        self.commit_count += 1
-        self.head = f"head-{self.commit_count}"
-        return self.head
-
-    # -- GitHubClient interface ------------------------------------------------
-
-    def get_user(self):
-        return {"login": "phil"}
-
-    def get_branch_head(self, branch):
-        return self.head
-
-    def get_tree(self, commit_sha, folders):
-        prefixes = tuple(f"{f}/" for f in folders)
-        return [
-            TreeEntry(p, s, len(self.blobs[s]))
-            for p, s in self.tree.items()
-            if p.startswith(prefixes)
-        ]
-
-    def get_blob(self, sha):
-        return self.blobs[sha]
-
-    def put_file(self, path, content, message, branch, base_sha=None):
-        current = self.tree.get(path)
-        if base_sha is None and current is not None:
-            raise RemoteConflict("file already exists")
-        if base_sha is not None and current != base_sha:
-            raise RemoteConflict("remote changed")
-        sha = gitsha.blob_sha(content)
-        self.blobs[sha] = content
-        self.tree[path] = sha
-        return {"content": {"sha": sha}, "commit": {"sha": self._advance()}}
-
-    def delete_file(self, path, message, branch, base_sha):
-        if self.tree.get(path) != base_sha:
-            raise RemoteConflict("remote changed")
-        del self.tree[path]
-        return {"commit": {"sha": self._advance()}}
-
-
-@pytest.fixture
-def cfg(tmp_path):
-    return Config(
-        client_id="cid",
-        owner="acme",
-        repo="nbs",
-        workspace_path=str(tmp_path / "ws"),
-    )
-
-
-def write_local(cfg, rel_path, text):
-    target = cfg.workspace() / rel_path
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(text, "utf-8", newline="\n")
-
-
-def read_local(cfg, rel_path):
-    return (cfg.workspace() / rel_path).read_text("utf-8")
 
 
 # -- the decision matrix -----------------------------------------------------
@@ -300,3 +218,65 @@ def test_crlf_local_file_counts_as_synced(cfg):
     (cfg.workspace() / "notebooks/a.py").write_bytes(b"line1\r\nline2\r\n")
     report = sync.status(client, cfg)
     assert [f.state for f in report.files] == [FileState.SYNCED]
+
+
+# -- Power BI project (PBIP) files ------------------------------------------------
+
+
+def test_scan_includes_platform_excludes_pbi_dir(cfg):
+    write_local(cfg, "reports/Sales.pbip", "{}")
+    write_local(cfg, "reports/Sales.SemanticModel/.platform", "{}")
+    write_local(cfg, "reports/Sales.SemanticModel/definition/model.tmdl", "model\n")
+    write_local(cfg, "reports/Sales.SemanticModel/.pbi/cache.abf", "binary junk")
+    write_local(cfg, "reports/Sales.Report/.pbi/localSettings.json", "{}")
+    found = sync.scan_local(cfg.workspace(), cfg.folders)
+    assert set(found) == {
+        "reports/Sales.pbip",
+        "reports/Sales.SemanticModel/.platform",
+        "reports/Sales.SemanticModel/definition/model.tmdl",
+    }
+
+
+def test_remote_dotfile_ignored_not_deleted(cfg):
+    """Regression: a dotfile committed remotely (via real git) must be invisible
+    on both sides — previously it was pulled into the manifest, then looked
+    locally deleted, and the next push deleted it from the repo."""
+    client = FakeClient(
+        {
+            "notebooks/a.py": b"a\n",
+            "reports/Sales.Report/.pbi/localSettings.json": b"{}",
+        }
+    )
+    report = sync.status(client, cfg)
+    assert [f.path for f in report.files] == ["notebooks/a.py"]
+
+    sync.pull(client, cfg)
+    assert not (cfg.workspace() / "reports/Sales.Report/.pbi/localSettings.json").exists()
+
+    result = sync.push(client, cfg, sleep=lambda s: None)
+    assert result.pushed == 0
+    assert "reports/Sales.Report/.pbi/localSettings.json" in client.tree  # untouched
+
+
+def test_remote_platform_file_syncs(cfg):
+    client = FakeClient({"reports/Sales.SemanticModel/.platform": b'{"logicalId": "x"}'})
+    report = sync.status(client, cfg)
+    assert [f.state for f in report.files] == [FileState.NEW_REMOTE]
+    sync.pull(client, cfg)
+    assert read_local(cfg, "reports/Sales.SemanticModel/.platform") == '{"logicalId": "x"}'
+    assert sync.status(client, cfg).by_state(FileState.SYNCED) != []
+
+
+def test_pbip_bytes_are_faithful(cfg):
+    # Power BI Desktop writes UTF-8 BOM and CRLF; non-.py files must round-trip
+    # byte-for-byte or every sync would see phantom changes.
+    bom_crlf = b"\xef\xbb\xbfmodel\r\n\tculture: en-US\r\n"
+    client = FakeClient({"reports/S.SemanticModel/definition/model.tmdl": bom_crlf})
+    sync.pull(client, cfg)
+    report = sync.status(client, cfg)
+    assert [f.state for f in report.files] == [FileState.SYNCED]
+
+    edited = bom_crlf + b"\tnewline\r\n"
+    (cfg.workspace() / "reports/S.SemanticModel/definition/model.tmdl").write_bytes(edited)
+    sync.push(client, cfg, sleep=lambda s: None)
+    assert client.blobs[client.tree["reports/S.SemanticModel/definition/model.tmdl"]] == edited

@@ -17,10 +17,15 @@ python mooring.pyz hub [--no-browser] [--port PORT]
 python mooring.pyz login
 python mooring.pyz logout
 python mooring.pyz whoami
-python mooring.pyz status
-python mooring.pyz pull [--theirs | --keep-both]
-python mooring.pyz push [paths...] [-m "message"]
+python mooring.pyz repo list
+python mooring.pyz repo add owner/name [--alias NAME] [--branch BR] [--no-use]
+python mooring.pyz repo use <alias>
+python mooring.pyz repo remove <alias>
+python mooring.pyz status [--repo ALIAS]
+python mooring.pyz pull [--theirs | --keep-both] [--repo ALIAS]
+python mooring.pyz push [paths...] [-m "message"] [--repo ALIAS]
 python mooring.pyz open notebooks/sales.py
+python mooring.pyz open reports/sales.pbip
 python mooring.pyz new sales-analysis
 python mooring.pyz selftest
 python mooring.pyz version
@@ -41,10 +46,28 @@ Start the local browser hub (the default when you run with no command).
 - `logout` — forget the stored token.
 - `whoami` — print the logged-in GitHub username.
 
+### `repo`
+
+Manage the registered team repos (see
+[Daily workflow → Switching repos](daily-workflow.md#switching-repos)):
+
+- `repo list` — show every registered repo; `*` marks the active one.
+- `repo add owner/name` — register a repo and switch to it. Options:
+  `--alias NAME` (short name, defaults to the repo name), `--branch BRANCH`,
+  `--workspace PATH` (custom local folder), `--no-use` (register without
+  switching).
+- `repo use <alias>` — switch the active repo.
+- `repo remove <alias>` — forget a repo. Its local workspace folder is kept;
+  delete it manually if you no longer want the files.
+
+`status`, `pull`, `push`, `open`, and `new` accept `--repo ALIAS` to act on a
+registered repo **without** switching the active one.
+
 ### `status`
 
 List every workspace file with its sync state (unchanged, modified, remote,
-conflicted, …) and a summary line.
+conflicted, …) and a summary line. Power BI project files are listed
+individually here; the hub groups them per project.
 
 ### `pull`
 
@@ -71,7 +94,9 @@ Files in conflict are blocked until resolved.
 ### `open` / `new`
 
 - `open <workspace-relative-path>` — open an existing notebook in the marimo
-  editor (e.g. `open notebooks/sales.py`).
+  editor (e.g. `open notebooks/sales.py`). A `.pbip` path opens the project in
+  **Power BI Desktop** instead (e.g. `open reports/sales.pbip`) — see
+  [Power BI reports](power-bi.md).
 - `new <name>` — create a notebook from the template and open it (e.g.
   `new sales-analysis`).
 

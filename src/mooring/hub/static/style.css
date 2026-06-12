@@ -30,6 +30,14 @@ header {
 
 header h1 { font-size: 1.2rem; margin: 0; }
 #repo-info { color: var(--muted); flex: 1; }
+#repo-select {
+  font: inherit;
+  font-size: 0.85rem;
+  padding: 0.25rem 0.4rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--card);
+}
 
 main { max-width: 60rem; margin: 1.5rem auto; padding: 0 1rem; }
 
@@ -102,6 +110,16 @@ td.path { font-family: Consolas, monospace; font-size: 0.9rem; }
 .badge.push { color: var(--accent); border-color: var(--accent); }
 .badge.pull { color: var(--warn); border-color: var(--warn); }
 .badge.conflict { color: var(--bad); border-color: var(--bad); font-weight: 600; }
+/* artifact has changes in both directions (some to push, some to pull) */
+.badge.mixed { color: var(--warn); border-color: var(--warn); font-weight: 600; }
+
+tr.member td.path { padding-left: 2.2rem; }
+button.caret {
+  border: none;
+  background: transparent;
+  padding: 0 0.3rem;
+  font-size: 0.9rem;
+}
 
 #error-banner {
   background: #ffebe9;
@@ -124,4 +142,10 @@ footer {
   max-width: 60rem;
   margin: 0 auto 2rem;
   padding: 0 1rem;
+}
+
+.hint {
+  color: var(--warn);
+  font-size: 0.9rem;
+  margin-top: 0.3rem;
 }

@@ -10,18 +10,21 @@
   <header>
     <h1>&#9875; mooring</h1>
     <div id="repo-info"></div>
+    <select id="repo-select" class="hidden" title="Switch repo"></select>
     <div id="user-info"></div>
   </header>
 
   <main>
     <section id="setup-card" class="card hidden">
-      <h2>Set up your team repo</h2>
-      <p>This copy of mooring isn't configured yet. Ask your admin for these values:</p>
-      <label>OAuth client id <input id="setup-client-id" placeholder="Ov23li..."></label>
+      <h2>Add a team repo</h2>
+      <p id="setup-intro">This copy of mooring isn't configured yet. Ask your admin for these values:</p>
+      <label id="setup-client-id-label">OAuth client id <input id="setup-client-id" placeholder="Ov23li..."></label>
       <label>Repo owner <input id="setup-owner" placeholder="your-org"></label>
       <label>Repo name <input id="setup-repo" placeholder="notebooks"></label>
       <label>Branch <input id="setup-branch" value="main"></label>
+      <label>Short name (optional) <input id="setup-alias" placeholder="defaults to repo name"></label>
       <button id="setup-save" class="primary">Save</button>
+      <button id="setup-cancel" class="hidden">Cancel</button>
     </section>
 
     <section id="login-card" class="card hidden">
@@ -64,6 +67,7 @@
 
   <footer>
     <div id="workspace-info" class="muted"></div>
+    <div id="workspace-hint" class="hint hidden"></div>
     <details><summary>Packages available in notebooks</summary>
       <div id="packages" class="muted"></div>
     </details>
