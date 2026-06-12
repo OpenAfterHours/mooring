@@ -25,7 +25,7 @@ from starlette.staticfiles import StaticFiles
 from mooring import __version__, auth, config, config_store, pbip, sync
 from mooring.cli import SELFTEST_PACKAGES, legacy_workspace_hint
 from mooring.editor import EditorServer, _free_port
-from mooring.github import AuthFailed, GitHubClient, GitHubError
+from mooring.github import AuthFailed, GitHubClient, GitHubError, compare_url
 
 
 def _static_dir() -> Path:
@@ -135,6 +135,13 @@ class Hub:
                 for a in artifacts
             ]
             body["summary"] = report.summary()
+            if report.review_branch:
+                body["review"] = {
+                    "branch": report.review_branch,
+                    "compare_url": compare_url(
+                        cfg.owner, cfg.repo, cfg.branch, report.review_branch
+                    ),
+                }
         except AuthFailed:
             auth.delete_token()
             self._user_login = ""
@@ -244,6 +251,11 @@ class Hub:
         paths_arg = data.get("paths") or None
         return self._sync_op(lambda: sync.push(self.client(), self.cfg, paths=paths_arg))
 
+    async def api_propose(self, request: Request) -> JSONResponse:
+        data = await request.json() if await request.body() else {}
+        paths_arg = data.get("paths") or None
+        return self._sync_op(lambda: sync.propose(self.client(), self.cfg, paths=paths_arg))
+
     async def api_resolve(self, request: Request) -> JSONResponse:
         data = await request.json()
         strategy = sync.ConflictStrategy(data["strategy"])
@@ -257,7 +269,11 @@ class Hub:
             result = op()
         except (GitHubError, OSError) as exc:
             return JSONResponse({"error": str(exc)}, status_code=502)
-        return JSONResponse({"lines": result.lines, "summary": result.summary()})
+        body = {"lines": result.lines, "summary": result.summary()}
+        if result.review_branch:
+            body["review_branch"] = result.review_branch
+            body["compare_url"] = result.compare_url
+        return JSONResponse(body)
 
     async def api_new(self, request: Request) -> JSONResponse:
         from mooring import notebook_template
@@ -325,6 +341,7 @@ def create_app(hub: Hub) -> Starlette:
             Route("/api/logout", hub.api_logout, methods=["POST"]),
             Route("/api/pull", hub.api_pull, methods=["POST"]),
             Route("/api/push", hub.api_push, methods=["POST"]),
+            Route("/api/propose", hub.api_propose, methods=["POST"]),
             Route("/api/resolve", hub.api_resolve, methods=["POST"]),
             Route("/api/new", hub.api_new, methods=["POST"]),
             Route("/api/open", hub.api_open, methods=["POST"]),

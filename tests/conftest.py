@@ -4,33 +4,55 @@ import pytest
 
 from mooring import gitsha
 from mooring.config import Config
-from mooring.github import RemoteConflict, TreeEntry
+from mooring.github import NotFound, RefAlreadyExists, RemoteConflict, TreeEntry
+
+DEFAULT_BRANCH = "main"
 
 
 class FakeClient:
     def __init__(self, files: dict[str, bytes] | None = None):
         self.blobs: dict[str, bytes] = {}
-        self.tree: dict[str, str] = {}
+        self.trees: dict[str, dict[str, str]] = {DEFAULT_BRANCH: {}}
         self.commit_count = 0
-        self.head = "head-0"
+        self.heads: dict[str, str] = {DEFAULT_BRANCH: "head-0"}
         for path, data in (files or {}).items():
             self.seed(path, data)
+
+    # The bulk of the suite only cares about the default branch; keep the
+    # original single-branch attribute names as views onto it.
+    @property
+    def tree(self) -> dict[str, str]:
+        return self.trees[DEFAULT_BRANCH]
+
+    @property
+    def head(self) -> str:
+        return self.heads[DEFAULT_BRANCH]
 
     def seed(self, path: str, data: bytes) -> None:
         """Simulate someone else pushing to the repo."""
         sha = gitsha.blob_sha(data)
         self.blobs[sha] = data
         self.tree[path] = sha
-        self._advance()
+        self._advance(DEFAULT_BRANCH)
 
     def remove(self, path: str) -> None:
         del self.tree[path]
-        self._advance()
+        self._advance(DEFAULT_BRANCH)
 
-    def _advance(self) -> str:
+    def merge(self, branch: str, into: str = DEFAULT_BRANCH) -> None:
+        """Simulate a PR from `branch` getting merged on GitHub."""
+        self.trees[into] = dict(self.trees[branch])
+        self._advance(into)
+
+    def delete_branch(self, branch: str) -> None:
+        """Simulate a PR getting closed and its branch deleted on GitHub."""
+        del self.trees[branch]
+        del self.heads[branch]
+
+    def _advance(self, branch: str) -> str:
         self.commit_count += 1
-        self.head = f"head-{self.commit_count}"
-        return self.head
+        self.heads[branch] = f"head-{self.commit_count}"
+        return self.heads[branch]
 
     # -- GitHubClient interface ------------------------------------------------
 
@@ -38,35 +60,56 @@ class FakeClient:
         return {"login": "phil"}
 
     def get_branch_head(self, branch):
-        return self.head
+        if branch not in self.heads:
+            raise NotFound(f"branch {branch}")
+        return self.heads[branch]
 
     def get_tree(self, commit_sha, folders):
+        tree = self.tree
+        for branch, head in self.heads.items():
+            if head == commit_sha:
+                tree = self.trees[branch]
+                break
         prefixes = tuple(f"{f}/" for f in folders)
         return [
             TreeEntry(p, s, len(self.blobs[s]))
-            for p, s in self.tree.items()
+            for p, s in tree.items()
             if p.startswith(prefixes)
         ]
 
     def get_blob(self, sha):
         return self.blobs[sha]
 
+    def create_ref(self, branch, sha):
+        if branch in self.trees:
+            raise RefAlreadyExists(f"branch {branch} already exists")
+        source = next(b for b, h in self.heads.items() if h == sha)
+        self.trees[branch] = dict(self.trees[source])
+        self.heads[branch] = sha
+        return {"ref": f"refs/heads/{branch}", "object": {"sha": sha}}
+
     def put_file(self, path, content, message, branch, base_sha=None):
-        current = self.tree.get(path)
+        if branch not in self.trees:
+            raise NotFound(f"branch {branch}")
+        tree = self.trees[branch]
+        current = tree.get(path)
         if base_sha is None and current is not None:
             raise RemoteConflict("file already exists")
         if base_sha is not None and current != base_sha:
             raise RemoteConflict("remote changed")
         sha = gitsha.blob_sha(content)
         self.blobs[sha] = content
-        self.tree[path] = sha
-        return {"content": {"sha": sha}, "commit": {"sha": self._advance()}}
+        tree[path] = sha
+        return {"content": {"sha": sha}, "commit": {"sha": self._advance(branch)}}
 
     def delete_file(self, path, message, branch, base_sha):
-        if self.tree.get(path) != base_sha:
+        if branch not in self.trees:
+            raise NotFound(f"branch {branch}")
+        tree = self.trees[branch]
+        if tree.get(path) != base_sha:
             raise RemoteConflict("remote changed")
-        del self.tree[path]
-        return {"commit": {"sha": self._advance()}}
+        del tree[path]
+        return {"commit": {"sha": self._advance(branch)}}
 
 
 @pytest.fixture

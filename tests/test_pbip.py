@@ -75,6 +75,8 @@ def test_remote_only_pointer_still_groups():
         ([FileState.MODIFIED, FileState.REMOTE_CHANGED], "mixed"),
         ([FileState.MODIFIED, FileState.REMOTE_CHANGED, FileState.CONFLICT], "conflict"),
         ([FileState.SYNCED, FileState.CONFLICT], "conflict"),
+        ([FileState.SYNCED, FileState.IN_REVIEW], "in review"),
+        ([FileState.MODIFIED, FileState.IN_REVIEW], "modified"),
     ],
 )
 def test_aggregate_state(states, expected):

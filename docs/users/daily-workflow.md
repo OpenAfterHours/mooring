@@ -8,7 +8,7 @@ Everything below happens in the **hub** (the browser page that opens when you
 run the app). The same actions are available from the
 [command line](cli.md) if you prefer a terminal.
 
-## The five actions
+## The six actions
 
 | Action | What it does |
 |--------|--------------|
@@ -16,6 +16,7 @@ run the app). The same actions are available from the
 | **Open** | Open a notebook in the bundled marimo editor (a new browser tab), or a Power BI project in **Power BI Desktop** — see [Power BI reports](power-bi.md). |
 | **New notebook** | Create a fresh marimo notebook from a template and open it. |
 | **Push** | Upload your changed files to the team repo — **one commit per file**. Blocked for any file that's in conflict. |
+| **Propose** | Like Push, but uploads to a **review branch** instead of the shared branch, so a teammate can review the changes as a pull request before they land. See [Proposing changes](#proposing-changes-for-review). |
 | **Resolve** | Appears on conflicted files. See [Resolving conflicts](conflicts.md). |
 
 Power BI projects appear as a **single grouped row** (expand with the ▸ caret
@@ -37,6 +38,35 @@ to see individual files); everything else is one row per file.
     push silently overwrite a teammate's work — GitHub itself rejects a write
     whose base SHA is stale — so the worst case is a conflict you resolve, not
     lost work.
+
+## Proposing changes for review
+
+If your team prefers changes to be reviewed before they land, use **Propose**
+instead of Push:
+
+1. **Propose** uploads your changed files to a personal review branch
+   (named like `mooring/your-username/20260612-0900`) — the shared branch is
+   untouched.
+2. The hub shows a link: **create / view the pull request**. Click it and
+   press *Create pull request* on GitHub. That's the only step that happens
+   on github.com — mooring never opens the PR for you.
+3. Proposed files show an *in review* badge. They are left out of **Push all**
+   so you can't accidentally bypass the review.
+4. Need to update the proposal after feedback? Edit the file and **Propose**
+   again — it goes to the same branch and the open pull request updates
+   itself.
+5. When the pull request is **merged**, the badge clears on its own and a
+   normal **Pull** brings your workspace in line. If the pull request is
+   closed and its branch deleted instead, the files simply go back to
+   *modified* — nothing is lost, and your next Propose starts a fresh branch.
+
+!!! note "If a reviewer edits the pull request"
+
+    The *in review* badge clears when your exact change lands on the shared
+    branch. If a reviewer amends the PR before merging, the merged version
+    differs from yours — the badge clears once the review branch is deleted
+    (GitHub offers this right after merging), and the reviewer's version
+    arrives with your next pull.
 
 ## Switching repos
 

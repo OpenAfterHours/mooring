@@ -8,7 +8,9 @@ from mooring.github import (
     AuthFailed,
     GitHubClient,
     GitHubError,
+    RefAlreadyExists,
     RemoteConflict,
+    compare_url,
 )
 
 REPO = f"{API_ROOT}/repos/acme/nbs"
@@ -106,3 +108,47 @@ def test_401_raises_auth_failed():
     responses.add(responses.GET, f"{API_ROOT}/user", json={}, status=401)
     with pytest.raises(AuthFailed):
         client().get_user()
+
+
+@responses.activate
+def test_create_ref_posts_branch_ref():
+    responses.add(
+        responses.POST,
+        f"{REPO}/git/refs",
+        json={"ref": "refs/heads/mooring/phil/20260612-0900", "object": {"sha": "c0ffee"}},
+        status=201,
+    )
+    client().create_ref("mooring/phil/20260612-0900", "c0ffee")
+    body = responses.calls[0].request.body
+    assert b'"ref": "refs/heads/mooring/phil/20260612-0900"' in body
+    assert b'"sha": "c0ffee"' in body
+
+
+@responses.activate
+def test_create_ref_existing_branch():
+    responses.add(
+        responses.POST,
+        f"{REPO}/git/refs",
+        json={"message": "Reference already exists"},
+        status=422,
+    )
+    with pytest.raises(RefAlreadyExists):
+        client().create_ref("mooring/phil/20260612-0900", "c0ffee")
+
+
+@responses.activate
+def test_create_ref_other_422_is_generic_error():
+    responses.add(
+        responses.POST,
+        f"{REPO}/git/refs",
+        json={"message": "Object does not exist"},
+        status=422,
+    )
+    with pytest.raises(GitHubError):
+        client().create_ref("mooring/phil/20260612-0900", "c0ffee")
+
+
+def test_compare_url():
+    assert compare_url("acme", "nbs", "main", "mooring/phil/20260612-0900") == (
+        "https://github.com/acme/nbs/compare/main...mooring/phil/20260612-0900?expand=1"
+    )
