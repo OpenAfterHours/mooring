@@ -15,7 +15,7 @@ from dataclasses import dataclass, replace
 from importlib import resources
 from pathlib import Path
 
-from mooring import paths
+from mooring import githost, paths
 
 
 @dataclass(frozen=True)
@@ -24,6 +24,7 @@ class Config:
     owner: str = ""
     repo: str = ""
     branch: str = "main"
+    host: str = githost.DEFAULT_HOST
     folders: tuple[str, ...] = ("notebooks", "data", "reports")
     warn_file_mb: int = 10
     max_file_mb: int = 45
@@ -61,6 +62,7 @@ class AppConfig:
     client_id: str = ""
     repos: tuple[RepoSpec, ...] = ()
     active_alias: str = ""
+    host: str = githost.DEFAULT_HOST
     folders: tuple[str, ...] = ("notebooks", "data", "reports")
     warn_file_mb: int = 10
     max_file_mb: int = 45
@@ -85,6 +87,7 @@ class AppConfig:
             if not self.repos:
                 return Config(
                     client_id=self.client_id,
+                    host=self.host,
                     folders=self.folders,
                     warn_file_mb=self.warn_file_mb,
                     max_file_mb=self.max_file_mb,
@@ -96,6 +99,7 @@ class AppConfig:
             owner=s.owner,
             repo=s.repo,
             branch=s.branch,
+            host=self.host,
             folders=self.folders,
             warn_file_mb=self.warn_file_mb,
             max_file_mb=self.max_file_mb,
@@ -203,6 +207,7 @@ def load_app_config(
         client_id=env.get("MOORING_CLIENT_ID", gh.get("client_id", "")),
         repos=specs,
         active_alias=active,
+        host=githost.normalize_host(env.get("MOORING_GITHUB_HOST") or str(gh.get("host", ""))),
         folders=tuple(sync.get("folders", ("notebooks", "data", "reports"))),
         warn_file_mb=int(sync.get("warn_file_mb", 10)),
         max_file_mb=int(sync.get("max_file_mb", 45)),

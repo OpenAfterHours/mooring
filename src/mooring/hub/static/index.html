@@ -19,6 +19,7 @@
       <h2>Add a team repo</h2>
       <p id="setup-intro">This copy of mooring isn't configured yet. Ask your admin for these values:</p>
       <label id="setup-client-id-label">OAuth client id <input id="setup-client-id" placeholder="Ov23li..."></label>
+      <label id="setup-host-label">GitHub URL (only for GitHub Enterprise) <input id="setup-host" placeholder="github.com"></label>
       <label>Repo owner <input id="setup-owner" placeholder="your-org"></label>
       <label>Repo name <input id="setup-repo" placeholder="notebooks"></label>
       <label>Branch <input id="setup-branch" value="main"></label>
@@ -32,7 +33,7 @@
       <button id="login-start" class="primary">Log in with GitHub</button>
       <div id="login-code-box" class="hidden">
         <p>Enter this code at
-          <a id="login-link" href="https://github.com/login/device" target="_blank" rel="noopener">github.com/login/device</a>:
+          <a id="login-link" href="#" target="_blank" rel="noopener">your GitHub sign-in page</a>:
         </p>
         <div id="login-code" class="code"></div>
         <p class="muted">Waiting for you to authorize&hellip;</p>

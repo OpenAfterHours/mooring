@@ -16,8 +16,10 @@ one came from.
 | Repo **owner** (org or username) | `owner` | [Creating the shared repo](#create-the-shared-repo) |
 | Repo **name** | `repo` | [Creating the shared repo](#create-the-shared-repo) |
 | Branch to sync (usually `main`) | `branch` | The repo's default branch |
+| GitHub **host** (only for GitHub Enterprise) | `host` | [GitHub Enterprise](#github-enterprise) |
 
-Once you have all four, plug them in via [Configuration](configuration.md).
+Once you have all four (five on GitHub Enterprise), plug them in via
+[Configuration](configuration.md).
 
 !!! note "No client secret"
 
@@ -109,12 +111,13 @@ OAuth apps**, the app must be approved before anyone can log in:
 
 ??? info "How login actually works (device flow)"
 
-    1. The app POSTs to `https://github.com/login/device/code` with your
-       `client_id` and the `repo` scope, and gets back a short **user code** and
-       the verification URL `https://github.com/login/device`.
+    1. The app POSTs to `https://{your-github-host}/login/device/code` with
+       your `client_id` and the `repo` scope, and gets back a short **user
+       code** and the verification URL `https://{your-github-host}/login/device`.
     2. The analyst opens that URL, enters the code, and authorizes the app.
-    3. Meanwhile the app polls `https://github.com/login/oauth/access_token`
-       until GitHub returns an **access token**.
+    3. Meanwhile the app polls
+       `https://{your-github-host}/login/oauth/access_token` until GitHub
+       returns an **access token**.
     4. The token is saved to the OS credential store — **Windows Credential
        Manager** / **macOS Keychain** via `keyring` — with a permission-locked
        plaintext file (`token` next to `config.toml`) as a fallback when no
@@ -123,6 +126,43 @@ OAuth apps**, the app must be approved before anyone can log in:
     For CI or scripted testing you can bypass device flow entirely by setting
     the `MOORING_TOKEN` environment variable (a personal access token works) —
     see [Configuration](configuration.md#environment-variables).
+
+## GitHub Enterprise
+
+If your GitHub is a **GitHub Enterprise** instance (say
+`https://ghe.example.com/` instead of `github.com`), everything above still
+applies — it just happens on *your* instance:
+
+1. Set the **`host`** config key (in `[github]`, next to `client_id`) to your
+   instance — a bare host like `ghe.example.com` or a full URL like
+   `https://ghe.example.com/` both work. There is one host per installation;
+   all registered repos live on it. From the CLI:
+   `mooring repo add your-org/notebooks --host ghe.example.com`.
+2. Register the OAuth app **on your instance** (same path: your GHE →
+   Settings → Developer settings → OAuth Apps), not on public github.com — a
+   github.com client id will not work against an Enterprise host.
+
+    !!! warning "Enable Device Flow there too"
+
+        The ["step everyone forgets"](#register-the-oauth-app) applies on
+        Enterprise just the same: enable **Device Flow** on the OAuth app you
+        registered on your instance.
+
+3. mooring derives the API endpoint automatically: `https://{host}/api/v3`
+   for GitHub Enterprise Server, `https://api.{host}` for GitHub Enterprise
+   Cloud data-residency hosts (`*.ghe.com`).
+
+!!! note "GitHub Enterprise Server version"
+
+    mooring sends the `X-GitHub-Api-Version: 2022-11-28` header, which GitHub
+    Enterprise Server supports from **3.9** onward. On older GHES versions API
+    calls fail with a version error — upgrade the instance or ask your GitHub
+    admins which version you're on.
+
+If analysts log in behind a corporate SSL-intercepting proxy, see
+[Corporate networks & TLS](configuration.md#corporate-networks-tls) — mooring
+verifies TLS against the OS trust store, so the usual corporate root CA setup
+just works.
 
 ## Plug the values in
 

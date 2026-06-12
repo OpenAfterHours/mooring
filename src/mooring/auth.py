@@ -1,10 +1,13 @@
 """GitHub OAuth Device Flow and token storage.
 
 Device flow needs only a public client_id (no secret): the app shows a short
-code, the user enters it at https://github.com/login/device, and we poll for
-the resulting token. Tokens are stored in the OS credential store via keyring
-(Windows Credential Manager / macOS Keychain), with a plaintext-file fallback,
-and MOORING_TOKEN overrides everything for CI and tests.
+code, the user enters it at {host}/login/device, and we poll for the
+resulting token. Works against github.com and GitHub Enterprise alike — the
+flow's endpoints live on the instance's web root. Tokens are stored in the
+OS credential store via keyring (Windows Credential Manager / macOS
+Keychain), with a plaintext-file fallback, keyed by host so a token never
+gets sent to a different GitHub instance; MOORING_TOKEN overrides everything
+for CI and tests.
 """
 
 from __future__ import annotations
@@ -17,14 +20,20 @@ from dataclasses import dataclass
 
 import requests
 
-from mooring import paths
+from mooring import githost, paths
 
-DEVICE_CODE_URL = "https://github.com/login/device/code"
-TOKEN_URL = "https://github.com/login/oauth/access_token"
 SCOPE = "repo"
 KEYRING_SERVICE = "mooring-github"
 KEYRING_USER = "github-token"
 TOKEN_FILE_NAME = "token"
+
+
+def device_code_url(host: str = githost.DEFAULT_HOST) -> str:
+    return f"{githost.web_root(host)}/login/device/code"
+
+
+def token_url(host: str = githost.DEFAULT_HOST) -> str:
+    return f"{githost.web_root(host)}/login/oauth/access_token"
 
 
 class AuthError(Exception):
@@ -38,6 +47,7 @@ class DeviceCode:
     verification_uri: str
     interval: int
     expires_in: int
+    host: str = githost.DEFAULT_HOST
 
 
 @dataclass
@@ -53,10 +63,14 @@ class PollResult:
         return self.token is None
 
 
-def start_device_flow(client_id: str, session: requests.Session | None = None) -> DeviceCode:
+def start_device_flow(
+    client_id: str,
+    session: requests.Session | None = None,
+    host: str = githost.DEFAULT_HOST,
+) -> DeviceCode:
     http = session or requests
     resp = http.post(
-        DEVICE_CODE_URL,
+        device_code_url(host),
         data={"client_id": client_id, "scope": SCOPE},
         headers={"Accept": "application/json"},
         timeout=30,
@@ -71,6 +85,7 @@ def start_device_flow(client_id: str, session: requests.Session | None = None) -
         verification_uri=data["verification_uri"],
         interval=int(data.get("interval", 5)),
         expires_in=int(data.get("expires_in", 900)),
+        host=host,
     )
 
 
@@ -84,7 +99,7 @@ def poll_once(
     http = session or requests
     current = interval if interval is not None else device.interval
     resp = http.post(
-        TOKEN_URL,
+        token_url(device.host),
         data={
             "client_id": client_id,
             "device_code": device.device_code,
@@ -105,7 +120,7 @@ def poll_once(
     if error == "expired_token":
         raise AuthError("The login code expired. Start the login again.")
     if error == "access_denied":
-        raise AuthError("Login was cancelled on github.com.")
+        raise AuthError("Login was cancelled on GitHub.")
     raise AuthError(f"GitHub login failed: {data.get('error_description', error or data)}")
 
 
@@ -129,8 +144,21 @@ def poll_for_token(
         sleep(interval)
 
 
-def _token_file() -> "os.PathLike[str]":
-    return paths.user_config_dir() / TOKEN_FILE_NAME
+# The default host keeps the pre-0.2 key/filename so existing logins survive
+# the upgrade; other hosts get their own slot so a token is never sent to a
+# different GitHub instance after the host setting changes.
+
+
+def _keyring_user(host: str) -> str:
+    if host == githost.DEFAULT_HOST:
+        return KEYRING_USER
+    return f"{KEYRING_USER}@{host}"
+
+
+def _token_file(host: str) -> "os.PathLike[str]":
+    if host == githost.DEFAULT_HOST:
+        return paths.user_config_dir() / TOKEN_FILE_NAME
+    return paths.user_config_dir() / f"{TOKEN_FILE_NAME}-{host.replace(':', '_')}"
 
 
 def _keyring():
@@ -145,15 +173,15 @@ def _keyring():
         return None
 
 
-def save_token(token: str) -> None:
+def save_token(token: str, host: str = githost.DEFAULT_HOST) -> None:
     kr = _keyring()
     if kr is not None:
         try:
-            kr.set_password(KEYRING_SERVICE, KEYRING_USER, token)
+            kr.set_password(KEYRING_SERVICE, _keyring_user(host), token)
             return
         except Exception:  # pragma: no cover - backend-dependent
             pass
-    path = _token_file()
+    path = _token_file(host)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(token, "utf-8")
     try:
@@ -166,32 +194,34 @@ def save_token(token: str) -> None:
     )
 
 
-def get_token(env: Mapping[str, str] | None = None) -> str | None:
+def get_token(
+    env: Mapping[str, str] | None = None, host: str = githost.DEFAULT_HOST
+) -> str | None:
     env = os.environ if env is None else env
     if env.get("MOORING_TOKEN"):
         return env["MOORING_TOKEN"]
     kr = _keyring()
     if kr is not None:
         try:
-            token = kr.get_password(KEYRING_SERVICE, KEYRING_USER)
+            token = kr.get_password(KEYRING_SERVICE, _keyring_user(host))
             if token:
                 return token
         except Exception:  # pragma: no cover - backend-dependent
             pass
-    path = _token_file()
+    path = _token_file(host)
     if os.path.isfile(path):
         text = open(path, encoding="utf-8").read().strip()
         return text or None
     return None
 
 
-def delete_token() -> None:
+def delete_token(host: str = githost.DEFAULT_HOST) -> None:
     kr = _keyring()
     if kr is not None:
         try:
-            kr.delete_password(KEYRING_SERVICE, KEYRING_USER)
+            kr.delete_password(KEYRING_SERVICE, _keyring_user(host))
         except Exception:  # pragma: no cover - includes PasswordDeleteError
             pass
-    path = _token_file()
+    path = _token_file(host)
     if os.path.isfile(path):
         os.remove(path)

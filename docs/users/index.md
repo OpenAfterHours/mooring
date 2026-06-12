@@ -63,9 +63,9 @@ Your admin distributes one of these — put it anywhere, e.g. your Desktop:
 1. Run the app. Your browser opens the **hub** at a local address
    (`http://127.0.0.1:…`).
 2. Click **Log in with GitHub**.
-3. The hub shows a short code and opens
-   [github.com/login/device](https://github.com/login/device) — enter the code
-   there and authorize.
+3. The hub shows a short code and opens your GitHub sign-in page
+   (`github.com/login/device`, or your company's GitHub instance) — enter the
+   code there and authorize.
 4. Once authorized, the hub shows the team's notebooks and their sync status.
 
 ??? info "What's happening during login?"

@@ -4,7 +4,6 @@ import pytest
 import responses
 
 from mooring.github import (
-    API_ROOT,
     AuthFailed,
     GitHubClient,
     GitHubError,
@@ -13,6 +12,7 @@ from mooring.github import (
     compare_url,
 )
 
+API_ROOT = "https://api.github.com"
 REPO = f"{API_ROOT}/repos/acme/nbs"
 
 
@@ -152,3 +152,22 @@ def test_compare_url():
     assert compare_url("acme", "nbs", "main", "mooring/phil/20260612-0900") == (
         "https://github.com/acme/nbs/compare/main...mooring/phil/20260612-0900?expand=1"
     )
+
+
+def test_compare_url_on_enterprise_host():
+    assert compare_url("acme", "nbs", "main", "fix", host="ghe.service.group") == (
+        "https://ghe.service.group/acme/nbs/compare/main...fix?expand=1"
+    )
+
+
+@responses.activate
+def test_enterprise_host_routes_to_api_v3():
+    ghes = GitHubClient("tok", "acme", "nbs", host="ghe.service.group")
+    responses.add(
+        responses.GET,
+        "https://ghe.service.group/api/v3/repos/acme/nbs/git/ref/heads/main",
+        json={"object": {"sha": "c0ffee"}},
+    )
+    responses.add(responses.GET, "https://ghe.service.group/api/v3/user", json={"login": "phil"})
+    assert ghes.get_branch_head("main") == "c0ffee"
+    assert ghes.get_user()["login"] == "phil"

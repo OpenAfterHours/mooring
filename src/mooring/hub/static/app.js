@@ -238,7 +238,8 @@ function renderRepoSelect(state) {
 async function refresh() {
   const state = await api("/api/state");
   showError(state.error || "");
-  $("repo-info").textContent = state.repo ? `${state.repo} @ ${state.branch}` : "";
+  const hostSuffix = state.host && state.host !== "github.com" ? ` · ${state.host}` : "";
+  $("repo-info").textContent = state.repo ? `${state.repo} @ ${state.branch}${hostSuffix}` : "";
   $("workspace-info").textContent = `Workspace: ${state.workspace}`;
   const hint = $("workspace-hint");
   hint.textContent = state.workspace_hint || "";
@@ -248,6 +249,7 @@ async function refresh() {
   renderRepoSelect(state);
   $("setup-card").classList.toggle("hidden", state.configured && !showAddRepo);
   $("setup-client-id-label").classList.toggle("hidden", state.configured);
+  $("setup-host-label").classList.toggle("hidden", state.configured);
   $("setup-cancel").classList.toggle("hidden", !state.configured);
   $("setup-intro").classList.toggle("hidden", state.configured);
   $("login-card").classList.toggle("hidden", !state.configured || state.logged_in);
@@ -282,6 +284,7 @@ async function startLogin() {
   $("login-code-box").classList.remove("hidden");
   $("login-code").textContent = data.user_code;
   $("login-link").href = data.verification_uri;
+  $("login-link").textContent = data.verification_uri.replace(/^https:\/\//, "");
   window.open(data.verification_uri, "_blank");
   pollLogin();
 }
@@ -332,6 +335,7 @@ $("setup-save").addEventListener("click", () => {
   showAddRepo = false;
   action("/api/setup", {
     client_id: $("setup-client-id").value,
+    host: $("setup-host").value,
     owner: $("setup-owner").value,
     repo: $("setup-repo").value,
     branch: $("setup-branch").value,

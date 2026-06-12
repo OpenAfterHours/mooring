@@ -49,7 +49,7 @@ instead of Push:
    untouched.
 2. The hub shows a link: **create / view the pull request**. Click it and
    press *Create pull request* on GitHub. That's the only step that happens
-   on github.com — mooring never opens the PR for you.
+   on GitHub itself — mooring never opens the PR for you.
 3. Proposed files show an *in review* badge. They are left out of **Push all**
    so you can't accidentally bypass the review.
 4. Need to update the proposal after feedback? Edit the file and **Propose**
