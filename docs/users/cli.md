@@ -24,6 +24,7 @@ python mooring.pyz repo remove <alias>
 python mooring.pyz status [--repo ALIAS]
 python mooring.pyz pull [--theirs | --keep-both] [--repo ALIAS]
 python mooring.pyz push [paths...] [-m "message"] [--repo ALIAS]
+python mooring.pyz propose [paths...] [-m "message"] [--repo ALIAS]
 python mooring.pyz open notebooks/sales.py
 python mooring.pyz open reports/sales.pbip
 python mooring.pyz new sales-analysis
@@ -60,8 +61,8 @@ Manage the registered team repos (see
 - `repo remove <alias>` — forget a repo. Its local workspace folder is kept;
   delete it manually if you no longer want the files.
 
-`status`, `pull`, `push`, `open`, and `new` accept `--repo ALIAS` to act on a
-registered repo **without** switching the active one.
+`status`, `pull`, `push`, `propose`, `open`, and `new` accept `--repo ALIAS`
+to act on a registered repo **without** switching the active one.
 
 ### `status`
 
@@ -90,6 +91,23 @@ Upload local changes — one commit per file.
 - `-m "message"` / `--message "message"` sets the commit message.
 
 Files in conflict are blocked until resolved.
+
+### `propose`
+
+Like `push`, but uploads to a personal **review branch** instead of the shared
+branch, so the changes can be reviewed as a pull request (see
+[Daily workflow → Proposing changes](daily-workflow.md#proposing-changes-for-review)):
+
+- `propose` with no paths proposes **all** changed files;
+  `propose notebooks/a.py` proposes only that path. `-m` sets the commit
+  message, as with `push`.
+- The output ends with a `https://github.com/.../compare/...` link — open it
+  to create the pull request. Mooring never creates the PR itself.
+- Repeating `propose` while the pull request is open updates the same branch;
+  once it merges (or its branch is deleted), the next `propose` starts a
+  fresh one.
+- Proposed files show as *in review* in `status` and are skipped by a plain
+  `push`.
 
 ### `open` / `new`
 

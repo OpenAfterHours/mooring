@@ -40,6 +40,16 @@ to it.
 4. The **branch** mooring syncs is `main` by default; set `branch` if your
    default branch is named differently.
 
+!!! tip "Want changes reviewed before they land?"
+
+    Analysts can use **Propose** instead of Push to upload changes to a
+    personal `mooring/<username>/...` review branch and open a pull request
+    (see [Proposing changes](../users/daily-workflow.md#proposing-changes-for-review)).
+    To **require** review, protect the shared branch with a GitHub branch
+    protection rule — direct pushes are then rejected and Propose becomes the
+    only way in. Analysts still need *write* permission on the repo so they
+    can create the review branches.
+
 !!! warning "Don't enable Git LFS on this repo"
 
     Mooring reads file contents through the GitHub API. For LFS-tracked files

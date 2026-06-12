@@ -12,6 +12,7 @@ const STATE_BADGES = {
   "deleted remotely": "pull",
   "conflict": "conflict",
   "mixed": "mixed",
+  "in review": "review",
 };
 
 const PUSH_STATES = ["modified", "new local", "deleted locally"];
@@ -46,6 +47,14 @@ function showLog(data) {
   const lines = (data.lines || []).slice();
   if (data.summary) lines.push("", data.summary);
   $("log").textContent = lines.join("\n");
+  // The <pre> is plain text; the compare link needs a real anchor.
+  const linkBox = $("log-link");
+  linkBox.classList.toggle("hidden", !data.compare_url);
+  if (data.compare_url) {
+    const a = linkBox.querySelector("a");
+    a.href = data.compare_url;
+    a.textContent = "Create / view the pull request on GitHub ↗";
+  }
 }
 
 function setBusy(value) {
@@ -74,6 +83,11 @@ function pushAction(paths, count) {
   return action("/api/push", paths ? { paths } : {});
 }
 
+function proposeAction(paths, count) {
+  if (count > 3) $("summary").textContent = `Proposing ${count} file(s)… (~${Math.ceil(count * 0.8)}s)`;
+  return action("/api/propose", paths ? { paths } : {});
+}
+
 function fileActions(file) {
   const actions = [];
   if (file.state === "conflict") {
@@ -82,6 +96,7 @@ function fileActions(file) {
     actions.push(["Push as copy", () => action("/api/resolve", { path: file.path, strategy: "push-copy" })]);
   } else if (PUSH_STATES.includes(file.state)) {
     actions.push(["Push", () => action("/api/push", { paths: [file.path] })]);
+    actions.push(["Propose", () => action("/api/propose", { paths: [file.path] })]);
   }
   const openable = file.path.endsWith(".py") || file.path.endsWith(".pbip");
   if (openable && !["new remote", "deleted locally"].includes(file.state)) {
@@ -164,6 +179,7 @@ function buildArtifactRows(artifact, files) {
       return f && PUSH_STATES.includes(f.state);
     });
     actions.push(["Push", () => pushAction(paths, paths.length)]);
+    actions.push(["Propose", () => proposeAction(paths, paths.length)]);
   }
   const pointer = byPath.get(artifact.pointer);
   if (pointer && !["new remote", "deleted locally"].includes(pointer.state)) {
@@ -185,6 +201,20 @@ function renderFiles(files, artifacts) {
   for (const file of files) {
     if (!file.artifact) tbody.appendChild(buildFileRow(file));
   }
+}
+
+function renderReviewBanner(review) {
+  const banner = $("review-banner");
+  banner.innerHTML = "";
+  banner.classList.toggle("hidden", !review);
+  if (!review) return;
+  banner.append(`Proposal open on ${review.branch} — `);
+  const a = document.createElement("a");
+  a.href = review.compare_url;
+  a.target = "_blank";
+  a.rel = "noopener";
+  a.textContent = "create / view the pull request";
+  banner.appendChild(a);
 }
 
 function renderRepoSelect(state) {
@@ -236,6 +266,7 @@ async function refresh() {
     });
     userInfo.appendChild(logoutBtn);
     $("summary").textContent = state.summary || "";
+    renderReviewBanner(state.review);
     lastFiles = state.files || [];
     renderFiles(lastFiles, state.artifacts || []);
   } else {
@@ -278,6 +309,10 @@ $("btn-pull").addEventListener("click", () => action("/api/pull", {}));
 $("btn-push").addEventListener("click", () => {
   const count = lastFiles.filter((f) => PUSH_STATES.includes(f.state)).length;
   return pushAction(null, count);
+});
+$("btn-propose").addEventListener("click", () => {
+  const count = lastFiles.filter((f) => PUSH_STATES.includes(f.state)).length;
+  return proposeAction(null, count);
 });
 $("btn-new").addEventListener("click", () => {
   const name = prompt("Notebook name (e.g. sales-analysis):");

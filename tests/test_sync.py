@@ -1,5 +1,7 @@
 """Sync engine tests against an in-memory fake of the GitHub client."""
 
+import time
+
 import pytest
 from conftest import FakeClient, read_local, write_local
 
@@ -165,6 +167,175 @@ def test_push_specific_paths_only(cfg):
     assert result.pushed == 1
     assert "notebooks/a.py" in client.tree
     assert "notebooks/b.py" not in client.tree
+
+
+# -- propose (push to a review branch) -------------------------------------------
+
+
+def _at(hour, minute):
+    return lambda: time.struct_time((2026, 6, 12, hour, minute, 0, 3, 163, -1))
+
+
+NOW1 = _at(9, 0)
+NOW2 = _at(10, 30)
+BRANCH1 = "mooring/phil/20260612-0900"
+
+
+def test_propose_happy_path(cfg):
+    client = FakeClient({"notebooks/a.py": b"v1\n"})
+    sync.pull(client, cfg)
+    write_local(cfg, "notebooks/a.py", "v2\n")
+    result = sync.propose(client, cfg, sleep=lambda s: None, now=NOW1)
+    assert result.proposed == 1
+    assert result.review_branch == BRANCH1
+    assert result.compare_url == (
+        f"https://github.com/acme/nbs/compare/main...{BRANCH1}?expand=1"
+    )
+    assert any(result.compare_url in line for line in result.lines)
+    # main untouched, review branch carries the edit
+    assert client.blobs[client.tree["notebooks/a.py"]] == b"v1\n"
+    assert client.blobs[client.trees[BRANCH1]["notebooks/a.py"]] == b"v2\n"
+    # the sync base stays pointed at main
+    mft = manifest.load(cfg.workspace())
+    assert mft.files["notebooks/a.py"] == client.tree["notebooks/a.py"]
+    assert mft.head_commit == client.head
+    assert mft.review_branch == BRANCH1
+    report = sync.status(client, cfg)
+    assert [f.state for f in report.files] == [FileState.IN_REVIEW]
+    assert report.review_branch == BRANCH1
+    assert "1 in review" in report.summary()
+
+
+def test_repeat_propose_reuses_branch(cfg):
+    client = FakeClient({"notebooks/a.py": b"v1\n"})
+    sync.pull(client, cfg)
+    write_local(cfg, "notebooks/a.py", "v2\n")
+    sync.propose(client, cfg, sleep=lambda s: None, now=NOW1)
+    write_local(cfg, "notebooks/a.py", "v3\n")
+    result = sync.propose(client, cfg, sleep=lambda s: None, now=NOW2)
+    assert result.proposed == 1
+    assert result.review_branch == BRANCH1  # same proposal, same branch
+    assert client.blobs[client.trees[BRANCH1]["notebooks/a.py"]] == b"v3\n"
+    assert [b for b in client.trees if b.startswith("mooring/")] == [BRANCH1]
+
+
+def test_propose_with_nothing_new_still_returns_link(cfg):
+    client = FakeClient({"notebooks/a.py": b"v1\n"})
+    sync.pull(client, cfg)
+    write_local(cfg, "notebooks/a.py", "v2\n")
+    sync.propose(client, cfg, sleep=lambda s: None, now=NOW1)
+    result = sync.propose(client, cfg, sleep=lambda s: None, now=NOW2)
+    assert result.proposed == 0
+    assert result.review_branch == BRANCH1
+    assert result.compare_url
+    assert [b for b in client.trees if b.startswith("mooring/")] == [BRANCH1]
+
+
+def test_merge_observed_clears_review_and_next_propose_is_fresh(cfg):
+    client = FakeClient({"notebooks/a.py": b"v1\n"})
+    sync.pull(client, cfg)
+    write_local(cfg, "notebooks/a.py", "v2\n")
+    sync.propose(client, cfg, sleep=lambda s: None, now=NOW1)
+    client.merge(BRANCH1)  # PR merged on GitHub
+    report = sync.status(client, cfg)
+    assert [f.state for f in report.files] == [FileState.SYNCED]
+    assert report.review_branch == ""
+    assert manifest.load(cfg.workspace()).review_branch == ""
+    sync.pull(client, cfg)
+    write_local(cfg, "notebooks/a.py", "v3\n")
+    result = sync.propose(client, cfg, sleep=lambda s: None, now=NOW2)
+    assert result.review_branch == "mooring/phil/20260612-1030"
+
+
+def test_deleted_review_branch_clears_review(cfg):
+    client = FakeClient({"notebooks/a.py": b"v1\n"})
+    sync.pull(client, cfg)
+    write_local(cfg, "notebooks/a.py", "v2\n")
+    sync.propose(client, cfg, sleep=lambda s: None, now=NOW1)
+    client.delete_branch(BRANCH1)  # PR closed without merging
+    report = sync.status(client, cfg)
+    assert [f.state for f in report.files] == [FileState.MODIFIED]
+    assert manifest.load(cfg.workspace()).review_branch == ""
+
+
+def test_propose_branch_name_collision_appends_suffix(cfg):
+    client = FakeClient({"notebooks/a.py": b"v1\n"})
+    sync.pull(client, cfg)
+    write_local(cfg, "notebooks/a.py", "v2\n")
+    sync.propose(client, cfg, sleep=lambda s: None, now=NOW1)
+    client.merge(BRANCH1)  # merged, but the branch is left in place
+    sync.pull(client, cfg)
+    write_local(cfg, "notebooks/a.py", "v3\n")
+    result = sync.propose(client, cfg, sleep=lambda s: None, now=NOW1)  # same minute
+    assert result.review_branch == f"{BRANCH1}-2"
+
+
+def test_propose_blocks_conflicts_and_creates_no_branch(cfg):
+    client = FakeClient({"notebooks/a.py": b"v1\n"})
+    sync.pull(client, cfg)
+    write_local(cfg, "notebooks/a.py", "mine\n")
+    client.seed("notebooks/a.py", b"theirs\n")
+    result = sync.propose(client, cfg, sleep=lambda s: None, now=NOW1)
+    assert result.proposed == 0
+    assert result.blocked_conflicts == ["notebooks/a.py"]
+    assert not any(b.startswith("mooring/") for b in client.trees)
+
+
+def test_propose_local_delete(cfg):
+    client = FakeClient({"notebooks/a.py": b"v1\n", "notebooks/b.py": b"v1\n"})
+    sync.pull(client, cfg)
+    (cfg.workspace() / "notebooks/b.py").unlink()
+    result = sync.propose(client, cfg, sleep=lambda s: None, now=NOW1)
+    assert result.proposed == 1
+    assert "notebooks/b.py" in client.tree  # main untouched
+    assert "notebooks/b.py" not in client.trees[BRANCH1]
+    assert manifest.load(cfg.workspace()).review_files == {"notebooks/b.py": None}
+    states = {f.path: f.state for f in sync.status(client, cfg).files}
+    assert states["notebooks/b.py"] is FileState.IN_REVIEW
+    client.merge(BRANCH1)
+    sync.status(client, cfg)
+    assert manifest.load(cfg.workspace()).review_branch == ""
+    sync.pull(client, cfg)
+    assert "notebooks/b.py" not in manifest.load(cfg.workspace()).files
+
+
+def test_edit_after_propose_reverts_to_modified(cfg):
+    client = FakeClient({"notebooks/a.py": b"v1\n"})
+    sync.pull(client, cfg)
+    write_local(cfg, "notebooks/a.py", "v2\n")
+    sync.propose(client, cfg, sleep=lambda s: None, now=NOW1)
+    write_local(cfg, "notebooks/a.py", "v3\n")
+    report = sync.status(client, cfg)
+    assert [f.state for f in report.files] == [FileState.MODIFIED]
+
+
+def test_push_skips_in_review_files(cfg):
+    client = FakeClient({"notebooks/a.py": b"v1\n"})
+    sync.pull(client, cfg)
+    write_local(cfg, "notebooks/a.py", "v2\n")
+    write_local(cfg, "notebooks/new.py", "fresh\n")
+    sync.propose(client, cfg, paths=["notebooks/a.py"], sleep=lambda s: None, now=NOW1)
+    result = sync.push(client, cfg, sleep=lambda s: None)
+    assert result.pushed == 1  # only new.py; the proposal is not bypassed
+    assert client.blobs[client.tree["notebooks/a.py"]] == b"v1\n"
+    result = sync.push(client, cfg, paths=["notebooks/a.py"], sleep=lambda s: None)
+    assert result.pushed == 0
+    assert any("in review" in line for line in result.lines)
+    assert client.blobs[client.tree["notebooks/a.py"]] == b"v1\n"
+
+
+def test_direct_push_supersedes_proposal(cfg):
+    client = FakeClient({"notebooks/a.py": b"v1\n"})
+    sync.pull(client, cfg)
+    write_local(cfg, "notebooks/a.py", "v2\n")
+    sync.propose(client, cfg, sleep=lambda s: None, now=NOW1)
+    write_local(cfg, "notebooks/a.py", "v3\n")  # edited again: pushable directly
+    result = sync.push(client, cfg, sleep=lambda s: None)
+    assert result.pushed == 1
+    assert client.blobs[client.tree["notebooks/a.py"]] == b"v3\n"
+    mft = manifest.load(cfg.workspace())
+    assert mft.review_branch == ""
+    assert mft.review_files == {}
 
 
 # -- resolve --------------------------------------------------------------------

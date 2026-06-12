@@ -89,13 +89,21 @@ def _build_parser() -> argparse.ArgumentParser:
     push.add_argument("paths", nargs="*", help="specific files to push (default: all changes)")
     push.add_argument("-m", "--message", default=None, help="commit message")
 
+    propose = sub.add_parser(
+        "propose", help="upload changes to a review branch (open a pull request on GitHub)"
+    )
+    propose.add_argument(
+        "paths", nargs="*", help="specific files to propose (default: all changes)"
+    )
+    propose.add_argument("-m", "--message", default=None, help="commit message")
+
     open_cmd = sub.add_parser("open", help="open a notebook in the marimo editor")
     open_cmd.add_argument("path", help="workspace-relative notebook path")
 
     new = sub.add_parser("new", help="create a new notebook and open it")
     new.add_argument("name", help="notebook name (e.g. sales-analysis)")
 
-    for cmd in (status, pull, push, open_cmd, new):
+    for cmd in (status, pull, push, propose, open_cmd, new):
         cmd.add_argument(
             "--repo", default=None, metavar="ALIAS", help="act on this repo instead of the active one"
         )
@@ -221,6 +229,8 @@ def cmd_status(cfg: config.Config) -> int:
     for f in report.files:
         print(f"  {f.path:<{width}}  {f.state.value}")
     print(report.summary())
+    if report.review_branch:
+        print(f"proposal open on {report.review_branch}")
     return 0
 
 
@@ -245,6 +255,16 @@ def cmd_push(cfg: config.Config, only_paths: list[str], message: str | None) -> 
     from mooring import sync
 
     result = sync.push(_client(cfg), cfg, paths=only_paths or None, message=message)
+    for line in result.lines:
+        print(f"  {line}")
+    print(result.summary())
+    return 0 if not result.blocked_conflicts else 1
+
+
+def cmd_propose(cfg: config.Config, only_paths: list[str], message: str | None) -> int:
+    from mooring import sync
+
+    result = sync.propose(_client(cfg), cfg, paths=only_paths or None, message=message)
     for line in result.lines:
         print(f"  {line}")
     print(result.summary())
@@ -378,6 +398,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_pull(cfg, args.theirs, args.keep_both)
     if command == "push":
         return cmd_push(cfg, args.paths, args.message)
+    if command == "propose":
+        return cmd_propose(cfg, args.paths, args.message)
     if command == "open":
         return cmd_open(cfg, args.path)
     if command == "new":
