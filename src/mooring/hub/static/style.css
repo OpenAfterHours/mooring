@@ -112,6 +112,8 @@ td.path { font-family: Consolas, monospace; font-size: 0.9rem; }
 .badge.conflict { color: var(--bad); border-color: var(--bad); font-weight: 600; }
 /* artifact has changes in both directions (some to push, some to pull) */
 .badge.mixed { color: var(--warn); border-color: var(--warn); font-weight: 600; }
+/* proposed on a review branch, awaiting its pull request (GitHub PR purple) */
+.badge.review { color: #8250df; border-color: #8250df; }
 
 tr.member td.path { padding-left: 2.2rem; }
 button.caret {

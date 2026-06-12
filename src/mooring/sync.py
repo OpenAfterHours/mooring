@@ -5,6 +5,12 @@ synced), local (computed from the workspace file), and remote (from the
 GitHub tree). The comparison yields a FileState; pull and push act on it.
 Conflicts are never auto-resolved: pull skips them unless given a strategy,
 push blocks them.
+
+propose() uploads push candidates to an auto-created review branch instead
+of cfg.branch, so the user can open a pull request on GitHub. Files sent
+that way show as IN_REVIEW until the merge is observed on cfg.branch (or the
+review branch disappears); reconciling that state means status() may save
+the manifest.
 """
 
 from __future__ import annotations
@@ -16,7 +22,13 @@ from pathlib import Path
 
 from mooring import gitsha, manifest as manifest_mod
 from mooring.config import Config
-from mooring.github import GitHubClient, RemoteConflict
+from mooring.github import (
+    GitHubClient,
+    NotFound,
+    RefAlreadyExists,
+    RemoteConflict,
+    compare_url,
+)
 
 # Local files matching this marker are mooring-created scratch copies of
 # remote versions ("keep both" resolution) and are never synced.
@@ -53,6 +65,7 @@ class FileState(Enum):
     NEW_REMOTE = "new remote"  # pull will add
     DELETED_REMOTE = "deleted remotely"  # pull will remove locally
     CONFLICT = "conflict"
+    IN_REVIEW = "in review"  # proposed on a review branch, awaiting merge
 
 
 PUSH_STATES = {FileState.MODIFIED, FileState.NEW_LOCAL, FileState.DELETED_LOCAL}
@@ -79,6 +92,7 @@ class FileStatus:
 class StatusReport:
     head_commit: str
     files: list[FileStatus] = field(default_factory=list)
+    review_branch: str = ""
 
     def by_state(self, *states: FileState) -> list[FileStatus]:
         return [f for f in self.files if f.state in states]
@@ -88,9 +102,13 @@ class StatusReport:
         to_push = len(self.by_state(*PUSH_STATES))
         to_pull = len(self.by_state(*PULL_STATES))
         conflicts = len(self.by_state(FileState.CONFLICT))
-        return (
+        text = (
             f"{synced} in sync, {to_push} to push, {to_pull} to pull, {conflicts} conflicted"
         )
+        in_review = len(self.by_state(FileState.IN_REVIEW))
+        if in_review:
+            text += f", {in_review} in review"
+        return text
 
 
 @dataclass
@@ -98,6 +116,9 @@ class SyncResult:
     lines: list[str] = field(default_factory=list)
     pulled: int = 0
     pushed: int = 0
+    proposed: int = 0
+    review_branch: str = ""
+    compare_url: str = ""
     skipped_conflicts: list[str] = field(default_factory=list)
     blocked_conflicts: list[str] = field(default_factory=list)
 
@@ -107,6 +128,8 @@ class SyncResult:
             parts.append(f"pulled {self.pulled} file(s)")
         if self.pushed:
             parts.append(f"pushed {self.pushed} file(s)")
+        if self.proposed:
+            parts.append(f"proposed {self.proposed} file(s) for review")
         conflicted = self.skipped_conflicts or self.blocked_conflicts
         if conflicted:
             parts.append(f"{len(conflicted)} conflict(s) need attention")
@@ -165,12 +188,19 @@ def compute_status(
     local: dict[str, str],
     remote: dict[str, str],
     head: str,
+    review: dict[str, str | None] | None = None,
 ) -> StatusReport:
     report = StatusReport(head_commit=head)
     for path in sorted(set(mft.files) | set(local) | set(remote)):
         state = classify(mft.files.get(path), local.get(path), remote.get(path))
         if state is None:
             continue
+        # A push candidate whose local content matches what was already sent
+        # to the review branch is awaiting its PR, not awaiting a push.
+        # CONFLICT stays CONFLICT: remote moved underneath the proposal and
+        # the user must resolve regardless.
+        if state in PUSH_STATES and review and path in review and review[path] == local.get(path):
+            state = FileState.IN_REVIEW
         report.files.append(
             FileStatus(
                 path=path,
@@ -183,13 +213,41 @@ def compute_status(
     return report
 
 
+def _reconcile_review(
+    client: GitHubClient, mft: manifest_mod.Manifest, remote: dict[str, str]
+) -> bool:
+    """Clear review records once cfg.branch caught up (merge observed) or the
+    review branch is gone (PR closed). Returns whether the manifest changed."""
+    if not mft.review_branch:
+        return False
+    changed = False
+    for path, sent in list(mft.review_files.items()):
+        if remote.get(path) == sent:  # blob shas are content-addressed
+            del mft.review_files[path]
+            changed = True
+    if not mft.review_files:
+        mft.review_branch = ""
+        return True
+    try:
+        client.get_branch_head(mft.review_branch)
+    except NotFound:
+        mft.review_branch = ""
+        mft.review_files = {}
+        return True
+    return changed
+
+
 def status(client: GitHubClient, cfg: Config) -> StatusReport:
     workspace = cfg.workspace()
     mft = manifest_mod.load(workspace)
     head = client.get_branch_head(cfg.branch)
     local = scan_local(workspace, cfg.folders)
     remote = _remote_entries(client, cfg, head, mft)
-    return compute_status(mft, local, remote, head)
+    if _reconcile_review(client, mft, remote):
+        manifest_mod.save(workspace, mft)
+    report = compute_status(mft, local, remote, head, review=mft.review_files)
+    report.review_branch = mft.review_branch
+    return report
 
 
 def _write_blob(workspace: Path, rel_path: str, data: bytes) -> None:
@@ -216,7 +274,8 @@ def pull(
     head = client.get_branch_head(cfg.branch)
     local = scan_local(workspace, cfg.folders)
     remote = _remote_entries(client, cfg, head, mft)
-    report = compute_status(mft, local, remote, head)
+    _reconcile_review(client, mft, remote)  # pull saves the manifest below
+    report = compute_status(mft, local, remote, head, review=mft.review_files)
     result = SyncResult()
 
     for f in report.files:
@@ -276,7 +335,8 @@ def push(
     head = client.get_branch_head(cfg.branch)
     local = scan_local(workspace, cfg.folders)
     remote = _remote_entries(client, cfg, head, mft)
-    report = compute_status(mft, local, remote, head)
+    _reconcile_review(client, mft, remote)  # push saves the manifest below
+    report = compute_status(mft, local, remote, head, review=mft.review_files)
     result = SyncResult()
 
     wanted = {p.replace("\\", "/") for p in paths} if paths else None
@@ -291,6 +351,12 @@ def push(
             result.lines.append(
                 f"conflict {f.path} (blocked — pull first, or resolve in the hub)"
             )
+    if wanted:
+        for f in report.by_state(FileState.IN_REVIEW):
+            if f.path in wanted:
+                result.lines.append(
+                    f"in review {f.path} (already proposed — edit it again to push directly)"
+                )
 
     last_commit = ""
     for index, f in enumerate(candidates):
@@ -326,14 +392,136 @@ def push(
                 continue
             mft.files[f.path] = response["content"]["sha"]
             result.lines.append(f"pushed   {f.path}")
+        mft.review_files.pop(f.path, None)  # a direct push supersedes a stale proposal
         commit = response.get("commit", {}).get("sha", "")
         if commit:
             last_commit = commit
         result.pushed += 1
 
+    if not mft.review_files:
+        mft.review_branch = ""
     if last_commit:
         mft.head_commit = last_commit
     mft.branch = cfg.branch
+    manifest_mod.save(workspace, mft)
+    return result
+
+
+def propose(
+    client: GitHubClient,
+    cfg: Config,
+    paths: list[str] | None = None,
+    message: str | None = None,
+    throttle: float = 0.8,
+    sleep=time.sleep,
+    now=time.localtime,
+) -> SyncResult:
+    """Upload push candidates to an auto-created review branch instead of
+    cfg.branch, so the user can open a pull request on GitHub. The sync base
+    (manifest files/head_commit/branch) stays pointed at cfg.branch."""
+    workspace = cfg.workspace()
+    mft = manifest_mod.load(workspace)
+    head = client.get_branch_head(cfg.branch)
+    local = scan_local(workspace, cfg.folders)
+    remote = _remote_entries(client, cfg, head, mft)
+    _reconcile_review(client, mft, remote)
+    report = compute_status(mft, local, remote, head, review=mft.review_files)
+    result = SyncResult()
+
+    wanted = {p.replace("\\", "/") for p in paths} if paths else None
+    candidates = [
+        f
+        for f in report.by_state(*PUSH_STATES)
+        if wanted is None or f.path in wanted
+    ]
+    for f in report.by_state(FileState.CONFLICT):
+        if wanted is None or f.path in wanted:
+            result.blocked_conflicts.append(f.path)
+            result.lines.append(
+                f"conflict {f.path} (blocked — pull first, or resolve in the hub)"
+            )
+    if wanted:
+        for f in report.by_state(FileState.IN_REVIEW):
+            if f.path in wanted:
+                result.lines.append(f"in review {f.path} (already proposed)")
+
+    branch_name = mft.review_branch
+    if branch_name:
+        review_head = client.get_branch_head(branch_name)
+        review_tree = {
+            e.path: e.sha
+            for e in client.get_tree(review_head, cfg.folders)
+            if is_synced_path(e.path)
+        }
+    else:
+        # A fresh branch forks from head, so its tree is exactly `remote`.
+        review_tree = dict(remote)
+
+    def ensure_branch() -> str:
+        # Created lazily so an all-refused propose leaves no empty branch.
+        nonlocal branch_name
+        if branch_name:
+            return branch_name
+        login = client.get_user()["login"]
+        name = f"mooring/{login}/{time.strftime('%Y%m%d-%H%M', now())}"
+        for suffix in ("", "-2", "-3", "-4"):
+            try:
+                client.create_ref(name + suffix, head)
+                branch_name = name + suffix
+                return branch_name
+            except RefAlreadyExists:
+                continue
+        raise RefAlreadyExists(f"No free review branch name near {name}.")
+
+    for index, f in enumerate(candidates):
+        if index > 0 and throttle:
+            sleep(throttle)  # contents-API writes trip secondary rate limits if rapid
+        base = review_tree.get(f.path)
+        if f.state is FileState.DELETED_LOCAL:
+            if base:
+                client.delete_file(
+                    f.path,
+                    message or f"Propose deleting {f.path} via mooring",
+                    ensure_branch(),
+                    base,
+                )
+                result.lines.append(f"proposed {f.path} (delete)")
+            else:
+                result.lines.append(f"proposed {f.path} (already absent on review branch)")
+            mft.review_files[f.path] = None
+        else:
+            data = gitsha.read_for_push(workspace / f.path, f.path)
+            size_mb = len(data) / (1024 * 1024)
+            if size_mb > cfg.max_file_mb:
+                result.lines.append(
+                    f"refused  {f.path} ({size_mb:.0f} MB > {cfg.max_file_mb} MB limit)"
+                )
+                continue
+            if size_mb > cfg.warn_file_mb:
+                result.lines.append(f"warning  {f.path} is {size_mb:.0f} MB")
+            try:
+                response = client.put_file(
+                    f.path,
+                    data,
+                    message or f"Propose {f.path} via mooring",
+                    ensure_branch(),
+                    base_sha=base,
+                )
+            except RemoteConflict:
+                result.blocked_conflicts.append(f.path)
+                result.lines.append(
+                    f"conflict {f.path} (review branch changed — refresh and retry)"
+                )
+                continue
+            mft.review_files[f.path] = response["content"]["sha"]
+            result.lines.append(f"proposed {f.path}")
+        result.proposed += 1
+
+    if branch_name:
+        mft.review_branch = branch_name
+        result.review_branch = branch_name
+        result.compare_url = compare_url(cfg.owner, cfg.repo, cfg.branch, branch_name)
+        result.lines.append(f"open a pull request: {result.compare_url}")
     manifest_mod.save(workspace, mft)
     return result
 

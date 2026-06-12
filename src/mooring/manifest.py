@@ -21,6 +21,10 @@ class Manifest:
     branch: str = ""
     head_commit: str = ""
     files: dict[str, str] = field(default_factory=dict)  # repo path -> base blob sha
+    # Active proposal (push-for-review) state. review_files maps repo path to
+    # the blob sha sent to the review branch; None means a proposed deletion.
+    review_branch: str = ""
+    review_files: dict[str, str | None] = field(default_factory=dict)
 
 
 def manifest_path(workspace: Path) -> Path:
@@ -32,11 +36,14 @@ def load(workspace: Path) -> Manifest:
     if not path.is_file():
         return Manifest()
     data = json.loads(path.read_text("utf-8"))
+    review = data.get("review") or {}
     return Manifest(
         version=data.get("version", 1),
         branch=data.get("branch", ""),
         head_commit=data.get("head_commit", ""),
         files=dict(data.get("files", {})),
+        review_branch=str(review.get("branch", "")),
+        review_files=dict(review.get("files", {})),
     )
 
 
@@ -49,6 +56,11 @@ def save(workspace: Path, manifest: Manifest) -> None:
         "head_commit": manifest.head_commit,
         "files": dict(sorted(manifest.files.items())),
     }
+    if manifest.review_branch:
+        payload["review"] = {
+            "branch": manifest.review_branch,
+            "files": dict(sorted(manifest.review_files.items())),
+        }
     tmp = path.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(payload, indent=2), "utf-8")
     os.replace(tmp, path)

@@ -202,6 +202,31 @@ def test_state_groups_pbip_artifacts(configured):
     assert grouped["notebooks/a.py"] is None
 
 
+def test_propose_endpoint_and_state_review(configured):
+    client, _, fake, tmp_path = configured
+    write_ws(tmp_path, "ws1", "notebooks/a.py", "a")
+    resp = client.post("/api/propose", json={})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["review_branch"].startswith("mooring/phil/")
+    assert body["compare_url"].startswith("https://github.com/acme/nbs/compare/main...")
+    state = client.get("/api/state").json()
+    assert [f["state"] for f in state["files"]] == ["in review"]
+    assert state["review"]["branch"] == body["review_branch"]
+    assert state["review"]["compare_url"] == body["compare_url"]
+    assert fake.tree == {}  # nothing reached main
+
+
+def test_state_pbip_artifact_fully_proposed_shows_in_review(configured):
+    client, _, _, tmp_path = configured
+    write_ws(tmp_path, "ws1", "reports/Sales.pbip", "{}")
+    client.post("/api/propose", json={})
+    state = client.get("/api/state").json()
+    [artifact] = state["artifacts"]
+    assert artifact["state"] == "in review"
+    assert artifact["to_push"] == 0
+
+
 def test_open_pbip_calls_launch(configured, monkeypatch):
     client, _, _, tmp_path = configured
     write_ws(tmp_path, "ws1", "reports/Sales.pbip", "{}")

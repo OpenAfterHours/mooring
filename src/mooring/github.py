@@ -40,6 +40,15 @@ class RateLimited(GitHubError):
     pass
 
 
+class RefAlreadyExists(GitHubError):
+    """Branch creation hit an existing ref (HTTP 422)."""
+
+
+def compare_url(owner: str, repo: str, base: str, branch: str) -> str:
+    """GitHub's compare page for opening a pull request from `branch` into `base`."""
+    return f"https://github.com/{owner}/{repo}/compare/{base}...{branch}?expand=1"
+
+
 @dataclass
 class TreeEntry:
     path: str
@@ -150,6 +159,23 @@ class GitHubClient:
         return data.get("content", "").encode()
 
     # -- writes (Contents API, one commit per file) ---------------------------
+
+    def create_ref(self, branch: str, sha: str) -> dict:
+        resp = self._session.post(
+            self._repo_url("git/refs"),
+            json={"ref": f"refs/heads/{branch}", "sha": sha},
+            timeout=30,
+        )
+        # _check's 422 heuristics target sha mismatches; "Reference already
+        # exists" needs its own type so callers can retry with a new name.
+        if resp.status_code == 422:
+            try:
+                message = resp.json().get("message", "")
+            except ValueError:
+                message = ""
+            if "already exists" in message.lower():
+                raise RefAlreadyExists(f"Branch {branch} already exists.")
+        return self._check(resp)
 
     def put_file(
         self,

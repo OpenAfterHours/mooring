@@ -72,6 +72,8 @@ def aggregate_state(members: list[FileStatus]) -> str:
         return FileState.MODIFIED.value
     if has_pull:
         return FileState.REMOTE_CHANGED.value
+    if FileState.IN_REVIEW in states:
+        return FileState.IN_REVIEW.value
     return FileState.SYNCED.value
 
 
