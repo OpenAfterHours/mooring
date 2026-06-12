@@ -40,6 +40,7 @@ nav = [
   { "For users" = [
     { "Install & first run" = "users/index.md" },
     { "Daily workflow" = "users/daily-workflow.md" },
+    { "Power BI reports" = "users/power-bi.md" },
     { "Resolving conflicts" = "users/conflicts.md" },
     { "Command-line reference" = "users/cli.md" },
   ] },
