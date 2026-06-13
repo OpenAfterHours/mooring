@@ -153,6 +153,36 @@ def test_active_repo_env_override(tmp_path):
     assert app2.config_for("sandbox").branch == "dev"  # untouched
 
 
+# -- central logging ([logging] section) ------------------------------------
+
+
+def test_logging_defaults_off(tmp_path):
+    app = load_app_config(user_config_path=tmp_path / "missing.toml", env={})
+    assert app.log_endpoint == ""
+    assert app.log_level == "info"
+
+
+def test_logging_from_user_config(tmp_path):
+    user = tmp_path / "config.toml"
+    user.write_text(
+        '[logging]\nendpoint = "https://collector.example/m"\nlevel = "error"\n', "utf-8"
+    )
+    app = load_app_config(user_config_path=user, env={})
+    assert app.log_endpoint == "https://collector.example/m"
+    assert app.log_level == "error"
+
+
+def test_logging_env_overrides(tmp_path):
+    user = tmp_path / "config.toml"
+    user.write_text('[logging]\nendpoint = "https://baked.example"\n', "utf-8")
+    app = load_app_config(
+        user_config_path=user,
+        env={"MOORING_LOG_ENDPOINT": r"\\server\share\logs", "MOORING_LOG_LEVEL": "error"},
+    )
+    assert app.log_endpoint == r"\\server\share\logs"
+    assert app.log_level == "error"
+
+
 def test_default_workspace_keyed_by_owner():
     a = paths.default_workspace("acme", "notebooks")
     b = paths.default_workspace("phil", "notebooks")
