@@ -22,7 +22,7 @@ from starlette.responses import FileResponse, JSONResponse
 from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
-from mooring import __version__, auth, config, config_store, pbip, sync
+from mooring import __version__, auth, config, config_store, pbip, sync, telemetry
 from mooring.cli import SELFTEST_PACKAGES, legacy_workspace_hint
 from mooring.editor import EditorServer, _free_port
 from mooring.github import AuthFailed, GitHubClient, GitHubError, compare_url
@@ -64,6 +64,7 @@ class Hub:
     def username(self) -> str:
         if not self._user_login:
             self._user_login = self.client().get_user()["login"]
+            telemetry.set_user(self._user_login)
         return self._user_login
 
     def ensure_editor(self) -> EditorServer:
@@ -150,6 +151,7 @@ class Hub:
             body["logged_in"] = False
             body["error"] = "Your GitHub login expired. Please log in again."
         except GitHubError as exc:
+            telemetry.log_error(exc=exc, op="state")
             body["error"] = str(exc)
         return JSONResponse(body)
 
@@ -177,6 +179,7 @@ class Hub:
         except ValueError as exc:
             return JSONResponse({"error": str(exc)}, status_code=400)
         self.reload()
+        telemetry.log_event("repo_add", alias=fields["alias"] or fields["repo"])
         return JSONResponse({"ok": True, "active_repo": self.app_cfg.active_alias})
 
     async def api_repo_switch(self, request: Request) -> JSONResponse:
@@ -187,6 +190,7 @@ class Hub:
         except KeyError:
             return JSONResponse({"error": f"Unknown repo alias {alias!r}."}, status_code=400)
         self.reload()
+        telemetry.log_event("repo_switch", alias=alias)
         return JSONResponse({"ok": True, "active_repo": alias})
 
     async def api_repo_remove(self, request: Request) -> JSONResponse:
@@ -198,6 +202,7 @@ class Hub:
         except KeyError:
             return JSONResponse({"error": f"Unknown repo alias {alias!r}."}, status_code=400)
         self.reload()
+        telemetry.log_event("repo_remove", alias=alias)
         return JSONResponse(
             {"ok": True, "lines": [f"Removed {alias!r}; workspace folder kept at {workspace}"]}
         )
@@ -235,6 +240,7 @@ class Hub:
             with self._lock:
                 self._device = None
             self._user_login = ""
+            telemetry.log_event("login")
             return JSONResponse({"status": "ok"})
         with self._lock:
             self._poll_interval = result.interval
@@ -244,36 +250,49 @@ class Hub:
     def api_logout(self, request: Request) -> JSONResponse:
         auth.delete_token(host=self.cfg.host)
         self._user_login = ""
+        telemetry.log_event("logout")
         return JSONResponse({"ok": True})
 
     async def api_pull(self, request: Request) -> JSONResponse:
         data = await request.json() if await request.body() else {}
         strategy = sync.ConflictStrategy(data.get("strategy", "skip"))
-        return self._sync_op(lambda: sync.pull(self.client(), self.cfg, strategy=strategy))
+        return self._sync_op("pull", lambda: sync.pull(self.client(), self.cfg, strategy=strategy))
 
     async def api_push(self, request: Request) -> JSONResponse:
         data = await request.json() if await request.body() else {}
         paths_arg = data.get("paths") or None
-        return self._sync_op(lambda: sync.push(self.client(), self.cfg, paths=paths_arg))
+        return self._sync_op("push", lambda: sync.push(self.client(), self.cfg, paths=paths_arg))
 
     async def api_propose(self, request: Request) -> JSONResponse:
         data = await request.json() if await request.body() else {}
         paths_arg = data.get("paths") or None
-        return self._sync_op(lambda: sync.propose(self.client(), self.cfg, paths=paths_arg))
+        return self._sync_op(
+            "propose", lambda: sync.propose(self.client(), self.cfg, paths=paths_arg)
+        )
 
     async def api_resolve(self, request: Request) -> JSONResponse:
         data = await request.json()
         strategy = sync.ConflictStrategy(data["strategy"])
         username = self.username() if strategy is sync.ConflictStrategy.PUSH_COPY else ""
         return self._sync_op(
-            lambda: sync.resolve(self.client(), self.cfg, data["path"], strategy, username)
+            "resolve",
+            lambda: sync.resolve(self.client(), self.cfg, data["path"], strategy, username),
         )
 
-    def _sync_op(self, op) -> JSONResponse:
+    def _sync_op(self, name: str, op) -> JSONResponse:
         try:
             result = op()
         except (GitHubError, OSError) as exc:
+            telemetry.log_error(exc=exc, op=name)
             return JSONResponse({"error": str(exc)}, status_code=502)
+        telemetry.log_event(
+            name,
+            pulled=result.pulled,
+            pushed=result.pushed,
+            proposed=result.proposed,
+            conflicts=len(result.skipped_conflicts) + len(result.blocked_conflicts),
+            lines=len(result.lines),
+        )
         body = {"lines": result.lines, "summary": result.summary()}
         if result.review_branch:
             body["review_branch"] = result.review_branch
@@ -288,6 +307,7 @@ class Hub:
             rel_path = notebook_template.create(self.cfg.workspace(), data.get("name", ""))
         except (ValueError, FileExistsError) as exc:
             return JSONResponse({"error": str(exc)}, status_code=400)
+        telemetry.log_event("new")
         return self._open(rel_path)
 
     async def api_open(self, request: Request) -> JSONResponse:
@@ -309,6 +329,7 @@ class Hub:
             except pbip.PbipLaunchError as exc:
                 return JSONResponse({"error": str(exc)}, status_code=400)
             name = rel_path.rsplit("/", 1)[-1]
+            telemetry.log_event("open", kind="pbip")
             return JSONResponse(
                 {"path": rel_path, "lines": [f"Opened {name} in Power BI Desktop"]}
             )
@@ -321,6 +342,7 @@ class Hub:
             editor = self.ensure_editor()
         except Exception as exc:  # noqa: BLE001 - shown in the UI
             return JSONResponse({"error": f"Could not start the editor: {exc}"}, status_code=502)
+        telemetry.log_event("open", kind="notebook")
         return JSONResponse({"path": rel_path, "url": editor.url_for(rel_path)})
 
 
@@ -333,6 +355,7 @@ def create_app(hub: Hub) -> Starlette:
             yield
         finally:
             hub.shutdown()
+            telemetry.flush(timeout=3.0)
 
     return Starlette(
         routes=[
@@ -363,6 +386,7 @@ def run_hub(
     app = create_app(hub)
     port = port or _free_port()
     url = f"http://127.0.0.1:{port}/"
+    telemetry.log_event("hub_start")
     print(f"mooring hub running at {url} (Ctrl+C to quit)")
     if open_browser:
         threading.Timer(0.8, webbrowser.open, args=(url,)).start()

@@ -83,6 +83,13 @@ direction.
 |-----|---------|---------|
 | `path` | `""` | Override the workspace location (single-repo form; with `[repos]`, use the per-repo `workspace` key). Empty means `~/Documents/mooring/<owner>/<repo>`. Supports `~` expansion. |
 
+### `[logging]`
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `endpoint` | `""` | Where to send usage/error events. Empty disables logging. See [Central logging](#central-logging) for the auto-detected URL-vs-path behaviour. |
+| `level` | `"info"` | `"info"` logs usage events **and** errors; `"error"` logs only errors. |
+
 ## The packaged default file
 
 `src/mooring/config_default.toml` is baked into every build. Edit it **before
@@ -102,6 +109,10 @@ max_file_mb = 45
 
 [workspace]
 path = ""                  # empty = ~/Documents/mooring/<owner>/<repo>
+
+[logging]
+endpoint = ""              # optional; see Central logging below
+level = "info"
 ```
 
 To bake **several** repos in, use the `[repos]` form shown above instead of
@@ -172,9 +183,57 @@ integration testing and CI, but work anywhere:
 | `MOORING_WORKSPACE` | The active repo's workspace path |
 | `MOORING_TOKEN` | The stored auth token — set this to skip device-flow login entirely (a personal access token works). |
 | `MOORING_TRUSTSTORE` | Set to `0` to disable [OS trust store TLS verification](#corporate-networks-tls) and fall back to the bundled CA list. |
+| `MOORING_LOG_ENDPOINT` | `[logging] endpoint` — the central log destination (see [Central logging](#central-logging)). |
+| `MOORING_LOG_LEVEL` | `[logging] level` — `info` or `error`. |
 
 See [Contributing](../developers/contributing.md#integration-testing) for using
 these to test against a scratch repo.
+
+## Central logging
+
+Set `[logging] endpoint` (baked into the build, or in a user `config.toml`) to
+collect a record of how the app is used and what fails, from every copy, in one
+place. It is **off by default** — no endpoint, no logging. When an endpoint is
+set, logging is always on for users (there is no per-user off switch).
+
+The value is **auto-detected**:
+
+- An `http://` / `https://` URL → each event is **POSTed as JSON** to that URL.
+  HTTPS uses the OS trust store like the rest of the app, so a corporate
+  proxy's root CA is honoured automatically.
+- Anything else is treated as a **folder or UNC path** → events are appended to
+  a per-user file `<os-user>@<host>.jsonl` in that folder (e.g.
+  `\\fileserver\share\mooring-logs`). One file per user means no write
+  contention between teammates on a shared drive.
+
+```toml
+[logging]
+endpoint = "https://collector.example.com/mooring"   # or \\server\share\mooring-logs
+level = "info"   # "info" = usage + errors; "error" = errors only
+```
+
+### What gets logged
+
+Each event is one JSON object: a UTC timestamp, the event name, identity, and a
+few event-specific fields. Identity is **OS username, hostname, app version, OS,
+Python version, and the GitHub login** (added once the user has logged in).
+
+```json
+{"ts":"2026-06-13T12:34:56.789Z","event":"push","version":"0.2.2",
+ "os_user":"jdoe","host":"FIN-LT-042","os":"Windows-11-10.0.26200",
+ "python":"3.12.4","user":"octocat","pushed":3,"conflicts":0,"lines":4}
+```
+
+Events cover the app/command start, login/logout, repo add/switch/remove,
+pull/push/propose (with counts), open/new, and errors (`event:"error"` with the
+exception type and message). **No file contents, file paths, or full tracebacks
+are ever sent** — only counts and coarse kinds. An error message may incidentally
+contain a URL or path.
+
+Logging is strictly best-effort: it runs on a background thread, never blocks a
+command, and silently drops events if the destination is slow or unreachable
+(the process still exits within a few seconds). `mooring selftest` prints a
+`logging` line showing the active destination.
 
 ## Corporate networks & TLS
 

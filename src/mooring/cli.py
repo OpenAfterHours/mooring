@@ -9,7 +9,7 @@ import sys
 from collections.abc import Mapping
 from pathlib import Path
 
-from mooring import __version__, config, paths
+from mooring import __version__, config, paths, telemetry
 
 SELFTEST_PACKAGES = (
     "marimo",
@@ -162,7 +162,7 @@ def legacy_workspace_hint(cfg: config.Config) -> str:
     return ""
 
 
-def cmd_selftest(cfg: config.Config) -> int:
+def cmd_selftest(app_cfg: config.AppConfig, cfg: config.Config) -> int:
     import importlib.metadata
 
     print(f"mooring {__version__}  (python {sys.version.split()[0]}, {sys.executable})")
@@ -183,6 +183,12 @@ def cmd_selftest(cfg: config.Config) -> int:
         else "OS trust store (truststore)"
     )
     print(f"  tls trust   : {tls}")
+    log_dest = app_cfg.log_endpoint.strip()
+    if log_dest:
+        kind = "url" if log_dest.lower().startswith(("http://", "https://")) else "path"
+        print(f"  logging     : on -> {log_dest} ({kind})")
+    else:
+        print("  logging     : off (no endpoint configured)")
     if cfg.is_configured:
         print(f"  team repo   : {cfg.repo_slug} (branch {cfg.branch}, host {cfg.host})")
     else:
@@ -230,6 +236,8 @@ def cmd_login(cfg: config.Config) -> int:
     from mooring.github import GitHubClient
 
     user = GitHubClient(token, cfg.owner, cfg.repo, host=cfg.host).get_user()
+    telemetry.set_user(user["login"])
+    telemetry.log_event("login")
     print(f"Logged in as {user['login']}.")
     return 0
 
@@ -238,6 +246,7 @@ def cmd_logout(cfg: config.Config) -> int:
     from mooring import auth
 
     auth.delete_token(host=cfg.host)
+    telemetry.log_event("logout")
     print("Logged out.")
     return 0
 
@@ -246,6 +255,8 @@ def cmd_whoami(cfg: config.Config) -> int:
     from mooring.github import GitHubClient
 
     user = GitHubClient(_require_token(cfg), cfg.owner, cfg.repo, host=cfg.host).get_user()
+    telemetry.set_user(user["login"])
+    telemetry.log_event("whoami")
     print(user["login"])
     return 0
 
@@ -277,6 +288,13 @@ def cmd_pull(cfg: config.Config, theirs: bool, keep_both: bool) -> int:
         else sync.ConflictStrategy.SKIP
     )
     result = sync.pull(_client(cfg), cfg, strategy=strategy)
+    telemetry.log_event(
+        "pull",
+        pulled=result.pulled,
+        conflicts=len(result.skipped_conflicts),
+        lines=len(result.lines),
+        strategy=strategy.value,
+    )
     for line in result.lines:
         print(f"  {line}")
     print(result.summary())
@@ -287,6 +305,12 @@ def cmd_push(cfg: config.Config, only_paths: list[str], message: str | None) -> 
     from mooring import sync
 
     result = sync.push(_client(cfg), cfg, paths=only_paths or None, message=message)
+    telemetry.log_event(
+        "push",
+        pushed=result.pushed,
+        conflicts=len(result.blocked_conflicts),
+        lines=len(result.lines),
+    )
     for line in result.lines:
         print(f"  {line}")
     print(result.summary())
@@ -297,6 +321,12 @@ def cmd_propose(cfg: config.Config, only_paths: list[str], message: str | None) 
     from mooring import sync
 
     result = sync.propose(_client(cfg), cfg, paths=only_paths or None, message=message)
+    telemetry.log_event(
+        "propose",
+        proposed=result.proposed,
+        conflicts=len(result.blocked_conflicts),
+        review_branch=bool(result.review_branch),
+    )
     for line in result.lines:
         print(f"  {line}")
     print(result.summary())
@@ -319,11 +349,13 @@ def cmd_open(cfg: config.Config, rel_path: str) -> int:
             pbip.launch(target)
         except pbip.PbipLaunchError as exc:
             sys.exit(str(exc))
+        telemetry.log_event("open", kind="pbip")
         print(f"Opened {rel_path} in Power BI Desktop.")
         return 0
     server = EditorServer(workspace)
     server.ensure_started()
     url = server.url_for(rel_path)
+    telemetry.log_event("open", kind="notebook")
     print(f"Editor running at {url} (Ctrl+C to stop)")
     webbrowser.open(url)
     try:
@@ -338,6 +370,7 @@ def cmd_new(cfg: config.Config, name: str) -> int:
 
     workspace = cfg.workspace()
     rel_path = notebook_template.create(workspace, name)
+    telemetry.log_event("new")
     print(f"Created {rel_path}")
     return cmd_open(cfg, rel_path)
 
@@ -368,6 +401,7 @@ def cmd_repo(app_cfg: config.AppConfig, args: argparse.Namespace) -> int:
             )
         except ValueError as exc:
             sys.exit(str(exc))
+        telemetry.log_event("repo_add", alias=alias)
         active = " (now active)" if not args.no_use else ""
         print(f"Registered {owner}/{repo} as {alias!r}{active}.")
         return 0
@@ -376,6 +410,7 @@ def cmd_repo(app_cfg: config.AppConfig, args: argparse.Namespace) -> int:
             config_store.set_active(args.alias)
         except KeyError:
             sys.exit(_unknown_alias(args.alias, app_cfg))
+        telemetry.log_event("repo_switch", alias=args.alias)
         print(f"Active repo is now {args.alias!r}.")
         return 0
     if args.repo_command == "remove":
@@ -384,6 +419,7 @@ def cmd_repo(app_cfg: config.AppConfig, args: argparse.Namespace) -> int:
             config_store.remove_repo(args.alias)
         except KeyError:
             sys.exit(_unknown_alias(args.alias, app_cfg))
+        telemetry.log_event("repo_remove", alias=args.alias)
         print(f"Removed {args.alias!r}. Workspace folder {ws} was kept; delete it manually.")
         return 0
     return 2
@@ -394,28 +430,20 @@ def _unknown_alias(alias: str, app_cfg: config.AppConfig) -> str:
     return f"Unknown repo alias {alias!r}. Known: {known}"
 
 
-def main(argv: list[str] | None = None) -> int:
-    _inject_truststore()
-    _ensure_child_pythonpath()
-    parser = _build_parser()
-    args = parser.parse_args(argv)
-    command = args.command or "hub"
-    try:
-        app_cfg = config.load_app_config()
-    except ValueError as exc:  # e.g. a malformed [github] host
-        sys.exit(str(exc))
-    try:
-        cfg = app_cfg.config_for(getattr(args, "repo", None))
-    except KeyError:
-        sys.exit(_unknown_alias(args.repo, app_cfg))
-
+def _dispatch(
+    parser: argparse.ArgumentParser,
+    command: str,
+    app_cfg: config.AppConfig,
+    cfg: config.Config,
+    args: argparse.Namespace,
+) -> int:
     if command == "version":
         print(f"mooring {__version__}")
         return 0
     if command == "repo":
         return cmd_repo(app_cfg, args)
     if command == "selftest":
-        return cmd_selftest(cfg)
+        return cmd_selftest(app_cfg, cfg)
     if command == "hub":
         from mooring.hub.server import run_hub
 
@@ -442,6 +470,37 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_new(cfg, args.name)
     parser.error(f"unknown command {command!r}")
     return 2
+
+
+def main(argv: list[str] | None = None) -> int:
+    _inject_truststore()
+    _ensure_child_pythonpath()
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+    command = args.command or "hub"
+    try:
+        app_cfg = config.load_app_config()
+    except ValueError as exc:  # e.g. a malformed [github] host
+        sys.exit(str(exc))
+    try:
+        cfg = app_cfg.config_for(getattr(args, "repo", None))
+    except KeyError:
+        sys.exit(_unknown_alias(args.repo, app_cfg))
+
+    telemetry.configure(
+        app_cfg.log_endpoint,
+        identity=telemetry.base_identity(),
+        level=app_cfg.log_level,
+    )
+    telemetry.log_event("app_start", command=command)
+
+    try:
+        return _dispatch(parser, command, app_cfg, cfg, args)
+    except SystemExit:
+        raise  # user-facing errors (sys.exit / argparse) are not app failures
+    except BaseException as exc:  # noqa: BLE001 - record genuine failures, then re-raise
+        telemetry.log_error(exc=exc, command=command)
+        raise
 
 
 if __name__ == "__main__":

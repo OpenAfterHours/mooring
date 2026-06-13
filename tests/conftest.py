@@ -9,6 +9,25 @@ from mooring.github import NotFound, RefAlreadyExists, RemoteConflict, TreeEntry
 DEFAULT_BRANCH = "main"
 
 
+@pytest.fixture(autouse=True)
+def _hermetic_telemetry(monkeypatch):
+    """Keep telemetry off and isolated for the whole suite.
+
+    With no MOORING_LOG_ENDPOINT, ``telemetry.configure()`` is a no-op, so the
+    suite never POSTs or writes to the real log dir. Tests that want to exercise
+    telemetry set MOORING_LOG_ENDPOINT to a tmp path themselves. The teardown
+    drops the daemon/state so nothing leaks across tests.
+    """
+    monkeypatch.delenv("MOORING_LOG_ENDPOINT", raising=False)
+    monkeypatch.delenv("MOORING_LOG_LEVEL", raising=False)
+    monkeypatch.setenv("MOORING_TRUSTSTORE", "0")  # main() injects into global ssl
+    yield
+    from mooring import telemetry
+
+    telemetry.flush(0.2)
+    telemetry._reset_for_tests()
+
+
 class FakeClient:
     def __init__(self, files: dict[str, bytes] | None = None):
         self.blobs: dict[str, bytes] = {}

@@ -30,3 +30,13 @@ max_file_mb = 45
 
 [workspace]
 path = ""        # empty = ~/Documents/mooring/<owner>/<repo>
+
+# Central logging. Set `endpoint` to collect usage events and errors from every
+# copy of the app in one place. The value is auto-detected:
+#   http(s)://...  -> each event is POSTed as JSON
+#   anything else  -> treated as a folder/UNC path; events are appended as a
+#                     per-user JSONL file (e.g. \\server\share\mooring-logs).
+# Empty = disabled (the shipped default). When set, it is always on for users.
+[logging]
+endpoint = ""
+level = "info"   # "info" logs usage + errors; "error" logs only errors

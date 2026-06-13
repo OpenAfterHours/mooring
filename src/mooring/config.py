@@ -66,6 +66,8 @@ class AppConfig:
     folders: tuple[str, ...] = ("notebooks", "data", "reports")
     warn_file_mb: int = 10
     max_file_mb: int = 45
+    log_endpoint: str = ""
+    log_level: str = "info"
 
     @property
     def aliases(self) -> list[str]:
@@ -174,6 +176,7 @@ def load_app_config(
     gh = data.get("github", {})
     sync = data.get("sync", {})
     ws = data.get("workspace", {})
+    log = data.get("logging", {})
 
     specs, active = repo_specs_from_data(data)
     if env.get("MOORING_ACTIVE_REPO") in {s.alias for s in specs}:
@@ -211,6 +214,8 @@ def load_app_config(
         folders=tuple(sync.get("folders", ("notebooks", "data", "reports"))),
         warn_file_mb=int(sync.get("warn_file_mb", 10)),
         max_file_mb=int(sync.get("max_file_mb", 45)),
+        log_endpoint=env.get("MOORING_LOG_ENDPOINT", str(log.get("endpoint", ""))),
+        log_level=env.get("MOORING_LOG_LEVEL", str(log.get("level", "info"))),
     )
 
 

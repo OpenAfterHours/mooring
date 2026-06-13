@@ -1,10 +1,11 @@
 """CLI repo-management commands driven through cli.main()."""
 
+import json
 import tomllib
 
 import pytest
 
-from mooring import cli, paths
+from mooring import cli, paths, telemetry
 
 
 @pytest.fixture(autouse=True)
@@ -84,3 +85,20 @@ def test_status_with_unknown_repo_alias_exits():
 def test_repo_list_when_empty(capsys):
     assert cli.main(["repo", "list"]) == 0
     assert "No repos registered" in capsys.readouterr().out
+
+
+def test_telemetry_records_events_through_main(tmp_path, monkeypatch):
+    """A baked path endpoint makes cli.main() emit app_start + the command event."""
+    logdir = tmp_path / "telemetry"
+    monkeypatch.setenv("MOORING_LOG_ENDPOINT", str(logdir))
+    assert cli.main(["repo", "add", "acme/nbs"]) == 0
+    telemetry.flush(2.0)
+    files = list(logdir.glob("*.jsonl"))
+    assert len(files) == 1
+    events = [json.loads(line) for line in files[0].read_text("utf-8").splitlines() if line.strip()]
+    by_name = {e["event"]: e for e in events}
+    assert "app_start" in by_name and "repo_add" in by_name
+    assert by_name["app_start"]["command"] == "repo"
+    assert by_name["repo_add"]["alias"] == "nbs"
+    assert by_name["app_start"]["ts"].endswith("Z")
+    assert by_name["app_start"]["version"]  # identity stamped

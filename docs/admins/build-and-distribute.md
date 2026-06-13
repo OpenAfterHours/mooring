@@ -27,6 +27,10 @@ Edit `src/mooring/config_default.toml` with your `client_id`, `owner`, `repo`,
 and `branch` (and adjust `[sync]` limits if needed) so analysts get a
 ready-to-use app. See [Configuration](configuration.md) for every key.
 
+To watch usage and field errors across your team, set `[logging] endpoint` to a
+collector URL or a shared folder/UNC path — see
+[Central logging](configuration.md#central-logging). Leave it empty to disable.
+
 ## 2. Build the artifacts
 
 ```bash
