@@ -337,18 +337,69 @@ def test_push_skips_in_review_files(cfg):
     assert client.blobs[client.tree["notebooks/a.py"]] == b"v1\n"
 
 
-def test_direct_push_supersedes_proposal(cfg):
+def test_push_routes_in_review_edits_to_review_branch(cfg):
     client = FakeClient({"notebooks/a.py": b"v1\n"})
     sync.pull(client, cfg)
     write_local(cfg, "notebooks/a.py", "v2\n")
     sync.propose(client, cfg, sleep=lambda s: None, now=NOW1)
-    write_local(cfg, "notebooks/a.py", "v3\n")  # edited again: pushable directly
+    write_local(cfg, "notebooks/a.py", "v3\n")  # further edit while the PR is open
     result = sync.push(client, cfg, sleep=lambda s: None)
     assert result.pushed == 1
-    assert client.blobs[client.tree["notebooks/a.py"]] == b"v3\n"
+    # main is untouched; the edit lands on the review branch (the open PR)
+    assert client.blobs[client.tree["notebooks/a.py"]] == b"v1\n"
+    assert client.blobs[client.trees[BRANCH1]["notebooks/a.py"]] == b"v3\n"
+    # review state is preserved and updated, sync base unchanged
     mft = manifest.load(cfg.workspace())
-    assert mft.review_branch == ""
-    assert mft.review_files == {}
+    assert mft.review_branch == BRANCH1
+    assert mft.review_files["notebooks/a.py"] == client.trees[BRANCH1]["notebooks/a.py"]
+    assert mft.files["notebooks/a.py"] == client.tree["notebooks/a.py"]
+    # the PR link is surfaced and the file settles back to in-review
+    assert result.review_branch == BRANCH1
+    assert result.compare_url
+    report = sync.status(client, cfg)
+    assert [f.state for f in report.files] == [FileState.IN_REVIEW]
+
+
+def test_push_in_review_does_not_advance_main(cfg):
+    client = FakeClient({"notebooks/a.py": b"v1\n"})
+    sync.pull(client, cfg)
+    write_local(cfg, "notebooks/a.py", "v2\n")
+    sync.propose(client, cfg, sleep=lambda s: None, now=NOW1)
+    head_before = manifest.load(cfg.workspace()).head_commit
+    write_local(cfg, "notebooks/a.py", "v3\n")
+    sync.push(client, cfg, sleep=lambda s: None)
+    assert manifest.load(cfg.workspace()).head_commit == head_before
+
+
+def test_push_mixed_routes_each_to_its_branch(cfg):
+    client = FakeClient({"notebooks/a.py": b"v1\n"})
+    sync.pull(client, cfg)
+    write_local(cfg, "notebooks/a.py", "v2\n")
+    sync.propose(client, cfg, paths=["notebooks/a.py"], sleep=lambda s: None, now=NOW1)
+    write_local(cfg, "notebooks/a.py", "v3\n")  # in-review file, edited again
+    write_local(cfg, "notebooks/b.py", "new\n")  # brand-new, not part of the PR
+    result = sync.push(client, cfg, sleep=lambda s: None)
+    assert result.pushed == 2
+    # in-review edit went to the PR branch; the new file went straight to main
+    assert client.blobs[client.trees[BRANCH1]["notebooks/a.py"]] == b"v3\n"
+    assert client.blobs[client.tree["notebooks/a.py"]] == b"v1\n"
+    assert client.blobs[client.tree["notebooks/b.py"]] == b"new\n"
+    assert "notebooks/b.py" not in client.trees[BRANCH1]
+
+
+def test_push_in_review_delete_targets_review_branch(cfg):
+    client = FakeClient({"notebooks/a.py": b"v1\n", "notebooks/b.py": b"v1\n"})
+    sync.pull(client, cfg)
+    write_local(cfg, "notebooks/b.py", "v2\n")
+    sync.propose(client, cfg, paths=["notebooks/b.py"], sleep=lambda s: None, now=NOW1)
+    (cfg.workspace() / "notebooks/b.py").unlink()  # delete the proposed file
+    result = sync.push(client, cfg, sleep=lambda s: None)
+    assert result.pushed == 1
+    assert "notebooks/b.py" not in client.trees[BRANCH1]  # removed on the PR branch
+    assert "notebooks/b.py" in client.tree  # main untouched
+    mft = manifest.load(cfg.workspace())
+    assert mft.review_branch == BRANCH1
+    assert mft.review_files["notebooks/b.py"] is None
 
 
 # -- resolve --------------------------------------------------------------------
