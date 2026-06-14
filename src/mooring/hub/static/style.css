@@ -53,14 +53,18 @@ main { max-width: 60rem; margin: 1.5rem auto; padding: 0 1rem; }
 .muted { color: var(--muted); font-size: 0.9rem; }
 
 label { display: block; margin: 0.5rem 0; }
-label input {
+label input,
+label textarea,
+label select {
   display: block;
   width: 100%;
-  max-width: 24rem;
+  max-width: 36rem;
   padding: 0.4rem;
   border: 1px solid var(--border);
   border-radius: 6px;
+  font: inherit;
 }
+label textarea { resize: vertical; }
 
 button {
   font: inherit;

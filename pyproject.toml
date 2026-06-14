@@ -19,6 +19,7 @@ dependencies = [
     "openpyxl",
     "fastexcel",
     "tomli-w>=1.2.0",
+    "github-copilot-sdk>=1.0.1",
 ]
 
 [project.scripts]

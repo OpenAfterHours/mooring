@@ -31,6 +31,15 @@ max_file_mb = 45
 [workspace]
 path = ""        # empty = ~/Documents/mooring/<owner>/<repo>
 
+# AI assistance. When enabled and an AI provider is connected, the hub's
+# "AI helper" turns a dataset's SCHEMA (column names + types only — never any
+# data values) plus a plain-English goal into ready-to-paste Polars code.
+# Schema-only is enforced by mooring; the data itself never leaves the machine.
+[ai]
+enabled = true        # set false to hide the AI helper entirely
+provider = "copilot"  # AI backend; "copilot" = GitHub Copilot (pluggable)
+model = ""            # provider model id; empty = the provider's default
+
 # Central logging. Set `endpoint` to collect usage events and errors from every
 # copy of the app in one place. The value is auto-detected:
 #   http(s)://...  -> each event is POSTed as JSON

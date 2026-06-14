@@ -235,6 +235,133 @@ function renderRepoSelect(state) {
   select.appendChild(add);
 }
 
+// -- AI helper ---------------------------------------------------------------
+
+let aiBusy = false;
+let aiLoginPolling = false;
+let lastAiState = null;
+
+function renderAi(s) {
+  lastAiState = s;
+  const card = $("ai-card");
+  if (!s || !s.enabled) {
+    card.classList.add("hidden");
+    return;
+  }
+  card.classList.remove("hidden");
+
+  const sel = $("ai-dataset");
+  const prev = sel.value;
+  sel.innerHTML = "";
+  const datasets = s.datasets || [];
+  const placeholder = document.createElement("option");
+  placeholder.value = "";
+  placeholder.textContent = datasets.length ? "— pick a dataset —" : "(no data files found)";
+  sel.appendChild(placeholder);
+  for (const d of datasets) {
+    const opt = document.createElement("option");
+    opt.value = d;
+    opt.textContent = d;
+    if (d === prev) opt.selected = true;
+    sel.appendChild(opt);
+  }
+
+  $("ai-status").textContent = s.detail || "";
+  const connected = !!s.connected;
+  $("ai-connect").classList.toggle("hidden", connected || !s.available);
+  $("ai-generate").disabled = !connected || busy || aiBusy;
+
+  const login = s.login || {};
+  const lines = login.output || [];
+  const showLogin = !!login.running || lines.length > 0;
+  $("ai-login").classList.toggle("hidden", !showLogin);
+  $("ai-login").textContent = lines.join("\n");
+}
+
+async function aiRefresh() {
+  renderAi(await api("/api/ai/state"));
+}
+
+// While `copilot login` runs, its device code / progress streams server-side;
+// poll so it surfaces (and the connected state updates) without manual Refresh.
+async function pollAiLogin() {
+  if (aiLoginPolling) return;
+  aiLoginPolling = true;
+  try {
+    for (;;) {
+      const s = await api("/api/ai/state");
+      renderAi(s);
+      if (!(s.login && s.login.running)) break;
+      await new Promise((r) => setTimeout(r, 1500));
+    }
+    // Sign-in finished: one forced probe so the card reflects the result.
+    await api("/api/ai/check", {});
+    await aiRefresh();
+  } finally {
+    aiLoginPolling = false;
+  }
+}
+
+async function aiAction(fn) {
+  if (busy || aiBusy) return;
+  aiBusy = true;
+  setBusy(true);
+  showError("");
+  try {
+    await fn();
+  } finally {
+    aiBusy = false;
+    setBusy(false);
+    // setBusy(false) re-enables every button; re-apply the card's own
+    // connected/disabled logic so Generate isn't clickable while disconnected.
+    if (lastAiState) renderAi(lastAiState);
+  }
+}
+
+function wireAi() {
+  $("ai-refresh").addEventListener("click", () =>
+    aiAction(async () => {
+      const data = await api("/api/ai/check", {});
+      if (data.error) showError(data.error);
+      await aiRefresh();
+    })
+  );
+  $("ai-connect").addEventListener("click", () =>
+    aiAction(async () => {
+      const data = await api("/api/ai/connect", {});
+      if (data.error) return showError(data.error);
+      await aiRefresh();
+      pollAiLogin(); // fire-and-forget: surfaces the device code + completion
+    })
+  );
+  $("ai-generate").addEventListener("click", () =>
+    aiAction(async () => {
+      const dataset = $("ai-dataset").value;
+      const instruction = $("ai-instruction").value.trim();
+      if (!instruction) return showError("Describe what you want the code to do.");
+      $("ai-status").textContent = "Generating… Copilot can take a few seconds.";
+      const data = await api("/api/ai/generate", { dataset, instruction });
+      if (data.error) {
+        $("ai-result").classList.add("hidden");
+        return showError(data.error);
+      }
+      $("ai-code").textContent = data.code || "";
+      $("ai-result").classList.remove("hidden");
+      await aiRefresh();
+    })
+  );
+  $("ai-copy").addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText($("ai-code").textContent);
+      const btn = $("ai-copy");
+      btn.textContent = "Copied!";
+      setTimeout(() => (btn.textContent = "Copy"), 1200);
+    } catch {
+      showError("Couldn't copy — select the code and copy manually.");
+    }
+  });
+}
+
 async function refresh() {
   const state = await api("/api/state");
   showError(state.error || "");
@@ -273,6 +400,12 @@ async function refresh() {
     renderFiles(lastFiles, state.artifacts || []);
   } else {
     $("user-info").textContent = "";
+  }
+
+  if (state.ai_enabled) {
+    aiRefresh();
+  } else {
+    $("ai-card").classList.add("hidden");
   }
 }
 
@@ -347,4 +480,5 @@ $("setup-cancel").addEventListener("click", () => {
   refresh();
 });
 
+wireAi();
 refresh();

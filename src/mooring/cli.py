@@ -134,6 +134,25 @@ def _build_parser() -> argparse.ArgumentParser:
             "--repo", default=None, metavar="ALIAS", help="act on this repo instead of the active one"
         )
 
+    ai = sub.add_parser("ai", help="AI helper: connect Copilot and generate code")
+    ai_sub = ai.add_subparsers(dest="ai_command", required=True)
+    ai_sub.add_parser("status", help="show the AI provider's sign-in status")
+    ai_login = ai_sub.add_parser("login", help="sign in to Copilot (OAuth device flow)")
+    ai_login.add_argument(
+        "--host", default=None, help="GitHub host URL for Copilot (GHE data residency)"
+    )
+    ai_gen = ai_sub.add_parser(
+        "generate", help="generate code from a dataset's schema (no data values are sent)"
+    )
+    ai_gen.add_argument("instruction", help="what the code should do, in plain English")
+    ai_gen.add_argument(
+        "--data", default="", help="workspace-relative dataset path (parquet/csv/xlsx)"
+    )
+    ai_gen.add_argument("--target", default="polars", help="code flavour (default: polars)")
+    ai_gen.add_argument(
+        "--repo", default=None, metavar="ALIAS", help="act on this repo instead of the active one"
+    )
+
     sub.add_parser("selftest", help="verify the bundled environment")
     sub.add_parser("version", help="print the version")
     return parser
@@ -189,6 +208,18 @@ def cmd_selftest(app_cfg: config.AppConfig, cfg: config.Config) -> int:
         print(f"  logging     : on -> {log_dest} ({kind})")
     else:
         print("  logging     : off (no endpoint configured)")
+    if not app_cfg.ai_enabled:
+        print("  ai          : disabled")
+    else:
+        try:
+            from mooring.ai import get_provider
+
+            prov = get_provider(app_cfg)
+            avail = "available" if prov.available() else "unavailable (CLI not bundled)"
+            print(f"  ai          : {app_cfg.ai_provider} {avail} "
+                  "(run `mooring ai status` to check sign-in)")
+        except Exception as exc:  # noqa: BLE001 - never let the AI probe fail selftest
+            print(f"  ai          : error ({exc})")
     if cfg.is_configured:
         print(f"  team repo   : {cfg.repo_slug} (branch {cfg.branch}, host {cfg.host})")
     else:
@@ -425,6 +456,57 @@ def cmd_repo(app_cfg: config.AppConfig, args: argparse.Namespace) -> int:
     return 2
 
 
+def cmd_ai(app_cfg: config.AppConfig, cfg: config.Config, args: argparse.Namespace) -> int:
+    from mooring.ai import AIError, get_provider
+
+    try:
+        provider = get_provider(app_cfg)
+    except AIError as exc:
+        sys.exit(str(exc))
+
+    if args.ai_command == "login":
+        if not provider.available():
+            sys.exit("The Copilot CLI is not available in this build.")
+        print("Opening Copilot sign-in — a browser window will open to authorize…")
+        code = provider.login_interactive(host=args.host)
+        print("Copilot sign-in complete." if code == 0 else "Copilot sign-in did not complete.")
+        return code
+
+    if args.ai_command == "status":
+        st = provider.status(force=True)
+        state = "connected" if st.connected else ("unavailable" if not st.available else "not connected")
+        who = f" as {st.account}" if st.account else ""
+        print(f"AI provider : {app_cfg.ai_provider}")
+        print(f"  status    : {state}{who}")
+        if st.detail:
+            print(f"  detail    : {st.detail}")
+        return 0 if st.connected else 1
+
+    if args.ai_command == "generate":
+        from mooring import schema
+
+        if not args.data:
+            sys.exit("Provide --data <path> to a dataset (parquet/csv/xlsx).")
+        target = cfg.workspace() / args.data
+        if not target.is_file():
+            sys.exit(f"No such dataset: {target}")
+        try:
+            ds = schema.extract_schema(target)
+        except (ValueError, OSError) as exc:
+            sys.exit(str(exc))
+        context = schema.format_for_ai(ds, source=args.data)
+        try:
+            code = provider.generate(
+                schema_context=context, instruction=args.instruction, target=args.target
+            )
+        except AIError as exc:
+            sys.exit(str(exc))
+        telemetry.log_event("ai_generate", provider=app_cfg.ai_provider, ok=True)
+        print(code)
+        return 0
+    return 2
+
+
 def _unknown_alias(alias: str, app_cfg: config.AppConfig) -> str:
     known = ", ".join(app_cfg.aliases) or "(none)"
     return f"Unknown repo alias {alias!r}. Known: {known}"
@@ -442,6 +524,8 @@ def _dispatch(
         return 0
     if command == "repo":
         return cmd_repo(app_cfg, args)
+    if command == "ai":
+        return cmd_ai(app_cfg, cfg, args)
     if command == "selftest":
         return cmd_selftest(app_cfg, cfg)
     if command == "hub":

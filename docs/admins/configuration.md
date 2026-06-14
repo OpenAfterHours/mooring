@@ -90,6 +90,18 @@ direction.
 | `endpoint` | `""` | Where to send usage/error events. Empty disables logging. See [Central logging](#central-logging) for the auto-detected URL-vs-path behaviour. |
 | `level` | `"info"` | `"info"` logs usage events **and** errors; `"error"` logs only errors. |
 
+### `[ai]`
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `enabled` | `true` | Show the hub's **AI helper** (and the `mooring ai` commands). Set `false` to hide it entirely. |
+| `provider` | `"copilot"` | The AI backend. Only `copilot` (GitHub Copilot) is implemented today. |
+| `model` | `""` | Copilot model id (e.g. `gpt-5`). Empty uses Copilot's default. |
+
+The AI helper turns a dataset's **schema** (column names + types) plus a
+plain-English goal into Polars code — **without sending any data values** to the
+model. See [AI helper](#ai-helper) below.
+
 ## The packaged default file
 
 `src/mooring/config_default.toml` is baked into every build. Edit it **before
@@ -113,6 +125,11 @@ path = ""                  # empty = ~/Documents/mooring/<owner>/<repo>
 [logging]
 endpoint = ""              # optional; see Central logging below
 level = "info"
+
+[ai]
+enabled = true             # the schema-only AI helper; see AI helper below
+provider = "copilot"
+model = ""                 # e.g. "gpt-5"; empty = Copilot's default
 ```
 
 To bake **several** repos in, use the `[repos]` form shown above instead of
@@ -185,6 +202,9 @@ integration testing and CI, but work anywhere:
 | `MOORING_TRUSTSTORE` | Set to `0` to disable [OS trust store TLS verification](#corporate-networks-tls) and fall back to the bundled CA list. |
 | `MOORING_LOG_ENDPOINT` | `[logging] endpoint` — the central log destination (see [Central logging](#central-logging)). |
 | `MOORING_LOG_LEVEL` | `[logging] level` — `info` or `error`. |
+| `MOORING_AI_ENABLED` | `[ai] enabled` — set `0` to hide the AI helper. |
+| `MOORING_AI_PROVIDER` | `[ai] provider`. |
+| `MOORING_AI_MODEL` | `[ai] model`. |
 
 See [Contributing](../developers/contributing.md#integration-testing) for using
 these to test against a scratch repo.
@@ -234,6 +254,53 @@ Logging is strictly best-effort: it runs on a background thread, never blocks a
 command, and silently drops events if the destination is slow or unreachable
 (the process still exits within a few seconds). `mooring selftest` prints a
 `logging` line showing the active destination.
+
+## AI helper
+
+The hub's **AI helper** lets an analyst pick a dataset, describe a goal in plain
+English, and get back Polars code for their next notebook cell — backed by the
+analyst's own **GitHub Copilot** licence.
+
+The defining constraint: **the AI never sees the data.** mooring extracts only
+the dataset's *schema* — column names, types, and a row count — and sends that
+plus the analyst's instruction to Copilot. No cell value ever leaves the
+machine. Three independent safeguards back this up:
+
+- mooring reads schemas from the parquet footer / csv & xlsx headers and emits
+  only names and dtypes — never a value (proven by the test suite).
+- The request runs the Copilot agent with **all tools disabled** (empty tool
+  allowlist + a deny-all permission handler that fails closed), so the agent
+  cannot read the data files itself.
+- The system prompt tells the model it will only ever see the schema and must
+  not attempt to read any file.
+
+### Requirements
+
+- A **GitHub Copilot** subscription (Business/Enterprise recommended — their
+  terms exclude your prompts from training). Copilot is billed separately from,
+  and not the same product as, GitHub Models.
+- No extra install: the official `github-copilot-sdk` and its bundled CLI ship
+  **inside** the mooring artifact.
+
+### Connecting
+
+Copilot uses its own sign-in, separate from your mooring GitHub token. Each
+analyst connects **once**:
+
+- In the hub's **AI helper** card, click **Connect Copilot** (a browser window
+  opens for the OAuth device flow), or
+- run `mooring ai login` in a terminal.
+
+The credential is stored in the OS credential store and reused automatically.
+`mooring ai status` shows the current sign-in; `mooring selftest` shows an `ai`
+line. Generate from the hub card, or headless with
+`mooring ai generate --data data/sales.parquet "filter to 2024 EU rows"`.
+
+!!! note "Data-handling terms"
+
+    Schema text (column names + types) is still sent to GitHub's Copilot
+    service. Confirm your Copilot plan's data-handling terms meet your
+    institution's requirements before enabling for regulated data.
 
 ## Corporate networks & TLS
 

@@ -28,6 +28,9 @@ python mooring.pyz propose [paths...] [-m "message"] [--repo ALIAS]
 python mooring.pyz open notebooks/sales.py
 python mooring.pyz open reports/sales.pbip
 python mooring.pyz new sales-analysis
+python mooring.pyz ai status
+python mooring.pyz ai login [--host URL]
+python mooring.pyz ai generate "<goal>" --data data/sales.parquet [--target polars]
 python mooring.pyz selftest
 python mooring.pyz version
 ```
@@ -118,11 +121,27 @@ branch, so the changes can be reviewed as a pull request (see
 - `new <name>` — create a notebook from the template and open it (e.g.
   `new sales-analysis`).
 
+### `ai`
+
+The schema-only **AI helper** (see [Configuration → AI helper](../admins/configuration.md#ai-helper)).
+It sends Copilot a dataset's column names and types — **never any data values**.
+
+- `ai login [--host URL]` — sign in to GitHub Copilot (OAuth device flow; a
+  browser opens). Use `--host https://example.ghe.com` for GitHub Enterprise
+  Cloud data residency. The credential is stored in your OS credential store.
+- `ai status` — show whether Copilot is connected.
+- `ai generate "<goal>" --data <path>` — print code for a goal against a
+  dataset's schema, e.g.
+  `ai generate "filter to 2024 EU rows and sum revenue" --data data/sales.parquet`.
+  `--target` picks the code flavour (default `polars`); `--repo ALIAS` selects a
+  registered repo.
+
 ### `selftest`
 
 Verify the bundled environment: checks each frozen package imports, prints your
-config-file / workspace / log locations, the active `PYTHONPATH`, and whether a
-team repo is configured. Useful for diagnosing a machine.
+config-file / workspace / log locations, the active `PYTHONPATH`, whether a team
+repo is configured, and whether the AI helper is available. Useful for
+diagnosing a machine.
 
 ### `version`
 

@@ -8,6 +8,7 @@ that the hub starts lazily and tears down on shutdown.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import threading
 import time
@@ -22,7 +23,7 @@ from starlette.responses import FileResponse, JSONResponse
 from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
-from mooring import __version__, auth, config, config_store, pbip, sync, telemetry
+from mooring import __version__, auth, config, config_store, pbip, schema, sync, telemetry
 from mooring.cli import SELFTEST_PACKAGES, legacy_workspace_hint
 from mooring.editor import EditorServer, _free_port
 from mooring.github import AuthFailed, GitHubClient, GitHubError, compare_url
@@ -43,6 +44,9 @@ class Hub:
         self._next_poll = 0.0
         self._user_login = ""
         self._lock = threading.Lock()
+        # The AI provider is built lazily and cached: it holds sign-in/probe
+        # state, so it must outlive a single request.
+        self._ai = None
 
     # -- helpers -------------------------------------------------------------
 
@@ -53,6 +57,15 @@ class Hub:
     def reload(self) -> None:
         with self._lock:
             self.app_cfg = config.load_app_config()
+            self._ai = None  # rebuild against the new config on next use
+
+    def ai(self):
+        """The configured AI provider (cached). Raises AIError if unknown."""
+        if self._ai is None:
+            from mooring.ai import get_provider
+
+            self._ai = get_provider(self.app_cfg)
+        return self._ai
 
     def client(self) -> GitHubClient:
         cfg = self.cfg
@@ -105,6 +118,7 @@ class Hub:
             "user": "",
             "files": [],
             "artifacts": [],
+            "ai_enabled": self.app_cfg.ai_enabled and cfg.is_configured,
         }
         if not cfg.is_configured:
             return JSONResponse(body)
@@ -345,6 +359,125 @@ class Hub:
         telemetry.log_event("open", kind="notebook")
         return JSONResponse({"path": rel_path, "url": editor.url_for(rel_path)})
 
+    # -- AI helper (schema-only code generation) --------------------------------
+
+    def _ai_state_payload(self) -> dict:
+        """Cheap state for the AI card. Probes Copilot sign-in at most once per
+        TTL (and never while a sign-in is mid-flight)."""
+        cfg = self.cfg
+        if not (self.app_cfg.ai_enabled and cfg.is_configured):
+            return {"enabled": False}
+        payload: dict = {
+            "enabled": True,
+            "provider": self.app_cfg.ai_provider,
+            "model": self.app_cfg.ai_model,
+            "datasets": [],
+            "available": False,
+            "connected": False,
+            "account": "",
+            "detail": "",
+            "login": {"running": False, "output": []},
+        }
+        try:
+            payload["datasets"] = schema.list_datasets(cfg.workspace(), cfg.folders)
+        except OSError as exc:
+            payload["detail"] = f"Could not list datasets: {exc}"
+        try:
+            prov = self.ai()
+        except Exception as exc:  # noqa: BLE001 - unknown provider etc.
+            payload["detail"] = str(exc)
+            return payload
+        payload["available"] = prov.available()
+        payload["login"] = prov.login_state()
+        if not payload["available"]:
+            payload["detail"] = "The Copilot CLI is not available in this build."
+            return payload
+        if payload["login"]["running"]:
+            payload["detail"] = "Signing in… authorise in your browser, then Refresh."
+            return payload
+        # Cache-only here so merely opening the hub never spawns the CLI; an
+        # explicit Refresh (/api/ai/check), Connect, or Generate does the probe.
+        cached = prov.cached_status()
+        if cached is not None:
+            payload["connected"] = cached.connected
+            payload["account"] = cached.account
+            payload["detail"] = cached.detail
+        else:
+            payload["detail"] = "Sign in to Copilot to use the AI helper, then Refresh."
+        return payload
+
+    def api_ai_state(self, request: Request) -> JSONResponse:
+        return JSONResponse(self._ai_state_payload())
+
+    def api_ai_check(self, request: Request) -> JSONResponse:
+        if not (self.app_cfg.ai_enabled and self.cfg.is_configured):
+            return JSONResponse({"enabled": False})
+        try:
+            status = self.ai().status(force=True)
+        except Exception as exc:  # noqa: BLE001 - shown in the UI
+            return JSONResponse({"error": str(exc)}, status_code=502)
+        return JSONResponse(
+            {"connected": status.connected, "account": status.account, "detail": status.detail}
+        )
+
+    def api_ai_connect(self, request: Request) -> JSONResponse:
+        try:
+            status = self.ai().connect()
+        except Exception as exc:  # noqa: BLE001 - AIError or spawn failure
+            return JSONResponse({"error": str(exc)}, status_code=502)
+        telemetry.log_event("ai_connect", provider=self.app_cfg.ai_provider)
+        return JSONResponse({"detail": status.detail, "login": self.ai().login_state()})
+
+    async def api_ai_generate(self, request: Request) -> JSONResponse:
+        from mooring.ai import AIError
+
+        data = await request.json()
+        instruction = str(data.get("instruction", "")).strip()
+        rel_path = str(data.get("dataset", "")).strip()
+        if not instruction:
+            return JSONResponse(
+                {"error": "Describe what you want the code to do."}, status_code=400
+            )
+        context = self._ai_schema_context(rel_path)
+        if isinstance(context, JSONResponse):
+            return context  # an error response
+        try:
+            prov = self.ai()
+            # generate() drives the async SDK via asyncio.run, so it must run off
+            # the event loop thread.
+            code = await asyncio.to_thread(
+                prov.generate, schema_context=context, instruction=instruction
+            )
+        except Exception as exc:  # noqa: BLE001 - surface a clean message
+            telemetry.log_error(exc=exc, op="ai_generate")
+            status_code = 502 if isinstance(exc, AIError) else 500
+            return JSONResponse({"error": str(exc)}, status_code=status_code)
+        telemetry.log_event("ai_generate", provider=self.app_cfg.ai_provider, ok=True)
+        return JSONResponse({"code": code})
+
+    def _ai_schema_context(self, rel_path: str):
+        """Build the schema-only context from a workspace dataset. Returns the
+        context string, or a JSONResponse on error.
+
+        Every schema sent to the model flows through schema.extract_schema here,
+        which emits only column names + dtypes — so the value-stripping privacy
+        guarantee is enforced for all generations (no raw-text bypass)."""
+        if not rel_path:
+            return JSONResponse({"error": "Pick a dataset."}, status_code=400)
+        workspace = self.cfg.workspace()
+        target = (workspace / rel_path).resolve()
+        try:
+            target.relative_to(workspace.resolve())
+        except ValueError:
+            return JSONResponse({"error": "Path escapes the workspace."}, status_code=400)
+        if not target.is_file():
+            return JSONResponse({"error": f"No such dataset: {rel_path}"}, status_code=404)
+        try:
+            ds = schema.extract_schema(target)
+        except (ValueError, OSError) as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        return schema.format_for_ai(ds, source=rel_path)
+
 
 def create_app(hub: Hub) -> Starlette:
     static = _static_dir()
@@ -373,6 +506,10 @@ def create_app(hub: Hub) -> Starlette:
             Route("/api/resolve", hub.api_resolve, methods=["POST"]),
             Route("/api/new", hub.api_new, methods=["POST"]),
             Route("/api/open", hub.api_open, methods=["POST"]),
+            Route("/api/ai/state", hub.api_ai_state),
+            Route("/api/ai/check", hub.api_ai_check, methods=["POST"]),
+            Route("/api/ai/connect", hub.api_ai_connect, methods=["POST"]),
+            Route("/api/ai/generate", hub.api_ai_generate, methods=["POST"]),
             Mount("/static", StaticFiles(directory=static)),
         ],
         lifespan=lifespan,

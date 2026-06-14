@@ -89,7 +89,10 @@ library — there is no pip at runtime). To add or remove one:
 Hand the artifact to your analysts any way you like:
 
 - A file share or network drive.
-- Email (note the ~110 MB size for the `.pyz`/`.exe`).
+- Email (note the size: the AI helper bundles GitHub's Copilot CLI, a ~150 MB
+  native binary, so the `.pyz`/`.exe` is now ~250 MB. To ship a smaller artifact
+  to a team that won't use AI, set `[ai] enabled = false` and remove
+  `github-copilot-sdk` from `pyproject.toml` before building).
 - A **GitHub Release** (automatic with the `v*` tag workflow above).
 
 Then point them at [Install & first run](../users/index.md). If you baked the
@@ -98,6 +101,14 @@ config, they just run it and log in; if not, they'll complete the
 
 !!! note "Artifact size & first run"
 
-    The `.pyz`/`.exe` is ~110 MB (marimo + polars + plotly + altair). First run
-    extracts to a local cache (`%LOCALAPPDATA%\moonlit\` on Windows); old
-    versions' caches can be deleted freely.
+    The `.pyz`/`.exe` is ~250 MB (marimo + polars + plotly + altair, plus the
+    bundled GitHub Copilot CLI for the [AI helper](configuration.md#ai-helper)).
+    First run extracts to a local cache (`%LOCALAPPDATA%\moonlit\` on Windows);
+    old versions' caches can be deleted freely.
+
+!!! warning "Build on the OS you ship to (for the AI helper)"
+
+    `github-copilot-sdk` bundles a **platform-specific** Copilot CLI binary, so
+    build the Windows `.exe`/`.pyz` **on Windows** to bundle the Windows binary.
+    (mooring already targets Windows analysts.) If you disable the AI helper this
+    doesn't apply.

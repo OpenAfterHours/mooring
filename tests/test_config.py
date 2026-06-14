@@ -183,6 +183,37 @@ def test_logging_env_overrides(tmp_path):
     assert app.log_level == "error"
 
 
+# -- AI assistance ([ai] section) -------------------------------------------
+
+
+def test_ai_defaults(tmp_path):
+    app = load_app_config(user_config_path=tmp_path / "missing.toml", env={})
+    assert app.ai_enabled is True
+    assert app.ai_provider == "copilot"
+    assert app.ai_model == ""
+
+
+def test_ai_from_user_config(tmp_path):
+    user = tmp_path / "config.toml"
+    user.write_text(
+        '[ai]\nenabled = false\nprovider = "copilot"\nmodel = "gpt-5"\n', "utf-8"
+    )
+    app = load_app_config(user_config_path=user, env={})
+    assert app.ai_enabled is False
+    assert app.ai_model == "gpt-5"
+
+
+def test_ai_env_overrides(tmp_path):
+    user = tmp_path / "config.toml"
+    user.write_text('[ai]\nenabled = true\nmodel = "baked"\n', "utf-8")
+    app = load_app_config(
+        user_config_path=user,
+        env={"MOORING_AI_ENABLED": "0", "MOORING_AI_MODEL": "override"},
+    )
+    assert app.ai_enabled is False
+    assert app.ai_model == "override"
+
+
 def test_default_workspace_keyed_by_owner():
     a = paths.default_workspace("acme", "notebooks")
     b = paths.default_workspace("phil", "notebooks")

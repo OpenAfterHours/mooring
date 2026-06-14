@@ -60,6 +60,36 @@
       </div>
     </section>
 
+    <section id="ai-card" class="card hidden">
+      <h2>AI helper <span class="muted">· schema-only</span></h2>
+      <p class="muted">
+        Pick a dataset and say what you want. mooring sends Copilot only the
+        column <b>names and types</b> &mdash; never your data &mdash; and returns
+        Polars code for your next cell.
+      </p>
+      <div id="ai-status" class="muted"></div>
+      <pre id="ai-login" class="hidden"></pre>
+      <label>Dataset
+        <select id="ai-dataset"></select>
+      </label>
+      <label>What should the code do?
+        <textarea id="ai-instruction" rows="3"
+          placeholder="e.g. filter to 2024 EU rows and sum revenue by region"></textarea>
+      </label>
+      <div class="toolbar">
+        <button id="ai-generate" class="primary">Generate Polars</button>
+        <button id="ai-connect" class="hidden">Connect Copilot</button>
+        <button id="ai-refresh">&#8635; Refresh</button>
+      </div>
+      <div id="ai-result" class="hidden">
+        <div class="toolbar">
+          <b>Generated code</b>
+          <button id="ai-copy" class="small">Copy</button>
+        </div>
+        <pre id="ai-code"></pre>
+      </div>
+    </section>
+
     <section id="log-card" class="card hidden">
       <h3>Last operation</h3>
       <pre id="log"></pre>
