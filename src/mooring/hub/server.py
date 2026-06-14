@@ -23,7 +23,7 @@ from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
 from mooring import __version__, auth, config, config_store, pbip, sync, telemetry
-from mooring.cli import SELFTEST_PACKAGES, legacy_workspace_hint
+from mooring.cli import SELFTEST_PACKAGES, workspace_hint
 from mooring.editor import EditorServer, _free_port
 from mooring.github import AuthFailed, GitHubClient, GitHubError, compare_url
 
@@ -88,7 +88,7 @@ class Hub:
             "branch": cfg.branch,
             "host": cfg.host,
             "workspace": str(cfg.workspace()),
-            "workspace_hint": legacy_workspace_hint(cfg),
+            "workspace_hint": workspace_hint(cfg),
             "repos": [
                 {
                     "alias": s.alias,

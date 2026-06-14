@@ -389,6 +389,7 @@ def push(
 
     last_commit = ""
     touched_review = False
+    stale_remote = False
     for index, f in enumerate(candidates):
         if index > 0 and throttle:
             sleep(throttle)  # contents-API writes trip secondary rate limits if rapid
@@ -433,11 +434,16 @@ def push(
                 )
             except RemoteConflict:
                 result.blocked_conflicts.append(f.path)
-                reason = (
-                    "review branch changed — refresh and retry"
-                    if in_review
-                    else "remote changed — pull first"
-                )
+                if base is None:
+                    # We tried to *create* the file but it already exists on the
+                    # target — our cached remote view is stale (manifest out of
+                    # sync with cfg.branch). Force the next pull to refetch.
+                    stale_remote = True
+                    reason = "already on the remote — pull first"
+                elif in_review:
+                    reason = "review branch changed — refresh and retry"
+                else:
+                    reason = "remote changed — pull first"
                 result.lines.append(f"conflict {f.path} ({reason})")
                 continue
             if in_review:
@@ -463,6 +469,10 @@ def push(
         )
     if last_commit:
         mft.head_commit = last_commit
+    if stale_remote:
+        # Drop the head-commit short-circuit in _remote_entries so the next pull
+        # refetches the live tree and rebuilds a consistent manifest.
+        mft.head_commit = ""
     mft.branch = cfg.branch
     manifest_mod.save(workspace, mft)
     return result
@@ -565,9 +575,18 @@ def propose(
                 )
             except RemoteConflict:
                 result.blocked_conflicts.append(f.path)
-                result.lines.append(
-                    f"conflict {f.path} (review branch changed — refresh and retry)"
-                )
+                if base is None:
+                    # Creating a file that already exists on cfg.branch (and thus
+                    # on the freshly-forked review branch): our cached remote view
+                    # is stale. Invalidate it so the next pull refetches and heals.
+                    mft.head_commit = ""
+                    result.lines.append(
+                        f"conflict {f.path} (already on the remote — pull first)"
+                    )
+                else:
+                    result.lines.append(
+                        f"conflict {f.path} (review branch changed — refresh and retry)"
+                    )
                 continue
             mft.review_files[f.path] = response["content"]["sha"]
             result.lines.append(f"proposed {f.path}")

@@ -423,6 +423,48 @@ def test_push_in_review_delete_targets_review_branch(cfg):
     assert mft.review_files["notebooks/b.py"] is None
 
 
+def test_propose_create_conflict_on_stale_manifest_self_heals(cfg):
+    """A manifest whose `files` lost a path that is still on cfg.branch (e.g. an
+    external tool like OneDrive reverted it) made propose mis-see the file as new,
+    fork a branch that already had it, and fail to create it. The conflict must
+    now say 'pull first' and invalidate the head cache so the next pull heals it."""
+    client = FakeClient({"notebooks/a.py": b"v1\n"})
+    sync.pull(client, cfg)
+    # Corrupt the manifest: drop a.py but keep head_commit pointing at the same
+    # commit, so _remote_entries serves the stale cache (no live refetch).
+    mft = manifest.load(cfg.workspace())
+    assert mft.head_commit == client.head
+    del mft.files["notebooks/a.py"]
+    manifest.save(cfg.workspace(), mft)
+
+    result = sync.propose(client, cfg, sleep=lambda s: None, now=NOW1)
+    assert result.proposed == 0
+    assert result.blocked_conflicts == ["notebooks/a.py"]
+    assert any("already on the remote" in line for line in result.lines)
+    assert manifest.load(cfg.workspace()).head_commit == ""  # cache invalidated
+
+    # The next pull refetches the live tree and rebuilds a consistent manifest.
+    sync.pull(client, cfg)
+    healed = manifest.load(cfg.workspace())
+    assert "notebooks/a.py" in healed.files
+    assert healed.head_commit == client.head
+    assert sync.status(client, cfg).by_state(FileState.CONFLICT) == []
+
+
+def test_push_create_conflict_on_stale_manifest_invalidates_cache(cfg):
+    client = FakeClient({"notebooks/a.py": b"v1\n"})
+    sync.pull(client, cfg)
+    mft = manifest.load(cfg.workspace())
+    del mft.files["notebooks/a.py"]
+    manifest.save(cfg.workspace(), mft)
+
+    result = sync.push(client, cfg, sleep=lambda s: None)
+    assert result.pushed == 0
+    assert result.blocked_conflicts == ["notebooks/a.py"]
+    assert any("already on the remote" in line for line in result.lines)
+    assert manifest.load(cfg.workspace()).head_commit == ""
+
+
 # -- resolve --------------------------------------------------------------------
 
 

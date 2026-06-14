@@ -152,8 +152,8 @@ def _print_paths(cfg: config.Config) -> None:
     print(f"  config file : {paths.user_config_file()}")
     print(f"  workspace   : {cfg.workspace()}")
     print(f"  logs        : {paths.user_log_dir()}")
-    hint = legacy_workspace_hint(cfg)
-    if hint:
+    hints = (legacy_workspace_hint(cfg), paths.synced_folder_hint(cfg.workspace()))
+    for hint in (h for h in hints if h):
         print(f"  note        : {hint}")
 
 
@@ -169,6 +169,13 @@ def legacy_workspace_hint(cfg: config.Config) -> str:
             "(or set its 'workspace' in the config) to keep your sync history."
         )
     return ""
+
+
+def workspace_hint(cfg: config.Config) -> str:
+    """Combined workspace warnings (legacy location + cloud-sync folder) for the
+    hub and selftest, joined into one line."""
+    hints = (legacy_workspace_hint(cfg), paths.synced_folder_hint(cfg.workspace()))
+    return "  ".join(h for h in hints if h)
 
 
 def cmd_selftest(app_cfg: config.AppConfig, cfg: config.Config) -> int:
