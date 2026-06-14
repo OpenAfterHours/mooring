@@ -6,7 +6,7 @@ Mooring is a single-file app (`mooring.pyz` / `mooring.exe`) that lets a team
 of data analysts pull, edit, and push marimo notebooks stored in a shared
 GitHub repo — **without git installed on their machines**. All sync happens
 over the GitHub REST API; the only requirement on an analyst's machine is
-Python 3.12.
+Python 3.12 or newer.
 
 Double-clicking the app opens a local browser **hub**: log in to GitHub with
 a one-time device code, see every team notebook with its sync status, pull

@@ -4,22 +4,40 @@ icon: lucide/package
 
 # Build & distribute
 
-Mooring ships as a single self-contained artifact built with
-[moonlit](https://github.com/openafterhours/moonlit). This page covers baking
-your config, building the artifacts, the release workflow, changing the bundled
-packages, and getting the app to your team.
+Mooring reaches your team two ways: installed from **PyPI** with `uvx mooring`
+(on any Python 3.12+), or shipped as a single self-contained artifact built with
+[moonlit](https://github.com/openafterhours/moonlit) for analysts with no Python
+tooling. This page covers both — plus baking your config, building the artifacts,
+the release workflow, changing the bundled packages, and getting the app to your
+team.
+
+!!! tip "Install from PyPI (no build step)"
+
+    Anyone with **Python 3.12 or newer** can run Mooring without a frozen build —
+    they use their own interpreter, so they pick the version:
+
+    ```bash
+    uvx mooring                 # run it directly, or:
+    pip install mooring && mooring
+    ```
+
+    On first launch they fill in the
+    [runtime setup form](configuration.md#the-runtime-setup-form) (or you bake
+    config and publish your own build). The rest of this page is about the frozen
+    `.pyz`/`.exe` for machines with **no** Python tooling at all.
 
 ## Prerequisites
 
 - [uv](https://docs.astral.sh/uv/) installed.
 - Your four GitHub values from [GitHub setup](github-setup.md).
 
-!!! note "Why moonlit is invoked with `uvx --python 3.13`"
+!!! note "Why moonlit is invoked with `uvx`"
 
-    moonlit (the `.pyz`/`.exe` builder) needs Python ≥ 3.13, while the app
-    itself targets your team's **3.12**. So moonlit is **not** a project
-    dependency — it's run in an isolated environment via `uvx`, while
-    `--python-version 3.12` tells it which runtime to build *for*.
+    moonlit (the `.pyz`/`.exe` builder) is a build tool, not a project
+    dependency, so it's run in an isolated environment via `uvx` rather than
+    added to the lock. moonlit needs Python ≥ 3.13 to *run*; the app itself
+    supports 3.12+. `--python-version 3.13` tells moonlit which runtime to build
+    the artifact *for* (pick any 3.12+).
 
 ## 1. Bake your config
 
@@ -37,26 +55,36 @@ collector URL or a shared folder/UNC path — see
 uv sync
 uv run pytest
 
-# zipapp — needs Python 3.12 on the user's machine
-uvx --python 3.13 moonlit build -e mooring.cli:main -o dist/mooring.pyz --python-version 3.12
+# zipapp — needs Python 3.13 on the user's machine
+uvx --python 3.13 moonlit build -e mooring.cli:main -o dist/mooring.pyz --python-version 3.13
 
-# Windows .exe — needs Python 3.12 on the user's machine
-uvx --python 3.13 moonlit build -e mooring.cli:main -o dist/mooring.exe --windows-exe --python-version 3.12
+# Windows .exe — needs Python 3.13 on the user's machine
+uvx --python 3.13 moonlit build -e mooring.cli:main -o dist/mooring.exe --windows-exe --python-version 3.13
 ```
 
 For machines with **no Python at all**, build a folder bundle with embedded
 CPython instead:
 
 ```bash
-uvx --python 3.13 moonlit build -e mooring.cli:main -o dist/mooring-bundle --bundle-python --python-version 3.12
+uvx --python 3.13 moonlit build -e mooring.cli:main -o dist/mooring-bundle --bundle-python --python-version 3.13
 ```
 
-!!! warning "Python version is pinned"
+!!! warning "A frozen build targets one exact Python minor"
 
-    A `.pyz`/`.exe` built for 3.12 requires the user to have Python **3.12.x**;
-    moonlit shows a clear error otherwise. The `--bundle-python` build escapes
-    this entirely by embedding the interpreter (at the cost of a larger
-    download).
+    A `.pyz`/`.exe` built for 3.13 requires the recipient to have Python
+    **3.13.x** — an exact `major.minor` match, not a minimum. It won't run on
+    3.12 or 3.14: moonlit's bootstrap (stamped into the artifact) exits with a
+    clear error, and the bundled native wheels (`rpds_py`, `msgspec`, `loro`) are
+    `cp313`-only and can't import on another minor anyway. This is a property of
+    *freezing*, not of Mooring — the PyPI install above has no such constraint (it
+    runs on any 3.12+). The `--bundle-python` build sidesteps it by embedding the
+    interpreter (at the cost of a larger download).
+
+    To build for a different minor, just change `--python-version` (e.g.
+    `--python-version 3.12`). Because the project supports `>=3.12` and `uv.lock`
+    is resolved across that whole range, **no pin or lock edits are needed** — any
+    3.12+ target resolves from the same lock. (Dropping below 3.12 would need a
+    `requires-python` change; the source needs ≥ 3.11 for `tomllib`.)
 
 ## 3. Release workflow (optional)
 

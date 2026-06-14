@@ -3,7 +3,7 @@ name = "mooring"
 version = "0.2.6"
 description = "Git-free marimo notebook sharing via GitHub"
 readme = "README.md"
-requires-python = ">=3.12,<3.13"
+requires-python = ">=3.12"
 dependencies = [
     "marimo>=0.13",
     "starlette",
@@ -24,9 +24,12 @@ dependencies = [
 [project.scripts]
 mooring = "mooring.cli:main"
 
-# moonlit (the .pyz builder) is NOT a dev dependency: it needs Python >=3.13
-# while this project targets the team's 3.12. Invoke it isolated instead:
-#   uvx --python 3.13 moonlit build ...
+# The app supports Python 3.12+ (installed from PyPI, it uses the admin's own
+# interpreter). moonlit (the .pyz/.exe builder) is a separate build tool, not a
+# runtime/dev dependency — invoke it isolated via uvx so it doesn't bloat the
+# lock. It needs Python >=3.13 to run; --python-version picks which Python a
+# frozen build targets (any 3.12+):
+#   uvx --python 3.13 moonlit build ... --python-version 3.13
 [dependency-groups]
 dev = [
     "pytest",
