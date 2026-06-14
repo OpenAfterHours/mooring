@@ -260,6 +260,27 @@ def test_merge_observed_clears_review_and_next_propose_is_fresh(cfg):
     assert result.review_branch == "mooring/phil/20260612-1030"
 
 
+def test_merge_then_keep_editing_pushes_cleanly(cfg):
+    """After a proposal merges, editing the notebook again and pushing must go
+    straight to main without a spurious conflict — the sync base advanced to the
+    merged content rather than staying at the pre-proposal blob."""
+    client = FakeClient({"notebooks/a.py": b"v1\n"})
+    sync.pull(client, cfg)
+    write_local(cfg, "notebooks/a.py", "v2\n")
+    sync.propose(client, cfg, sleep=lambda s: None, now=NOW1)
+    client.merge(BRANCH1)  # PR merged to main
+    write_local(cfg, "notebooks/a.py", "v3\n")  # keep working on the same notebook
+    report = sync.status(client, cfg)
+    assert [f.state for f in report.files] == [FileState.MODIFIED]  # not CONFLICT
+    result = sync.push(client, cfg, sleep=lambda s: None)
+    assert result.blocked_conflicts == []
+    assert result.pushed == 1
+    assert client.blobs[client.tree["notebooks/a.py"]] == b"v3\n"
+    mft = manifest.load(cfg.workspace())
+    assert mft.review_branch == ""
+    assert mft.files["notebooks/a.py"] == client.tree["notebooks/a.py"]
+
+
 def test_deleted_review_branch_clears_review(cfg):
     client = FakeClient({"notebooks/a.py": b"v1\n"})
     sync.pull(client, cfg)

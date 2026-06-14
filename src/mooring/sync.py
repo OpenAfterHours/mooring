@@ -233,7 +233,15 @@ def _reconcile_review(
         return False
     changed = False
     for path, sent in list(mft.review_files.items()):
-        if remote.get(path) == sent:  # blob shas are content-addressed
+        if remote.get(path) == sent:  # blob shas are content-addressed: merged
+            # The proposal landed on cfg.branch, so it is now the sync base.
+            # Advance the base too: otherwise it stays at the pre-proposal blob,
+            # and any edits made after the merge classify as a spurious CONFLICT
+            # that neither pull (skips) nor push (blocks) can clear.
+            if sent is None:
+                mft.files.pop(path, None)
+            else:
+                mft.files[path] = sent
             del mft.review_files[path]
             changed = True
     if not mft.review_files:
