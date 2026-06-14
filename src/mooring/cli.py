@@ -73,7 +73,13 @@ def _build_parser() -> argparse.ArgumentParser:
     hub.add_argument("--no-browser", action="store_true", help="don't open a browser tab")
     hub.add_argument("--port", type=int, default=None, help="fixed port for the hub server")
 
-    sub.add_parser("login", help="log in to GitHub via device flow")
+    login = sub.add_parser("login", help="log in to GitHub via device flow")
+    login.add_argument(
+        "--host",
+        default=None,
+        help="GitHub host or URL for GitHub Enterprise (e.g. ghe.example.com); "
+        "saved as the global host before logging in",
+    )
     sub.add_parser("logout", help="forget the stored GitHub token")
     sub.add_parser("whoami", help="show the logged-in GitHub user")
     status = sub.add_parser("status", help="show sync status of workspace files")
@@ -98,7 +104,10 @@ def _build_parser() -> argparse.ArgumentParser:
     repo_use = repo_sub.add_parser("use", help="switch the active repo")
     repo_use.add_argument("alias")
     repo_rm = repo_sub.add_parser("remove", help="forget a repo (local files are kept)")
-    repo_rm.add_argument("alias")
+    repo_rm.add_argument("alias", nargs="?", default=None, help="alias to remove (omit when using --all)")
+    repo_rm.add_argument(
+        "--all", dest="all_repos", action="store_true", help="remove every registered repo"
+    )
 
     pull = sub.add_parser("pull", help="download changes from the team repo")
     pull_grp = pull.add_mutually_exclusive_group()
@@ -143,8 +152,8 @@ def _print_paths(cfg: config.Config) -> None:
     print(f"  config file : {paths.user_config_file()}")
     print(f"  workspace   : {cfg.workspace()}")
     print(f"  logs        : {paths.user_log_dir()}")
-    hint = legacy_workspace_hint(cfg)
-    if hint:
+    hints = (legacy_workspace_hint(cfg), paths.synced_folder_hint(cfg.workspace()))
+    for hint in (h for h in hints if h):
         print(f"  note        : {hint}")
 
 
@@ -160,6 +169,13 @@ def legacy_workspace_hint(cfg: config.Config) -> str:
             "(or set its 'workspace' in the config) to keep your sync history."
         )
     return ""
+
+
+def workspace_hint(cfg: config.Config) -> str:
+    """Combined workspace warnings (legacy location + cloud-sync folder) for the
+    hub and selftest, joined into one line."""
+    hints = (legacy_workspace_hint(cfg), paths.synced_folder_hint(cfg.workspace()))
+    return "  ".join(h for h in hints if h)
 
 
 def cmd_selftest(app_cfg: config.AppConfig, cfg: config.Config) -> int:
@@ -220,15 +236,28 @@ def _client(cfg: config.Config):
     return GitHubClient(_require_token(cfg), cfg.owner, cfg.repo, host=cfg.host)
 
 
-def cmd_login(cfg: config.Config) -> int:
-    from mooring import auth
+def cmd_login(cfg: config.Config, host: str | None = None) -> int:
+    import requests
 
+    from mooring import auth, config_store
+
+    if host is not None:
+        try:
+            new_host = config_store.set_host(host)
+        except ValueError as exc:
+            sys.exit(str(exc))
+        print(f"Saved GitHub host: {new_host}")
+        cfg = config.load_config()  # pick up the host just written
     if not cfg.client_id:
         sys.exit(
             "No OAuth client_id configured. Set [github] client_id in "
             f"{paths.user_config_file()}."
         )
-    device = auth.start_device_flow(cfg.client_id, host=cfg.host)
+    print(f"Requesting device code from {cfg.host}…")
+    try:
+        device = auth.start_device_flow(cfg.client_id, host=cfg.host)
+    except (auth.AuthError, requests.RequestException) as exc:
+        sys.exit(auth.device_flow_hint(cfg.host, exc))
     print(f"Open {device.verification_uri} and enter code: {device.user_code}")
     print("Waiting for authorization...")
     token = auth.poll_for_token(cfg.client_id, device)
@@ -414,6 +443,20 @@ def cmd_repo(app_cfg: config.AppConfig, args: argparse.Namespace) -> int:
         print(f"Active repo is now {args.alias!r}.")
         return 0
     if args.repo_command == "remove":
+        if getattr(args, "all_repos", False):
+            aliases = list(app_cfg.aliases)
+            if not aliases:
+                print("No repos registered.")
+                return 0
+            config_store.remove_all_repos()
+            telemetry.log_event("repo_remove", alias="*")
+            print(
+                f"Removed all {len(aliases)} repo(s): {', '.join(aliases)}. "
+                "Workspace folders were kept; delete them manually."
+            )
+            return 0
+        if not args.alias:
+            sys.exit("Specify a repo alias to remove, or use --all.")
         try:
             ws = app_cfg.config_for(args.alias).workspace()
             config_store.remove_repo(args.alias)
@@ -451,7 +494,7 @@ def _dispatch(
         port = getattr(args, "port", None)
         return run_hub(app_cfg, open_browser=not no_browser, port=port)
     if command == "login":
-        return cmd_login(cfg)
+        return cmd_login(cfg, getattr(args, "host", None))
     if command == "logout":
         return cmd_logout(cfg)
     if command == "whoami":

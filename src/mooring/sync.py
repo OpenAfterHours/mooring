@@ -183,6 +183,17 @@ def _remote_entries(
     return {e.path: e.sha for e in client.get_tree(head, cfg.folders) if is_synced_path(e.path)}
 
 
+def _review_tree(client: GitHubClient, cfg: Config, branch: str) -> dict[str, str]:
+    """The synced-file blob shas currently on an existing review branch, keyed by
+    path — the base shas needed to write further commits onto it."""
+    review_head = client.get_branch_head(branch)
+    return {
+        e.path: e.sha
+        for e in client.get_tree(review_head, cfg.folders)
+        if is_synced_path(e.path)
+    }
+
+
 def compute_status(
     mft: manifest_mod.Manifest,
     local: dict[str, str],
@@ -222,7 +233,15 @@ def _reconcile_review(
         return False
     changed = False
     for path, sent in list(mft.review_files.items()):
-        if remote.get(path) == sent:  # blob shas are content-addressed
+        if remote.get(path) == sent:  # blob shas are content-addressed: merged
+            # The proposal landed on cfg.branch, so it is now the sync base.
+            # Advance the base too: otherwise it stays at the pre-proposal blob,
+            # and any edits made after the merge classify as a spurious CONFLICT
+            # that neither pull (skips) nor push (blocks) can clear.
+            if sent is None:
+                mft.files.pop(path, None)
+            else:
+                mft.files[path] = sent
             del mft.review_files[path]
             changed = True
     if not mft.review_files:
@@ -355,19 +374,46 @@ def push(
         for f in report.by_state(FileState.IN_REVIEW):
             if f.path in wanted:
                 result.lines.append(
-                    f"in review {f.path} (already proposed — edit it again to push directly)"
+                    f"in review {f.path} (no local changes — already in the proposal)"
                 )
 
+    # A candidate that belongs to an open proposal keeps going to the review
+    # branch, so the (still-unapproved) PR picks up the new edits instead of them
+    # landing on cfg.branch behind the reviewer's back. Reaching cfg.branch means
+    # merging/closing the PR first — _reconcile_review then clears the state.
+    review_tree = (
+        _review_tree(client, cfg, mft.review_branch)
+        if mft.review_branch and any(f.path in mft.review_files for f in candidates)
+        else {}
+    )
+
     last_commit = ""
+    touched_review = False
+    stale_remote = False
     for index, f in enumerate(candidates):
         if index > 0 and throttle:
             sleep(throttle)  # contents-API writes trip secondary rate limits if rapid
+        in_review = bool(mft.review_branch) and f.path in mft.review_files
+        target = mft.review_branch if in_review else cfg.branch
+        base = review_tree.get(f.path) if in_review else f.base_sha
+        dest = " → review branch (PR)" if in_review else ""
+        response: dict | None = None
         if f.state is FileState.DELETED_LOCAL:
-            response = client.delete_file(
-                f.path, message or f"Delete {f.path} via mooring", cfg.branch, f.base_sha
-            )
-            mft.files.pop(f.path, None)
-            result.lines.append(f"deleted  {f.path}")
+            if not in_review:
+                response = client.delete_file(
+                    f.path, message or f"Delete {f.path} via mooring", target, base
+                )
+                mft.files.pop(f.path, None)
+                result.lines.append(f"deleted  {f.path}")
+            elif base is not None:
+                response = client.delete_file(
+                    f.path, message or f"Propose deleting {f.path} via mooring", target, base
+                )
+                mft.review_files[f.path] = None
+                result.lines.append(f"deleted  {f.path}{dest}")
+            else:
+                mft.review_files[f.path] = None
+                result.lines.append(f"deleted  {f.path} (already absent on review branch)")
         else:
             data = gitsha.read_for_push(workspace / f.path, f.path)
             size_mb = len(data) / (1024 * 1024)
@@ -383,25 +429,50 @@ def push(
                     f.path,
                     data,
                     message or f"Update {f.path} via mooring",
-                    cfg.branch,
-                    base_sha=f.base_sha,
+                    target,
+                    base_sha=base,
                 )
             except RemoteConflict:
                 result.blocked_conflicts.append(f.path)
-                result.lines.append(f"conflict {f.path} (remote changed — pull first)")
+                if base is None:
+                    # We tried to *create* the file but it already exists on the
+                    # target — our cached remote view is stale (manifest out of
+                    # sync with cfg.branch). Force the next pull to refetch.
+                    stale_remote = True
+                    reason = "already on the remote — pull first"
+                elif in_review:
+                    reason = "review branch changed — refresh and retry"
+                else:
+                    reason = "remote changed — pull first"
+                result.lines.append(f"conflict {f.path} ({reason})")
                 continue
-            mft.files[f.path] = response["content"]["sha"]
-            result.lines.append(f"pushed   {f.path}")
-        mft.review_files.pop(f.path, None)  # a direct push supersedes a stale proposal
-        commit = response.get("commit", {}).get("sha", "")
-        if commit:
-            last_commit = commit
+            if in_review:
+                mft.review_files[f.path] = response["content"]["sha"]
+            else:
+                mft.files[f.path] = response["content"]["sha"]
+                mft.review_files.pop(f.path, None)
+            result.lines.append(f"pushed   {f.path}{dest}")
+        if in_review:
+            touched_review = True
+        else:  # only cfg.branch writes advance the sync base
+            commit = (response or {}).get("commit", {}).get("sha", "")
+            if commit:
+                last_commit = commit
         result.pushed += 1
 
     if not mft.review_files:
         mft.review_branch = ""
+    if touched_review and mft.review_branch:
+        result.review_branch = mft.review_branch
+        result.compare_url = compare_url(
+            cfg.owner, cfg.repo, cfg.branch, mft.review_branch, host=cfg.host
+        )
     if last_commit:
         mft.head_commit = last_commit
+    if stale_remote:
+        # Drop the head-commit short-circuit in _remote_entries so the next pull
+        # refetches the live tree and rebuilds a consistent manifest.
+        mft.head_commit = ""
     mft.branch = cfg.branch
     manifest_mod.save(workspace, mft)
     return result
@@ -447,12 +518,7 @@ def propose(
 
     branch_name = mft.review_branch
     if branch_name:
-        review_head = client.get_branch_head(branch_name)
-        review_tree = {
-            e.path: e.sha
-            for e in client.get_tree(review_head, cfg.folders)
-            if is_synced_path(e.path)
-        }
+        review_tree = _review_tree(client, cfg, branch_name)
     else:
         # A fresh branch forks from head, so its tree is exactly `remote`.
         review_tree = dict(remote)
@@ -509,9 +575,18 @@ def propose(
                 )
             except RemoteConflict:
                 result.blocked_conflicts.append(f.path)
-                result.lines.append(
-                    f"conflict {f.path} (review branch changed — refresh and retry)"
-                )
+                if base is None:
+                    # Creating a file that already exists on cfg.branch (and thus
+                    # on the freshly-forked review branch): our cached remote view
+                    # is stale. Invalidate it so the next pull refetches and heals.
+                    mft.head_commit = ""
+                    result.lines.append(
+                        f"conflict {f.path} (already on the remote — pull first)"
+                    )
+                else:
+                    result.lines.append(
+                        f"conflict {f.path} (review branch changed — refresh and retry)"
+                    )
                 continue
             mft.review_files[f.path] = response["content"]["sha"]
             result.lines.append(f"proposed {f.path}")

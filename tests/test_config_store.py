@@ -97,3 +97,29 @@ def test_set_active_and_unknown_alias():
 def test_alias_validation_rejects(alias):
     with pytest.raises(ValueError):
         config_store.add_repo(alias, "acme", "nbs")
+
+
+def test_set_host_normalizes_and_persists():
+    config_store.add_repo("team", "acme", "nbs", client_id="cid")
+    assert config_store.set_host("https://GHE.Example.com/") == "ghe.example.com"
+    data = tomllib.loads(paths.user_config_file().read_text("utf-8"))
+    assert data["github"]["host"] == "ghe.example.com"
+    assert data["repos"]["active"] == "team"  # registry untouched
+    assert config.load_app_config().host == "ghe.example.com"
+
+
+def test_set_host_rejects_junk():
+    with pytest.raises(ValueError):
+        config_store.set_host("not a host!")
+
+
+def test_remove_all_repos_clears_registry_keeps_github():
+    config_store.add_repo("team", "acme", "nbs", client_id="cid", host="ghe.example")
+    config_store.add_repo("lab", "acme", "lab", make_active=False)
+    config_store.remove_all_repos()
+    app = config.load_app_config()
+    assert app.repos == ()
+    assert not app.config_for(None).is_configured
+    # [github] (client_id + host) survives the registry wipe
+    assert app.client_id == "cid"
+    assert app.host == "ghe.example"

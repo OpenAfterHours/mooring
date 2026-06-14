@@ -83,6 +83,19 @@ def add_repo(
     write_user_data(data)
 
 
+def set_host(host: str) -> str:
+    """Persist the global GitHub host; returns the normalized value.
+
+    Host is a single [github] setting shared by every repo, independent of the
+    [repos] registry, so this writes [github].host without materializing repos.
+    """
+    normalized = githost.normalize_host(host)
+    data = read_user_data()
+    data.setdefault("github", {})["host"] = normalized
+    write_user_data(data)
+    return normalized
+
+
 def remove_repo(alias: str) -> None:
     data = _materialized(read_user_data())
     if alias not in data["repos"] or alias in RESERVED_ALIASES:
@@ -94,6 +107,18 @@ def remove_repo(alias: str) -> None:
             data["repos"]["active"] = remaining[0]
         else:
             data["repos"].pop("active", None)
+    write_user_data(data)
+
+
+def remove_all_repos() -> None:
+    """Clear the entire repo registry. Workspaces and the saved token are kept.
+
+    An explicit empty [repos] is authoritative — it also overrides any
+    owner/repo baked into the packaged default (repo_specs_from_data treats a
+    present [repos] section as the whole truth).
+    """
+    data = read_user_data()
+    data["repos"] = {}
     write_user_data(data)
 
 

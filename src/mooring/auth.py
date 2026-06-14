@@ -40,6 +40,26 @@ class AuthError(Exception):
     pass
 
 
+def device_flow_hint(host: str, exc: Exception) -> str:
+    """A friendly one-line explanation for a failed device-code request.
+
+    Names the host (and HTTP status, if any) so a misrouted login is obvious,
+    and only suggests setting a host when the request went to the default
+    github.com — a real GHE host that 404s has a different cause (device flow
+    disabled, or a client_id from the wrong instance).
+    """
+    status = getattr(getattr(exc, "response", None), "status_code", None)
+    head = f"Couldn't start GitHub login against {host}"
+    head += f" (HTTP {status})." if status else f": {exc}"
+    if host == githost.DEFAULT_HOST:
+        head += (
+            " If this repo is on GitHub Enterprise, set its host: run "
+            '`mooring login --host ghe.example.com`, or add `host = "ghe.example.com"` '
+            "under [github] in your config."
+        )
+    return head
+
+
 @dataclass
 class DeviceCode:
     device_code: str
