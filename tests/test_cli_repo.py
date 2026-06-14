@@ -58,6 +58,29 @@ def test_repo_use_unknown_alias_exits():
     assert "Unknown repo alias" in str(exc.value)
 
 
+def test_cleared_registry_with_legacy_github_shows_no_phantom_repo(capsys):
+    """After clearing all repos, a still-populated legacy [github] section must
+    not resurrect a phantom repo in 'repo list' or contradict 'repo remove'.
+
+    Regression for the reported 'Unknown repo alias notebooks. Known: notebooks'
+    self-contradiction: 'list' must report no repos, and 'remove' of the old
+    name must report 'Known: (none)' rather than listing the phantom.
+    """
+    paths.user_config_file().parent.mkdir(parents=True, exist_ok=True)
+    paths.user_config_file().write_text(
+        '[github]\nclient_id = "cid"\nowner = "ShipsAfterHours"\nrepo = "notebooks"\n'
+        'branch = "master"\n[repos]\n',
+        "utf-8",
+    )
+    assert cli.main(["repo", "list"]) == 0
+    assert "No repos registered" in capsys.readouterr().out
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["repo", "remove", "notebooks"])
+    assert "Known: (none)" in str(exc.value)
+    assert "Known: notebooks" not in str(exc.value)
+
+
 def test_repo_remove_all(capsys):
     cli.main(["repo", "add", "acme/nbs"])
     cli.main(["repo", "add", "acme/lab", "--no-use"])

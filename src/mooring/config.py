@@ -194,15 +194,23 @@ def load_app_config(
     if specs and overrides:
         specs = tuple(replace(s, **overrides) if s.alias == active else s for s in specs)
     elif not specs:
-        owner = env.get("MOORING_OWNER", str(gh.get("owner", "")))
-        repo = env.get("MOORING_REPO", str(gh.get("repo", "")))
+        # No repos resolved from config. Env vars may still define a one-off
+        # repo, but the legacy v0.1 [github] owner/repo apply *only* when there
+        # is no [repos] section at all: a present (even empty) [repos] section
+        # is the whole truth, so it must not resurrect the legacy [github] repo.
+        # (That resurrection is what made a cleared registry — 'repo remove
+        # --all' writes [repos]={} — still surface the old repo in the hub.)
+        legacy_gh = {} if "repos" in data else gh
+        legacy_ws = {} if "repos" in data else ws
+        owner = env.get("MOORING_OWNER", str(legacy_gh.get("owner", "")))
+        repo = env.get("MOORING_REPO", str(legacy_gh.get("repo", "")))
         if owner or repo:
             spec = RepoSpec(
                 alias=repo or owner,
                 owner=owner,
                 repo=repo,
-                branch=env.get("MOORING_BRANCH", str(gh.get("branch", "main") or "main")),
-                workspace_path=env.get("MOORING_WORKSPACE", str(ws.get("path", ""))),
+                branch=env.get("MOORING_BRANCH", str(legacy_gh.get("branch", "main") or "main")),
+                workspace_path=env.get("MOORING_WORKSPACE", str(legacy_ws.get("path", ""))),
             )
             specs, active = (spec,), spec.alias
 

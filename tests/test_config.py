@@ -140,6 +140,42 @@ def test_config_for_unknown_alias_raises(tmp_path):
         app.config_for("nope")
 
 
+def test_empty_repos_section_disables_legacy_github_owner_repo(tmp_path):
+    """A present-but-empty [repos] section is authoritative: it must NOT
+    resurrect the legacy [github] owner/repo into a phantom repo.
+
+    Regression for the 'phantom notebooks repo' bug: after clearing every repo
+    (remove_all_repos writes [repos]={}), the still-populated legacy [github]
+    owner/repo must stay disabled, so the hub shows no repo and 'repo remove'
+    has nothing left to contradict itself over.
+    """
+    user = tmp_path / "config.toml"
+    user.write_text(
+        '[github]\nclient_id = "cid"\nowner = "ShipsAfterHours"\nrepo = "notebooks"\n'
+        'branch = "master"\n[repos]\n',
+        "utf-8",
+    )
+    app = load_app_config(user_config_path=user, env={})
+    assert app.aliases == []  # no phantom "notebooks"
+    assert app.active_alias == ""
+    assert app.repos == ()
+    assert not app.config_for(None).is_configured
+    assert app.client_id == "cid"  # the global [github] client_id is still honoured
+
+
+def test_env_owner_repo_defines_oneoff_even_with_empty_repos_section(tmp_path):
+    """An empty [repos] disables the legacy [github] repo, but an explicit
+    MOORING_OWNER/MOORING_REPO env override can still mint a one-off repo."""
+    user = tmp_path / "config.toml"
+    user.write_text('[github]\nowner = "old"\nrepo = "legacy"\n[repos]\n', "utf-8")
+    app = load_app_config(
+        user_config_path=user,
+        env={"MOORING_OWNER": "envowner", "MOORING_REPO": "envrepo"},
+    )
+    assert app.aliases == ["envrepo"]  # env wins, not the legacy old/legacy
+    assert app.config_for(None).repo_slug == "envowner/envrepo"
+
+
 def test_active_repo_env_override(tmp_path):
     user = tmp_path / "config.toml"
     user.write_text(REPOS_TOML, "utf-8")
