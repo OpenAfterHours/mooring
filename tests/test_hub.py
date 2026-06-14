@@ -15,7 +15,7 @@ def unconfigured_client(tmp_path, monkeypatch):
     monkeypatch.delenv("MOORING_TOKEN", raising=False)
     monkeypatch.delenv("MOORING_GITHUB_HOST", raising=False)
     # No client_id, so unconfigured — but with a tmp workspace to keep file
-    # endpoints away from the real Documents folder.
+    # endpoints away from the real default workspace folder.
     spec = config.RepoSpec(alias="ws", owner="", repo="", workspace_path=str(tmp_path / "ws"))
     hub = Hub(config.AppConfig(repos=(spec,), active_alias="ws"))
     with TestClient(create_app(hub)) as client:

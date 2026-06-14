@@ -24,21 +24,27 @@ def user_log_dir() -> Path:
 
 def default_workspace(owner: str, repo: str) -> Path:
     # Keyed by owner AND repo so same-named repos under different owners
-    # don't share a workspace.
-    return Path(platformdirs.user_documents_dir()) / APP_NAME / owner / repo
+    # don't share a workspace. Lives under ~/PythonProjects in the user's home
+    # directory rather than Documents, which Windows redirects into OneDrive
+    # where cloud sync corrupts mooring's state (see synced_folder_provider).
+    return Path.home() / "PythonProjects" / APP_NAME / owner / repo
 
 
-def legacy_workspace(repo: str) -> Path:
-    """The pre-multi-repo default (keyed by repo name only), kept for hints."""
-    return Path(platformdirs.user_documents_dir()) / APP_NAME / repo
+def legacy_workspaces(owner: str, repo: str) -> tuple[Path, ...]:
+    """Past default workspace locations (under Documents), newest first, kept so
+    we can hint existing users to migrate to the current default_workspace():
+    the owner-keyed Documents default, then the pre-multi-repo repo-only key."""
+    docs = Path(platformdirs.user_documents_dir()) / APP_NAME
+    return (docs / owner / repo, docs / repo)
 
 
 def synced_folder_provider(workspace: Path) -> str:
     """Name of the cloud-sync service the workspace sits inside, or "" — these
     revert/merge files (including .mooring/manifest.json) behind mooring's back,
-    which corrupts sync state. Windows redirects Documents into OneDrive, so the
-    default workspace silently lands there. Matched conservatively per path
-    component to avoid false positives (e.g. "sandbox", "toolbox")."""
+    which corrupts sync state. The default workspace lives under ~/PythonProjects
+    to steer clear of these, but a user-set 'workspace' can still land in one.
+    Matched conservatively per path component to avoid false positives
+    (e.g. "sandbox", "toolbox")."""
     for part in (p.lower() for p in workspace.parts):
         if part.startswith("onedrive"):  # "OneDrive", "OneDrive - Contoso"
             return "OneDrive"

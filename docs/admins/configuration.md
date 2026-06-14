@@ -81,7 +81,7 @@ direction.
 
 | Key | Default | Meaning |
 |-----|---------|---------|
-| `path` | `""` | Override the workspace location (single-repo form; with `[repos]`, use the per-repo `workspace` key). Empty means `~/Documents/mooring/<owner>/<repo>`. Supports `~` expansion. |
+| `path` | `""` | Override the workspace location (single-repo form; with `[repos]`, use the per-repo `workspace` key). Empty means `~/PythonProjects/mooring/<owner>/<repo>`. Supports `~` expansion. |
 
 ### `[logging]`
 
@@ -108,7 +108,7 @@ warn_file_mb = 10
 max_file_mb = 45
 
 [workspace]
-path = ""                  # empty = ~/Documents/mooring/<owner>/<repo>
+path = ""                  # empty = ~/PythonProjects/mooring/<owner>/<repo>
 
 [logging]
 endpoint = ""              # optional; see Central logging below

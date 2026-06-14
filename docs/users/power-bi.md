@@ -18,7 +18,7 @@ friendly way Power BI Desktop saves reports (not the binary `.pbix`).
 3. Save it inside your mooring workspace, in the `reports` folder:
 
     ```
-    Documents\mooring\<owner>\<repo>\reports\Sales.pbip
+    PythonProjects\mooring\<owner>\<repo>\reports\Sales.pbip
     ```
 
 Desktop creates three things next to each other:
