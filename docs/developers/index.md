@@ -70,7 +70,7 @@ src/mooring/
 ## Key design choices
 
 - **No git, ever.** Everything goes through the GitHub REST API, so analysts
-  need only Python 3.12.
+  need only Python 3.12 or newer.
 - **Conflicts are never silent.** Pull skips conflicted files; push relies on
   GitHub's SHA check to reject stale writes.
 - **Frozen package stack.** What a notebook can import is fixed at build time;

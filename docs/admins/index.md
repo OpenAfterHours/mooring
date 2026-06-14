@@ -12,7 +12,7 @@ section walks through each step.
 
 Once you've done the setup below, an analyst's entire experience is:
 
-1. Install Python 3.12.
+1. Install Python 3.13 (the version your build targets).
 2. Run the app file you gave them.
 3. Log in with a GitHub device code.
 4. Pull / edit / push.

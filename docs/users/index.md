@@ -4,18 +4,20 @@ icon: lucide/play
 
 # Install & first run
 
-This page gets you from nothing to a running hub. You only need **Python 3.12**
+This page gets you from nothing to a running hub. You only need **Python 3.13**
 and the `mooring` app file your admin gave you — no git, no pip, no admin
 rights.
 
-## 1. Install Python 3.12
+## 1. Install Python 3.13
 
-Mooring is pinned to Python **3.12.x**. A newer or older Python won't run a
-3.12 build (the app shows a clear error if so).
+Each Mooring build targets one exact Python minor version, fixed when the app is
+built — the builds you'll receive target **3.13.x**. Any 3.13 patch release works,
+but a newer or older minor (e.g. 3.12 or 3.14) won't run a 3.13 build and will
+exit with a clear message telling you which version to install.
 
 === "Windows"
 
-    1. Download Python 3.12 from
+    1. Download Python 3.13 from
        [python.org/downloads](https://www.python.org/downloads/).
     2. Run the installer and **tick *“Add python.exe to PATH”*** on the first
        screen.
@@ -23,24 +25,24 @@ Mooring is pinned to Python **3.12.x**. A newer or older Python won't run a
 
         ```powershell
         python --version
-        # Python 3.12.x
+        # Python 3.13.x
         ```
 
 === "macOS"
 
     ```bash
     # with Homebrew
-    brew install python@3.12
-    python3.12 --version
+    brew install python@3.13
+    python3.13 --version
     ```
 
 === "Linux"
 
-    Use your distro's package (e.g. `apt install python3.12`) or
+    Use your distro's package (e.g. `apt install python3.13`) or
     [pyenv](https://github.com/pyenv/pyenv). Confirm with:
 
     ```bash
-    python3.12 --version
+    python3.13 --version
     ```
 
 ## 2. Get the app
@@ -49,8 +51,8 @@ Your admin distributes one of these — put it anywhere, e.g. your Desktop:
 
 | File | Run it with | Needs Python? |
 |------|-------------|---------------|
-| `mooring.exe` | double-click, or `mooring.exe` | Yes (3.12) |
-| `mooring.pyz` | `python mooring.pyz` | Yes (3.12) |
+| `mooring.exe` | double-click, or `mooring.exe` | Yes (3.13) |
+| `mooring.pyz` | `python mooring.pyz` | Yes (3.13) |
 | `mooring-bundle/` folder | run the launcher inside | **No** — Python is embedded |
 
 !!! note "First launch is slow"

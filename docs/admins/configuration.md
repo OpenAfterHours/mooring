@@ -221,7 +221,7 @@ Python version, and the GitHub login** (added once the user has logged in).
 ```json
 {"ts":"2026-06-13T12:34:56.789Z","event":"push","version":"0.2.2",
  "os_user":"jdoe","host":"FIN-LT-042","os":"Windows-11-10.0.26200",
- "python":"3.12.4","user":"octocat","pushed":3,"conflicts":0,"lines":4}
+ "python":"3.13.7","user":"octocat","pushed":3,"conflicts":0,"lines":4}
 ```
 
 Events cover the app/command start, login/logout, repo add/switch/remove,
