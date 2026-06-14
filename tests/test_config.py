@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import platformdirs
 import pytest
 
 from mooring import paths
@@ -188,3 +189,36 @@ def test_default_workspace_keyed_by_owner():
     b = paths.default_workspace("phil", "notebooks")
     assert a != b
     assert a.name == "notebooks" and a.parent.name == "acme"
+
+
+def test_default_workspace_under_pythonprojects():
+    ws = paths.default_workspace("acme", "notebooks")
+    assert ws == Path.home() / "PythonProjects" / "mooring" / "acme" / "notebooks"
+    # The default must stay out of Documents (Windows redirects it into OneDrive).
+    assert "Documents" not in ws.parts
+
+
+def test_legacy_workspaces_point_at_documents():
+    owner_keyed, repo_keyed = paths.legacy_workspaces("acme", "notebooks")
+    docs = Path(platformdirs.user_documents_dir())
+    assert owner_keyed == docs / "mooring" / "acme" / "notebooks"
+    assert repo_keyed == docs / "mooring" / "notebooks"
+
+
+def test_legacy_hint_points_documents_users_to_new_default(tmp_path, monkeypatch):
+    from mooring import cli
+    from mooring.config import Config
+
+    old = tmp_path / "Documents" / "mooring" / "acme" / "nbs"
+    new = tmp_path / "PythonProjects" / "mooring" / "acme" / "nbs"
+    (old / ".mooring").mkdir(parents=True)  # existing sync history under Documents
+    monkeypatch.setattr(paths, "default_workspace", lambda o, r: new)
+    monkeypatch.setattr(paths, "legacy_workspaces", lambda o, r: (old,))
+
+    cfg = Config(owner="acme", repo="nbs")
+    hint = cli.legacy_workspace_hint(cfg)
+    assert str(old) in hint and str(new) in hint
+
+    # Once the files live at the new default, the hint goes quiet.
+    (new / ".mooring").mkdir(parents=True)
+    assert cli.legacy_workspace_hint(cfg) == ""

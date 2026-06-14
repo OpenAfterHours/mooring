@@ -21,7 +21,7 @@ host = "github.com"  # GitHub Enterprise: your instance's host, e.g. ghe.example
 # owner = "acme"
 # repo = "notebooks"
 # branch = "main"
-# workspace = ""   # optional override; empty = ~/Documents/mooring/<owner>/<repo>
+# workspace = ""   # optional override; empty = ~/PythonProjects/mooring/<owner>/<repo>
 
 [sync]
 folders = ["notebooks", "data", "reports"]
@@ -29,7 +29,7 @@ warn_file_mb = 10
 max_file_mb = 45
 
 [workspace]
-path = ""        # empty = ~/Documents/mooring/<owner>/<repo>
+path = ""        # empty = ~/PythonProjects/mooring/<owner>/<repo>
 
 # Central logging. Set `endpoint` to collect usage events and errors from every
 # copy of the app in one place. The value is auto-detected:

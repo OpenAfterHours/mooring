@@ -86,17 +86,17 @@ Notebooks, data, and reports sync into your home folder:
 === "Windows"
 
     ```
-    Documents\mooring\<owner>\<repo>\notebooks\   ← .py notebooks
-    Documents\mooring\<owner>\<repo>\data\        ← data files your notebooks read
-    Documents\mooring\<owner>\<repo>\reports\     ← Power BI projects (.pbip)
+    PythonProjects\mooring\<owner>\<repo>\notebooks\   ← .py notebooks
+    PythonProjects\mooring\<owner>\<repo>\data\        ← data files your notebooks read
+    PythonProjects\mooring\<owner>\<repo>\reports\     ← Power BI projects (.pbip)
     ```
 
 === "macOS / Linux"
 
     ```
-    ~/Documents/mooring/<owner>/<repo>/notebooks/
-    ~/Documents/mooring/<owner>/<repo>/data/
-    ~/Documents/mooring/<owner>/<repo>/reports/
+    ~/PythonProjects/mooring/<owner>/<repo>/notebooks/
+    ~/PythonProjects/mooring/<owner>/<repo>/data/
+    ~/PythonProjects/mooring/<owner>/<repo>/reports/
     ```
 
 `<owner>/<repo>` mirrors your team repository's GitHub address. All synced

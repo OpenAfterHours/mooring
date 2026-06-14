@@ -158,16 +158,19 @@ def _print_paths(cfg: config.Config) -> None:
 
 
 def legacy_workspace_hint(cfg: config.Config) -> str:
-    """Warn when a pre-multi-repo workspace exists but the new default doesn't."""
+    """Warn when files live at a past default location but the current default
+    doesn't exist yet, so the user can migrate and keep their sync history."""
     if not cfg.repo or cfg.workspace_path:
         return ""
-    old = paths.legacy_workspace(cfg.repo)
     new = cfg.workspace()
-    if old != new and (old / ".mooring").is_dir() and not (new / ".mooring").is_dir():
-        return (
-            f"Found an old workspace at {old} — move the folder to {new} "
-            "(or set its 'workspace' in the config) to keep your sync history."
-        )
+    if (new / ".mooring").is_dir():
+        return ""
+    for old in paths.legacy_workspaces(cfg.owner or "_", cfg.repo):
+        if old != new and (old / ".mooring").is_dir():
+            return (
+                f"Found an old workspace at {old} — move the folder to {new} "
+                "(or set its 'workspace' in the config) to keep your sync history."
+            )
     return ""
 
 
