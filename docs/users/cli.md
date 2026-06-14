@@ -14,13 +14,14 @@ Running the app with **no command** opens the browser hub.
 
 ```
 python mooring.pyz hub [--no-browser] [--port PORT]
-python mooring.pyz login
+python mooring.pyz login [--host HOST]
 python mooring.pyz logout
 python mooring.pyz whoami
 python mooring.pyz repo list
-python mooring.pyz repo add owner/name [--alias NAME] [--branch BR] [--no-use]
+python mooring.pyz repo add owner/name [--alias NAME] [--branch BR]
+                            [--workspace PATH] [--host HOST] [--no-use]
 python mooring.pyz repo use <alias>
-python mooring.pyz repo remove <alias>
+python mooring.pyz repo remove <alias> | repo remove --all
 python mooring.pyz status [--repo ALIAS]
 python mooring.pyz pull [--theirs | --keep-both] [--repo ALIAS]
 python mooring.pyz push [paths...] [-m "message"] [--repo ALIAS]
@@ -44,6 +45,13 @@ Start the local browser hub (the default when you run with no command).
 
 - `login` — start GitHub device-flow login: open the printed URL, enter the
   code, and the token is saved to your OS credential store.
+    - `--host HOST` — log in to a **GitHub Enterprise** instance instead of
+      public github.com, e.g. `login --host ghe.example.com` (a full URL like
+      `https://ghe.example.com/` works too). The host is saved as the global
+      host — it applies to *every* registered repo — and the device-flow login
+      then runs against it. Omit the flag for github.com. Tokens are stored
+      **per host**, so after switching hosts you log in again. See
+      [GitHub Enterprise](../admins/github-setup.md#github-enterprise).
 - `logout` — forget the stored token.
 - `whoami` — print the logged-in GitHub username.
 
@@ -55,11 +63,14 @@ Manage the registered team repos (see
 - `repo list` — show every registered repo; `*` marks the active one.
 - `repo add owner/name` — register a repo and switch to it. Options:
   `--alias NAME` (short name, defaults to the repo name), `--branch BRANCH`,
-  `--workspace PATH` (custom local folder), `--no-use` (register without
-  switching).
+  `--workspace PATH` (custom local folder),
+  `--host HOST` (a [GitHub Enterprise](../admins/github-setup.md#github-enterprise)
+  host, saved as the global host — one host per installation),
+  `--no-use` (register without switching).
 - `repo use <alias>` — switch the active repo.
 - `repo remove <alias>` — forget a repo. Its local workspace folder is kept;
-  delete it manually if you no longer want the files.
+  delete it manually if you no longer want the files. Use `repo remove --all`
+  to forget every registered repo at once.
 
 `status`, `pull`, `push`, `propose`, `open`, and `new` accept `--repo ALIAS`
 to act on a registered repo **without** switching the active one.
@@ -120,9 +131,19 @@ branch, so the changes can be reviewed as a pull request (see
 
 ### `selftest`
 
-Verify the bundled environment: checks each frozen package imports, prints your
-config-file / workspace / log locations, the active `PYTHONPATH`, and whether a
-team repo is configured. Useful for diagnosing a machine.
+Verify the bundled environment and print a diagnostic snapshot of the machine:
+
+- each frozen package and its version (a `FAIL` line if one won't import),
+- your config-file / workspace / log locations,
+- the active `PYTHONPATH`,
+- the **TLS trust** mode — OS trust store, or disabled via `MOORING_TRUSTSTORE=0`
+  (see [Corporate networks & TLS](../admins/configuration.md#corporate-networks-tls)),
+- the central-**logging** destination, or `off` when none is configured
+  (see [Central logging](../admins/configuration.md#central-logging)),
+- the configured **team repo**, with its branch and host.
+
+Useful for diagnosing a machine — share the output with your admin when login or
+sync misbehaves.
 
 ### `version`
 

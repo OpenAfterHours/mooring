@@ -16,17 +16,24 @@ per file (never silently overwritten).
 
 ## How it works
 
-- **One shared team repo** (e.g. `your-org/notebooks`) holds `notebooks/`
-  and `data/` folders. Everyone pulls from and pushes to it.
+- **One shared team repo** (e.g. `your-org/notebooks`) holds `notebooks/`,
+  `data/`, and `reports/` folders. Everyone pulls from and pushes to it.
 - **No git anywhere.** Pull walks the repo tree via the GitHub Git Data API
   and downloads only changed blobs; push uses the Contents API with the
   file's last-known SHA, so GitHub itself rejects writes that would clobber
   someone else's change.
 - **Conflicts are explicit.** Pull never overwrites local edits; push blocks
   conflicted files, offering per-file resolution.
+- **Push or propose.** Push commits straight to the shared branch; **propose**
+  sends changes to a personal review branch so they can land via a pull
+  request — protect the branch and propose becomes the only way in.
 - **Frozen package stack.** Notebooks can import anything bundled into the
   artifact (`polars`, `altair`, `plotly`, `openpyxl`, `fastexcel`,
   `requests`, plus the standard library). There is no pip at runtime.
+- **Works on corporate GitHub.** GitHub Enterprise instances are supported
+  (`mooring login --host ghe.example.com`), and TLS is verified against the
+  OS trust store, so SSL-intercepting proxies with an IT-installed root CA
+  just work.
 
 ## Documentation
 

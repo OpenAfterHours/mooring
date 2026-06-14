@@ -77,6 +77,16 @@ Your admin distributes one of these — put it anywhere, e.g. your Desktop:
     logged in between runs. See [GitHub setup](../admins/github-setup.md) for
     the admin side.
 
+!!! note "On GitHub Enterprise?"
+
+    If your team uses a GitHub Enterprise instance rather than public
+    github.com, the hub's setup card has a **GitHub URL** field for it (asked
+    once, on first setup). From a terminal, point mooring at your instance with
+    `mooring login --host ghe.example.com` before logging in (a full URL works
+    too). Tokens are kept per host, so this is also how you switch instances.
+    See [GitHub Enterprise](../admins/github-setup.md#github-enterprise) and the
+    [`login` reference](cli.md#login-logout-whoami).
+
 ## Next steps
 
 - [Daily workflow](daily-workflow.md) — pull, open, edit, push, and create
