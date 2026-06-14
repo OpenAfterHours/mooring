@@ -211,7 +211,9 @@ class Hub:
         try:
             device = auth.start_device_flow(self.cfg.client_id, host=self.cfg.host)
         except Exception as exc:  # noqa: BLE001 - shown in the UI
-            return JSONResponse({"error": str(exc)}, status_code=502)
+            return JSONResponse(
+                {"error": auth.device_flow_hint(self.cfg.host, exc)}, status_code=502
+            )
         with self._lock:
             self._device = device
             self._poll_interval = device.interval

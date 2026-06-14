@@ -58,6 +58,83 @@ def test_repo_use_unknown_alias_exits():
     assert "Unknown repo alias" in str(exc.value)
 
 
+def test_repo_remove_all(capsys):
+    cli.main(["repo", "add", "acme/nbs"])
+    cli.main(["repo", "add", "acme/lab", "--no-use"])
+    assert cli.main(["repo", "remove", "--all"]) == 0
+    out = capsys.readouterr().out
+    assert "Removed all 2 repo(s)" in out
+    data = tomllib.loads(paths.user_config_file().read_text("utf-8"))
+    assert data["repos"] == {}
+
+
+def test_repo_remove_all_when_empty(capsys):
+    assert cli.main(["repo", "remove", "--all"]) == 0
+    assert "No repos registered." in capsys.readouterr().out
+
+
+def test_repo_remove_requires_alias_or_all():
+    cli.main(["repo", "add", "acme/nbs"])
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["repo", "remove"])
+    assert "Specify a repo alias" in str(exc.value)
+
+
+def test_login_with_host_persists_and_uses_it(capsys, monkeypatch):
+    from mooring import auth, github
+
+    monkeypatch.setenv("MOORING_CLIENT_ID", "cid")
+    seen = {}
+
+    def fake_start(client_id, host="github.com", **kw):
+        seen["host"] = host
+        return auth.DeviceCode("d", "ABCD-1234", "https://x/login/device", 5, 900, host=host)
+
+    monkeypatch.setattr(auth, "start_device_flow", fake_start)
+    monkeypatch.setattr(auth, "poll_for_token", lambda *a, **k: "gho_tok")
+    monkeypatch.setattr(auth, "save_token", lambda *a, **k: None)
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            pass
+
+        def get_user(self):
+            return {"login": "octo"}
+
+    monkeypatch.setattr(github, "GitHubClient", FakeClient)
+
+    assert cli.main(["login", "--host", "https://GHE.Example/"]) == 0
+    assert seen["host"] == "ghe.example"  # normalized host passed to the flow
+    data = tomllib.loads(paths.user_config_file().read_text("utf-8"))
+    assert data["github"]["host"] == "ghe.example"  # and persisted
+    out = capsys.readouterr().out
+    assert "Saved GitHub host: ghe.example" in out
+    assert "Requesting device code from ghe.example" in out
+
+
+def test_login_failure_shows_enterprise_hint(monkeypatch):
+    import requests
+
+    from mooring import auth
+
+    monkeypatch.setenv("MOORING_CLIENT_ID", "cid")
+
+    class Resp:
+        status_code = 404
+
+    def boom(*a, **k):
+        err = requests.HTTPError("404 ...")
+        err.response = Resp()
+        raise err
+
+    monkeypatch.setattr(auth, "start_device_flow", boom)
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["login"])  # no --host → default github.com
+    msg = str(exc.value)
+    assert "github.com" in msg
+    assert "GitHub Enterprise" in msg
+
+
 def test_repo_add_malformed_slug_exits():
     with pytest.raises(SystemExit):
         cli.main(["repo", "add", "just-a-name"])

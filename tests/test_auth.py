@@ -58,6 +58,35 @@ def test_device_flow_on_enterprise_host():
     assert auth.poll_once("client123", device).token == "gho_ghe"
 
 
+class _Resp:
+    def __init__(self, status_code):
+        self.status_code = status_code
+
+
+def test_device_flow_hint_default_host_suggests_enterprise():
+    exc = Exception("boom")
+    exc.response = _Resp(404)
+    msg = auth.device_flow_hint("github.com", exc)
+    assert "github.com" in msg
+    assert "404" in msg
+    assert "GitHub Enterprise" in msg
+    assert "--host" in msg
+
+
+def test_device_flow_hint_enterprise_host_no_suggestion():
+    exc = Exception("boom")
+    exc.response = _Resp(404)
+    msg = auth.device_flow_hint("ghe.example", exc)
+    assert "ghe.example" in msg
+    assert "404" in msg
+    assert "GitHub Enterprise" not in msg
+
+
+def test_device_flow_hint_without_status_uses_message():
+    msg = auth.device_flow_hint("ghe.example", Exception("connection refused"))
+    assert "connection refused" in msg
+
+
 @responses.activate
 def test_poll_until_token_with_slow_down():
     responses.add(responses.POST, auth.token_url(), json={"error": "authorization_pending"})
