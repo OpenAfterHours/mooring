@@ -1,6 +1,7 @@
 """Sync engine tests against an in-memory fake of the GitHub client."""
 
 import time
+from dataclasses import replace
 
 import pytest
 from conftest import FakeClient, read_local, write_local
@@ -504,9 +505,97 @@ def test_scan_skips_scratch_and_hidden_files(cfg):
     write_local(cfg, "notebooks/a.py", "a\n")
     write_local(cfg, "notebooks/a.remote-1234567.py", "scratch\n")
     write_local(cfg, "notebooks/__pycache__/a.cpython-312.pyc", "junk")
+    write_local(cfg, "notebooks/__marimo__/session.json", "junk")  # marimo session state
     write_local(cfg, "notebooks/.hidden", "junk")
     found = sync.scan_local(cfg.workspace(), cfg.folders)
     assert set(found) == {"notebooks/a.py"}
+
+
+def test_custom_exclude_hides_local_files(cfg):
+    cfg = replace(cfg, exclude=("*.tmp", "scratch", "data/secret/*"))
+    write_local(cfg, "notebooks/keep.py", "a\n")
+    write_local(cfg, "notebooks/build.tmp", "junk\n")  # bare *.tmp glob, any depth
+    write_local(cfg, "notebooks/scratch/draft.py", "junk\n")  # bare name matches a folder
+    write_local(cfg, "data/secret/key.csv", "junk\n")  # path glob with "/"
+    write_local(cfg, "data/public.csv", "ok\n")
+    found = sync.scan_local(cfg.workspace(), cfg.folders, cfg.exclude)
+    assert set(found) == {"notebooks/keep.py", "data/public.csv"}
+
+
+def test_exclude_applies_to_remote_tree_on_pull(cfg):
+    # Built-in (__marimo__) and configured (*.tmp) excludes must hide remote
+    # files too, or pull would record them and the next push delete them.
+    cfg = replace(cfg, exclude=("*.tmp",))
+    client = FakeClient(
+        {
+            "notebooks/a.py": b"print(1)\n",
+            "notebooks/__marimo__/session.json": b"{}",
+            "notebooks/build.tmp": b"junk",
+        }
+    )
+    result = sync.pull(client, cfg)
+    assert result.pulled == 1
+    assert set(manifest.load(cfg.workspace()).files) == {"notebooks/a.py"}
+
+
+def test_trailing_slash_exclude_matches_like_bare_form(cfg):
+    # "scratch/" is the gitignore directory idiom; it must behave like "scratch".
+    cfg = replace(cfg, exclude=("scratch/",))
+    write_local(cfg, "notebooks/keep.py", "a\n")
+    write_local(cfg, "notebooks/scratch/draft.py", "junk\n")
+    found = sync.scan_local(cfg.workspace(), cfg.folders, cfg.exclude)
+    assert set(found) == {"notebooks/keep.py"}
+
+
+def test_slash_exclude_applies_to_remote_tree_on_pull(cfg):
+    # The "/"-form branch of the matcher must filter the remote tree too, not
+    # just the local scan (which test_custom_exclude_hides_local_files covers).
+    cfg = replace(cfg, exclude=("reports/drafts/*",))
+    client = FakeClient(
+        {
+            "notebooks/a.py": b"print(1)\n",
+            "reports/drafts/x.py": b"draft\n",  # under the slash glob
+            "reports/drafts/sub/deep.py": b"deep\n",  # "*" spans "/", so also hidden
+            "reports/final.md": b"keep\n",  # sibling outside the glob
+        }
+    )
+    result = sync.pull(client, cfg)
+    assert result.pulled == 2
+    assert set(manifest.load(cfg.workspace()).files) == {"notebooks/a.py", "reports/final.md"}
+    assert "reports/drafts/x.py" not in [f.path for f in sync.status(client, cfg).files]
+
+
+def test_exclude_added_after_sync_not_phantom_deleted(cfg):
+    # An exclude added once a file is already in the manifest forces the
+    # _remote_entries head==mft.head_commit short-circuit to filter it. If that
+    # branch dropped the filter, the path would surface as DELETED_LOCAL and the
+    # next push would delete a teammate's file remotely (the thrash bug).
+    client = FakeClient({"notebooks/a.py": b"a\n", "notebooks/old.tmp": b"junk"})
+    sync.pull(client, cfg)  # no exclude yet: both land in the manifest
+    assert manifest.load(cfg.workspace()).head_commit == client.head
+    cfg = replace(cfg, exclude=("*.tmp",))  # added later; branch head unchanged
+    report = sync.status(client, cfg)
+    assert "notebooks/old.tmp" not in {f.path for f in report.files}
+    result = sync.push(client, cfg, sleep=lambda s: None)
+    assert result.pushed == 0
+    assert "notebooks/old.tmp" in client.tree  # not phantom-deleted
+
+
+def test_exclude_added_mid_proposal_keeps_delete_review_record(cfg):
+    # Excluding a path with an open delete-proposal must not be misread as a
+    # merge: the absence from `remote` is the filter's doing, not the PR's.
+    client = FakeClient({"notebooks/a.py": b"a\n", "notebooks/b.py": b"b\n"})
+    sync.pull(client, cfg)
+    (cfg.workspace() / "notebooks/b.py").unlink()  # delete locally
+    sync.propose(client, cfg, sleep=lambda s: None)  # proposes the deletion
+    mft = manifest.load(cfg.workspace())
+    assert mft.review_branch and "notebooks/b.py" in mft.review_files
+    # Add an exclude matching the proposed-for-deletion path while the PR is open.
+    cfg = replace(cfg, exclude=("b.py",))
+    sync.status(client, cfg)
+    after = manifest.load(cfg.workspace())
+    assert after.review_branch == mft.review_branch  # PR tracking survives
+    assert "notebooks/b.py" in after.review_files
 
 
 def test_crlf_local_file_counts_as_synced(cfg):

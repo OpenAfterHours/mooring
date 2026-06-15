@@ -25,6 +25,14 @@ host = "github.com"  # GitHub Enterprise: your instance's host, e.g. ghe.example
 
 [sync]
 folders = ["notebooks", "data", "reports"]
+# Extra paths to keep out of GitHub, on top of the always-skipped ones
+# (dotfiles, __pycache__, marimo's __marimo__ session folder). Case-sensitive
+# globs: a bare pattern matches any path segment at any depth (e.g. "*.tmp",
+# "scratch"; a trailing "/" like "scratch/" works too); one containing "/"
+# matches the whole path, where "*" spans "/" (so "reports/drafts/*" also hides
+# "reports/drafts/sub/deep.py"). A bare pattern equal to a folders name hides
+# that whole synced folder.
+exclude = []
 warn_file_mb = 10
 max_file_mb = 45
 

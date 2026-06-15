@@ -26,6 +26,7 @@ class Config:
     branch: str = "main"
     host: str = githost.DEFAULT_HOST
     folders: tuple[str, ...] = ("notebooks", "data", "reports")
+    exclude: tuple[str, ...] = ()
     warn_file_mb: int = 10
     max_file_mb: int = 45
     workspace_path: str = ""
@@ -64,6 +65,7 @@ class AppConfig:
     active_alias: str = ""
     host: str = githost.DEFAULT_HOST
     folders: tuple[str, ...] = ("notebooks", "data", "reports")
+    exclude: tuple[str, ...] = ()
     warn_file_mb: int = 10
     max_file_mb: int = 45
     log_endpoint: str = ""
@@ -91,6 +93,7 @@ class AppConfig:
                     client_id=self.client_id,
                     host=self.host,
                     folders=self.folders,
+                    exclude=self.exclude,
                     warn_file_mb=self.warn_file_mb,
                     max_file_mb=self.max_file_mb,
                 )
@@ -103,10 +106,29 @@ class AppConfig:
             branch=s.branch,
             host=self.host,
             folders=self.folders,
+            exclude=self.exclude,
             warn_file_mb=self.warn_file_mb,
             max_file_mb=self.max_file_mb,
             workspace_path=s.workspace_path,
         )
+
+
+def _str_list(raw: object, key: str) -> tuple[str, ...]:
+    """Coerce a ``[sync]`` array value to a tuple of strings.
+
+    A bare string is accepted as the single-element form (``exclude = "*.tmp"``):
+    iterating a ``str`` would otherwise explode it into characters, and a lone
+    ``"*"`` would then silently match every path. Any other non-array type (e.g.
+    an accidental ``[sync.exclude]`` table, which TOML parses as a dict) is a
+    config error rather than silent garbage.
+    """
+    if isinstance(raw, str):
+        return (raw,)
+    if not isinstance(raw, (list, tuple)):
+        raise ValueError(f"[sync] {key} must be an array of strings, got {type(raw).__name__}")
+    if not all(isinstance(p, str) for p in raw):
+        raise ValueError(f"[sync] {key} entries must all be strings")
+    return tuple(raw)
 
 
 def _merge(base: dict, override: dict) -> dict:
@@ -219,7 +241,8 @@ def load_app_config(
         repos=specs,
         active_alias=active,
         host=githost.normalize_host(env.get("MOORING_GITHUB_HOST") or str(gh.get("host", ""))),
-        folders=tuple(sync.get("folders", ("notebooks", "data", "reports"))),
+        folders=_str_list(sync.get("folders", ("notebooks", "data", "reports")), "folders"),
+        exclude=_str_list(sync.get("exclude", ()), "exclude"),
         warn_file_mb=int(sync.get("warn_file_mb", 10)),
         max_file_mb=int(sync.get("max_file_mb", 45)),
         log_endpoint=env.get("MOORING_LOG_ENDPOINT", str(log.get("endpoint", ""))),
