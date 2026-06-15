@@ -20,6 +20,7 @@ const PUSH_STATES = ["modified", "new local", "deleted locally"];
 let busy = false;
 let showAddRepo = false;
 let lastFiles = [];
+let aiChatEnabled = false;
 
 async function api(path, body) {
   const opts = body === undefined
@@ -115,6 +116,13 @@ function fileActions(file, opts) {
   const openable = file.path.endsWith(".py") || file.path.endsWith(".pbip");
   if (openable && file.has_local) {
     actions.push(["Open", () => action("/api/open", { path: file.path }, false)]);
+  }
+  // AI copilot opens in a second tab beside the notebook (schema-only).
+  if (aiChatEnabled && file.path.endsWith(".py") && file.has_local) {
+    actions.push([
+      "AI",
+      () => window.open(`/ai/chat?notebook=${encodeURIComponent(file.path)}`, "_blank"),
+    ]);
   }
   // Delete is suppressed on PBIP member rows (opts.member): a project is only
   // deleted whole, via its header, since removing one member would leave a
@@ -266,6 +274,7 @@ async function refresh() {
   hint.textContent = state.workspace_hint || "";
   hint.classList.toggle("hidden", !state.workspace_hint);
   $("packages").textContent = (state.packages || []).join(", ");
+  aiChatEnabled = !!state.ai_chat;
 
   renderRepoSelect(state);
   $("setup-card").classList.toggle("hidden", state.configured && !showAddRepo);

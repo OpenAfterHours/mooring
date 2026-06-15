@@ -344,3 +344,150 @@ def test_state_reports_has_local_flag(configured):
     assert files["notebooks/local.py"]["has_local"] is True
     assert files["notebooks/remote.py"]["state"] == "new remote"
     assert files["notebooks/remote.py"]["has_local"] is False
+
+
+# -- AI copilot chat (stub turn + file-write Apply) -------------------------------
+
+# A valid marimo notebook so cellwrite can parse + append a cell on Apply.
+_NB_SRC = (
+    "import marimo\n\n"
+    '__generated_with = "0.23.9"\n'
+    "app = marimo.App()\n\n\n"
+    "@app.cell\n"
+    "def _():\n"
+    "    seed = 1\n"
+    "    return (seed,)\n\n\n"
+    'if __name__ == "__main__":\n'
+    "    app.run()\n"
+)
+
+
+@pytest.fixture
+def stub_chat(monkeypatch):
+    """Use the no-LLM stub session so chat tests don't need the Copilot SDK/auth."""
+    from mooring.ai.chat import StubChatSession
+
+    monkeypatch.setattr(
+        Hub, "_make_chat_session", lambda self, ctx, ws, nb: StubChatSession(system_context=ctx)
+    )
+
+
+def _open_chat(client, hub, notebook="nb.py", dataset="", source="import marimo\n"):
+    ws = hub.cfg.workspace()
+    ws.mkdir(parents=True, exist_ok=True)
+    (ws / notebook).write_text(source, "utf-8")
+    body = {"notebook": notebook}
+    if dataset:
+        body["dataset"] = dataset
+    resp = client.post("/api/ai/chat/open", json=body)
+    return resp
+
+
+def test_chat_open_context_is_value_free(unconfigured_client, stub_chat):
+    import polars as pl
+
+    client, hub = unconfigured_client
+    ws = hub.cfg.workspace()
+    (ws / "data").mkdir(parents=True, exist_ok=True)
+    secret = "SECRET_VALUE_DO_NOT_LEAK"
+    pl.DataFrame({"region": [secret], "amount": [123456]}).write_parquet(ws / "data" / "s.parquet")
+    resp = _open_chat(client, hub, dataset="data/s.parquet", source="import marimo\n# my code\n")
+    assert resp.status_code == 200
+    ctx = hub._chats[resp.json()["sid"]].system_context
+    assert "region" in ctx and "amount" in ctx  # schema column names present
+    assert "import marimo" in ctx  # notebook source present
+    assert secret not in ctx and "123456" not in ctx  # data VALUES never present
+
+
+def test_chat_open_rejects_traversal(unconfigured_client):
+    client, hub = unconfigured_client
+    hub.cfg.workspace().mkdir(parents=True, exist_ok=True)
+    resp = client.post("/api/ai/chat/open", json={"notebook": "../escape.py"})
+    assert resp.status_code == 400
+
+
+def test_chat_send_streams_events(unconfigured_client, stub_chat):
+    client, hub = unconfigured_client
+    sid = _open_chat(client, hub).json()["sid"]
+    q = hub._chats[sid].subscribe()  # subscribe before sending, like the SSE client
+    assert client.post("/api/ai/chat/send", json={"sid": sid, "text": "hi"}).json()["ok"]
+    kinds = []
+    while True:
+        ev = q.get(timeout=2)
+        kinds.append(ev.kind)
+        if ev.kind == "idle":
+            break
+    assert "delta" in kinds and "message" in kinds and "proposal" in kinds
+
+
+def test_chat_apply_writes_cell_into_notebook(unconfigured_client, stub_chat):
+    client, hub = unconfigured_client
+    sid = _open_chat(client, hub, source=_NB_SRC).json()["sid"]
+    resp = client.post("/api/ai/chat/apply", json={"sid": sid, "code": "result = 41 + 1"})
+    assert resp.status_code == 200
+    assert resp.json()["ok"] is True
+    # The cell was written into the .py source (marimo --watch shows it in the tab).
+    nb = (hub.cfg.workspace() / "nb.py").read_text("utf-8")
+    assert "result = 41 + 1" in nb
+    assert "﻿" not in nb  # no BOM (the marimo parser rejects it)
+
+
+def test_chat_apply_rejects_empty_code(unconfigured_client, stub_chat):
+    client, hub = unconfigured_client
+    sid = _open_chat(client, hub, source=_NB_SRC).json()["sid"]
+    resp = client.post("/api/ai/chat/apply", json={"sid": sid, "code": "   "})
+    assert resp.status_code == 400
+
+
+def test_chat_apply_unknown_sid_404(unconfigured_client, stub_chat):
+    client, _ = unconfigured_client
+    resp = client.post("/api/ai/chat/apply", json={"sid": "nope", "code": "x = 1"})
+    assert resp.status_code == 404
+
+
+def test_chat_stream_emits_sse_frames(unconfigured_client, monkeypatch):
+    from mooring.ai.chat import ChatBroadcaster, ChatEvent
+
+    class QuickSession(ChatBroadcaster):
+        def subscribe(self):
+            import queue as _q
+
+            qq = _q.Queue()
+            for ev in (
+                ChatEvent("delta", {"text": "hi "}),
+                ChatEvent("message", {"text": "hi"}),
+                ChatEvent("proposal", {"code": "x=1"}),
+                ChatEvent("idle"),
+                ChatEvent("closed"),
+            ):
+                qq.put(ev)
+            return qq
+
+        def send(self, text):
+            pass
+
+    client, hub = unconfigured_client
+    monkeypatch.setattr(Hub, "_make_chat_session", lambda self, *a, **k: QuickSession())
+    sid = _open_chat(client, hub).json()["sid"]
+    resp = client.get(f"/api/ai/chat/stream/{sid}")
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("text/event-stream")
+    body = resp.text
+    assert "event: delta" in body
+    assert "event: proposal" in body
+    assert "event: closed" in body
+
+
+def test_chat_stream_unknown_sid_404(unconfigured_client):
+    client, _ = unconfigured_client
+    assert client.get("/api/ai/chat/stream/nope").status_code == 404
+
+
+def test_chat_disabled_when_ai_off(tmp_path, monkeypatch):
+    monkeypatch.setattr(paths, "user_config_dir", lambda: tmp_path / "appdata")
+    spec = config.RepoSpec(alias="ws", owner="", repo="", workspace_path=str(tmp_path / "ws"))
+    hub = Hub(config.AppConfig(repos=(spec,), active_alias="ws", ai_enabled=False))
+    with TestClient(create_app(hub)) as client:
+        assert client.get("/ai/chat").status_code == 404
+        assert client.post("/api/ai/chat/open", json={"notebook": "nb.py"}).status_code == 404
+        assert client.get("/api/state").json()["ai_chat"] is False

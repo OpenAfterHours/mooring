@@ -151,3 +151,55 @@ footer {
   font-size: 0.9rem;
   margin-top: 0.3rem;
 }
+
+/* --- AI copilot chat page --- */
+#chat-target { color: var(--muted); flex: 1; }
+#chat-dataset {
+  font: inherit;
+  padding: 0.3rem 0.4rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--card);
+}
+#messages {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  max-height: 60vh;
+  overflow-y: auto;
+}
+.msg {
+  padding: 0.5rem 0.75rem;
+  border-radius: 8px;
+  white-space: pre-wrap;
+  line-height: 1.4;
+}
+.msg-user { background: var(--accent); color: #fff; align-self: flex-end; max-width: 80%; }
+.msg-assistant {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  align-self: flex-start;
+  max-width: 95%;
+}
+.msg.proposal { width: 100%; max-width: 100%; }
+.cell-code {
+  font-family: Consolas, monospace;
+  font-size: 0.85rem;
+  letter-spacing: normal;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.6rem;
+  margin: 0;
+  white-space: pre;
+  overflow-x: auto;
+}
+.composer { display: flex; gap: 0.5rem; align-items: flex-end; }
+.composer textarea {
+  flex: 1;
+  font: inherit;
+  padding: 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  resize: vertical;
+}

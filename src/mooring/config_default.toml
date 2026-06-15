@@ -48,3 +48,15 @@ path = ""        # empty = ~/PythonProjects/mooring/<owner>/<repo>
 [logging]
 endpoint = ""
 level = "info"   # "info" logs usage + errors; "error" logs only errors
+
+# AI copilot. When enabled and Copilot is connected, the hub's "AI" button
+# opens an interactive chat that helps write notebook code. It is schema-only:
+# the assistant sees a dataset's column names + types (never any data value) and
+# the notebook's source, and can propose cells you approve into the open
+# notebook. Requires the optional `mooring[copilot]` extra and a GitHub Copilot
+# licence. See docs/admins/ai-privacy.md.
+[ai]
+enabled = true              # set false to hide the AI copilot entirely
+provider = "copilot"        # AI backend; "copilot" = GitHub Copilot (pluggable)
+model = ""                  # provider model id; empty = the provider's default
+chat_idle_timeout_sec = 900 # close an idle chat session after this many seconds
