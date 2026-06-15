@@ -27,11 +27,13 @@ CLI/agent policy enabled. If the extra isn't installed, the chat will tell you.
 
 1. In the hub, open a notebook (**Open**) and, on the same row, click **AI** —
    the chat opens in a new tab.
-2. Optionally pick a **dataset** so the assistant knows your columns and types.
+2. Optionally pick a **dataset** (so the assistant knows your columns and types),
+   a **model**, and a reasoning **effort**.
 3. Ask for what you want — e.g. *"filter to 2024 and total `amount` by `region`"*.
-   The reply streams in, and code suggestions appear as **Proposed cell** blocks.
-4. Click **Apply ▸** on a proposal: the cell is added to your open notebook **and
-   run**. Review it there like any other cell.
+   While it works you'll see a thinking indicator and a status line
+   (*"Looking up the schema…"*); the reply then streams in with formatted code.
+4. Click **Apply ▸** on a proposed cell: it's written into your notebook and runs
+   there. Review it like any other cell.
 
 Keep both tabs side by side: chat on one, the marimo notebook on the other.
 
@@ -41,8 +43,11 @@ Keep both tabs side by side: chat on one, the marimo notebook on the other.
 
 ## Tips
 
-- If **Apply** says *"open the notebook tab first"*, the copilot couldn't find
-  your notebook tab — make sure it's open, then apply again.
+- Keep the notebook tab open beside the chat so applied cells appear live; if
+  it's closed, the cell is still saved and shows next time you open the notebook.
+- **Model & effort:** pick a model from the dropdown; for models that support it,
+  a higher reasoning **effort** trades speed for more thorough answers. Your
+  choice is remembered. (Some models — and "Auto" — have no effort setting.)
 - The assistant can read your notebook's current code and ask for a dataset's
   schema on its own; you don't need to paste either in.
 - It writes Polars (`pl`) by default, matching mooring's bundled notebook stack.

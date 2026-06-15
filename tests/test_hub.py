@@ -108,9 +108,16 @@ workspace = '{ws2}'
 @pytest.fixture
 def configured(tmp_path, monkeypatch):
     monkeypatch.setattr(paths, "user_config_dir", lambda: tmp_path / "appdata")
-    for var in ("MOORING_TOKEN", "MOORING_CLIENT_ID", "MOORING_OWNER", "MOORING_REPO",
-                "MOORING_BRANCH", "MOORING_WORKSPACE", "MOORING_ACTIVE_REPO",
-                "MOORING_GITHUB_HOST"):
+    for var in (
+        "MOORING_TOKEN",
+        "MOORING_CLIENT_ID",
+        "MOORING_OWNER",
+        "MOORING_REPO",
+        "MOORING_BRANCH",
+        "MOORING_WORKSPACE",
+        "MOORING_ACTIVE_REPO",
+        "MOORING_GITHUB_HOST",
+    ):
         monkeypatch.delenv(var, raising=False)
     (tmp_path / "appdata").mkdir()
     paths.user_config_file().write_text(
@@ -247,9 +254,16 @@ def test_propose_endpoint_and_state_review(configured):
 
 def test_propose_compare_url_on_enterprise_host(tmp_path, monkeypatch):
     monkeypatch.setattr(paths, "user_config_dir", lambda: tmp_path / "appdata")
-    for var in ("MOORING_TOKEN", "MOORING_CLIENT_ID", "MOORING_OWNER", "MOORING_REPO",
-                "MOORING_BRANCH", "MOORING_WORKSPACE", "MOORING_ACTIVE_REPO",
-                "MOORING_GITHUB_HOST"):
+    for var in (
+        "MOORING_TOKEN",
+        "MOORING_CLIENT_ID",
+        "MOORING_OWNER",
+        "MOORING_REPO",
+        "MOORING_BRANCH",
+        "MOORING_WORKSPACE",
+        "MOORING_ACTIVE_REPO",
+        "MOORING_GITHUB_HOST",
+    ):
         monkeypatch.delenv(var, raising=False)
     (tmp_path / "appdata").mkdir()
     paths.user_config_file().write_text(
@@ -368,7 +382,9 @@ def stub_chat(monkeypatch):
     from mooring.ai.chat import StubChatSession
 
     monkeypatch.setattr(
-        Hub, "_make_chat_session", lambda self, ctx, ws, nb: StubChatSession(system_context=ctx)
+        Hub,
+        "_make_chat_session",
+        lambda self, ctx, ws, nb, **kw: StubChatSession(system_context=ctx),
     )
 
 
@@ -491,3 +507,59 @@ def test_chat_disabled_when_ai_off(tmp_path, monkeypatch):
         assert client.get("/ai/chat").status_code == 404
         assert client.post("/api/ai/chat/open", json={"notebook": "nb.py"}).status_code == 404
         assert client.get("/api/state").json()["ai_chat"] is False
+
+
+# -- AI copilot model/effort controls --------------------------------------------
+
+
+class _FakeModelProvider:
+    def list_models(self, force=False):
+        return [
+            {"id": "auto", "name": "Auto", "efforts": [], "default_effort": "", "multiplier": None},
+            {
+                "id": "claude-opus-4.8",
+                "name": "Claude Opus 4.8",
+                "efforts": ["low", "high", "max"],
+                "default_effort": "medium",
+                "multiplier": 1,
+            },
+        ]
+
+
+def test_chat_models_lists_models(unconfigured_client, monkeypatch):
+    client, _ = unconfigured_client
+    monkeypatch.setattr("mooring.ai.get_provider", lambda app_cfg: _FakeModelProvider())
+    resp = client.get("/api/ai/models")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert [m["id"] for m in data["models"]] == ["auto", "claude-opus-4.8"]
+    assert data["models"][1]["efforts"] == ["low", "high", "max"]
+    assert "default_model" in data and "default_effort" in data
+
+
+def test_chat_models_disabled_when_ai_off(tmp_path, monkeypatch):
+    monkeypatch.setattr(paths, "user_config_dir", lambda: tmp_path / "appdata")
+    spec = config.RepoSpec(alias="ws", owner="", repo="", workspace_path=str(tmp_path / "ws"))
+    hub = Hub(config.AppConfig(repos=(spec,), active_alias="ws", ai_enabled=False))
+    with TestClient(create_app(hub)) as client:
+        assert client.get("/api/ai/models").status_code == 404
+
+
+def test_chat_open_threads_model_and_effort(unconfigured_client, monkeypatch):
+    client, hub = unconfigured_client
+    seen = {}
+
+    def fake_make(self, ctx, ws, nb, model="", reasoning_effort=None):
+        from mooring.ai.chat import StubChatSession
+
+        seen["model"] = model
+        seen["effort"] = reasoning_effort
+        return StubChatSession(system_context=ctx)
+
+    monkeypatch.setattr(Hub, "_make_chat_session", fake_make)
+    _open_chat(client, hub, source=_NB_SRC)  # default body: no model/effort
+    client.post(
+        "/api/ai/chat/open",
+        json={"notebook": "nb.py", "model": "claude-opus-4.8", "reasoning_effort": "high"},
+    )
+    assert seen == {"model": "claude-opus-4.8", "effort": "high"}

@@ -42,10 +42,18 @@ _TOOL_GUIDE = (
 
 class CopilotChatSession(ChatBroadcaster):
     def __init__(
-        self, *, model: str, system_context: str, workspace, folders, notebook_rel: str
+        self,
+        *,
+        model: str,
+        system_context: str,
+        workspace,
+        folders,
+        notebook_rel: str,
+        reasoning_effort: str | None = None,
     ) -> None:
         super().__init__()
         self._model = (model or "").strip()
+        self._reasoning_effort = (reasoning_effort or "").strip() or None
         self._system_context = system_context + _TOOL_GUIDE
         self._workspace = Path(workspace)
         self._folders = tuple(folders)
@@ -120,12 +128,16 @@ class CopilotChatSession(ChatBroadcaster):
             notebook_rel=self._notebook_rel,
             emit_proposal=self._emit_proposal,
         )
+        extra = {}
+        if self._reasoning_effort:
+            extra["reasoning_effort"] = self._reasoning_effort
         self._session = await client.create_session(
             model=self._model or None,
             streaming=True,
             tools=tools,
             available_tools=TOOL_NAMES,  # only mooring's safe tools => no built-ins
             working_directory=self._workdir,
+            **extra,
             **hardened_session_kwargs(self._system_context),
         )
         self._session.on(self._on_event)
@@ -153,9 +165,21 @@ class CopilotChatSession(ChatBroadcaster):
             self._broadcast(ChatEvent("delta", {"text": getattr(data, "delta_content", "") or ""}))
         elif etype == ET.ASSISTANT_MESSAGE:
             self._broadcast(ChatEvent("message", {"text": getattr(data, "content", "") or ""}))
+        elif etype == ET.ASSISTANT_INTENT:
+            intent = getattr(data, "intent", "") or ""
+            if intent:
+                self._broadcast(ChatEvent("intent", {"text": intent}))
         elif etype == ET.TOOL_EXECUTION_START:
             name = getattr(data, "tool_name", None) or getattr(data, "name", "") or ""
             self._broadcast(ChatEvent("tool", {"name": name}))
+        elif etype == ET.TOOL_EXECUTION_PROGRESS:
+            self._broadcast(
+                ChatEvent("tool", {"progress": getattr(data, "progress_message", "") or ""})
+            )
+        elif etype == ET.TOOL_EXECUTION_COMPLETE:
+            self._broadcast(
+                ChatEvent("tool_done", {"success": bool(getattr(data, "success", True))})
+            )
         elif etype == ET.SESSION_IDLE:
             self._broadcast(ChatEvent("idle"))
         elif etype == ET.SESSION_ERROR:

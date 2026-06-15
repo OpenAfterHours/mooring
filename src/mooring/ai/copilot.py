@@ -38,6 +38,7 @@ from mooring.ai.base import AIError, ProviderStatus
 _GENERATE_TIMEOUT = 120.0  # seconds the model may take to answer
 _PROBE_TIMEOUT = 30.0  # seconds to check sign-in status
 _STATUS_TTL = 45.0  # cache the (CLI-spawning) auth probe this long
+_MODELS_TTL = 300.0  # cache the model list this long (it changes rarely)
 _MAX_LOGIN_LINES = 50
 
 
@@ -52,6 +53,9 @@ class CopilotProvider:
         self._cache_lock = threading.Lock()
         self._cached_status: ProviderStatus | None = None
         self._cached_at = 0.0
+        self._models_lock = threading.Lock()
+        self._cached_models: list[dict] | None = None
+        self._models_at = 0.0
 
     # -- discovery ----------------------------------------------------------
 
@@ -226,9 +230,7 @@ class CopilotProvider:
 
     # -- generation ---------------------------------------------------------
 
-    def generate(
-        self, *, schema_context: str, instruction: str, target: str = "polars"
-    ) -> str:
+    def generate(self, *, schema_context: str, instruction: str, target: str = "polars") -> str:
         if not self.available():
             raise AIError("The Copilot CLI is not available in this build.")
         if not instruction.strip():
@@ -237,9 +239,7 @@ class CopilotProvider:
             schema_context=schema_context, instruction=instruction, target=target
         )
         try:
-            text = self._run(
-                self._agenerate(system, user, self.model), _GENERATE_TIMEOUT + 45
-            )
+            text = self._run(self._agenerate(system, user, self.model), _GENERATE_TIMEOUT + 45)
         except AIError:
             raise
         except (asyncio.TimeoutError, TimeoutError) as exc:
@@ -261,11 +261,21 @@ class CopilotProvider:
         )
         return _extract_code(text)
 
-    def open_chat(self, *, system_context: str, workspace, folders, notebook_rel: str):
+    def open_chat(
+        self,
+        *,
+        system_context: str,
+        workspace,
+        folders,
+        notebook_rel: str,
+        model: str | None = None,
+        reasoning_effort: str | None = None,
+    ):
         """Open a long-lived, streaming, value-blind chat session (the copilot).
 
         The session reuses :func:`hardened_session_kwargs` (the audited privacy
-        config) and adds mooring's safe tools. Raises :class:`AIError` on a
+        config) and adds mooring's safe tools. ``model``/``reasoning_effort``
+        override the configured defaults when given. Raises :class:`AIError` on a
         startup/auth/policy failure.
         """
         if not self.available():
@@ -275,7 +285,8 @@ class CopilotProvider:
         from mooring.ai.session import CopilotChatSession
 
         session = CopilotChatSession(
-            model=self.model,
+            model=(model or "").strip() or self.model,
+            reasoning_effort=reasoning_effort,
             system_context=system_context,
             workspace=workspace,
             folders=folders,
@@ -283,6 +294,44 @@ class CopilotProvider:
         )
         session.start()
         return session
+
+    # -- models -------------------------------------------------------------
+
+    def list_models(self, force: bool = False) -> list[dict]:
+        """The models the signed-in user may use, as value-free dicts.
+
+        Returns ``[]`` when unavailable / not signed in (the caller reports the
+        connection state separately). Cached for ``_MODELS_TTL`` since it spawns
+        the CLI. Each dict: id, name, efforts (the model's supported reasoning
+        efforts), default_effort, multiplier (premium-request cost or None).
+        """
+        if not self.available():
+            return []
+        with self._models_lock:
+            fresh = (
+                self._cached_models is not None
+                and (time.monotonic() - self._models_at) < _MODELS_TTL
+            )
+            if fresh and not force:
+                return self._cached_models
+        try:
+            models = self._run(self._alist_models(), _PROBE_TIMEOUT)
+        except Exception:  # noqa: BLE001 - never raise into the hub; report none
+            models = []
+        with self._models_lock:
+            self._cached_models = models
+            self._models_at = time.monotonic()
+        return models
+
+    async def _alist_models(self) -> list[dict]:
+        from copilot import CopilotClient
+
+        client = CopilotClient(use_logged_in_user=True)
+        async with client:
+            auth = await client.get_auth_status()
+            if not _is_authed(auth):
+                return []
+            return [_model_dict(m) for m in await client.list_models()]
 
     async def _agenerate(self, system: str, user: str, model: str) -> str:
         from copilot import CopilotClient
@@ -315,6 +364,23 @@ class CopilotProvider:
     @staticmethod
     def _run(coro, timeout: float):
         return asyncio.run(asyncio.wait_for(coro, timeout))
+
+
+def _model_dict(m: object) -> dict:
+    """Serialize a Copilot ModelInfo to a plain, value-free dict for the UI.
+
+    Defensive: an unexpected billing/effort shape must not break the listing.
+    """
+    billing = getattr(m, "billing", None)
+    multiplier = getattr(billing, "multiplier", None) if billing is not None else None
+    efforts = getattr(m, "supported_reasoning_efforts", None) or []
+    return {
+        "id": str(getattr(m, "id", "") or ""),
+        "name": str(getattr(m, "name", "") or getattr(m, "id", "") or ""),
+        "efforts": [str(e) for e in efforts],
+        "default_effort": str(getattr(m, "default_reasoning_effort", "") or ""),
+        "multiplier": multiplier,
+    }
 
 
 def _deny_all(request, invocation):  # noqa: ANN001 - SDK permission callback

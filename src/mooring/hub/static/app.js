@@ -79,6 +79,18 @@ async function action(path, body, refreshAfter = true) {
   }
 }
 
+// Pop the copilot out into its own window (not a tab) so it sits beside the
+// notebook. The window features are what make the browser open a window rather
+// than a tab; a per-notebook name reuses/focuses an already-open chat window.
+function openChatWindow(path) {
+  const url = `/ai/chat?notebook=${encodeURIComponent(path)}`;
+  const name = "mooringAI_" + path.replace(/[^a-z0-9]/gi, "_");
+  const height = Math.min(960, (window.screen && window.screen.availHeight) || 900);
+  const win = window.open(url, name, `popup,width=560,height=${height},left=80,top=60`);
+  if (win) win.focus();
+  else window.open(url, "_blank"); // popup blocked → fall back to a tab
+}
+
 // The contents API is throttled to ~1 file/s; tell the user a long push is alive.
 function pushAction(paths, count) {
   if (count > 3) $("summary").textContent = `Pushing ${count} file(s)… (~${Math.ceil(count * 0.8)}s)`;
@@ -117,12 +129,10 @@ function fileActions(file, opts) {
   if (openable && file.has_local) {
     actions.push(["Open", () => action("/api/open", { path: file.path }, false)]);
   }
-  // AI copilot opens in a second tab beside the notebook (schema-only).
+  // AI copilot pops out into its own window (not a tab) so it can sit beside the
+  // notebook. One window per notebook; clicking again focuses the existing one.
   if (aiChatEnabled && file.path.endsWith(".py") && file.has_local) {
-    actions.push([
-      "AI",
-      () => window.open(`/ai/chat?notebook=${encodeURIComponent(file.path)}`, "_blank"),
-    ]);
+    actions.push(["AI", () => openChatWindow(file.path)]);
   }
   // Delete is suppressed on PBIP member rows (opts.member): a project is only
   // deleted whole, via its header, since removing one member would leave a

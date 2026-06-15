@@ -73,6 +73,7 @@ class AppConfig:
     ai_enabled: bool = True
     ai_provider: str = "copilot"
     ai_model: str = ""
+    ai_reasoning_effort: str = ""
     ai_chat_idle_timeout: int = 900
 
     @property
@@ -264,6 +265,9 @@ def load_app_config(
         ai_enabled=_as_bool(env.get("MOORING_AI_ENABLED"), _as_bool(ai.get("enabled"), True)),
         ai_provider=env.get("MOORING_AI_PROVIDER", str(ai.get("provider", "copilot"))),
         ai_model=env.get("MOORING_AI_MODEL", str(ai.get("model", ""))),
+        ai_reasoning_effort=env.get(
+            "MOORING_AI_REASONING_EFFORT", str(ai.get("reasoning_effort", ""))
+        ),
         ai_chat_idle_timeout=int(
             env.get("MOORING_AI_CHAT_IDLE_SEC", ai.get("chat_idle_timeout_sec", 900))
         ),

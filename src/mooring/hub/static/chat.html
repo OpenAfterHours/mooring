@@ -14,10 +14,18 @@
   </header>
 
   <main>
-    <section class="card">
-      <label>Dataset in context
-        <select id="chat-dataset"><option value="">(none — notebook source only)</option></select>
-      </label>
+    <section class="card context-bar">
+      <div class="context-row">
+        <label>Dataset
+          <select id="chat-dataset"><option value="">(none — notebook source only)</option></select>
+        </label>
+        <label>Model
+          <select id="chat-model"></select>
+        </label>
+        <label id="effort-wrap" class="hidden">Effort
+          <select id="chat-effort"></select>
+        </label>
+      </div>
       <div id="chat-status" class="muted"></div>
       <p class="hint">The assistant can see this notebook's code and the selected dataset's
         <b>schema</b> (column names &amp; types) — never the data itself. Don't paste real values
@@ -26,9 +34,11 @@
 
     <section id="messages" class="card"></section>
 
-    <section class="card">
+    <div id="activity" class="activity hidden"></div>
+
+    <section class="card composer-card">
       <div class="composer">
-        <textarea id="chat-input" rows="3" placeholder="Ask for help, e.g. &quot;filter to 2024 and total amount by region&quot;"></textarea>
+        <textarea id="chat-input" rows="1" placeholder="Ask for help, e.g. &quot;filter to 2024 and total amount by region&quot;"></textarea>
         <button id="chat-send" class="primary">Send</button>
       </div>
     </section>

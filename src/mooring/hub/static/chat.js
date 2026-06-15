@@ -2,15 +2,28 @@
 
 // The interactive AI copilot page. Opens beside the marimo notebook tab. The
 // model streams over SSE; proposed cells are Applied (injected + run) into the
-// open notebook via the hub, which talks to marimo over HTTP only.
+// open notebook via the hub. mooring talks to marimo over HTTP only, never a
+// websocket — outputs/values never reach this page or the model.
 
 const $ = (id) => document.getElementById(id);
 const NOTEBOOK = new URLSearchParams(location.search).get("notebook") || "";
+const LS_MODEL = "mooring.ai.model";
+const LS_EFFORT = "mooring.ai.effort";
+
+const TOOL_LABELS = {
+  mooring_list_datasets: "Listing datasets…",
+  mooring_get_schema: "Looking up the schema…",
+  mooring_read_notebook_source: "Reading the notebook…",
+  mooring_propose_cell: "Drafting a cell…",
+};
 
 let sid = null;
 let source = null; // EventSource
 let assistantEl = null; // the assistant bubble currently being streamed
-let busy = false;
+let assistantRaw = ""; // accumulated raw text for the streaming bubble
+let turnState = "idle"; // idle | thinking | streaming | applying | error
+let stick = true; // auto-scroll only when the user is near the bottom
+let MODELS = [];
 
 async function api(path, body) {
   const opts = body === undefined
@@ -32,13 +45,128 @@ function setStatus(text) {
   $("chat-status").textContent = text || "";
 }
 
+// -- scrolling --------------------------------------------------------------
+
+function isNearBottom() {
+  const m = $("messages");
+  return m.scrollHeight - m.scrollTop - m.clientHeight < 80;
+}
+
+function maybeScroll() {
+  if (stick) $("messages").scrollTop = $("messages").scrollHeight;
+}
+
+// -- markdown (escape-first; never inject raw model output) ------------------
+
+function escapeHtml(s) {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+function inlineMd(s) {
+  return s
+    .replace(/`([^`]+)`/g, "<code>$1</code>")
+    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+    .replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<em>$2</em>");
+}
+
+// Format a non-code text segment: blank-line paragraphs + "- " bullet lists.
+function formatProse(segment) {
+  const out = [];
+  let list = [];
+  let para = [];
+  const flushList = () => {
+    if (list.length) {
+      out.push("<ul>" + list.map((x) => `<li>${inlineMd(x)}</li>`).join("") + "</ul>");
+      list = [];
+    }
+  };
+  const flushPara = () => {
+    if (para.length) {
+      out.push(`<p>${para.map(inlineMd).join("<br>")}</p>`);
+      para = [];
+    }
+  };
+  for (const line of segment.split("\n")) {
+    const li = line.match(/^\s*[-*]\s+(.*)$/);
+    if (li) {
+      flushPara();
+      list.push(li[1]);
+    } else if (line.trim() === "") {
+      flushPara();
+      flushList();
+    } else {
+      flushList();
+      para.push(line);
+    }
+  }
+  flushPara();
+  flushList();
+  return out.join("");
+}
+
+function renderMarkdown(text) {
+  try {
+    // Escape first, then split on fenced code blocks. The capturing split yields
+    // [text, lang, body, text, lang, body, …]; format text parts, keep code parts
+    // verbatim (already escaped). No sentinels, no innerHTML of raw model output.
+    const parts = escapeHtml(text).split(/```[^\n]*\n?([\s\S]*?)```/g);
+    let html = "";
+    parts.forEach((part, i) => {
+      if (i % 2 === 1) {
+        html += `<pre class="cell-code"><code>${part.replace(/\n+$/, "")}</code></pre>`;
+      } else {
+        html += formatProse(part);
+      }
+    });
+    return html;
+  } catch (_e) {
+    return null; // caller falls back to textContent
+  }
+}
+
+// -- messages ---------------------------------------------------------------
+
 function addMessage(role, text) {
   const el = document.createElement("div");
   el.className = `msg msg-${role}`;
   el.textContent = text;
   $("messages").appendChild(el);
-  el.scrollIntoView({ block: "end" });
+  maybeScroll();
   return el;
+}
+
+function showThinking() {
+  const el = document.createElement("div");
+  el.className = "msg msg-assistant thinking";
+  el.innerHTML = '<span class="dots"><i></i><i></i><i></i></span>';
+  $("messages").appendChild(el);
+  assistantEl = el;
+  assistantRaw = "";
+  maybeScroll();
+}
+
+// The bubble we stream into: reuse the thinking placeholder (clearing its dots)
+// or start a fresh assistant bubble.
+function streamingBubble() {
+  if (assistantEl && assistantEl.classList.contains("thinking")) {
+    assistantEl.classList.remove("thinking");
+    assistantEl.innerHTML = "";
+    assistantRaw = "";
+  } else if (!assistantEl) {
+    assistantEl = addMessage("assistant", "");
+    assistantRaw = "";
+  }
+  return assistantEl;
+}
+
+function finalizeAssistant(text) {
+  const el = streamingBubble();
+  assistantRaw = text || assistantRaw;
+  const html = renderMarkdown(assistantRaw);
+  if (html === null) el.textContent = assistantRaw;
+  else el.innerHTML = html;
+  assistantEl = null; // next delta/message starts a new bubble
+  maybeScroll();
 }
 
 function addProposal(code) {
@@ -62,13 +190,10 @@ function addProposal(code) {
   applyBtn.addEventListener("click", async () => {
     applyBtn.disabled = true;
     note.textContent = " applying…";
-    const { status, data } = await api("/api/ai/chat/apply", { sid, code });
+    const { data } = await api("/api/ai/chat/apply", { sid, code });
     if (data.ok) {
-      note.textContent = " added & run ✓";
+      note.textContent = " added ✓";
       applyBtn.textContent = "Applied";
-    } else if (status === 409) {
-      note.textContent = " — open the notebook tab first, then Apply again";
-      applyBtn.disabled = false;
     } else {
       note.textContent = ` — ${data.error || "failed"}`;
       applyBtn.disabled = false;
@@ -78,8 +203,40 @@ function addProposal(code) {
   bar.append(label, applyBtn, note);
   wrap.append(bar, pre);
   $("messages").appendChild(wrap);
-  wrap.scrollIntoView({ block: "end" });
+  maybeScroll();
 }
+
+// -- activity chip ----------------------------------------------------------
+
+function setActivity(text) {
+  const a = $("activity");
+  a.textContent = text || "";
+  a.classList.toggle("hidden", !text);
+}
+
+function clearActivity() {
+  setActivity("");
+}
+
+// -- turn lifecycle ---------------------------------------------------------
+
+function setTurnState(state) {
+  turnState = state;
+  const sending = state === "thinking" || state === "streaming";
+  $("chat-send").disabled = sending;
+  $("chat-input").disabled = sending;
+  if (state === "idle" || state === "error") {
+    // Drop an empty "thinking" placeholder if no tokens ever arrived.
+    if (assistantEl && assistantEl.classList.contains("thinking")) {
+      assistantEl.remove();
+      assistantEl = null;
+    }
+    clearActivity();
+    if (state === "idle") $("chat-input").focus();
+  }
+}
+
+// -- session ----------------------------------------------------------------
 
 function closeStream() {
   if (source) {
@@ -88,11 +245,19 @@ function closeStream() {
   }
 }
 
+function selectedEffort() {
+  return $("effort-wrap").classList.contains("hidden") ? "" : $("chat-effort").value;
+}
+
 async function openChat() {
   closeStream();
   showError("");
   const dataset = $("chat-dataset").value;
-  const { status, data } = await api("/api/ai/chat/open", { notebook: NOTEBOOK, dataset });
+  const model = $("chat-model").value;
+  const reasoning_effort = selectedEffort();
+  const { status, data } = await api("/api/ai/chat/open", {
+    notebook: NOTEBOOK, dataset, model, reasoning_effort,
+  });
   if (!data.sid) {
     showError(data.error || `Could not start the copilot (${status}).`);
     return;
@@ -100,52 +265,105 @@ async function openChat() {
   sid = data.sid;
   source = new EventSource(`/api/ai/chat/stream/${sid}`);
   source.addEventListener("delta", (e) => {
-    const { text } = JSON.parse(e.data);
-    if (!assistantEl) assistantEl = addMessage("assistant", "");
-    assistantEl.textContent += text;
+    if (turnState === "thinking") setTurnState("streaming");
+    const el = streamingBubble();
+    assistantRaw += JSON.parse(e.data).text;
+    el.textContent = assistantRaw; // fast plain text while streaming
+    maybeScroll();
   });
-  source.addEventListener("message", (e) => {
-    const { text } = JSON.parse(e.data);
-    if (assistantEl) assistantEl.textContent = text;
-    else addMessage("assistant", text);
-    assistantEl = null;
+  source.addEventListener("message", (e) => finalizeAssistant(JSON.parse(e.data).text));
+  source.addEventListener("proposal", (e) => addProposal(JSON.parse(e.data).code));
+  source.addEventListener("tool", (e) => {
+    const d = JSON.parse(e.data);
+    setActivity(d.progress || TOOL_LABELS[d.name] || "Working…");
   });
-  source.addEventListener("proposal", (e) => {
-    const { code } = JSON.parse(e.data);
-    addProposal(code);
-  });
-  source.addEventListener("idle", () => setBusy(false));
-  // Named "fail", not "error": a server-sent SSE event named "error" collides
-  // with EventSource's native connection-error event.
+  source.addEventListener("tool_done", () => clearActivity());
+  source.addEventListener("intent", (e) => setActivity(JSON.parse(e.data).text));
+  source.addEventListener("idle", () => setTurnState("idle"));
   source.addEventListener("fail", (e) => {
     showError(JSON.parse(e.data).text || "The assistant reported an error.");
-    setBusy(false);
+    setTurnState("error");
   });
   source.addEventListener("closed", () => setStatus("Session closed."));
   source.onerror = () => setStatus("Reconnecting…");
-  setStatus(dataset ? `Schema in context: ${dataset}` : "Notebook source in context.");
-}
-
-function setBusy(value) {
-  busy = value;
-  $("chat-send").disabled = value;
+  const bits = [];
+  if (dataset) bits.push(`schema: ${dataset}`);
+  if (model) bits.push(model + (reasoning_effort ? ` · ${reasoning_effort}` : ""));
+  setStatus(bits.join("  ·  ") || "Notebook source in context.");
 }
 
 async function send() {
-  if (busy) return;
+  if (turnState !== "idle") return;
   const input = $("chat-input");
   const text = input.value.trim();
   if (!sid || !text) return;
+  stick = true;
   addMessage("user", text);
   input.value = "";
+  input.style.height = "auto";
   assistantEl = null;
-  setBusy(true);
-  const { status, data } = await api("/api/ai/chat/send", { sid, text });
+  setTurnState("thinking");
+  showThinking();
+  const { data } = await api("/api/ai/chat/send", { sid, text });
   if (data.error) {
     showError(data.error);
-    setBusy(false);
+    setTurnState("error");
   }
 }
+
+// -- models / effort --------------------------------------------------------
+
+function populateEfforts(preferDefault) {
+  const model = MODELS.find((m) => m.id === $("chat-model").value);
+  const sel = $("chat-effort");
+  sel.innerHTML = "";
+  const efforts = (model && model.efforts) || [];
+  if (!efforts.length) {
+    $("effort-wrap").classList.add("hidden");
+    return;
+  }
+  $("effort-wrap").classList.remove("hidden");
+  for (const e of efforts) {
+    const o = document.createElement("option");
+    o.value = e;
+    o.textContent = e;
+    sel.appendChild(o);
+  }
+  const saved = localStorage.getItem(LS_EFFORT);
+  sel.value = efforts.includes(saved)
+    ? saved
+    : efforts.includes(preferDefault)
+      ? preferDefault
+      : (model && model.default_effort) || efforts[0];
+}
+
+async function loadModels() {
+  const { data } = await api("/api/ai/models");
+  MODELS = data.models || [];
+  const sel = $("chat-model");
+  sel.innerHTML = "";
+  const wrap = sel.closest("label");
+  if (!MODELS.length) {
+    wrap.classList.add("hidden");
+    $("effort-wrap").classList.add("hidden");
+    return;
+  }
+  wrap.classList.remove("hidden");
+  for (const m of MODELS) {
+    const o = document.createElement("option");
+    o.value = m.id;
+    o.textContent = m.name + (m.multiplier && m.multiplier > 1 ? ` · ${m.multiplier}×` : "");
+    sel.appendChild(o);
+  }
+  const saved = localStorage.getItem(LS_MODEL);
+  const wanted = [saved, data.default_model, MODELS[0].id].find((id) =>
+    MODELS.some((m) => m.id === id),
+  );
+  sel.value = wanted;
+  populateEfforts(data.default_effort);
+}
+
+// -- init -------------------------------------------------------------------
 
 async function init() {
   $("chat-target").textContent = NOTEBOOK ? `Notebook: ${NOTEBOOK}` : "(no notebook)";
@@ -161,14 +379,35 @@ async function init() {
     opt.textContent = ds;
     select.appendChild(opt);
   }
+  setStatus("Loading models…");
+  await loadModels();
+
   select.addEventListener("change", openChat);
+  $("chat-model").addEventListener("change", () => {
+    localStorage.setItem(LS_MODEL, $("chat-model").value);
+    populateEfforts();
+    openChat();
+  });
+  $("chat-effort").addEventListener("change", () => {
+    localStorage.setItem(LS_EFFORT, $("chat-effort").value);
+    openChat();
+  });
+  $("messages").addEventListener("scroll", () => {
+    stick = isNearBottom();
+  });
   $("chat-send").addEventListener("click", send);
-  $("chat-input").addEventListener("keydown", (e) => {
+  const input = $("chat-input");
+  input.addEventListener("input", () => {
+    input.style.height = "auto";
+    input.style.height = Math.min(input.scrollHeight, 160) + "px";
+  });
+  input.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       send();
     }
   });
+
   await openChat();
 }
 
