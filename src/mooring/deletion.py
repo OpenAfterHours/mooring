@@ -1,0 +1,131 @@
+"""Delete notebooks (and Power BI projects) from the local workspace.
+
+Deletion is local-only: removing the file makes the three-way sync classify it
+as "deleted locally" (a push candidate), and the next push or propose removes it
+from the team repo — the same explicit-sync path every other change takes.
+Nothing here touches the manifest or the remote.
+
+A ``.pbip`` pointer deletes the whole artifact: the pointer plus every file under
+its sibling ``.SemanticModel/`` and ``.Report/`` folders (see :mod:`mooring.pbip`).
+"""
+
+from __future__ import annotations
+
+from collections.abc import Iterable
+from pathlib import Path
+
+from mooring import pbip
+from mooring.sync import is_synced_path
+
+
+def _resolve_within(workspace: Path, rel_path: str) -> Path:
+    """Resolve a workspace-relative path, rejecting anything that escapes it
+    (including via a symlink/junction component, since ``resolve()`` follows them)."""
+    target = (workspace / rel_path).resolve()
+    try:
+        target.relative_to(workspace.resolve())
+    except ValueError as exc:
+        raise ValueError("Path escapes the workspace.") from exc
+    return target
+
+
+def _is_within(ws_real: Path, p: Path) -> bool:
+    try:
+        p.resolve().relative_to(ws_real)
+        return True
+    except (ValueError, OSError):
+        return False
+
+
+def _in_synced_folder(rel_path: str, folders: Iterable[str] | None) -> bool:
+    """Whether ``rel_path`` lives under one of the configured sync roots. ``None``
+    means 'unrestricted' (direct callers/tests); production passes cfg.folders so
+    the delete set matches the files the hub actually lists (scan_local scope)."""
+    if folders is None:
+        return True
+    return rel_path.split("/", 1)[0] in tuple(folders)
+
+
+def _expand(workspace: Path, rel_path: str) -> list[str]:
+    """The workspace-relative files that make up ``rel_path``: just the file
+    itself, or — for a ``.pbip`` pointer — the pointer plus every file under its
+    artifact folders, so the project folder disappears cleanly.
+
+    ``rglob`` descends into symlinks/junctions, so each member's real path is
+    re-checked against the workspace: a reparse point planted inside an artifact
+    folder must never make a delete reach outside the workspace.
+    """
+    if not rel_path.endswith(pbip.POINTER_SUFFIX):
+        return [rel_path]
+    key = rel_path[: -len(pbip.POINTER_SUFFIX)]
+    ws_real = workspace.resolve()
+    members = [rel_path]
+    for suffix in pbip.ARTIFACT_DIR_SUFFIXES:
+        folder = workspace / f"{key}{suffix}"
+        if folder.is_dir():
+            members += [
+                p.relative_to(workspace).as_posix()
+                for p in sorted(folder.rglob("*"))
+                if p.is_file() and _is_within(ws_real, p)
+            ]
+    return members
+
+
+def _prune_empty_dirs(workspace: Path, start: Path) -> None:
+    """Remove now-empty directories a delete left behind, walking up to — but
+    never removing — the workspace root."""
+    ws = workspace.resolve()
+    current = start.resolve()
+    while current != ws and ws in current.parents:
+        try:
+            current.rmdir()  # raises if the directory still has contents
+        except OSError:
+            return
+        current = current.parent
+
+
+def target_paths(
+    workspace: Path,
+    rel_path: str,
+    exclude: Iterable[str] = (),
+    folders: Iterable[str] | None = None,
+) -> list[str]:
+    """The workspace-relative files that deleting ``rel_path`` would remove.
+
+    Does not touch disk. Raises ``ValueError`` for a path that escapes the
+    workspace or is not a deletable notebook — a dotfile, the ``.mooring``
+    manifest, or anything outside the configured sync folders — so callers can
+    preview and confirm before deleting.
+    """
+    rel_path = rel_path.replace("\\", "/").rstrip("/")
+    if not rel_path:
+        raise ValueError("No path to delete.")
+    _resolve_within(workspace, rel_path)
+    if not is_synced_path(rel_path, exclude) or not _in_synced_folder(rel_path, folders):
+        raise ValueError(f"Refusing to delete {rel_path!r}: not a notebook in this workspace.")
+    return _expand(workspace, rel_path)
+
+
+def delete(
+    workspace: Path,
+    rel_path: str,
+    exclude: Iterable[str] = (),
+    folders: Iterable[str] | None = None,
+) -> list[str]:
+    """Delete one notebook — a single file, or a whole PBIP artifact for a
+    ``.pbip`` pointer — from the workspace.
+
+    Returns the workspace-relative POSIX paths actually removed. Raises
+    ``ValueError`` on a traversal/non-notebook path and ``FileNotFoundError``
+    when nothing existed to delete.
+    """
+    removed: list[str] = []
+    for rel in target_paths(workspace, rel_path, exclude, folders):
+        target = workspace / rel
+        if target.is_file():
+            target.unlink()
+            removed.append(rel)
+            _prune_empty_dirs(workspace, target.parent)
+    if not removed:
+        raise FileNotFoundError(rel_path)
+    return removed

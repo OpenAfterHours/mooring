@@ -242,10 +242,18 @@ def compute_status(
     review: dict[str, str | None] | None = None,
 ) -> StatusReport:
     report = StatusReport(head_commit=head)
-    for path in sorted(set(mft.files) | set(local) | set(remote)):
+    review = review or {}
+    for path in sorted(set(mft.files) | set(local) | set(remote) | set(review)):
         state = classify(mft.files.get(path), local.get(path), remote.get(path))
         if state is None:
-            continue
+            # A proposed *addition* the user has since deleted locally is absent
+            # from cfg.branch (base/local/remote all None) but still lives on the
+            # review branch. Keep it as a delete candidate so push/propose can
+            # withdraw it from the open PR instead of silently dropping it.
+            if review.get(path) is not None:
+                state = FileState.DELETED_LOCAL
+            else:
+                continue
         # A push candidate whose local content matches what was already sent
         # to the review branch is awaiting its PR, not awaiting a push.
         # CONFLICT stays CONFLICT: remote moved underneath the proposal and

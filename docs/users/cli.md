@@ -29,6 +29,7 @@ python mooring.pyz propose [paths...] [-m "message"] [--repo ALIAS]
 python mooring.pyz open notebooks/sales.py
 python mooring.pyz open reports/sales.pbip
 python mooring.pyz new sales-analysis
+python mooring.pyz delete notebooks/sales.py [-y]
 python mooring.pyz selftest
 python mooring.pyz version
 ```
@@ -72,8 +73,8 @@ Manage the registered team repos (see
   delete it manually if you no longer want the files. Use `repo remove --all`
   to forget every registered repo at once.
 
-`status`, `pull`, `push`, `propose`, `open`, and `new` accept `--repo ALIAS`
-to act on a registered repo **without** switching the active one.
+`status`, `pull`, `push`, `propose`, `open`, `new`, and `delete` accept
+`--repo ALIAS` to act on a registered repo **without** switching the active one.
 
 ### `status`
 
@@ -128,6 +129,21 @@ branch, so the changes can be reviewed as a pull request (see
   [Power BI reports](power-bi.md).
 - `new <name>` — create a notebook from the template and open it (e.g.
   `new sales-analysis`).
+
+### `delete`
+
+Delete a notebook from your workspace. A `.pbip` path removes the whole Power BI
+project (its pointer plus the `.SemanticModel/` and `.Report/` folders).
+
+```
+python mooring.pyz delete notebooks/sales.py
+```
+
+Deletion is **local only**: it removes the file(s) from your workspace, and the
+notebook then shows as *deleted locally* in `status`. Run `push` (or `propose`)
+afterwards to remove it from the team repo for everyone; a notebook you never
+shared just disappears. You are asked to confirm first — pass `-y`/`--yes` to
+skip the prompt (required when running non-interactively, e.g. from a script).
 
 ### `selftest`
 

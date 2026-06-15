@@ -120,6 +120,7 @@ class Hub:
                 {
                     "path": f.path,
                     "state": f.state.value,
+                    "has_local": f.local_sha is not None,
                     **({"artifact": artifact_of[f.path]} if f.path in artifact_of else {}),
                 }
                 for f in report.files
@@ -316,6 +317,28 @@ class Hub:
         data = await request.json()
         return self._open(data.get("path", ""))
 
+    async def api_delete(self, request: Request) -> JSONResponse:
+        from mooring import deletion
+
+        data = await request.json()
+        rel_path = str(data.get("path", ""))
+        cfg = self.cfg
+        try:
+            removed = deletion.delete(cfg.workspace(), rel_path, cfg.exclude, cfg.folders)
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        except FileNotFoundError:
+            return JSONResponse({"error": f"No such notebook: {rel_path}"}, status_code=404)
+        telemetry.log_event("delete", count=len(removed))
+        name = rel_path.rsplit("/", 1)[-1]
+        return JSONResponse(
+            {
+                "lines": [f"deleted {r}" for r in removed],
+                "summary": f"Deleted {name}. If it was shared, push or propose to "
+                "remove it for the team.",
+            }
+        )
+
     def _open(self, rel_path: str) -> JSONResponse:
         workspace = self.cfg.workspace()
         target = (workspace / rel_path).resolve()
@@ -375,6 +398,7 @@ def create_app(hub: Hub) -> Starlette:
             Route("/api/resolve", hub.api_resolve, methods=["POST"]),
             Route("/api/new", hub.api_new, methods=["POST"]),
             Route("/api/open", hub.api_open, methods=["POST"]),
+            Route("/api/delete", hub.api_delete, methods=["POST"]),
             Mount("/static", StaticFiles(directory=static)),
         ],
         lifespan=lifespan,

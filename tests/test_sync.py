@@ -134,6 +134,65 @@ def test_push_local_delete(cfg):
     assert "notebooks/b.py" not in manifest.load(cfg.workspace()).files
 
 
+def test_delete_then_push_removes_remote(cfg):
+    """End-to-end: deletion.delete() leaves the file as DELETED_LOCAL, and the
+    next push removes it from the team repo — the deletion module's contract."""
+    from mooring import deletion
+
+    client = FakeClient({"notebooks/a.py": b"v1\n", "notebooks/b.py": b"v1\n"})
+    sync.pull(client, cfg)
+    deletion.delete(cfg.workspace(), "notebooks/b.py")
+    states = {f.path: f.state for f in sync.status(client, cfg).files}
+    assert states["notebooks/b.py"] is FileState.DELETED_LOCAL
+    result = sync.push(client, cfg, sleep=lambda s: None)
+    assert result.pushed == 1
+    assert "notebooks/b.py" not in client.tree
+    assert "notebooks/a.py" in client.tree
+    assert "notebooks/b.py" not in manifest.load(cfg.workspace()).files
+
+
+def test_delete_pbip_then_push_removes_all_members(cfg):
+    from mooring import deletion
+
+    client = FakeClient(
+        {
+            "reports/Sales.pbip": b"{}\n",
+            "reports/Sales.SemanticModel/model.tmdl": b"m\n",
+            "reports/Sales.Report/report.json": b"{}\n",
+            "notebooks/keep.py": b"k\n",
+        }
+    )
+    sync.pull(client, cfg)
+    removed = deletion.delete(cfg.workspace(), "reports/Sales.pbip")
+    assert len(removed) == 3
+    result = sync.push(client, cfg, sleep=lambda s: None)
+    assert result.pushed == 3
+    assert not any(p.startswith("reports/Sales") for p in client.tree)
+    assert "notebooks/keep.py" in client.tree
+
+
+def test_delete_proposed_new_file_withdraws_it_from_review(cfg):
+    """A brand-new file proposed for review, then deleted locally, must be
+    withdrawn from the open PR — not silently dropped (it was never on
+    cfg.branch, so classify would otherwise omit it entirely)."""
+    from mooring import deletion
+
+    client = FakeClient()
+    write_local(cfg, "notebooks/new.py", "fresh\n")
+    sync.propose(client, cfg, sleep=lambda s: None, now=NOW1)
+    assert "notebooks/new.py" in client.trees[BRANCH1]
+    deletion.delete(cfg.workspace(), "notebooks/new.py")
+    states = {f.path: f.state for f in sync.status(client, cfg).files}
+    assert states["notebooks/new.py"] is FileState.DELETED_LOCAL  # not dropped
+    result = sync.push(client, cfg, sleep=lambda s: None)
+    assert result.pushed == 1
+    assert "notebooks/new.py" not in client.trees[BRANCH1]  # gone from the PR
+    sync.status(client, cfg)  # reconciles the now-empty proposal away
+    mft = manifest.load(cfg.workspace())
+    assert mft.review_files == {}
+    assert mft.review_branch == ""
+
+
 def test_push_blocks_conflicts(cfg):
     client = FakeClient({"notebooks/a.py": b"v1\n"})
     sync.pull(client, cfg)
