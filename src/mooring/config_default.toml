@@ -58,5 +58,6 @@ level = "info"   # "info" logs usage + errors; "error" logs only errors
 [ai]
 enabled = true              # set false to hide the AI copilot entirely
 provider = "copilot"        # AI backend; "copilot" = GitHub Copilot (pluggable)
-model = ""                  # provider model id; empty = the provider's default
+model = ""                  # default model id; empty = the provider's default (users can pick in the chat)
+reasoning_effort = ""       # default reasoning effort; empty = the model's default (users can pick per model)
 chat_idle_timeout_sec = 900 # close an idle chat session after this many seconds

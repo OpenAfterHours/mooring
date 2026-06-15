@@ -63,6 +63,10 @@ class AIProvider(Protocol):
         """
         ...
 
+    def list_models(self, force: bool = False) -> list[dict]:
+        """Available models as value-free dicts (id/name/efforts/...). [] if unavailable."""
+        ...
+
 
 def get_provider(app_cfg: "AppConfig") -> AIProvider:
     """Build the configured provider. Import of the backend is deferred."""

@@ -23,7 +23,18 @@ def _event(etype, **data):
     return types.SimpleNamespace(type=etype, data=types.SimpleNamespace(**data))
 
 
+# A scripted turn: (SessionEventType, data kwargs). Tests can override.
+BASIC_TURN = [
+    (ET.ASSISTANT_MESSAGE_DELTA, {"delta_content": "Hel"}),
+    (ET.ASSISTANT_MESSAGE_DELTA, {"delta_content": "lo"}),
+    (ET.ASSISTANT_MESSAGE, {"content": "Hello"}),
+    (ET.SESSION_IDLE, {"aborted": False}),
+]
+
+
 class FakeSession:
+    SCRIPT = BASIC_TURN
+
     def __init__(self, create_kwargs):
         self.create_kwargs = create_kwargs
         self._handler = None
@@ -35,10 +46,8 @@ class FakeSession:
 
     async def send(self, prompt, **kw):
         # Drive the streaming handler exactly like the real SDK would.
-        self._handler(_event(ET.ASSISTANT_MESSAGE_DELTA, delta_content="Hel"))
-        self._handler(_event(ET.ASSISTANT_MESSAGE_DELTA, delta_content="lo"))
-        self._handler(_event(ET.ASSISTANT_MESSAGE, content="Hello"))
-        self._handler(_event(ET.SESSION_IDLE, aborted=False))
+        for etype, data in type(self).SCRIPT:
+            self._handler(_event(etype, **data))
         return "turn-1"
 
     async def disconnect(self):
@@ -72,15 +81,30 @@ class FakeClient:
 @pytest.fixture
 def fake_sdk(monkeypatch):
     monkeypatch.setattr(copilot, "CopilotClient", FakeClient)
+    FakeSession.SCRIPT = BASIC_TURN  # reset any per-test override
     FakeClient.last = None
     FakeClient.authed = True
 
 
-def _make(tmp_path):
+def _make(tmp_path, **kw):
     (tmp_path / "nb.py").write_text("import marimo\n", "utf-8")
     return CopilotChatSession(
-        model="", system_context="CTX", workspace=tmp_path, folders=("data",), notebook_rel="nb.py"
+        model="",
+        system_context="CTX",
+        workspace=tmp_path,
+        folders=("data",),
+        notebook_rel="nb.py",
+        **kw,
     )
+
+
+def _drain(q, until="idle", timeout=3):
+    kinds = []
+    while True:
+        ev = q.get(timeout=timeout)
+        kinds.append((ev.kind, ev.data))
+        if ev.kind == until:
+            return kinds
 
 
 def test_streams_delta_message_idle(fake_sdk, tmp_path):
@@ -88,13 +112,47 @@ def test_streams_delta_message_idle(fake_sdk, tmp_path):
     try:
         q = sess.subscribe()
         sess.send("hi")
-        kinds = []
-        while True:
-            ev = q.get(timeout=3)
-            kinds.append(ev.kind)
-            if ev.kind == "idle":
-                break
+        kinds = [k for k, _ in _drain(q)]
         assert kinds == ["delta", "delta", "message", "idle"]
+    finally:
+        sess.close()
+
+
+def test_tool_and_intent_events(fake_sdk, tmp_path):
+    FakeSession.SCRIPT = [
+        (ET.ASSISTANT_INTENT, {"intent": "Aggregate sales by region"}),
+        (ET.TOOL_EXECUTION_START, {"tool_name": "mooring_get_schema", "arguments": {}}),
+        (ET.TOOL_EXECUTION_PROGRESS, {"progress_message": "reading footer", "tool_call_id": "c1"}),
+        (ET.TOOL_EXECUTION_COMPLETE, {"success": True, "tool_call_id": "c1"}),
+        (ET.ASSISTANT_MESSAGE, {"content": "done"}),
+        (ET.SESSION_IDLE, {"aborted": False}),
+    ]
+    sess = _make(tmp_path).start()
+    try:
+        q = sess.subscribe()
+        sess.send("group sales by region")
+        events = _drain(q)
+        kinds = [k for k, _ in events]
+        assert kinds[0] == "intent"
+        assert ("tool", {"name": "mooring_get_schema"}) in events
+        assert ("tool", {"progress": "reading footer"}) in events
+        assert ("tool_done", {"success": True}) in events
+    finally:
+        sess.close()
+
+
+def test_reasoning_effort_passed_through(fake_sdk, tmp_path):
+    sess = _make(tmp_path, reasoning_effort="high").start()
+    try:
+        assert FakeClient.last.session.create_kwargs["reasoning_effort"] == "high"
+    finally:
+        sess.close()
+
+
+def test_no_reasoning_effort_by_default(fake_sdk, tmp_path):
+    sess = _make(tmp_path).start()
+    try:
+        assert "reasoning_effort" not in FakeClient.last.session.create_kwargs
     finally:
         sess.close()
 

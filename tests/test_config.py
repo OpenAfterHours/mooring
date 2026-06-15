@@ -287,3 +287,17 @@ def test_legacy_hint_points_documents_users_to_new_default(tmp_path, monkeypatch
     # Once the files live at the new default, the hint goes quiet.
     (new / ".mooring").mkdir(parents=True)
     assert cli.legacy_workspace_hint(cfg) == ""
+
+
+def test_ai_reasoning_effort_from_config_and_env(tmp_path):
+    user = tmp_path / "config.toml"
+    user.write_text('[ai]\nreasoning_effort = "high"\n', "utf-8")
+    assert load_app_config(user_config_path=user, env={}).ai_reasoning_effort == "high"
+    # env overrides the file
+    app = load_app_config(user_config_path=user, env={"MOORING_AI_REASONING_EFFORT": "xhigh"})
+    assert app.ai_reasoning_effort == "xhigh"
+    # default is empty (= the model's default)
+    assert (
+        load_app_config(user_config_path=tmp_path / "missing.toml", env={}).ai_reasoning_effort
+        == ""
+    )

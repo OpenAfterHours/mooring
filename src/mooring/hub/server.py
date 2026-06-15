@@ -386,9 +386,7 @@ class Hub:
                 return JSONResponse({"error": str(exc)}, status_code=400)
             name = rel_path.rsplit("/", 1)[-1]
             telemetry.log_event("open", kind="pbip")
-            return JSONResponse(
-                {"path": rel_path, "lines": [f"Opened {name} in Power BI Desktop"]}
-            )
+            return JSONResponse({"path": rel_path, "lines": [f"Opened {name} in Power BI Desktop"]})
         if not rel_path.endswith(".py"):
             return JSONResponse(
                 {"error": "Only .py notebooks and .pbip projects can be opened."},
@@ -434,9 +432,7 @@ class Hub:
         if dataset_rel:
             ds = self._ws_file(workspace, dataset_rel)
             try:
-                schema_text = schema.format_for_ai(
-                    schema.extract_schema(ds), source=dataset_rel
-                )
+                schema_text = schema.format_for_ai(schema.extract_schema(ds), source=dataset_rel)
             except (ValueError, OSError) as exc:
                 raise ValueError(f"Could not read the schema for {dataset_rel}: {exc}") from exc
         source = self._ws_file(workspace, notebook_rel, suffix=".py").read_text("utf-8")
@@ -444,11 +440,19 @@ class Hub:
             schema_text=schema_text, notebook_source=source, notebook_rel=notebook_rel
         )
 
-    def _make_chat_session(self, system_context: str, workspace: Path, notebook_rel: str):
+    def _make_chat_session(
+        self,
+        system_context: str,
+        workspace: Path,
+        notebook_rel: str,
+        model: str = "",
+        reasoning_effort: str | None = None,
+    ):
         """Open a streaming Copilot chat session bound to this notebook.
 
-        Raises AIError (-> 502 with an install/connect hint) if Copilot isn't
-        available or signed in.
+        ``model``/``reasoning_effort`` override the configured defaults. Raises
+        AIError (-> 502 with an install/connect hint) if Copilot isn't available
+        or signed in.
         """
         from mooring.ai import get_provider
 
@@ -458,6 +462,8 @@ class Hub:
             workspace=workspace,
             folders=self.cfg.folders,
             notebook_rel=notebook_rel,
+            model=model,
+            reasoning_effort=reasoning_effort,
         )
 
     def _reap_idle_chats(self) -> None:
@@ -482,6 +488,10 @@ class Hub:
         data = await request.json()
         notebook = str(data.get("notebook", "")).strip()
         dataset = str(data.get("dataset", "")).strip()
+        model = str(data.get("model", "")).strip()
+        reasoning_effort = (
+            str(data.get("reasoning_effort", "")).strip() or self.app_cfg.ai_reasoning_effort
+        )
         if not notebook:
             return JSONResponse({"error": "A notebook is required."}, status_code=400)
         workspace = self.cfg.workspace()
@@ -493,7 +503,9 @@ class Hub:
             return JSONResponse({"error": f"No such file: {exc}"}, status_code=404)
         self._reap_idle_chats()
         try:
-            session = self._make_chat_session(context, workspace, notebook)
+            session = self._make_chat_session(
+                context, workspace, notebook, model=model, reasoning_effort=reasoning_effort
+            )
         except Exception as exc:  # noqa: BLE001 - AIError surfaces to the UI in Phase 1
             return JSONResponse({"error": str(exc)}, status_code=502)
         sid = secrets.token_urlsafe(9)
@@ -574,6 +586,22 @@ class Hub:
         telemetry.log_event("ai_chat_apply")
         return JSONResponse({"ok": True})
 
+    async def api_chat_models(self, request: Request) -> JSONResponse:
+        """The models the user can pick, plus the configured defaults (value-free)."""
+        if not self.app_cfg.ai_enabled:
+            return JSONResponse({"enabled": False}, status_code=404)
+        from mooring.ai import get_provider
+
+        provider = get_provider(self.app_cfg)
+        models = await asyncio.to_thread(provider.list_models)
+        return JSONResponse(
+            {
+                "models": models,
+                "default_model": self.app_cfg.ai_model or "",
+                "default_effort": self.app_cfg.ai_reasoning_effort or "",
+            }
+        )
+
 
 def create_app(hub: Hub) -> Starlette:
     static = _static_dir()
@@ -604,6 +632,7 @@ def create_app(hub: Hub) -> Starlette:
             Route("/api/open", hub.api_open, methods=["POST"]),
             Route("/api/delete", hub.api_delete, methods=["POST"]),
             Route("/ai/chat", hub.chat_page),
+            Route("/api/ai/models", hub.api_chat_models),
             Route("/api/ai/chat/open", hub.api_chat_open, methods=["POST"]),
             Route("/api/ai/chat/stream/{sid}", hub.api_chat_stream),
             Route("/api/ai/chat/send", hub.api_chat_send, methods=["POST"]),
@@ -614,9 +643,7 @@ def create_app(hub: Hub) -> Starlette:
     )
 
 
-def run_hub(
-    app_cfg: config.AppConfig, open_browser: bool = True, port: int | None = None
-) -> int:
+def run_hub(app_cfg: config.AppConfig, open_browser: bool = True, port: int | None = None) -> int:
     hub = Hub(app_cfg)
     app = create_app(hub)
     port = port or _free_port()
