@@ -5,19 +5,18 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import os
+import subprocess
 import sys
 from collections.abc import Mapping
 from pathlib import Path
 
-from mooring import __version__, config, paths, telemetry
+from mooring import __version__, config, paths, pyproject_env, telemetry
 
+# Mooring's own runtime — what the lean bundle must always carry. A repo's
+# notebook packages are not listed here: they live in the repo's pyproject.toml
+# and are verified per-workspace by pyproject_env.missing_deps().
 SELFTEST_PACKAGES = (
     "marimo",
-    "polars",
-    "altair",
-    "plotly",
-    "openpyxl",
-    "fastexcel",
     "requests",
     "truststore",
     "keyring",
@@ -148,7 +147,31 @@ def _build_parser() -> argparse.ArgumentParser:
         "-y", "--yes", action="store_true", help="skip the confirmation prompt"
     )
 
-    for cmd in (status, pull, push, propose, open_cmd, new, delete_cmd):
+    init_cmd = sub.add_parser(
+        "init",
+        help="create the repo's pyproject.toml (its notebook dependencies) and lock it",
+    )
+
+    deps = sub.add_parser("deps", help="manage the repo's notebook dependencies")
+    deps_sub = deps.add_subparsers(dest="deps_command", required=True)
+    deps_add = deps_sub.add_parser("add", help="add packages to the repo and re-lock")
+    deps_add.add_argument(
+        "packages", nargs="+", help="packages to add (e.g. polars 'scipy>=1.11')"
+    )
+    deps_rm = deps_sub.add_parser("remove", help="remove packages from the repo and re-lock")
+    deps_rm.add_argument("packages", nargs="+", help="packages to remove")
+    deps_sub.add_parser("list", help="list declared packages and whether each is available")
+    deps_sub.add_parser("lock", help="refresh uv.lock from pyproject.toml")
+
+    build_reqs = sub.add_parser(
+        "build-requirements",
+        help="export the repo's pinned deps for a frozen build (see docs: build & distribute)",
+    )
+    build_reqs.add_argument(
+        "-o", "--output", default=None, help="write to this file (default: stdout)"
+    )
+
+    for cmd in (status, pull, push, propose, open_cmd, new, delete_cmd, init_cmd, deps, build_reqs):
         cmd.add_argument(
             "--repo", default=None, metavar="ALIAS", help="act on this repo instead of the active one"
         )
@@ -395,9 +418,12 @@ def cmd_open(cfg: config.Config, rel_path: str) -> int:
         print(f"Opened {rel_path} in Power BI Desktop.")
         return 0
     server = EditorServer(workspace)
+    if not server.use_uv():
+        for line in _missing_deps_lines(pyproject_env.missing_deps(workspace)):
+            print(line)
     server.ensure_started()
     url = server.url_for(rel_path)
-    telemetry.log_event("open", kind="notebook")
+    telemetry.log_event("open", kind="notebook", uv=server.use_uv())
     print(f"Editor running at {url} (Ctrl+C to stop)")
     webbrowser.open(url)
     try:
@@ -407,14 +433,95 @@ def cmd_open(cfg: config.Config, rel_path: str) -> int:
     return 0
 
 
+def _missing_deps_lines(missing: list[str]) -> list[str]:
+    if not missing:
+        return []
+    return [
+        f"Warning: this build can't provide: {', '.join(missing)}",
+        f"  Declared in {pyproject_env.PYPROJECT_NAME} but not in the bundle — importing "
+        "them will fail.",
+        "  Ask your admin to include them in the build, or run mooring via uv.",
+    ]
+
+
 def cmd_new(cfg: config.Config, name: str) -> int:
     from mooring import notebook_template
 
     workspace = cfg.workspace()
+    if pyproject_env.scaffold(workspace):
+        print(f"Created {pyproject_env.PYPROJECT_NAME} for this repo's notebook dependencies.")
     rel_path = notebook_template.create(workspace, name)
     telemetry.log_event("new")
     print(f"Created {rel_path}")
     return cmd_open(cfg, rel_path)
+
+
+def cmd_init(cfg: config.Config) -> int:
+    workspace = cfg.workspace()
+    target = pyproject_env.pyproject_path(workspace)
+    if not pyproject_env.scaffold(workspace):
+        print(f"{pyproject_env.PYPROJECT_NAME} already exists at {target}.")
+        return 0
+    telemetry.log_event("init")
+    print(f"Created {target} (marimo only — add your team's packages).")
+    if pyproject_env.lock_path(workspace).is_file():
+        print(f"Locked {pyproject_env.LOCK_NAME}.")
+    elif not pyproject_env.uv_available():
+        print("Install uv to generate uv.lock (`mooring deps lock`), or commit just the pyproject.")
+    print("Next: `mooring deps add <pkg>` to add packages, then `mooring push` to share.")
+    return 0
+
+
+def cmd_deps(cfg: config.Config, args: argparse.Namespace) -> int:
+    workspace = cfg.workspace()
+    command = args.deps_command
+    if command == "list":
+        status = pyproject_env.dep_status(workspace)
+        if not status:
+            if not pyproject_env.has_pyproject(workspace):
+                print("No pyproject.toml yet. Run `mooring init`.")
+            else:
+                print("No dependencies declared.")
+            return 0
+        for req, available in status:
+            print(f"  {'ok' if available else 'missing':<8} {req}")
+        unavailable = [r for r, ok in status if not ok]
+        if unavailable:
+            print(f"{len(unavailable)} not available in this environment.")
+        return 0
+    if command in ("remove", "lock") and not pyproject_env.has_pyproject(workspace):
+        sys.exit("No pyproject.toml yet. Run `mooring init` first.")
+    try:
+        if command == "add":
+            pyproject_env.scaffold(workspace, name=cfg.repo or None, lock=False)
+            pyproject_env.add(workspace, args.packages)
+            print(f"Added: {', '.join(args.packages)}. Run `mooring push` to share.")
+        elif command == "remove":
+            pyproject_env.remove(workspace, args.packages)
+            print(f"Removed: {', '.join(args.packages)}. Run `mooring push` to share.")
+        elif command == "lock":
+            pyproject_env.run_lock(workspace)
+            print(f"Locked {pyproject_env.LOCK_NAME}.")
+    except pyproject_env.UvNotAvailable as exc:
+        sys.exit(str(exc))
+    except subprocess.CalledProcessError as exc:
+        sys.exit(f"uv {command} failed (exit {exc.returncode}).")
+    telemetry.log_event("deps", action=command)
+    return 0
+
+
+def cmd_build_requirements(cfg: config.Config, output: str | None) -> int:
+    workspace = cfg.workspace()
+    if not pyproject_env.has_pyproject(workspace):
+        sys.exit("No pyproject.toml in the workspace. Run `mooring init` first.")
+    text = pyproject_env.export_requirements(workspace)
+    telemetry.log_event("build_requirements")
+    if output:
+        Path(output).write_text(text, encoding="utf-8")
+        print(f"Wrote {output}")
+    else:
+        sys.stdout.write(text)
+    return 0
 
 
 def cmd_delete(cfg: config.Config, rel_path: str, assume_yes: bool) -> int:
@@ -557,6 +664,12 @@ def _dispatch(
         return cmd_open(cfg, args.path)
     if command == "new":
         return cmd_new(cfg, args.name)
+    if command == "init":
+        return cmd_init(cfg)
+    if command == "deps":
+        return cmd_deps(cfg, args)
+    if command == "build-requirements":
+        return cmd_build_requirements(cfg, args.output)
     if command == "delete":
         return cmd_delete(cfg, args.path, args.yes)
     parser.error(f"unknown command {command!r}")

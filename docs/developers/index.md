@@ -60,7 +60,8 @@ src/mooring/
   gitsha.py              compute git blob SHAs locally
   manifest.py            record of what was last synced
   sync.py                three-way sync engine (pull / push / resolve)
-  editor.py              marimo subprocess manager
+  editor.py              marimo subprocess manager (frozen bundle or uv project)
+  pyproject_env.py       per-repo notebook deps (pyproject.toml + uv.lock)
   notebook_template.py   template for `new`
   hub/
     server.py            Starlette app + endpoints
@@ -73,7 +74,9 @@ src/mooring/
   need only Python 3.12 or newer.
 - **Conflicts are never silent.** Pull skips conflicted files; push relies on
   GitHub's SHA check to reject stale writes.
-- **Frozen package stack.** What a notebook can import is fixed at build time;
-  there's no pip at runtime.
+- **Dependencies live with the repo.** A repo's notebook packages are declared in
+  its own `pyproject.toml` + `uv.lock` (synced via GitHub). With uv, `editor.py`
+  runs notebooks in that locked env; a frozen `.pyz` carries a bundle the admin
+  built from the same file (no pip at runtime). Mooring itself stays lean.
 
 Ready to make changes? See [Contributing](contributing.md).

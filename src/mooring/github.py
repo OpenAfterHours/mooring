@@ -131,7 +131,12 @@ class GitHubClient:
         )
         return data["object"]["sha"]
 
-    def get_tree(self, commit_sha: str, folders: tuple[str, ...]) -> list[TreeEntry]:
+    def get_tree(
+        self,
+        commit_sha: str,
+        folders: tuple[str, ...],
+        extra_paths: tuple[str, ...] = (),
+    ) -> list[TreeEntry]:
         commit = self._check(
             self._session.get(self._repo_url(f"git/commits/{commit_sha}"), timeout=30)
         )
@@ -148,9 +153,12 @@ class GitHubClient:
                 "mooring cannot sync this repo."
             )
         prefixes = tuple(f"{f.rstrip('/')}/" for f in folders)
+        extra = frozenset(extra_paths)
         entries = []
         for item in data.get("tree", []):
-            if item["type"] != "blob" or not item["path"].startswith(prefixes):
+            if item["type"] != "blob":
+                continue
+            if not (item["path"].startswith(prefixes) or item["path"] in extra):
                 continue
             if len(item["sha"]) != 40:
                 raise GitHubError("SHA-256 object-format repos are not supported.")

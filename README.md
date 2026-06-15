@@ -27,11 +27,14 @@ per file (never silently overwritten).
 - **Push or propose.** Push commits straight to the shared branch; **propose**
   sends changes to a personal review branch so they can land via a pull
   request — protect the branch and propose becomes the only way in.
-- **Frozen package stack.** Notebooks can import anything bundled into the
-  artifact (`polars`, `altair`, `plotly`, `openpyxl`, `fastexcel`,
-  `requests`, plus the standard library). There is no pip at runtime. Running
-  from PyPI instead? Add packages per run with `uvx --with pandas mooring` —
-  they become importable in notebooks (frozen artifacts keep their fixed set).
+- **Dependencies live with the repo.** A repo declares its notebook packages in
+  a `pyproject.toml` + `uv.lock` at its root (run `mooring init`, then
+  `mooring deps add <pkg>`), version-controlled alongside the notebooks. With uv,
+  notebooks run in that locked environment automatically; mooring itself ships
+  lean (no opinionated analyst stack baked in). For machines with no uv, an admin
+  builds a frozen `.pyz` whose bundle is generated from that same `pyproject.toml`
+  — one source of truth, two delivery modes (see
+  [build & distribute](docs/admins/build-and-distribute.md)).
 - **Works on corporate GitHub.** GitHub Enterprise instances are supported
   (`mooring login --host ghe.example.com`), and TLS is verified against the
   OS trust store, so SSL-intercepting proxies with an IT-installed root CA

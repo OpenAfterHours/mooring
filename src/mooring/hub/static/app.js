@@ -42,9 +42,10 @@ function showError(message) {
 }
 
 function showLog(data) {
-  if (!data || (!data.lines && !data.summary)) return;
+  if (!data || (!data.lines && !data.summary && !data.warning)) return;
   $("log-card").classList.remove("hidden");
   const lines = (data.lines || []).slice();
+  if (data.warning) lines.push("⚠ " + data.warning);
   if (data.summary) lines.push("", data.summary);
   $("log").textContent = lines.join("\n");
   // The <pre> is plain text; the compare link needs a real anchor.

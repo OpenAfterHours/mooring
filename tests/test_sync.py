@@ -72,6 +72,25 @@ def test_pull_applies_remote_update_and_delete(cfg):
     assert not (cfg.workspace() / "notebooks/b.py").exists()
 
 
+def test_root_pyproject_and_lock_sync_like_any_file(cfg):
+    # The repo's dependency project lives at the workspace ROOT, outside the
+    # configured folders, but still rides push/pull (sync.PROJECT_FILES).
+    write_local(cfg, "pyproject.toml", "[project]\nname = 'x'\n")
+    write_local(cfg, "uv.lock", "version = 1\n")
+    write_local(cfg, "notebooks/a.py", "print(1)\n")
+    client = FakeClient()
+    result = sync.push(client, cfg)
+    assert result.pushed == 3
+    assert "pyproject.toml" in client.tree
+    assert "uv.lock" in client.tree
+
+    # A teammate pulls them into a fresh workspace.
+    cfg2 = replace(cfg, workspace_path=str(cfg.workspace().parent / "ws2"))
+    sync.pull(client, cfg2)
+    assert read_local(cfg2, "pyproject.toml") == "[project]\nname = 'x'\n"
+    assert read_local(cfg2, "uv.lock") == "version = 1\n"
+
+
 def test_pull_never_overwrites_local_edits_by_default(cfg):
     client = FakeClient({"notebooks/a.py": b"v1\n"})
     sync.pull(client, cfg)

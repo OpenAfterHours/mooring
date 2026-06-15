@@ -32,6 +32,11 @@ from mooring.github import (
     compare_url,
 )
 
+# Root-level files that participate in sync even though they live outside the
+# configured folders: the repo's notebook-dependency project (see
+# mooring.pyproject_env). They ride pull/push/propose like any tracked file.
+PROJECT_FILES = ("pyproject.toml", "uv.lock")
+
 # Local files matching this marker are mooring-created scratch copies of
 # remote versions ("keep both" resolution) and are never synced.
 REMOTE_COPY_MARKER = ".remote-"
@@ -206,6 +211,10 @@ def scan_local(
             if not is_synced_path(rel, exclude):
                 continue
             out[rel] = gitsha.local_blob_sha(path, rel)
+    for name in PROJECT_FILES:
+        path = workspace / name
+        if path.is_file() and is_synced_path(name, exclude):
+            out[name] = gitsha.local_blob_sha(path, name)
     return out
 
 
@@ -218,7 +227,7 @@ def _remote_entries(
         return {p: s for p, s in mft.files.items() if is_synced_path(p, cfg.exclude)}
     return {
         e.path: e.sha
-        for e in client.get_tree(head, cfg.folders)
+        for e in client.get_tree(head, cfg.folders, PROJECT_FILES)
         if is_synced_path(e.path, cfg.exclude)
     }
 
@@ -229,7 +238,7 @@ def _review_tree(client: GitHubClient, cfg: Config, branch: str) -> dict[str, st
     review_head = client.get_branch_head(branch)
     return {
         e.path: e.sha
-        for e in client.get_tree(review_head, cfg.folders)
+        for e in client.get_tree(review_head, cfg.folders, PROJECT_FILES)
         if is_synced_path(e.path, cfg.exclude)
     }
 

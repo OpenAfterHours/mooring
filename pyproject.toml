@@ -12,14 +12,12 @@ dependencies = [
     "truststore",
     "keyring",
     "platformdirs",
-    # notebook stack frozen into the distributed artifact
-    "polars",
-    "altair",
-    "plotly",
-    "openpyxl",
-    "fastexcel",
     "tomli-w>=1.2.0",
 ]
+# Mooring ships lean: only its own runtime is bundled. A repo's notebook
+# dependencies live in that repo's own pyproject.toml (synced via GitHub) — see
+# docs/admins/build-and-distribute.md. uv users run notebooks against it; for a
+# frozen .pyz the admin builds a team-specific artifact from those deps.
 
 [project.scripts]
 mooring = "mooring.cli:main"
