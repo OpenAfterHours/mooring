@@ -88,7 +88,18 @@ function proposeAction(paths, count) {
   return action("/api/propose", paths ? { paths } : {});
 }
 
-function fileActions(file) {
+function deleteAction(path, kind) {
+  const name = path.split("/").pop();
+  const what = kind === "project" ? `the Power BI project ${name}` : name;
+  const ok = confirm(
+    `Delete ${what} from your workspace?\n\n` +
+    "This removes the local file(s). Push or Propose afterwards to remove it from the team repo."
+  );
+  if (ok) action("/api/delete", { path });
+}
+
+function fileActions(file, opts) {
+  opts = opts || {};
   const actions = [];
   if (file.state === "conflict") {
     actions.push(["Use remote", () => action("/api/resolve", { path: file.path, strategy: "theirs" })]);
@@ -98,9 +109,17 @@ function fileActions(file) {
     actions.push(["Push", () => action("/api/push", { paths: [file.path] })]);
     actions.push(["Propose", () => action("/api/propose", { paths: [file.path] })]);
   }
+  // has_local is server truth (the file exists on disk); some states such as a
+  // remote-deleted conflict have no local file, so Open/Delete must not appear.
   const openable = file.path.endsWith(".py") || file.path.endsWith(".pbip");
-  if (openable && !["new remote", "deleted locally"].includes(file.state)) {
+  if (openable && file.has_local) {
     actions.push(["Open", () => action("/api/open", { path: file.path }, false)]);
+  }
+  // Delete is suppressed on PBIP member rows (opts.member): a project is only
+  // deleted whole, via its header, since removing one member would leave a
+  // structurally broken artifact.
+  if (file.has_local && !opts.member) {
+    actions.push(["Delete", () => deleteAction(file.path)]);
   }
   return actions;
 }
@@ -136,8 +155,8 @@ function buildRow(pathCell, state, actions) {
   return tr;
 }
 
-function buildFileRow(file) {
-  return buildRow(file.path, file.state, fileActions(file));
+function buildFileRow(file, opts) {
+  return buildRow(file.path, file.state, fileActions(file, opts));
 }
 
 function buildArtifactRows(artifact, files) {
@@ -146,7 +165,7 @@ function buildArtifactRows(artifact, files) {
     .map((path) => byPath.get(path))
     .filter(Boolean)
     .map((file) => {
-      const row = buildFileRow(file);
+      const row = buildFileRow(file, { member: true });
       row.classList.add("member", "hidden");
       return row;
     });
@@ -182,8 +201,9 @@ function buildArtifactRows(artifact, files) {
     actions.push(["Propose", () => proposeAction(paths, paths.length)]);
   }
   const pointer = byPath.get(artifact.pointer);
-  if (pointer && !["new remote", "deleted locally"].includes(pointer.state)) {
+  if (pointer && pointer.has_local) {
     actions.push(["Open", () => action("/api/open", { path: artifact.pointer }, false)]);
+    actions.push(["Delete", () => deleteAction(artifact.pointer, "project")]);
   }
 
   const header = buildRow([caret, name, detail], artifact.state, actions);

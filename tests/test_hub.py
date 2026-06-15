@@ -295,3 +295,49 @@ def test_open_rejects_traversal(configured, monkeypatch):
     (tmp_path / "evil.py").write_text("x", "utf-8")
     resp = client.post("/api/open", json={"path": "../evil.py"})
     assert resp.status_code == 400
+
+
+def test_delete_endpoint_removes_file(configured):
+    client, _, _, tmp_path = configured
+    write_ws(tmp_path, "ws1", "notebooks/a.py", "a")
+    resp = client.post("/api/delete", json={"path": "notebooks/a.py"})
+    assert resp.status_code == 200
+    assert resp.json()["lines"] == ["deleted notebooks/a.py"]
+    assert not (tmp_path / "ws1" / "notebooks/a.py").exists()
+    # A never-synced file just disappears (nothing left for the team to remove).
+    state = client.get("/api/state").json()
+    assert state["files"] == []
+
+
+def test_delete_endpoint_pbip_artifact(configured):
+    client, _, _, tmp_path = configured
+    write_ws(tmp_path, "ws1", "reports/Sales.pbip", "{}")
+    write_ws(tmp_path, "ws1", "reports/Sales.SemanticModel/model.tmdl", "m")
+    resp = client.post("/api/delete", json={"path": "reports/Sales.pbip"})
+    assert resp.status_code == 200
+    assert not (tmp_path / "ws1" / "reports/Sales.pbip").exists()
+    assert not (tmp_path / "ws1" / "reports/Sales.SemanticModel").exists()
+
+
+def test_delete_endpoint_rejects_traversal(configured):
+    client, _, _, tmp_path = configured
+    (tmp_path / "evil.py").write_text("x", "utf-8")
+    resp = client.post("/api/delete", json={"path": "../evil.py"})
+    assert resp.status_code == 400
+    assert (tmp_path / "evil.py").exists()
+
+
+def test_delete_endpoint_missing_404s(configured):
+    client, _, _, _ = configured
+    resp = client.post("/api/delete", json={"path": "notebooks/nope.py"})
+    assert resp.status_code == 404
+
+
+def test_state_reports_has_local_flag(configured):
+    client, _, fake, tmp_path = configured
+    write_ws(tmp_path, "ws1", "notebooks/local.py", "a")
+    fake.seed("notebooks/remote.py", b"r")  # exists only on the remote
+    files = {f["path"]: f for f in client.get("/api/state").json()["files"]}
+    assert files["notebooks/local.py"]["has_local"] is True
+    assert files["notebooks/remote.py"]["state"] == "new remote"
+    assert files["notebooks/remote.py"]["has_local"] is False

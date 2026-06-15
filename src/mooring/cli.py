@@ -138,7 +138,17 @@ def _build_parser() -> argparse.ArgumentParser:
     new = sub.add_parser("new", help="create a new notebook and open it")
     new.add_argument("name", help="notebook name (e.g. sales-analysis)")
 
-    for cmd in (status, pull, push, propose, open_cmd, new):
+    delete_cmd = sub.add_parser(
+        "delete", help="delete a notebook from the workspace (push afterwards to remove it remotely)"
+    )
+    delete_cmd.add_argument(
+        "path", help="workspace-relative notebook path (a .py file or a .pbip project)"
+    )
+    delete_cmd.add_argument(
+        "-y", "--yes", action="store_true", help="skip the confirmation prompt"
+    )
+
+    for cmd in (status, pull, push, propose, open_cmd, new, delete_cmd):
         cmd.add_argument(
             "--repo", default=None, metavar="ALIAS", help="act on this repo instead of the active one"
         )
@@ -407,6 +417,39 @@ def cmd_new(cfg: config.Config, name: str) -> int:
     return cmd_open(cfg, rel_path)
 
 
+def cmd_delete(cfg: config.Config, rel_path: str, assume_yes: bool) -> int:
+    from mooring import deletion
+
+    workspace = cfg.workspace()
+    try:
+        targets = deletion.target_paths(workspace, rel_path, cfg.exclude, cfg.folders)
+    except ValueError as exc:
+        sys.exit(str(exc))
+    existing = [t for t in targets if (workspace / t).is_file()]
+    if not existing:
+        sys.exit(f"No such notebook: {workspace / rel_path}")
+    if not assume_yes:
+        count = len(existing)
+        what = rel_path if count == 1 else f"{rel_path} ({count} files)"
+        if not sys.stdin.isatty():
+            sys.exit(f"Refusing to delete {what} without confirmation. Re-run with --yes.")
+        if input(f"Delete {what} from the workspace? [y/N] ").strip().lower() not in ("y", "yes"):
+            print("Cancelled.")
+            return 0
+    try:
+        removed = deletion.delete(workspace, rel_path, cfg.exclude, cfg.folders)
+    except FileNotFoundError:  # vanished between the prompt and the delete
+        sys.exit(f"No such notebook: {workspace / rel_path}")
+    telemetry.log_event("delete", count=len(removed))
+    for r in removed:
+        print(f"  deleted {r}")
+    print(
+        f"Deleted {rel_path} locally. Run `mooring push` (or `propose`) to remove it "
+        "from the team repo."
+    )
+    return 0
+
+
 def cmd_repo(app_cfg: config.AppConfig, args: argparse.Namespace) -> int:
     from mooring import config_store
 
@@ -514,6 +557,8 @@ def _dispatch(
         return cmd_open(cfg, args.path)
     if command == "new":
         return cmd_new(cfg, args.name)
+    if command == "delete":
+        return cmd_delete(cfg, args.path, args.yes)
     parser.error(f"unknown command {command!r}")
     return 2
 
