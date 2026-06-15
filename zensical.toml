@@ -40,6 +40,7 @@ nav = [
   { "For users" = [
     { "Install & first run" = "users/index.md" },
     { "Daily workflow" = "users/daily-workflow.md" },
+    { "AI copilot" = "users/ai-copilot.md" },
     { "Power BI reports" = "users/power-bi.md" },
     { "Resolving conflicts" = "users/conflicts.md" },
     { "Command-line reference" = "users/cli.md" },
@@ -48,6 +49,7 @@ nav = [
     { "Overview & checklist" = "admins/index.md" },
     { "GitHub setup" = "admins/github-setup.md" },
     { "Configuration" = "admins/configuration.md" },
+    { "AI copilot privacy" = "admins/ai-privacy.md" },
     { "Build & distribute" = "admins/build-and-distribute.md" },
   ] },
   { "For developers" = [

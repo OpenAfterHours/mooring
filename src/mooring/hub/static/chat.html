@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>mooring · AI copilot</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="chat-body">
+  <header>
+    <h1>&#9875; mooring</h1>
+    <span class="badge synced" title="The assistant only ever sees column names &amp; types, never data values">schema-only</span>
+    <div id="chat-target" class="muted"></div>
+  </header>
+
+  <main>
+    <section class="card">
+      <label>Dataset in context
+        <select id="chat-dataset"><option value="">(none — notebook source only)</option></select>
+      </label>
+      <div id="chat-status" class="muted"></div>
+      <p class="hint">The assistant can see this notebook's code and the selected dataset's
+        <b>schema</b> (column names &amp; types) — never the data itself. Don't paste real values
+        into a cell or this chat.</p>
+    </section>
+
+    <section id="messages" class="card"></section>
+
+    <section class="card">
+      <div class="composer">
+        <textarea id="chat-input" rows="3" placeholder="Ask for help, e.g. &quot;filter to 2024 and total amount by region&quot;"></textarea>
+        <button id="chat-send" class="primary">Send</button>
+      </div>
+    </section>
+
+    <div id="error-banner" class="hidden"></div>
+  </main>
+
+  <script src="/static/chat.js"></script>
+</body>
+</html>

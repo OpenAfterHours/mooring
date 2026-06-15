@@ -8,7 +8,11 @@ that the hub starts lazily and tears down on shutdown.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
+import json
+import queue
+import secrets
 import threading
 import time
 import webbrowser
@@ -18,7 +22,7 @@ from pathlib import Path
 import uvicorn
 from starlette.applications import Starlette
 from starlette.requests import Request
-from starlette.responses import FileResponse, JSONResponse
+from starlette.responses import FileResponse, JSONResponse, StreamingResponse
 from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
@@ -43,6 +47,12 @@ class Hub:
         self._next_poll = 0.0
         self._user_login = ""
         self._lock = threading.Lock()
+        # AI copilot chat sessions, keyed by a hub-minted sid. Each is bound to
+        # one open notebook; the value is a chat.StubChatSession (Phase 0) or a
+        # CopilotChatSession (Phase 1) — both ChatBroadcasters.
+        self._chats: dict[str, object] = {}
+        self._chat_targets: dict[str, tuple[str, str]] = {}  # sid -> (workspace, notebook rel)
+        self._chat_lock = threading.Lock()
 
     # -- helpers -------------------------------------------------------------
 
@@ -53,6 +63,9 @@ class Hub:
     def reload(self) -> None:
         with self._lock:
             self.app_cfg = config.load_app_config()
+        # Chat context (schema + notebook source) is bound to the old config;
+        # drop sessions so a new chat picks up the new repo/workspace.
+        self._close_all_chats()
 
     def client(self) -> GitHubClient:
         cfg = self.cfg
@@ -68,12 +81,24 @@ class Hub:
         return self._user_login
 
     def ensure_editor(self) -> EditorServer:
-        workspace = self.cfg.workspace()
+        return self.ensure_editor_for(self.cfg.workspace())
+
+    def ensure_editor_for(self, workspace: Path) -> EditorServer:
         editor = self.editors.setdefault(str(workspace), EditorServer(workspace))
         editor.ensure_started()
         return editor
 
+    def _close_all_chats(self) -> None:
+        with self._chat_lock:
+            sessions = list(self._chats.values())
+            self._chats.clear()
+            self._chat_targets.clear()
+        for session in sessions:
+            with contextlib.suppress(Exception):
+                session.close()  # type: ignore[attr-defined]
+
     def shutdown(self) -> None:
+        self._close_all_chats()
         for editor in self.editors.values():
             editor.shutdown()
 
@@ -101,11 +126,17 @@ class Hub:
             ],
             "active_repo": self.app_cfg.active_alias,
             "packages": sorted(SELFTEST_PACKAGES),
+            "ai_chat": self.app_cfg.ai_enabled,
+            "datasets": [],
             "logged_in": False,
             "user": "",
             "files": [],
             "artifacts": [],
         }
+        if self.app_cfg.ai_enabled:
+            from mooring import schema
+
+            body["datasets"] = schema.list_datasets(cfg.workspace(), cfg.folders)
         if not cfg.is_configured:
             return JSONResponse(body)
         if not auth.get_token(host=cfg.host):
@@ -379,6 +410,170 @@ class Hub:
                 )
         return JSONResponse(payload)
 
+    # -- AI copilot (chat) -----------------------------------------------------
+
+    def _ws_file(self, workspace: Path, rel: str, *, suffix: str | None = None) -> Path:
+        """Resolve a workspace-relative path, rejecting escapes/missing files."""
+        target = (workspace / rel).resolve()
+        try:
+            target.relative_to(workspace.resolve())
+        except ValueError as exc:
+            raise ValueError("Path escapes the workspace.") from exc
+        if suffix and not rel.endswith(suffix):
+            raise ValueError(f"Expected a {suffix} file.")
+        if not target.is_file():
+            raise FileNotFoundError(rel)
+        return target
+
+    def _build_chat_context(self, workspace: Path, notebook_rel: str, dataset_rel: str) -> str:
+        """The value-blind context for a chat: dataset SCHEMA + notebook SOURCE only."""
+        from mooring import schema
+        from mooring.ai.chat import build_system_context
+
+        schema_text = ""
+        if dataset_rel:
+            ds = self._ws_file(workspace, dataset_rel)
+            try:
+                schema_text = schema.format_for_ai(
+                    schema.extract_schema(ds), source=dataset_rel
+                )
+            except (ValueError, OSError) as exc:
+                raise ValueError(f"Could not read the schema for {dataset_rel}: {exc}") from exc
+        source = self._ws_file(workspace, notebook_rel, suffix=".py").read_text("utf-8")
+        return build_system_context(
+            schema_text=schema_text, notebook_source=source, notebook_rel=notebook_rel
+        )
+
+    def _make_chat_session(self, system_context: str, workspace: Path, notebook_rel: str):
+        """Open a streaming Copilot chat session bound to this notebook.
+
+        Raises AIError (-> 502 with an install/connect hint) if Copilot isn't
+        available or signed in.
+        """
+        from mooring.ai import get_provider
+
+        provider = get_provider(self.app_cfg)
+        return provider.open_chat(
+            system_context=system_context,
+            workspace=workspace,
+            folders=self.cfg.folders,
+            notebook_rel=notebook_rel,
+        )
+
+    def _reap_idle_chats(self) -> None:
+        timeout = self.app_cfg.ai_chat_idle_timeout
+        with self._chat_lock:
+            dead = [sid for sid, s in self._chats.items() if s.idle_seconds() > timeout]  # type: ignore[attr-defined]
+            sessions = [self._chats.pop(sid) for sid in dead]
+            for sid in dead:
+                self._chat_targets.pop(sid, None)
+        for session in sessions:
+            with contextlib.suppress(Exception):
+                session.close()  # type: ignore[attr-defined]
+
+    def chat_page(self, request: Request) -> FileResponse | JSONResponse:
+        if not self.app_cfg.ai_enabled:
+            return JSONResponse({"error": "The AI copilot is disabled."}, status_code=404)
+        return FileResponse(_static_dir() / "chat.html")
+
+    async def api_chat_open(self, request: Request) -> JSONResponse:
+        if not self.app_cfg.ai_enabled:
+            return JSONResponse({"enabled": False}, status_code=404)
+        data = await request.json()
+        notebook = str(data.get("notebook", "")).strip()
+        dataset = str(data.get("dataset", "")).strip()
+        if not notebook:
+            return JSONResponse({"error": "A notebook is required."}, status_code=400)
+        workspace = self.cfg.workspace()
+        try:
+            context = self._build_chat_context(workspace, notebook, dataset)
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        except FileNotFoundError as exc:
+            return JSONResponse({"error": f"No such file: {exc}"}, status_code=404)
+        self._reap_idle_chats()
+        try:
+            session = self._make_chat_session(context, workspace, notebook)
+        except Exception as exc:  # noqa: BLE001 - AIError surfaces to the UI in Phase 1
+            return JSONResponse({"error": str(exc)}, status_code=502)
+        sid = secrets.token_urlsafe(9)
+        with self._chat_lock:
+            self._chats[sid] = session
+            self._chat_targets[sid] = (str(workspace), notebook)
+        telemetry.log_event("ai_chat_open")
+        return JSONResponse({"sid": sid, "notebook": notebook})
+
+    async def api_chat_stream(self, request: Request) -> StreamingResponse | JSONResponse:
+        sid = request.path_params["sid"]
+        session = self._chats.get(sid)
+        if session is None:
+            return JSONResponse({"error": "Unknown chat session."}, status_code=404)
+        return StreamingResponse(
+            self._sse_gen(session),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    async def _sse_gen(self, session):
+        q = session.subscribe()
+        try:
+            yield ": connected\n\n"
+            while True:
+                try:
+                    event = await asyncio.to_thread(q.get, True, 15.0)
+                except queue.Empty:
+                    yield ": ping\n\n"
+                    continue
+                yield f"event: {event.kind}\ndata: {json.dumps(event.data)}\n\n"
+                if event.kind == "closed":
+                    break
+        finally:
+            session.unsubscribe(q)
+
+    async def api_chat_send(self, request: Request) -> JSONResponse:
+        data = await request.json()
+        sid = str(data.get("sid", ""))
+        text = str(data.get("text", "")).strip()
+        session = self._chats.get(sid)
+        if session is None:
+            return JSONResponse({"error": "Unknown chat session."}, status_code=404)
+        if not text:
+            return JSONResponse({"error": "Type a message."}, status_code=400)
+        try:
+            await asyncio.to_thread(session.send, text)
+        except Exception as exc:  # noqa: BLE001 - AIError surfaces to the UI in Phase 1
+            return JSONResponse({"error": str(exc)}, status_code=502)
+        telemetry.log_event("ai_chat_send")
+        return JSONResponse({"ok": True})
+
+    async def api_chat_apply(self, request: Request) -> JSONResponse:
+        data = await request.json()
+        sid = str(data.get("sid", ""))
+        code = str(data.get("code", ""))
+        with self._chat_lock:
+            target = self._chat_targets.get(sid)
+        if target is None:
+            return JSONResponse({"error": "Unknown chat session."}, status_code=404)
+        if not code.strip():
+            return JSONResponse({"error": "Nothing to apply."}, status_code=400)
+        workspace_str, notebook_rel = target
+        from mooring.ai.cellwrite import CellWriteError, append_cell
+
+        try:
+            nb_path = self._ws_file(Path(workspace_str), notebook_rel, suffix=".py")
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        except FileNotFoundError:
+            return JSONResponse({"error": f"No such notebook: {notebook_rel}"}, status_code=404)
+        # Write the cell into the .py; the editor's --watch picks it up and (with
+        # watcher_on_save=autorun) runs it, so it appears in the open notebook tab.
+        try:
+            await asyncio.to_thread(append_cell, nb_path, code)
+        except CellWriteError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=502)
+        telemetry.log_event("ai_chat_apply")
+        return JSONResponse({"ok": True})
+
 
 def create_app(hub: Hub) -> Starlette:
     static = _static_dir()
@@ -408,6 +603,11 @@ def create_app(hub: Hub) -> Starlette:
             Route("/api/new", hub.api_new, methods=["POST"]),
             Route("/api/open", hub.api_open, methods=["POST"]),
             Route("/api/delete", hub.api_delete, methods=["POST"]),
+            Route("/ai/chat", hub.chat_page),
+            Route("/api/ai/chat/open", hub.api_chat_open, methods=["POST"]),
+            Route("/api/ai/chat/stream/{sid}", hub.api_chat_stream),
+            Route("/api/ai/chat/send", hub.api_chat_send, methods=["POST"]),
+            Route("/api/ai/chat/apply", hub.api_chat_apply, methods=["POST"]),
             Mount("/static", StaticFiles(directory=static)),
         ],
         lifespan=lifespan,

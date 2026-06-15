@@ -23,10 +23,13 @@ import socket
 import subprocess
 import sys
 import time
+import tomllib
 import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
+
+import tomli_w
 
 from mooring import pyproject_env
 
@@ -82,6 +85,10 @@ class EditorServer:
             "--token-password",
             self.token,
             "--skip-update-check",
+            # Watch the .py files: when the AI copilot applies a cell by writing
+            # the notebook source, marimo reloads it and the cell appears in the
+            # open tab. (See ai/cellwrite.py and docs/admins/ai-privacy.md.)
+            "--watch",
         ]
         if not self.use_uv():
             return [sys.executable, "-m", "marimo", *marimo_args], None
@@ -101,10 +108,59 @@ class EditorServer:
         if self.running:
             return
         self.workspace.mkdir(parents=True, exist_ok=True)
+        self._ensure_marimo_config()
         self.port = _free_port()
         cmd, env = self._invocation()
         self._proc = subprocess.Popen(cmd, cwd=str(self.workspace), env=env)
         self._wait_ready()
+
+    def _ensure_marimo_config(self) -> None:
+        """Write the workspace ``.marimo.toml`` mooring relies on, for every editor.
+
+        Two things:
+        1. Turn marimo's OWN AI off (``ai.enabled``/``completion.copilot`` =
+           false). marimo's built-in AI would send real column *sample values* to
+           whatever model is configured — a data-confidentiality leak outside
+           mooring's control. mooring never uses marimo's AI (its copilot is
+           schema-only and value-blind).
+        2. ``runtime.watcher_on_save = "autorun"`` so that when the copilot applies
+           a cell (by writing the .py source), ``--watch`` reloads AND runs it —
+           matching the "Apply = add + run" behaviour.
+
+        marimo resolves its user config from the first ``.marimo.toml`` found
+        searching the cwd (the workspace) upward, so a file written here wins over
+        any personal ``~/.marimo.toml``. It is a dotfile, so sync never uploads
+        it. Residual: a ``[tool.marimo.ai]`` section committed to the repo's
+        ``pyproject.toml`` is a higher-precedence project override — see
+        docs/admins/ai-privacy.md. Best-effort: never block the editor on it.
+        """
+        path = self.workspace / ".marimo.toml"
+        try:
+            data: dict = {}
+            if path.is_file():
+                data = tomllib.loads(path.read_text("utf-8"))
+            ai = data.get("ai")
+            completion = data.get("completion")
+            runtime = data.get("runtime")
+            if not isinstance(ai, dict):
+                ai = data["ai"] = {}
+            if not isinstance(completion, dict):
+                completion = data["completion"] = {}
+            if not isinstance(runtime, dict):
+                runtime = data["runtime"] = {}
+            already = (
+                ai.get("enabled") is False
+                and completion.get("copilot") is False
+                and runtime.get("watcher_on_save") == "autorun"
+            )
+            if already:
+                return  # nothing to change — don't rewrite the file
+            ai["enabled"] = False
+            completion["copilot"] = False
+            runtime["watcher_on_save"] = "autorun"
+            path.write_text(tomli_w.dumps(data), encoding="utf-8")
+        except (OSError, tomllib.TOMLDecodeError):
+            pass
 
     def _wait_ready(self) -> None:
         deadline = time.monotonic() + STARTUP_TIMEOUT

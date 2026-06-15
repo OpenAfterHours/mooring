@@ -176,6 +176,14 @@ def _build_parser() -> argparse.ArgumentParser:
             "--repo", default=None, metavar="ALIAS", help="act on this repo instead of the active one"
         )
 
+    ai = sub.add_parser("ai", help="AI copilot: sign in to Copilot and check status")
+    ai_sub = ai.add_subparsers(dest="ai_command", required=True)
+    ai_sub.add_parser("status", help="show the AI provider's sign-in status")
+    ai_login = ai_sub.add_parser("login", help="sign in to Copilot (OAuth device flow)")
+    ai_login.add_argument(
+        "--host", default=None, help="GitHub host URL for Copilot (GHE data residency)"
+    )
+
     sub.add_parser("selftest", help="verify the bundled environment")
     sub.add_parser("version", help="print the version")
     return parser
@@ -626,6 +634,41 @@ def _unknown_alias(alias: str, app_cfg: config.AppConfig) -> str:
     return f"Unknown repo alias {alias!r}. Known: {known}"
 
 
+def cmd_ai(app_cfg: config.AppConfig, args: argparse.Namespace) -> int:
+    """Manage the AI copilot's Copilot sign-in (login / status).
+
+    Code generation now lives in the interactive chat (hub "AI" button), not the
+    CLI; this command only handles authentication and readiness.
+    """
+    from mooring.ai import AIError, get_provider
+
+    try:
+        provider = get_provider(app_cfg)
+    except AIError as exc:
+        sys.exit(str(exc))
+
+    if args.ai_command == "login":
+        if not provider.available():
+            sys.exit("Copilot isn't available. Install the extra: pip install mooring[copilot]")
+        print("Opening Copilot sign-in — a browser window will open to authorize…")
+        code = provider.login_interactive(host=args.host)
+        print("Copilot sign-in complete." if code == 0 else "Copilot sign-in did not complete.")
+        return code
+
+    if args.ai_command == "status":
+        st = provider.status(force=True)
+        state = (
+            "connected" if st.connected else ("unavailable" if not st.available else "not connected")
+        )
+        who = f" as {st.account}" if st.account else ""
+        print(f"AI provider : {app_cfg.ai_provider}")
+        print(f"  status    : {state}{who}")
+        if st.detail:
+            print(f"  detail    : {st.detail}")
+        return 0 if st.connected else 1
+    return 2
+
+
 def _dispatch(
     parser: argparse.ArgumentParser,
     command: str,
@@ -638,6 +681,8 @@ def _dispatch(
         return 0
     if command == "repo":
         return cmd_repo(app_cfg, args)
+    if command == "ai":
+        return cmd_ai(app_cfg, args)
     if command == "selftest":
         return cmd_selftest(app_cfg, cfg)
     if command == "hub":

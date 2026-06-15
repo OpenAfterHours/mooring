@@ -19,6 +19,15 @@ dependencies = [
 # docs/admins/build-and-distribute.md. uv users run notebooks against it; for a
 # frozen .pyz the admin builds a team-specific artifact from those deps.
 
+# The AI copilot is opt-in: the GitHub Copilot SDK bundles a ~150 MB native CLI,
+# so it ships as an extra rather than a base dependency. Install with
+# `pip install mooring[copilot]` / `uvx mooring[copilot]`. Without it, the chat
+# surfaces a "install the copilot extra" hint and the rest of mooring is lean.
+[project.optional-dependencies]
+copilot = [
+    "github-copilot-sdk>=1.0.1",
+]
+
 [project.scripts]
 mooring = "mooring.cli:main"
 

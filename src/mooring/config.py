@@ -70,6 +70,10 @@ class AppConfig:
     max_file_mb: int = 45
     log_endpoint: str = ""
     log_level: str = "info"
+    ai_enabled: bool = True
+    ai_provider: str = "copilot"
+    ai_model: str = ""
+    ai_chat_idle_timeout: int = 900
 
     @property
     def aliases(self) -> list[str]:
@@ -129,6 +133,15 @@ def _str_list(raw: object, key: str) -> tuple[str, ...]:
     if not all(isinstance(p, str) for p in raw):
         raise ValueError(f"[sync] {key} entries must all be strings")
     return tuple(raw)
+
+
+def _as_bool(value: object, default: bool) -> bool:
+    """Coerce a TOML bool or a string env override to bool; None keeps default."""
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() not in ("0", "false", "no", "off", "")
 
 
 def _merge(base: dict, override: dict) -> dict:
@@ -199,6 +212,7 @@ def load_app_config(
     sync = data.get("sync", {})
     ws = data.get("workspace", {})
     log = data.get("logging", {})
+    ai = data.get("ai", {})
 
     specs, active = repo_specs_from_data(data)
     if env.get("MOORING_ACTIVE_REPO") in {s.alias for s in specs}:
@@ -247,6 +261,12 @@ def load_app_config(
         max_file_mb=int(sync.get("max_file_mb", 45)),
         log_endpoint=env.get("MOORING_LOG_ENDPOINT", str(log.get("endpoint", ""))),
         log_level=env.get("MOORING_LOG_LEVEL", str(log.get("level", "info"))),
+        ai_enabled=_as_bool(env.get("MOORING_AI_ENABLED"), _as_bool(ai.get("enabled"), True)),
+        ai_provider=env.get("MOORING_AI_PROVIDER", str(ai.get("provider", "copilot"))),
+        ai_model=env.get("MOORING_AI_MODEL", str(ai.get("model", ""))),
+        ai_chat_idle_timeout=int(
+            env.get("MOORING_AI_CHAT_IDLE_SEC", ai.get("chat_idle_timeout_sec", 900))
+        ),
     )
 
 
