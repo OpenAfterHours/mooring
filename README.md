@@ -29,7 +29,9 @@ per file (never silently overwritten).
   request — protect the branch and propose becomes the only way in.
 - **Frozen package stack.** Notebooks can import anything bundled into the
   artifact (`polars`, `altair`, `plotly`, `openpyxl`, `fastexcel`,
-  `requests`, plus the standard library). There is no pip at runtime.
+  `requests`, plus the standard library). There is no pip at runtime. Running
+  from PyPI instead? Add packages per run with `uvx --with pandas mooring` —
+  they become importable in notebooks (frozen artifacts keep their fixed set).
 - **Works on corporate GitHub.** GitHub Enterprise instances are supported
   (`mooring login --host ghe.example.com`), and TLS is verified against the
   OS trust store, so SSL-intercepting proxies with an IT-installed root CA

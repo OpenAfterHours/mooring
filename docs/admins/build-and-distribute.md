@@ -26,6 +26,34 @@ team.
     config and publish your own build). The rest of this page is about the frozen
     `.pyz`/`.exe` for machines with **no** Python tooling at all.
 
+!!! tip "Add notebook packages at run time (PyPI/uvx only)"
+
+    PyPI/uvx users aren't limited to the baked-in stack. uv's `--with` injects
+    extra packages into that run's environment, and because mooring exposes its
+    `site-packages` to the marimo subprocess, anything you add becomes importable
+    in notebooks — e.g. pandas alongside (or instead of) polars:
+
+    ```bash
+    uvx --with pandas mooring        # notebooks can now `import pandas`
+    ```
+
+    For **several** packages, use any of uv's forms:
+
+    ```bash
+    # repeat the flag
+    uvx --with pandas --with duckdb --with "polars>=1.0" mooring
+    # comma-separated
+    uvx --with "pandas,duckdb,polars>=1.0" mooring
+    # from a requirements file
+    uvx --with-requirements extras.txt mooring
+    ```
+
+    The `--with` / `--with-requirements` flags must come **before** the `mooring`
+    command name. This works for the PyPI/uvx path (and `pip install` into a
+    venv); **frozen `.pyz`/`.exe` artifacts keep their fixed stack** — to change
+    those, edit `dependencies` and rebuild (see
+    [§4](#changing-the-bundled-package-stack)).
+
 ## Prerequisites
 
 - [uv](https://docs.astral.sh/uv/) installed.
@@ -102,7 +130,7 @@ To cut a release: tag a commit `vX.Y.Z` and push the tag.
     `.github/workflows/docs.yml`, builds and publishes **this documentation
     site** — see [Contributing](../developers/contributing.md#working-on-the-docs).
 
-## 4. Changing the bundled package stack
+## 4. Changing the bundled package stack { #changing-the-bundled-package-stack }
 
 Notebooks can only import what's frozen into the artifact (currently `polars`,
 `altair`, `plotly`, `openpyxl`, `fastexcel`, `requests`, plus the standard
@@ -111,6 +139,12 @@ library — there is no pip at runtime). To add or remove one:
 1. Edit `dependencies` in `pyproject.toml`.
 2. `uv sync`.
 3. Rebuild (step 2) and redistribute.
+
+!!! note "PyPI/uvx users don't need a rebuild"
+
+    This frozen-stack edit only affects the `.pyz`/`.exe`. Anyone running from
+    PyPI can add packages per run with `uvx --with <pkg> mooring` — see the
+    "Add notebook packages at run time" tip near the top of this page.
 
 ## 5. Distribute { #distribute }
 
