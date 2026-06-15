@@ -1,6 +1,6 @@
 [project]
 name = "mooring"
-version = "0.2.6"
+version = "0.2.7"
 description = "Git-free marimo notebook sharing via GitHub"
 readme = "README.md"
 requires-python = ">=3.12"
