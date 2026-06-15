@@ -12,7 +12,36 @@ def test_defaults_when_no_user_config(tmp_path):
     assert not cfg.is_configured
     assert cfg.branch == "main"
     assert cfg.folders == ("notebooks", "data", "reports")
+    assert cfg.exclude == ()
     assert cfg.warn_file_mb == 10
+
+
+def test_sync_exclude_is_parsed(tmp_path):
+    user = tmp_path / "config.toml"
+    user.write_text('[sync]\nexclude = ["*.tmp", "scratch", "reports/drafts/*"]\n', "utf-8")
+    cfg = load_config(user_config_path=user, env={})
+    assert cfg.exclude == ("*.tmp", "scratch", "reports/drafts/*")
+
+
+def test_sync_exclude_bare_string_is_single_pattern(tmp_path):
+    # `exclude = "*.tmp"` must be one pattern, not the chars ('*','.','t','m','p')
+    # — the stray '*' would otherwise match every segment and hide everything.
+    user = tmp_path / "config.toml"
+    user.write_text('[sync]\nexclude = "*.tmp"\n', "utf-8")
+    assert load_config(user_config_path=user, env={}).exclude == ("*.tmp",)
+
+
+def test_sync_exclude_rejects_non_string_array(tmp_path):
+    # An accidental [sync.exclude] table (a dict) or non-string entries should
+    # fail loudly rather than coerce to silent garbage patterns.
+    table = tmp_path / "table.toml"
+    table.write_text("[sync.exclude]\nfoo = 1\n", "utf-8")
+    with pytest.raises(ValueError):
+        load_config(user_config_path=table, env={})
+    nums = tmp_path / "nums.toml"
+    nums.write_text("[sync]\nexclude = [1, 2]\n", "utf-8")
+    with pytest.raises(ValueError):
+        load_config(user_config_path=nums, env={})
 
 
 def test_user_config_overrides_defaults(tmp_path):

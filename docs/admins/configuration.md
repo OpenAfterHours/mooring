@@ -69,13 +69,52 @@ Rules worth knowing:
 | Key | Default | Meaning |
 |-----|---------|---------|
 | `folders` | `["notebooks", "data", "reports"]` | Top-level repo folders to sync. Only paths under these are tracked. Applies to every registered repo. |
+| `exclude` | `[]` | Extra paths to keep out of GitHub, on top of the always-skipped ones. Applies to every registered repo. See [Excluding files](#excluding-files). |
 | `warn_file_mb` | `10` | Warn when pushing a file larger than this many MB. |
 | `max_file_mb` | `45` | Refuse to push files larger than this. The GitHub Contents API fails somewhere below 50 MB, so don't raise it past ~45. |
 
-Within synced folders, dotfiles are skipped — **except** `.platform` files,
-which Power BI projects require. `.pbi/` folders (Power BI machine-local
-caches, including multi-MB `cache.abf` files) are never synced in either
-direction.
+#### Excluding files
+
+Some paths are **always** skipped in both directions, no configuration needed:
+
+- **dotfiles** (anything starting with `.`) — **except** `.platform` files,
+  which Power BI projects require;
+- **`.pbi/`** folders (Power BI machine-local caches, including multi-MB
+  `cache.abf` files);
+- **`__pycache__/`** (CPython bytecode) and **`__marimo__/`** (marimo's
+  per-session state, layout, and cache folder);
+- mooring's own `.remote-<sha>` conflict scratch copies.
+
+To skip anything else, add glob patterns to `exclude`. They are **case-sensitive**:
+
+```toml
+[sync]
+exclude = [
+  "*.tmp",            # any file with this name, anywhere in the tree
+  "scratch",          # a file or folder named "scratch", anywhere
+  "reports/drafts/*", # a pattern with "/" matches the whole path
+]
+```
+
+How patterns match:
+
+- A **bare** pattern (no `/`) matches any single path *segment*, so it catches
+  both files and folders by that name at **any depth**. Useful, but note this
+  means a bare pattern equal to a synced folder name — e.g. `exclude = ["data"]`
+  with the default `folders` — hides that **entire** top-level folder. To target
+  a nested folder only, anchor it with a `/` pattern (e.g. `"*/data/*"`).
+- A pattern **containing `/`** is matched against the full repo-relative path.
+  Wildcards are **not** path-aware here: `*` spans `/`, so `"reports/drafts/*"`
+  also hides deeper files like `reports/drafts/sub/deep.py` (i.e. `*` behaves
+  like gitignore's recursive `**`, not a single level).
+- A **trailing `/`** is accepted and means the same as the bare form, so the
+  familiar gitignore directory idiom `"scratch/"` works.
+- A single pattern may be written as a bare string — `exclude = "*.tmp"` is the
+  same as `exclude = ["*.tmp"]`.
+
+The same `exclude` applies to the local scan **and** the remote tree, so an
+excluded path stays invisible to both pull and push (it is never uploaded, and a
+teammate's matching file is never pulled or deleted).
 
 ### `[workspace]`
 
@@ -104,6 +143,7 @@ branch = "main"
 
 [sync]
 folders = ["notebooks", "data", "reports"]
+exclude = []               # extra paths to skip; see Excluding files above
 warn_file_mb = 10
 max_file_mb = 45
 

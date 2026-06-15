@@ -15,7 +15,9 @@ the manifest.
 
 from __future__ import annotations
 
+import fnmatch
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -38,22 +40,54 @@ REMOTE_COPY_MARKER = ".remote-"
 # a required ".platform" metadata file inside each artifact folder.
 KEEP_DOT_NAMES = {".platform"}
 
+# Machine-generated directories that never belong in the shared repo, skipped
+# both as a directory anywhere on the path and as a leaf name. __pycache__ is
+# CPython bytecode; __marimo__ is marimo's per-session state/layout/cache.
+MACHINE_DIRS = frozenset({"__pycache__", "__marimo__"})
 
-def is_synced_path(rel_path: str) -> bool:
+
+def _excluded_by_patterns(rel_path: str, patterns: Iterable[str]) -> bool:
+    """Whether a user-configured [sync] exclude pattern hides this path.
+
+    Patterns are case-sensitive globs (paths are POSIX and case-sensitive on
+    GitHub). A bare pattern matches any single path segment anywhere in the tree
+    (e.g. "*.tmp", "secrets.json", "drafts" — note "drafts" also hides a
+    top-level synced folder of that name). A pattern containing "/" matches the
+    whole relative path; "*" there spans "/" (so "reports/drafts/*" also hides
+    "reports/drafts/sub/deep.py"). A trailing "/" is accepted and means the same
+    as the bare form, matching the gitignore "directory" idiom.
+    """
+    segments = rel_path.split("/")
+    for pat in patterns:
+        pat = pat.rstrip("/")  # "scratch/" is the directory idiom for "scratch"
+        if not pat:
+            continue  # empty / all-slashes pattern matches nothing
+        if "/" in pat:
+            if fnmatch.fnmatchcase(rel_path, pat):
+                return True
+        elif any(fnmatch.fnmatchcase(seg, pat) for seg in segments):
+            return True
+    return False
+
+
+def is_synced_path(rel_path: str, exclude: Iterable[str] = ()) -> bool:
     """Whether a workspace-relative POSIX path participates in sync.
 
     Applied to both the local scan and the remote tree so the two sides agree:
     a path invisible on one side must be invisible on both, otherwise pull
-    records it in the manifest and the next push deletes it remotely.
+    records it in the manifest and the next push deletes it remotely. For that
+    reason `exclude` must be the same on every call within a run.
     """
     *dirs, name = rel_path.split("/")
-    if any(d.startswith(".") or d == "__pycache__" for d in dirs):
-        return False  # .mooring/, PBIP .pbi/ machine-local state, etc.
+    if any(d.startswith(".") or d in MACHINE_DIRS for d in dirs):
+        return False  # .mooring/, PBIP .pbi/ machine-local state, __marimo__, etc.
     if name.startswith(".") and name not in KEEP_DOT_NAMES:
         return False
-    if name == "__pycache__":
+    if name in MACHINE_DIRS:
         return False
-    return REMOTE_COPY_MARKER not in name
+    if REMOTE_COPY_MARKER in name:
+        return False
+    return not _excluded_by_patterns(rel_path, exclude)
 
 
 class FileState(Enum):
@@ -157,7 +191,9 @@ def classify(base: str | None, local: str | None, remote: str | None) -> FileSta
     return FileState.CONFLICT  # remote changed or deleted underneath us
 
 
-def scan_local(workspace: Path, folders: tuple[str, ...]) -> dict[str, str]:
+def scan_local(
+    workspace: Path, folders: tuple[str, ...], exclude: Iterable[str] = ()
+) -> dict[str, str]:
     out: dict[str, str] = {}
     for folder in folders:
         root = workspace / folder
@@ -167,7 +203,7 @@ def scan_local(workspace: Path, folders: tuple[str, ...]) -> dict[str, str]:
             if not path.is_file():
                 continue
             rel = path.relative_to(workspace).as_posix()
-            if not is_synced_path(rel):
+            if not is_synced_path(rel, exclude):
                 continue
             out[rel] = gitsha.local_blob_sha(path, rel)
     return out
@@ -179,8 +215,12 @@ def _remote_entries(
     # If the branch head hasn't moved since our last sync, the remote tree is
     # exactly what the manifest recorded — no tree fetch needed.
     if head and head == mft.head_commit:
-        return {p: s for p, s in mft.files.items() if is_synced_path(p)}
-    return {e.path: e.sha for e in client.get_tree(head, cfg.folders) if is_synced_path(e.path)}
+        return {p: s for p, s in mft.files.items() if is_synced_path(p, cfg.exclude)}
+    return {
+        e.path: e.sha
+        for e in client.get_tree(head, cfg.folders)
+        if is_synced_path(e.path, cfg.exclude)
+    }
 
 
 def _review_tree(client: GitHubClient, cfg: Config, branch: str) -> dict[str, str]:
@@ -190,7 +230,7 @@ def _review_tree(client: GitHubClient, cfg: Config, branch: str) -> dict[str, st
     return {
         e.path: e.sha
         for e in client.get_tree(review_head, cfg.folders)
-        if is_synced_path(e.path)
+        if is_synced_path(e.path, cfg.exclude)
     }
 
 
@@ -225,7 +265,10 @@ def compute_status(
 
 
 def _reconcile_review(
-    client: GitHubClient, mft: manifest_mod.Manifest, remote: dict[str, str]
+    client: GitHubClient,
+    mft: manifest_mod.Manifest,
+    remote: dict[str, str],
+    exclude: Iterable[str] = (),
 ) -> bool:
     """Clear review records once cfg.branch caught up (merge observed) or the
     review branch is gone (PR closed). Returns whether the manifest changed."""
@@ -233,6 +276,12 @@ def _reconcile_review(
         return False
     changed = False
     for path, sent in list(mft.review_files.items()):
+        # An excluded path is absent from `remote` because the filter hid it,
+        # not because the proposal merged. For a proposed deletion (sent is None)
+        # that absence would otherwise read as None == None and wrongly clear the
+        # record, abandoning a still-open PR — so skip excluded paths entirely.
+        if _excluded_by_patterns(path, exclude):
+            continue
         if remote.get(path) == sent:  # blob shas are content-addressed: merged
             # The proposal landed on cfg.branch, so it is now the sync base.
             # Advance the base too: otherwise it stays at the pre-proposal blob,
@@ -260,9 +309,9 @@ def status(client: GitHubClient, cfg: Config) -> StatusReport:
     workspace = cfg.workspace()
     mft = manifest_mod.load(workspace)
     head = client.get_branch_head(cfg.branch)
-    local = scan_local(workspace, cfg.folders)
+    local = scan_local(workspace, cfg.folders, cfg.exclude)
     remote = _remote_entries(client, cfg, head, mft)
-    if _reconcile_review(client, mft, remote):
+    if _reconcile_review(client, mft, remote, cfg.exclude):
         manifest_mod.save(workspace, mft)
     report = compute_status(mft, local, remote, head, review=mft.review_files)
     report.review_branch = mft.review_branch
@@ -291,9 +340,9 @@ def pull(
     workspace.mkdir(parents=True, exist_ok=True)
     mft = manifest_mod.load(workspace)
     head = client.get_branch_head(cfg.branch)
-    local = scan_local(workspace, cfg.folders)
+    local = scan_local(workspace, cfg.folders, cfg.exclude)
     remote = _remote_entries(client, cfg, head, mft)
-    _reconcile_review(client, mft, remote)  # pull saves the manifest below
+    _reconcile_review(client, mft, remote, cfg.exclude)  # pull saves the manifest below
     report = compute_status(mft, local, remote, head, review=mft.review_files)
     result = SyncResult()
 
@@ -352,9 +401,9 @@ def push(
     workspace = cfg.workspace()
     mft = manifest_mod.load(workspace)
     head = client.get_branch_head(cfg.branch)
-    local = scan_local(workspace, cfg.folders)
+    local = scan_local(workspace, cfg.folders, cfg.exclude)
     remote = _remote_entries(client, cfg, head, mft)
-    _reconcile_review(client, mft, remote)  # push saves the manifest below
+    _reconcile_review(client, mft, remote, cfg.exclude)  # push saves the manifest below
     report = compute_status(mft, local, remote, head, review=mft.review_files)
     result = SyncResult()
 
@@ -493,9 +542,9 @@ def propose(
     workspace = cfg.workspace()
     mft = manifest_mod.load(workspace)
     head = client.get_branch_head(cfg.branch)
-    local = scan_local(workspace, cfg.folders)
+    local = scan_local(workspace, cfg.folders, cfg.exclude)
     remote = _remote_entries(client, cfg, head, mft)
-    _reconcile_review(client, mft, remote)
+    _reconcile_review(client, mft, remote, cfg.exclude)
     report = compute_status(mft, local, remote, head, review=mft.review_files)
     result = SyncResult()
 
