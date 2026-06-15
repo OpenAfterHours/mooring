@@ -89,6 +89,20 @@ Your admin distributes one of these — put it anywhere, e.g. your Desktop:
     See [GitHub Enterprise](../admins/github-setup.md#github-enterprise) and the
     [`login` reference](cli.md#login-logout-whoami).
 
+!!! tip "Installed with `uvx mooring`?"
+
+    If you run Mooring from PyPI (`uvx mooring`) rather than a frozen app file,
+    you can pull in an extra library just for that session — e.g. pandas
+    alongside the bundled polars:
+
+    ```bash
+    uvx --with pandas mooring        # notebooks can now `import pandas`
+    ```
+
+    Repeat `--with` for several packages. See
+    [Build & distribute](../admins/build-and-distribute.md) for the details.
+    (Frozen `.exe`/`.pyz`/bundle files keep their fixed package set.)
+
 ## Next steps
 
 - [Daily workflow](daily-workflow.md) — pull, open, edit, push, and create
