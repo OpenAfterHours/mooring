@@ -83,17 +83,18 @@ class FakeClient:
             raise NotFound(f"branch {branch}")
         return self.heads[branch]
 
-    def get_tree(self, commit_sha, folders):
+    def get_tree(self, commit_sha, folders, extra_paths=()):
         tree = self.tree
         for branch, head in self.heads.items():
             if head == commit_sha:
                 tree = self.trees[branch]
                 break
         prefixes = tuple(f"{f}/" for f in folders)
+        extra = frozenset(extra_paths)
         return [
             TreeEntry(p, s, len(self.blobs[s]))
             for p, s in tree.items()
-            if p.startswith(prefixes)
+            if p.startswith(prefixes) or p in extra
         ]
 
     def get_blob(self, sha):

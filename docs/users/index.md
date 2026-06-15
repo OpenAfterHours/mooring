@@ -57,8 +57,8 @@ Your admin distributes one of these — put it anywhere, e.g. your Desktop:
 
 !!! note "First launch is slow"
 
-    The first run unpacks the app (~110 MB: marimo + polars + plotly + altair)
-    to a local cache. Later launches are fast.
+    The first run unpacks the app to a local cache (its size depends on the
+    packages your admin built in). Later launches are fast.
 
 ## 3. Open the hub and log in
 
@@ -89,19 +89,21 @@ Your admin distributes one of these — put it anywhere, e.g. your Desktop:
     See [GitHub Enterprise](../admins/github-setup.md#github-enterprise) and the
     [`login` reference](cli.md#login-logout-whoami).
 
-!!! tip "Installed with `uvx mooring`?"
+!!! tip "Adding packages your notebooks need"
 
-    If you run Mooring from PyPI (`uvx mooring`) rather than a frozen app file,
-    you can pull in an extra library just for that session — e.g. pandas
-    alongside the bundled polars:
+    A repo's notebook packages live in a `pyproject.toml` + `uv.lock` at its root,
+    shared with the team through GitHub. Add to them with:
 
     ```bash
-    uvx --with pandas mooring        # notebooks can now `import pandas`
+    mooring deps add polars "scipy>=1.11"   # then `mooring push` to share
     ```
 
-    Repeat `--with` for several packages. See
-    [Build & distribute](../admins/build-and-distribute.md) for the details.
-    (Frozen `.exe`/`.pyz`/bundle files keep their fixed package set.)
+    If you run Mooring from PyPI (`uvx mooring`) with uv, notebooks open in that
+    locked environment automatically. For a one-off package you don't want to
+    commit, `uvx --with pandas mooring` injects it for that session only. See the
+    [CLI reference](cli.md#init-deps-notebook-dependencies) and
+    [Build & distribute](../admins/build-and-distribute.md). (Frozen `.exe`/`.pyz`
+    files have a fixed set — your admin builds it from the same `pyproject.toml`.)
 
 ## Next steps
 

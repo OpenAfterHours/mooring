@@ -111,9 +111,13 @@ with the notebook.
 
 ## What you can import in a notebook
 
-Notebooks can import anything frozen into the app, plus the standard library:
+The repo's notebook packages are declared in a `pyproject.toml` + `uv.lock` at the
+workspace root, shared with the team through GitHub. Add to them with
+`mooring deps add <pkg>` (then `mooring push`), and see the whole set with
+`mooring deps list` — see the [CLI reference](cli.md#init-deps-notebook-dependencies).
 
-`polars`, `altair`, `plotly`, `openpyxl`, `fastexcel`, `requests`
-
-There is **no pip at runtime** — if you need another package, ask your admin to
-add it to the build (see [Build & distribute](../admins/build-and-distribute.md)).
+With [uv](https://docs.astral.sh/uv/) on your machine, notebooks open in that
+locked environment automatically. On a frozen `.pyz` with no uv, you can import
+whatever your admin built in; opening a notebook that needs something the build
+lacks shows a warning (ask your admin to add it — see
+[Build & distribute](../admins/build-and-distribute.md)).

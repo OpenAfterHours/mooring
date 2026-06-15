@@ -191,6 +191,9 @@ def test_switch_changes_editor_workspace(configured, monkeypatch):
         def ensure_started(self):
             pass
 
+        def use_uv(self):
+            return False
+
         def url_for(self, rel_path):
             return f"http://editor/{rel_path}"
 

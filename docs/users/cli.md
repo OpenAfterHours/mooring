@@ -30,6 +30,12 @@ python mooring.pyz open notebooks/sales.py
 python mooring.pyz open reports/sales.pbip
 python mooring.pyz new sales-analysis
 python mooring.pyz delete notebooks/sales.py [-y]
+python mooring.pyz init
+python mooring.pyz deps add polars "scipy>=1.11"
+python mooring.pyz deps remove polars
+python mooring.pyz deps list
+python mooring.pyz deps lock
+python mooring.pyz build-requirements [-o FILE]
 python mooring.pyz selftest
 python mooring.pyz version
 ```
@@ -129,6 +135,33 @@ branch, so the changes can be reviewed as a pull request (see
   [Power BI reports](power-bi.md).
 - `new <name>` — create a notebook from the template and open it (e.g.
   `new sales-analysis`).
+
+### `init` / `deps` — notebook dependencies
+
+A repo declares the packages its notebooks need in a `pyproject.toml` + `uv.lock`
+at the workspace root, version-controlled alongside the notebooks. With uv on your
+machine, mooring opens notebooks in that locked environment automatically; on a
+frozen `.pyz` with no uv, the bundle the admin built is used and `open` warns if a
+declared package isn't in it.
+
+- `init` — scaffold the repo's `pyproject.toml` (seeded with just `marimo`) and,
+  if uv is available, its `uv.lock`. `new` does this for you on the first
+  notebook. Safe to re-run; it never overwrites an existing file.
+- `deps add <pkg>…` — add packages and re-lock (e.g.
+  `deps add polars "scipy>=1.11"`). Run `push` afterwards to share them.
+- `deps remove <pkg>…` — remove packages and re-lock.
+- `deps list` — show declared packages and whether each is available in the
+  current environment.
+- `deps lock` — refresh `uv.lock` from `pyproject.toml`.
+
+`deps add`/`remove`/`lock` need [uv](https://docs.astral.sh/uv/) installed.
+
+### `build-requirements`
+
+Export the repo's declared packages (one per line, `marimo` omitted) for an admin
+building a frozen artifact from this repo's stack — see
+[Build & distribute → §4](../admins/build-and-distribute.md#changing-the-bundled-package-stack).
+`-o FILE` writes to a file instead of standard output.
 
 ### `delete`
 

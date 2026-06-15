@@ -22,7 +22,7 @@ from starlette.responses import FileResponse, JSONResponse
 from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
-from mooring import __version__, auth, config, config_store, pbip, sync, telemetry
+from mooring import __version__, auth, config, config_store, pbip, pyproject_env, sync, telemetry
 from mooring.cli import SELFTEST_PACKAGES, workspace_hint
 from mooring.editor import EditorServer, _free_port
 from mooring.github import AuthFailed, GitHubClient, GitHubError, compare_url
@@ -367,8 +367,17 @@ class Hub:
             editor = self.ensure_editor()
         except Exception as exc:  # noqa: BLE001 - shown in the UI
             return JSONResponse({"error": f"Could not start the editor: {exc}"}, status_code=502)
-        telemetry.log_event("open", kind="notebook")
-        return JSONResponse({"path": rel_path, "url": editor.url_for(rel_path)})
+        telemetry.log_event("open", kind="notebook", uv=editor.use_uv())
+        payload = {"path": rel_path, "url": editor.url_for(rel_path)}
+        if not editor.use_uv():
+            missing = pyproject_env.missing_deps(workspace)
+            if missing:
+                payload["warning"] = (
+                    f"This build can't provide: {', '.join(missing)}. They're declared in "
+                    f"{pyproject_env.PYPROJECT_NAME} but not bundled, so importing them will fail. "
+                    "Ask your admin to include them in the build, or run mooring via uv."
+                )
+        return JSONResponse(payload)
 
 
 def create_app(hub: Hub) -> Starlette:

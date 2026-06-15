@@ -1,15 +1,23 @@
 """Manage the marimo editor as a subprocess.
 
-marimo has no programmatic edit-mode API (only run mode), so we spawn
-`python -m marimo edit <workspace>` as a single directory-mode server and
-open individual notebooks via its `?file=` URL parameter. cli.main() puts the
-bundled site-packages on PYTHONPATH before anything runs, so this subprocess
-— and the kernel processes marimo itself spawns — can import everything even
-when mooring runs from a moonlit-extracted zipapp.
+marimo has no programmatic edit-mode API (only run mode), so we spawn a single
+directory-mode server and open individual notebooks via its `?file=` URL
+parameter. The launch backend is chosen by capability:
+
+- uv available + a repo `pyproject.toml` → `uv run --frozen --project <ws> marimo
+  edit <ws>`, so notebooks run in the team's locked dependency env (see
+  pyproject_env). The bundled-site-packages PYTHONPATH bridge is stripped for this
+  subprocess so it can't shadow the project env.
+- otherwise → `python -m marimo edit <ws>` against the frozen bundle. cli.main()
+  puts the bundled site-packages on PYTHONPATH first, so this subprocess — and the
+  kernels marimo spawns — can import everything even from a moonlit zipapp.
+
+`MOORING_FORCE_FROZEN=1` forces the frozen path regardless of uv.
 """
 
 from __future__ import annotations
 
+import os
 import secrets
 import socket
 import subprocess
@@ -20,7 +28,15 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
+from mooring import pyproject_env
+
 STARTUP_TIMEOUT = 30.0
+
+
+def _force_frozen() -> bool:
+    return os.environ.get("MOORING_FORCE_FROZEN", "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
 
 
 class EditorError(Exception):
@@ -44,15 +60,18 @@ class EditorServer:
     def running(self) -> bool:
         return self._proc is not None and self._proc.poll() is None
 
-    def ensure_started(self) -> None:
-        if self.running:
-            return
-        self.workspace.mkdir(parents=True, exist_ok=True)
-        self.port = _free_port()
-        cmd = [
-            sys.executable,
-            "-m",
-            "marimo",
+    def use_uv(self) -> bool:
+        """Whether to launch via the team's locked uv project rather than the
+        frozen bundle."""
+        return (
+            not _force_frozen()
+            and pyproject_env.uv_available()
+            and pyproject_env.has_pyproject(self.workspace)
+        )
+
+    def _invocation(self) -> tuple[list[str], dict[str, str] | None]:
+        """The launch command and an optional env override (None = inherit)."""
+        marimo_args = [
             "edit",
             str(self.workspace),
             "--headless",
@@ -64,7 +83,27 @@ class EditorServer:
             self.token,
             "--skip-update-check",
         ]
-        self._proc = subprocess.Popen(cmd, cwd=str(self.workspace))
+        if not self.use_uv():
+            return [sys.executable, "-m", "marimo", *marimo_args], None
+        run = ["uv", "run"]
+        if pyproject_env.lock_path(self.workspace).is_file():
+            run.append("--frozen")
+        run += ["--project", str(self.workspace)]
+        if not pyproject_env.declares(self.workspace, "marimo"):
+            run += ["--with", "marimo"]  # safety net: always startable
+        run.append("marimo")
+        # Drop the bundled-site-packages PYTHONPATH so it can't shadow the
+        # project env uv builds; uv's venv is self-contained.
+        env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
+        return [*run, *marimo_args], env
+
+    def ensure_started(self) -> None:
+        if self.running:
+            return
+        self.workspace.mkdir(parents=True, exist_ok=True)
+        self.port = _free_port()
+        cmd, env = self._invocation()
+        self._proc = subprocess.Popen(cmd, cwd=str(self.workspace), env=env)
         self._wait_ready()
 
     def _wait_ready(self) -> None:

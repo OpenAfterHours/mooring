@@ -8,8 +8,8 @@ Mooring reaches your team two ways: installed from **PyPI** with `uvx mooring`
 (on any Python 3.12+), or shipped as a single self-contained artifact built with
 [moonlit](https://github.com/openafterhours/moonlit) for analysts with no Python
 tooling. This page covers both — plus baking your config, building the artifacts,
-the release workflow, changing the bundled packages, and getting the app to your
-team.
+the release workflow, building a repo's package stack into a frozen artifact, and
+getting the app to your team.
 
 !!! tip "Install from PyPI (no build step)"
 
@@ -26,33 +26,30 @@ team.
     config and publish your own build). The rest of this page is about the frozen
     `.pyz`/`.exe` for machines with **no** Python tooling at all.
 
-!!! tip "Add notebook packages at run time (PyPI/uvx only)"
+!!! tip "Notebook dependencies live in the repo (PyPI/uvx)"
 
-    PyPI/uvx users aren't limited to the baked-in stack. uv's `--with` injects
-    extra packages into that run's environment, and because mooring exposes its
-    `site-packages` to the marimo subprocess, anything you add becomes importable
-    in notebooks — e.g. pandas alongside (or instead of) polars:
-
-    ```bash
-    uvx --with pandas mooring        # notebooks can now `import pandas`
-    ```
-
-    For **several** packages, use any of uv's forms:
+    A repo declares the packages its notebooks need in a `pyproject.toml` +
+    `uv.lock` at its root, version-controlled alongside the notebooks. Mooring
+    itself ships lean (just its own runtime) — the team chooses the stack:
 
     ```bash
-    # repeat the flag
-    uvx --with pandas --with duckdb --with "polars>=1.0" mooring
-    # comma-separated
-    uvx --with "pandas,duckdb,polars>=1.0" mooring
-    # from a requirements file
-    uvx --with-requirements extras.txt mooring
+    mooring init                              # scaffold pyproject.toml (marimo) + uv.lock
+    mooring deps add polars duckdb "scipy>=1.11"
+    mooring push                              # share the change with the team
     ```
 
-    The `--with` / `--with-requirements` flags must come **before** the `mooring`
-    command name. This works for the PyPI/uvx path (and `pip install` into a
-    venv); **frozen `.pyz`/`.exe` artifacts keep their fixed stack** — to change
-    those, edit `dependencies` and rebuild (see
-    [§4](#changing-the-bundled-package-stack)).
+    With uv available, mooring opens each notebook in that locked environment
+    (`uv run --frozen marimo edit …`), so everyone gets identical versions and
+    `import polars` just works. For a one-off package you don't want to commit,
+    uv's `--with` still injects extras into a single run:
+
+    ```bash
+    uvx --with pandas mooring                 # ad-hoc, not recorded in the repo
+    ```
+
+    Frozen `.pyz`/`.exe` artifacts have no uv at runtime — their importable set is
+    whatever the admin built in (see [§4](#changing-the-bundled-package-stack)).
+    Opening a notebook that needs a package the bundle lacks shows a warning.
 
 ## Prerequisites
 
@@ -130,28 +127,48 @@ To cut a release: tag a commit `vX.Y.Z` and push the tag.
     `.github/workflows/docs.yml`, builds and publishes **this documentation
     site** — see [Contributing](../developers/contributing.md#working-on-the-docs).
 
-## 4. Changing the bundled package stack { #changing-the-bundled-package-stack }
+## 4. Build a frozen artifact for a repo's stack { #changing-the-bundled-package-stack }
 
-Notebooks can only import what's frozen into the artifact (currently `polars`,
-`altair`, `plotly`, `openpyxl`, `fastexcel`, `requests`, plus the standard
-library — there is no pip at runtime). To add or remove one:
+Frozen `.pyz`/`.exe` artifacts have no pip/uv at runtime, so a notebook can only
+import what's bundled. Mooring itself ships **lean** — only its own runtime — so
+the notebook packages come from **the repo's** `pyproject.toml` (the same file uv
+users run against). Generate the bundle from it so the two delivery modes never
+drift:
 
-1. Edit `dependencies` in `pyproject.toml`.
-2. `uv sync`.
-3. Rebuild (step 2) and redistribute.
+1. In a synced workspace for that repo, export its declared packages:
+
+   ```bash
+   mooring build-requirements -o build-reqs.txt
+   ```
+
+2. In your mooring build checkout, add those packages and re-sync the lock:
+
+   ```bash
+   uv add -r build-reqs.txt
+   uv sync
+   ```
+
+3. Rebuild the artifacts (step 2 above) and redistribute. The `.pyz` now bundles
+   mooring **plus** the repo's packages, so its notebooks import them with no uv.
+
+!!! note "Drive the bundle from the repo, not by hand"
+
+    Don't commit analyst packages into mooring's own `pyproject.toml` — that
+    re-introduces the bloat this design removed and drifts from the repo. Add them
+    in a throwaway, team-specific build checkout via `mooring build-requirements`
+    so the repo stays the single source of truth.
 
 !!! note "PyPI/uvx users don't need a rebuild"
 
-    This frozen-stack edit only affects the `.pyz`/`.exe`. Anyone running from
-    PyPI can add packages per run with `uvx --with <pkg> mooring` — see the
-    "Add notebook packages at run time" tip near the top of this page.
+    With uv, notebooks run against the repo's `pyproject.toml` / `uv.lock`
+    directly. A frozen rebuild is only for machines with no Python tooling.
 
 ## 5. Distribute { #distribute }
 
 Hand the artifact to your analysts any way you like:
 
 - A file share or network drive.
-- Email (note the ~110 MB size for the `.pyz`/`.exe`).
+- Email (size depends on the repo's packages — see the note below).
 - A **GitHub Release** (automatic with the `v*` tag workflow above).
 
 Then point them at [Install & first run](../users/index.md). If you baked the
@@ -160,6 +177,7 @@ config, they just run it and log in; if not, they'll complete the
 
 !!! note "Artifact size & first run"
 
-    The `.pyz`/`.exe` is ~110 MB (marimo + polars + plotly + altair). First run
-    extracts to a local cache (`%LOCALAPPDATA%\moonlit\` on Windows); old
-    versions' caches can be deleted freely.
+    Size tracks what you bundle: a lean marimo-only build is the floor; each
+    package the repo adds (§4) grows it (a typical analyst stack lands around
+    ~110 MB). First run extracts to a local cache (`%LOCALAPPDATA%\moonlit\` on
+    Windows); old versions' caches can be deleted freely.
