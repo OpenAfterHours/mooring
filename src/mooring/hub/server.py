@@ -423,22 +423,69 @@ class Hub:
             raise FileNotFoundError(rel)
         return target
 
-    def _build_chat_context(self, workspace: Path, notebook_rel: str, dataset_rel: str) -> str:
-        """The value-blind context for a chat: dataset SCHEMA + notebook SOURCE only."""
+    def _build_chat_context(self, workspace: Path, notebook_rel: str, dataset_rel: str):
+        """Return ``(system_context, dictionary_index)`` for a chat.
+
+        The value-free core is the dataset SCHEMA + notebook SOURCE. When the
+        opt-in context feature is on, it also folds in the team instructions and
+        a locality-selected, value-minimised data-dictionary slice (with the
+        selected dataset's schema enriched by matching dictionary entries), and
+        returns the parsed index so the session can offer the pull tools.
+        """
         from mooring import schema
+        from mooring.ai import context as ctxmod
+        from mooring.ai import locality
         from mooring.ai.chat import build_system_context
+        from mooring.ai.datadictionary import DictionaryIndex
+
+        repo_ctx = ctxmod.discover_context(
+            workspace,
+            context_dir=self.app_cfg.ai_context_dir,
+            enabled=self.app_cfg.ai_context,
+            max_kb=self.app_cfg.ai_context_max_kb,
+        )
+        index = repo_ctx.index
+        has_dict = not index.is_empty()
 
         schema_text = ""
+        dataset_schema = None
         if dataset_rel:
             ds = self._ws_file(workspace, dataset_rel)
             try:
-                schema_text = schema.format_for_ai(schema.extract_schema(ds), source=dataset_rel)
+                dataset_schema = schema.extract_schema(ds)
             except (ValueError, OSError) as exc:
                 raise ValueError(f"Could not read the schema for {dataset_rel}: {exc}") from exc
+            schema_text = (
+                locality.enrich_dataset_schema(dataset_schema, index, dataset_rel)
+                if has_dict
+                else schema.format_for_ai(dataset_schema, source=dataset_rel)
+            )
+
         source = self._ws_file(workspace, notebook_rel, suffix=".py").read_text("utf-8")
-        return build_system_context(
-            schema_text=schema_text, notebook_source=source, notebook_rel=notebook_rel
+
+        dictionary_text = ""
+        if has_dict:
+            dataset_cols = (
+                {n for n, _ in dataset_schema.columns} if dataset_schema is not None else set()
+            )
+            stem = Path(dataset_rel).stem if dataset_rel else ""
+            tables, reasons, n_more = locality.working_set(
+                index,
+                dataset_columns=dataset_cols,
+                dataset_stem=stem,
+                notebook_source=source,
+                notebook_rel=notebook_rel,
+            )
+            dictionary_text = locality.seed_text(tables, reasons, n_more)
+
+        context = build_system_context(
+            schema_text=schema_text,
+            notebook_source=source,
+            notebook_rel=notebook_rel,
+            instructions_text=repo_ctx.instructions,
+            dictionary_text=dictionary_text,
         )
+        return context, (index if has_dict else DictionaryIndex())
 
     def _make_chat_session(
         self,
@@ -447,12 +494,14 @@ class Hub:
         notebook_rel: str,
         model: str = "",
         reasoning_effort: str | None = None,
+        dictionary=None,
     ):
         """Open a streaming Copilot chat session bound to this notebook.
 
-        ``model``/``reasoning_effort`` override the configured defaults. Raises
-        AIError (-> 502 with an install/connect hint) if Copilot isn't available
-        or signed in.
+        ``model``/``reasoning_effort`` override the configured defaults;
+        ``dictionary`` (a parsed index) enables the value-free dictionary tools.
+        Raises AIError (-> 502 with an install/connect hint) if Copilot isn't
+        available or signed in.
         """
         from mooring.ai import get_provider
 
@@ -464,6 +513,7 @@ class Hub:
             notebook_rel=notebook_rel,
             model=model,
             reasoning_effort=reasoning_effort,
+            dictionary=dictionary,
         )
 
     def _reap_idle_chats(self) -> None:
@@ -496,7 +546,7 @@ class Hub:
             return JSONResponse({"error": "A notebook is required."}, status_code=400)
         workspace = self.cfg.workspace()
         try:
-            context = self._build_chat_context(workspace, notebook, dataset)
+            context, index = self._build_chat_context(workspace, notebook, dataset)
         except ValueError as exc:
             return JSONResponse({"error": str(exc)}, status_code=400)
         except FileNotFoundError as exc:
@@ -504,7 +554,12 @@ class Hub:
         self._reap_idle_chats()
         try:
             session = self._make_chat_session(
-                context, workspace, notebook, model=model, reasoning_effort=reasoning_effort
+                context,
+                workspace,
+                notebook,
+                model=model,
+                reasoning_effort=reasoning_effort,
+                dictionary=index,
             )
         except Exception as exc:  # noqa: BLE001 - AIError surfaces to the UI in Phase 1
             return JSONResponse({"error": str(exc)}, status_code=502)

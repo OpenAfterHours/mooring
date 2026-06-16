@@ -39,6 +39,16 @@ _TOOL_GUIDE = (
     "review and apply it. You have no other tools and cannot read the data itself."
 )
 
+_DICT_TOOL_GUIDE = (
+    "\n\nA team DATA DICTIONARY is available (metadata only — names/types/keys/"
+    "descriptions, never values):\n"
+    "- mooring_list_tables — list dictionary tables by domain\n"
+    "- mooring_describe_table(table) — one table's columns, types, and foreign keys\n"
+    "- mooring_search_dictionary(query) — find tables/columns by term.\n"
+    "Use these to confirm table and column names (and join keys) BEFORE proposing "
+    "code; a relevant slice may already be in your context."
+)
+
 
 class CopilotChatSession(ChatBroadcaster):
     def __init__(
@@ -50,14 +60,19 @@ class CopilotChatSession(ChatBroadcaster):
         folders,
         notebook_rel: str,
         reasoning_effort: str | None = None,
+        dictionary=None,
     ) -> None:
         super().__init__()
         self._model = (model or "").strip()
         self._reasoning_effort = (reasoning_effort or "").strip() or None
-        self._system_context = system_context + _TOOL_GUIDE
+        guide = _TOOL_GUIDE
+        if dictionary is not None and not dictionary.is_empty():
+            guide += _DICT_TOOL_GUIDE
+        self._system_context = system_context + guide
         self._workspace = Path(workspace)
         self._folders = tuple(folders)
         self._notebook_rel = notebook_rel
+        self._dictionary = dictionary
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
         self._client = None
@@ -111,7 +126,7 @@ class CopilotChatSession(ChatBroadcaster):
         from copilot import CopilotClient
 
         from mooring.ai.copilot import _is_authed, hardened_session_kwargs
-        from mooring.ai.tools import TOOL_NAMES, build_tools
+        from mooring.ai.tools import build_tools
 
         # An empty working dir: even if a built-in file tool slipped the allowlist,
         # there are no data files here to read.
@@ -127,6 +142,7 @@ class CopilotChatSession(ChatBroadcaster):
             folders=self._folders,
             notebook_rel=self._notebook_rel,
             emit_proposal=self._emit_proposal,
+            dictionary=self._dictionary,
         )
         extra = {}
         if self._reasoning_effort:
@@ -135,7 +151,9 @@ class CopilotChatSession(ChatBroadcaster):
             model=self._model or None,
             streaming=True,
             tools=tools,
-            available_tools=TOOL_NAMES,  # only mooring's safe tools => no built-ins
+            # Allowlist exactly the tools we built (mooring's safe set, plus the
+            # dictionary tools when present) => the SDK's built-ins stay dropped.
+            available_tools=[t.name for t in tools],
             working_directory=self._workdir,
             **extra,
             **hardened_session_kwargs(self._system_context),

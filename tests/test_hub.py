@@ -549,7 +549,7 @@ def test_chat_open_threads_model_and_effort(unconfigured_client, monkeypatch):
     client, hub = unconfigured_client
     seen = {}
 
-    def fake_make(self, ctx, ws, nb, model="", reasoning_effort=None):
+    def fake_make(self, ctx, ws, nb, model="", reasoning_effort=None, dictionary=None):
         from mooring.ai.chat import StubChatSession
 
         seen["model"] = model

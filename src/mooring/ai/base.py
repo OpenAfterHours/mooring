@@ -55,11 +55,23 @@ class AIProvider(Protocol):
         """Return generated code. Sends ONLY ``schema_context`` + ``instruction``."""
         ...
 
-    def open_chat(self, *, system_context: str, workspace, folders, notebook_rel: str):
+    def open_chat(
+        self,
+        *,
+        system_context: str,
+        workspace,
+        folders,
+        notebook_rel: str,
+        model: str | None = None,
+        reasoning_effort: str | None = None,
+        dictionary=None,
+    ):
         """Open a long-lived, streaming chat session (a ``ChatBroadcaster``).
 
-        Sends the model ONLY ``system_context`` (schema + notebook source) and the
-        analyst's turns. Raises :class:`AIError` if unavailable/not signed in.
+        Sends the model ONLY ``system_context`` (schema + notebook source, plus
+        any opt-in team context already folded in) and the analyst's turns.
+        ``dictionary`` (a parsed index) enables the value-free dictionary tools.
+        Raises :class:`AIError` if unavailable/not signed in.
         """
         ...
 

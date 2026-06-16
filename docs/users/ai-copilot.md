@@ -41,6 +41,28 @@ Keep both tabs side by side: chat on one, the marimo notebook on the other.
     Anything you type into a cell or the chat is visible to the assistant. Refer
     to columns by name — don't paste actual data values.
 
+## Team context (optional)
+
+If your admin enables it (`[ai] context = true`), the copilot also reads a
+`context/` folder in your workspace so it understands *your* data, not just the
+columns of the file you opened:
+
+- **`context/instructions.md`** — house rules in plain English ("report amounts in
+  GBP millions", "exclude test accounts"). Sent to the assistant on every turn.
+- **`context/dictionaries/*.yaml`** — your team's data dictionary (dbt
+  `schema.yml` works out of the box; one file per domain). The assistant pulls in
+  the tables relevant to what you're working on and can look up others on demand —
+  so it can write correct joins and SQL using your real table and column names.
+
+Only metadata crosses the wire — table/column **names, types, keys, and
+descriptions**, never sample values. Run `mooring ai dictionary check` to see how
+your files parse and to catch anything sensitive *before* you share them.
+
+!!! warning "These files are sent verbatim and shared"
+    Unlike the dataset schema, `context/` files contain whatever you write and are
+    shared with your team. Never put real data values or secrets in them — see
+    [the privacy page](../admins/ai-privacy.md#team-context-opt-in-not-a-structural-guarantee).
+
 ## Tips
 
 - Keep the notebook tab open beside the chat so applied cells appear live; if

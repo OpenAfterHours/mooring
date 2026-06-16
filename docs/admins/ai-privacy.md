@@ -12,6 +12,13 @@ for security reviewers who need to verify the claim. The short version:
 > and the notebook's **source code**. It has no tool that can read a data file,
 > a cell output, or a variable value — and mooring never sends those anywhere.
 
+This structural guarantee covers the **dataset and notebook**. An admin can
+additionally opt in to **team context** (instructions + a data dictionary) — text
+your team authors. That is a deliberately *weaker*, non-structural channel; it is
+off by default and described in [Team context](#team-context-opt-in-not-a-structural-guarantee)
+below. When it is on, the headline above holds for your data, but the model also
+sees whatever your team wrote into those files.
+
 ## What the assistant receives
 
 | Sent to the model | Why it's safe |
@@ -29,17 +36,22 @@ for security reviewers who need to verify the claim. The short version:
 
 ## The four structural guarantees
 
-1. **Schema-only context.** The context handed to the model is assembled in one
-   place (`ai/chat.py:build_system_context`) from the schema text and the notebook
-   source — nothing else.
-2. **Value-free tools only.** The agent is given exactly four mooring tools
-   (`ai/tools.py`): list datasets, get a schema, read the notebook source, and
-   *propose* a cell. Each is value-free by construction. The session's
-   `available_tools` allowlist contains **only** these names, so the SDK's
-   built-in file-reading and shell tools are **not available**. The four mooring
-   tools run without a permission prompt (they are value-free), while a **deny-all
-   permission handler** rejects anything else as a backstop; and the agent runs
-   with an **empty working directory** so there are no data files within its reach.
+1. **Single choke point.** The context handed to the model is assembled in one
+   place (`ai/chat.py:build_system_context`) — from the schema text and the
+   notebook source, plus (only when team context is enabled) the team instructions
+   and the value-minimised data-dictionary slice. Nothing reaches the model except
+   through this one function.
+2. **Value-free tools only.** The agent is given mooring's own tools (`ai/tools.py`):
+   list datasets, get a schema, read the notebook source, and *propose* a cell —
+   each value-free by construction. When a data dictionary is configured, three more
+   tools (`list_tables`, `describe_table`, `search_dictionary`) serve it; they look
+   up tables by name in an **in-memory parsed index** (never a filesystem path) and
+   return only the five allowlisted fields (see [Team context](#team-context-opt-in-not-a-structural-guarantee)).
+   The session's `available_tools` allowlist contains **only** these tool names, so
+   the SDK's built-in file-reading and shell tools are **not available**; a
+   **deny-all permission handler** rejects anything else as a backstop; and the
+   agent runs with an **empty working directory** so there are no data files within
+   its reach.
 3. **Applying a cell only writes source; mooring never opens a marimo websocket.**
    When you Apply a proposed cell, mooring writes the cell's **source code** into
    the notebook's `.py` file (via marimo's own codegen); the editor, launched with
@@ -56,6 +68,42 @@ for security reviewers who need to verify the claim. The short version:
 
 Nothing about a conversation is persisted: the session store, telemetry, config
 discovery, skills, file hooks, and host-git access are all switched off.
+
+## Team context (opt-in): not a structural guarantee
+
+The four guarantees above are *structural* — they hold no matter what. **Team
+context is different and weaker, by design**, so it is **off by default**
+(`[ai] context = false`). When an admin turns it on, mooring reads the workspace's
+`context/` folder and feeds the model:
+
+- **`context/instructions.md`** — free-text guidance, sent **verbatim**. This is
+  the residual leak vector: a human can type anything, so whatever is written here
+  reaches the model. It is the `copilot-instructions.md` equivalent.
+- **`context/dictionaries/*.yaml`** — per-domain data dictionaries (dbt
+  `schema.yml` and other shapes auto-detected). mooring parses each file and keeps
+  **only five fields** per column — `name`, `type`, `nullable`, `relationship`,
+  `description` — dropping everything else (sample values, defaults, enums, test
+  literals, `meta`/`comment` blobs). It then serves only the slice relevant to your
+  current notebook/dataset, with the rest reachable via the dictionary tools.
+
+Two honest caveats:
+
+- **The dictionary is *minimised*, not *structurally* value-free.** Unlike
+  `schema.py` (which never materialises a value), the dictionary's `description` is
+  free text a human wrote; if someone types a real value into a description, it can
+  reach the model. The five-slot allowlist (`ai/datadictionary.py`) and a
+  best-effort **secret scan** (`ai/secrets.py`, which withholds an instructions file
+  and drops a description on a high-confidence hit) reduce the risk — but the
+  primary controls are the allowlist and **human review**, not the scanner. Regex
+  scanning cannot catch a customer name, an internal account code, or a value typed
+  into prose.
+- **`context/` is shared.** If your team syncs `context/` via GitHub, these files
+  go to the whole team. Treat them like code: review changes, and never paste real
+  values or secrets.
+
+Run `mooring ai dictionary check` to see exactly how your files parse — which shape
+was detected, how many tables/columns were kept, which keys were dropped, and any
+secret-scan findings — *before* enabling the feature or sharing the files.
 
 ## The one thing to watch
 
@@ -74,7 +122,10 @@ A future release will add an automatic PII/redaction guard on outbound text.
   tests/test_chat_session.py tests/test_notebook_control.py` — these assert that
   a fixture value (`SECRET_VALUE_DO_NOT_LEAK`) never appears in anything sent to
   the model, that the session is built with the value-blind options, and that the
-  marimo channel is HTTP-only.
+  marimo channel is HTTP-only. For the team-context surface, `tests/test_datadictionary.py`,
+  `tests/test_ai_dict_tools.py`, and `tests/test_context.py` assert that
+  value-bearing keys are dropped, that the dictionary tools can't reach a file, and
+  that a secret in an instructions/description field is withheld.
 - **Live spike.** `scripts/spike_copilot_chat.py` opens a real session and asks
   the agent to read a file; it has no tool to do so.
 

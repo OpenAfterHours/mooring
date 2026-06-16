@@ -75,6 +75,11 @@ class AppConfig:
     ai_model: str = ""
     ai_reasoning_effort: str = ""
     ai_chat_idle_timeout: int = 900
+    # Team context (instructions + data dictionary). Opt-in: when off, the copilot
+    # behaves exactly as before (dataset schema + notebook source only).
+    ai_context: bool = False
+    ai_context_dir: str = "context"
+    ai_context_max_kb: int = 256
 
     @property
     def aliases(self) -> list[str]:
@@ -270,6 +275,11 @@ def load_app_config(
         ),
         ai_chat_idle_timeout=int(
             env.get("MOORING_AI_CHAT_IDLE_SEC", ai.get("chat_idle_timeout_sec", 900))
+        ),
+        ai_context=_as_bool(env.get("MOORING_AI_CONTEXT"), _as_bool(ai.get("context"), False)),
+        ai_context_dir=env.get("MOORING_AI_CONTEXT_DIR", str(ai.get("context_dir", "context"))),
+        ai_context_max_kb=int(
+            env.get("MOORING_AI_CONTEXT_MAX_KB", ai.get("context_max_kb", 256))
         ),
     )
 
