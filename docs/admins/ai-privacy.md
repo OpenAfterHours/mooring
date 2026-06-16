@@ -85,9 +85,11 @@ data often lives **outside** it — a network share, a warehouse export, a datab
 connection, a path built at runtime — and the schema most useful for writing code
 is frequently a *derived* frame (a join/filter result) that no file holds. To help
 there, mooring can read the schema of the dataframes **already loaded in your
-running kernel**. It is **on by default** and value-free, but — like team context —
-its safety comes from *how it is built*, not from physical impossibility, so it is
-documented here in full. Turn it off with `[ai] live_schema = false`.
+running kernel**. It is **on by default**, refreshed on every chat turn (so a frame
+you load after opening the chat is picked up without reopening), and value-free — but,
+like team context, its safety comes from *how it is built*, not from physical
+impossibility, so it is documented here in full. Turn it off with
+`[ai] live_schema = false`.
 
 How it stays value-blind (`ai/introspect.py`):
 
@@ -104,6 +106,11 @@ How it stays value-blind (`ai/introspect.py`):
 - **Fail-closed on the way back.** The reader (`_parse_frames`) accepts only the
   `{name, columns: [[str, str]], n_rows: int}` shape and drops everything else, so a
   value can't ride back on a key mooring doesn't read.
+- **The per-turn refresh adds no new value channel.** The schema is captured at
+  chat-open *and* re-probed on each turn through the **same** frozen probe and
+  fail-closed reader; a turn re-states the schema only when the kernel changed, and an
+  unchanged kernel is not re-sent. The refresh re-states already-value-free schema —
+  it opens no path a value could take that the open-time capture did not.
 
 Honest caveat: unlike `schema.py` (which physically only ever reads a file header),
 this probe runs in a namespace that *contains* values. Its value-blindness is the

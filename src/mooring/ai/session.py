@@ -209,16 +209,18 @@ class CopilotChatSession(ChatBroadcaster):
 
     # -- turns --------------------------------------------------------------
 
-    def send(self, text: str) -> None:
+    def send(self, text: str, live_schema_text: str = "") -> None:
         self.touch()
         if self._loop is None or self._session is None:
             raise AIError("Chat session is not ready.")
-        text = self._pii_gate(text)
-        if text is None:
+        gated = self._pii_gate(text)
+        if gated is None:
             return  # held pending the analyst's "Send anyway" (see send_confirmed)
-        self._forward(text)
+        # The live-schema prefix is machine-rendered and already value-free, so it is
+        # added AFTER the PII gate — it must not trip the warn-and-hold flow.
+        self._forward(self._live_prefix(live_schema_text) + gated)
 
-    def send_confirmed(self, token: str) -> None:
+    def send_confirmed(self, token: str, live_schema_text: str = "") -> None:
         """Forward a prompt the analyst chose to send despite the PII warning."""
         self.touch()
         if self._loop is None or self._session is None:
@@ -226,7 +228,7 @@ class CopilotChatSession(ChatBroadcaster):
         text = self._pii_take(token)
         if text is None:
             raise AIError("That message has expired — please retype it.")
-        self._forward(text)
+        self._forward(self._live_prefix(live_schema_text) + text)
 
     def _forward(self, text: str) -> None:
         future = asyncio.run_coroutine_threadsafe(self._session.send(text), self._loop)

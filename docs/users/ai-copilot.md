@@ -79,4 +79,8 @@ your files parse and to catch anything sensitive *before* you share them.
   choice is remembered. (Some models — and "Auto" — have no effort setting.)
 - The assistant can read your notebook's current code and ask for a dataset's
   schema on its own; you don't need to paste either in.
+- It also sees the schema of dataframes already loaded in the running notebook —
+  and this is **refreshed every time you send a message**, so if you load a new
+  dataframe mid-chat, just ask your next question; there's no need to reopen the
+  chat. (It sees column names and types only, never your data values.)
 - It writes Polars (`pl`) by default, matching mooring's bundled notebook stack.

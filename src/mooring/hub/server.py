@@ -488,30 +488,11 @@ class Hub:
 
         # Schemas of dataframes LIVE in the running kernel — covers data loaded
         # from OUTSIDE the workspace (network/warehouse/DB) and derived frames no
-        # file holds. Value-free (names + dtypes only) and best-effort: any failure
-        # leaves live_text empty and we fall back to the file-based schema above.
-        live_text = ""
-        if self.app_cfg.ai_live_schema:
-            from mooring.ai import introspect
-
-            try:
-                frames = introspect.live_dataset_schemas(
-                    self.editors.get(str(workspace)), notebook_rel
-                )
-                if self.app_cfg.ai_pii:
-                    scrubbed = []
-                    for fr in frames:
-                        kept, ff = pii.scrub_columns(fr.columns)
-                        if ff:  # a pivot/transpose put a PII value in a column NAME
-                            pii_banner += [
-                                {"where": f"live `{fr.name}` column", "kind": f.kind} for f in ff
-                            ]
-                            fr = replace(fr, columns=kept)
-                        scrubbed.append(fr)
-                    frames = scrubbed
-                live_text = introspect.format_live_schemas(frames)
-            except Exception:  # noqa: BLE001 - never block chat-open on introspection
-                live_text = ""
+        # file holds. Best-effort + value-free; the single pipeline (_live_schema_text)
+        # shared with the per-turn refresh. On any failure live_text is "" and we
+        # fall back to the file-based schema above.
+        live_text, live_banner = self._live_schema_text(workspace, notebook_rel)
+        pii_banner += live_banner
 
         dictionary_text = ""
         if has_dict:
@@ -536,7 +517,49 @@ class Hub:
             instructions_text=repo_ctx.instructions,
             dictionary_text=dictionary_text,
         )
-        return context, (index if has_dict else DictionaryIndex()), pii_banner
+        return context, (index if has_dict else DictionaryIndex()), pii_banner, live_text
+
+    def _live_schema_text(self, workspace: Path, notebook_rel: str) -> tuple[str, list[dict]]:
+        """Value-free schema of the dataframes LIVE in ``notebook_rel``'s kernel.
+
+        Returns ``(rendered_text, pii_banner)``. Best-effort: any failure (live
+        schema off, no running editor/session, frames not loaded, probe error)
+        yields ``("", [])`` and the caller falls back to the file-based schema.
+        The ONE value-free pipeline (introspect probe -> ``scrub_columns`` ->
+        ``format_live_schemas``) shared by chat-open and the per-turn refresh.
+        """
+        if not self.app_cfg.ai_live_schema:
+            return "", []
+        from dataclasses import replace
+
+        from mooring.ai import introspect, pii
+
+        banner: list[dict] = []
+        try:
+            frames = introspect.live_dataset_schemas(self.editors.get(str(workspace)), notebook_rel)
+            if self.app_cfg.ai_pii:
+                scrubbed = []
+                for fr in frames:
+                    kept, ff = pii.scrub_columns(fr.columns)
+                    if ff:  # a pivot/transpose put a PII value in a column NAME
+                        banner += [
+                            {"where": f"live `{fr.name}` column", "kind": f.kind} for f in ff
+                        ]
+                        fr = replace(fr, columns=kept)
+                    scrubbed.append(fr)
+                frames = scrubbed
+            return introspect.format_live_schemas(frames), banner
+        except Exception:  # noqa: BLE001 - never block chat on introspection
+            return "", []
+
+    def _live_schema_for_sid(self, sid: str) -> tuple[str, list[dict]]:
+        """The current live-kernel schema for an open chat session (best-effort)."""
+        with self._chat_lock:
+            target = self._chat_targets.get(sid)
+        if target is None:
+            return "", []
+        workspace_str, notebook_rel = target
+        return self._live_schema_text(Path(workspace_str), notebook_rel)
 
     def _make_chat_session(
         self,
@@ -599,7 +622,9 @@ class Hub:
             return JSONResponse({"error": "A notebook is required."}, status_code=400)
         workspace = self.cfg.workspace()
         try:
-            context, index, pii_banner = self._build_chat_context(workspace, notebook, dataset)
+            context, index, pii_banner, live_text = self._build_chat_context(
+                workspace, notebook, dataset
+            )
         except ValueError as exc:
             return JSONResponse({"error": str(exc)}, status_code=400)
         except FileNotFoundError as exc:
@@ -616,6 +641,9 @@ class Hub:
             )
         except Exception as exc:  # noqa: BLE001 - AIError surfaces to the UI in Phase 1
             return JSONResponse({"error": str(exc)}, status_code=502)
+        # Seed the snapshot already in the system context so turn 1 doesn't redundantly
+        # re-inject it; later turns refresh from the kernel (see api_chat_send).
+        session.set_initial_live_schema(live_text)
         sid = secrets.token_urlsafe(9)
         with self._chat_lock:
             self._chats[sid] = session
@@ -658,24 +686,30 @@ class Hub:
         session = self._chats.get(sid)
         if session is None:
             return JSONResponse({"error": "Unknown chat session."}, status_code=404)
+        # Refresh the live-kernel schema so dataframes added since chat-open (or the
+        # last turn) are visible without reopening. Value-free + best-effort; the
+        # session re-injects it only when it changed. Off-thread — it does kernel I/O.
+        live_text, live_banner = await asyncio.to_thread(self._live_schema_for_sid, sid)
+        if live_banner:  # a refreshed column NAME was itself PII (withheld) — count only
+            telemetry.log_event("ai_pii", findings=len(live_banner))
         # "Send anyway" path: forward a prompt the PII guard held, verbatim, once.
         confirm = str(data.get("confirm_token", "")).strip()
         if confirm:
             try:
-                await asyncio.to_thread(session.send_confirmed, confirm)
+                await asyncio.to_thread(session.send_confirmed, confirm, live_text)
             except Exception as exc:  # noqa: BLE001 - AIError surfaces to the UI
                 return JSONResponse({"error": str(exc)}, status_code=502)
             telemetry.log_event("ai_chat_send", confirmed=1)
-            return JSONResponse({"ok": True})
+            return JSONResponse({"ok": True, "pii": live_banner})
         text = str(data.get("text", "")).strip()
         if not text:
             return JSONResponse({"error": "Type a message."}, status_code=400)
         try:
-            await asyncio.to_thread(session.send, text)
+            await asyncio.to_thread(session.send, text, live_text)
         except Exception as exc:  # noqa: BLE001 - AIError surfaces to the UI in Phase 1
             return JSONResponse({"error": str(exc)}, status_code=502)
         telemetry.log_event("ai_chat_send")
-        return JSONResponse({"ok": True})
+        return JSONResponse({"ok": True, "pii": live_banner})
 
     async def api_chat_apply(self, request: Request) -> JSONResponse:
         data = await request.json()

@@ -51,6 +51,10 @@ class ChatBroadcaster:
         self._pii_enabled = False
         self._pii_block = True
         self._pending: dict[str, str] = {}  # confirm-token -> held prompt text
+        # The live-kernel schema the model has last been shown (the system-context
+        # snapshot at open, then the most recent per-turn refresh). A turn re-injects
+        # the live schema only when this changes — see _live_prefix.
+        self._last_live_schema = ""
 
     def subscribe(self) -> queue.Queue[ChatEvent]:
         q: queue.Queue[ChatEvent] = queue.Queue(maxsize=_QUEUE_MAX)
@@ -122,6 +126,33 @@ class ChatBroadcaster:
         """Pop the prompt held under ``token`` (forwarded verbatim, exactly once)."""
         return self._pending.pop(token, None)
 
+    # -- live-kernel schema refresh -----------------------------------------
+
+    def set_initial_live_schema(self, text: str) -> None:
+        """Seed the live-schema snapshot already folded into the system context at
+        chat-open, so the first turn re-injects only if the kernel changed since."""
+        self._last_live_schema = (text or "").strip()
+
+    def _live_prefix(self, live_schema_text: str) -> str:
+        """A block to PREPEND to a turn when the kernel's dataframes changed since
+        the model last saw them — otherwise ``""``.
+
+        ``live_schema_text`` comes from the SAME ``introspect`` probe -> scrub ->
+        ``format_live_schemas`` pipeline as the system context (column names +
+        dtypes only, never a value), so re-stating it opens no new value channel.
+        Updates the stored snapshot when it changes; a held/empty refresh leaves it
+        untouched so a later turn still re-injects.
+        """
+        live = (live_schema_text or "").strip()
+        if not live or live == self._last_live_schema:
+            return ""
+        self._last_live_schema = live
+        return (
+            "UPDATED LIVE NOTEBOOK DATAFRAMES (schema only) — the kernel changed "
+            "since the last message; use this in place of any earlier live-dataframe "
+            "list:\n" + live + "\n\n"
+        )
+
 
 class StubChatSession(ChatBroadcaster):
     """A no-LLM stand-in used in Phase 0 to prove the chat → Apply → run loop.
@@ -136,18 +167,23 @@ class StubChatSession(ChatBroadcaster):
     ) -> None:
         super().__init__()
         self.system_context = system_context  # stored so tests can prove it's value-free
+        self.last_sent = ""  # exact text forwarded, incl. any live-schema prefix (tests)
         self.configure_pii(enabled=pii_enabled, block=pii_block)
 
-    def send(self, text: str) -> None:
+    def send(self, text: str, live_schema_text: str = "") -> None:
         self.touch()
-        if self._pii_gate(text) is None:
+        gated = self._pii_gate(text)
+        if gated is None:
             return  # held pending the analyst's confirmation
+        self.last_sent = self._live_prefix(live_schema_text) + gated
         self._reply()
 
-    def send_confirmed(self, token: str) -> None:
+    def send_confirmed(self, token: str, live_schema_text: str = "") -> None:
         self.touch()
-        if self._pii_take(token) is None:
+        text = self._pii_take(token)
+        if text is None:
             raise AIError("That message has expired — please retype it.")
+        self.last_sent = self._live_prefix(live_schema_text) + text
         self._reply()
 
     def _reply(self) -> None:
