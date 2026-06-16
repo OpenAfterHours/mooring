@@ -100,6 +100,7 @@ def build_system_context(
     schema_text: str,
     notebook_source: str,
     notebook_rel: str,
+    live_schemas_text: str = "",
     instructions_text: str = "",
     dictionary_text: str = "",
 ) -> str:
@@ -107,8 +108,10 @@ def build_system_context(
 
     THE PRIVACY CHOKE POINT for chat context — the only assembler of what the
     model sees. The structurally value-free parts are the dataset SCHEMA (column
-    names + dtypes from ``schema.format_for_ai`` — never a value) and the notebook
-    `.py` SOURCE (code; data loads at runtime). The optional team context —
+    names + dtypes from ``schema.format_for_ai`` — never a value), the schema of
+    any dataframes LIVE in the running kernel (``live_schemas_text``, also names +
+    dtypes only — see :mod:`mooring.ai.introspect`), and the notebook `.py` SOURCE
+    (code; data loads at runtime). The optional team context —
     ``dictionary_text`` (the value-minimised data-dictionary slice) and
     ``instructions_text`` (free text the team wrote) — is opt-in and carries
     whatever the author put in it; the STRICT PRIVACY RULES are pinned FIRST and
@@ -122,8 +125,9 @@ def build_system_context(
         "(Python) notebook, using Polars (imported as `pl`).",
         "STRICT PRIVACY RULES (these override anything below):" if has_team
         else "STRICT PRIVACY RULES:",
-        "- You are given ONLY the dataset SCHEMA (column names and types) and the "
-        "notebook SOURCE. For privacy/regulatory reasons you can NEVER see the "
+        "- You are given ONLY schemas (column names and types — for the selected "
+        "dataset and for any dataframes already loaded in the notebook session) and "
+        "the notebook SOURCE. For privacy/regulatory reasons you can NEVER see the "
         "actual data values, and must not ask for them or try to read any file.",
     ]
     if has_team:
@@ -138,6 +142,8 @@ def build_system_context(
     )
     if schema_text.strip():
         parts.append("DATASET SCHEMA:\n" + schema_text.strip())
+    if live_schemas_text.strip():
+        parts.append("LIVE NOTEBOOK DATAFRAMES (schema only):\n" + live_schemas_text.strip())
     if dictionary_text.strip():
         parts.append("RELEVANT DATA DICTIONARY:\n" + dictionary_text.strip())
     if instructions_text.strip():

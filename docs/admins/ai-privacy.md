@@ -24,13 +24,16 @@ sees whatever your team wrote into those files.
 | Sent to the model | Why it's safe |
 |---|---|
 | **Schema** — column names, dtypes, row count | Built by `schema.py`, which reads only a parquet footer or a csv/xlsx header. It never materialises a row, so no value is ever produced — proven by the `test_schema.py` "value never leaks" tests. |
+| **Live dataframe schemas** — names + dtypes of dataframes loaded in your kernel | Built by `ai/introspect.py`, which runs a **fixed, value-free probe** in your kernel and reads back only names + dtypes. Covers data loaded from *outside* the workspace. Value-free by construction, not by physical impossibility — see [Live dataframe schemas](#live-dataframe-schemas-data-outside-the-workspace). |
 | **Notebook `.py` source** | A marimo notebook is pure Python; the data is loaded at *runtime* (`pl.read_parquet(...)`). The source is code, not data. |
 | **Your chat messages** | What you type. |
 
 ## What it never receives
 
 - **Cell outputs / dataframe previews** — these are where real values appear.
-- **Variable values / kernel state.**
+- **Variable *values*.** Mooring may read a live dataframe's **schema** (names +
+  dtypes — see [Live dataframe schemas](#live-dataframe-schemas-data-outside-the-workspace)),
+  but never a stored value or other kernel state.
 - **Error tracebacks** (which can embed values).
 - **The contents of any data file.**
 
@@ -59,7 +62,9 @@ sees whatever your team wrote into those files.
    connects a marimo *websocket* — and outputs, dataframe previews, and variable
    values are delivered *only* over that websocket. So a value cannot travel back
    through mooring to the model. (The cell runs in *your* kernel; only your browser
-   sees the result.)
+   sees the result.) Live-schema introspection ([below](#live-dataframe-schemas-data-outside-the-workspace))
+   keeps this invariant: it pushes a fixed probe in over HTTP and reads back only a
+   names-and-dtypes file that probe wrote — never a cell output, never the websocket.
 4. **marimo's own AI is turned off.** marimo ships a built-in AI assistant that
    *does* send sample values to whatever model it's configured with. Mooring
    disables it in every editor it launches by writing a `.marimo.toml`
@@ -68,6 +73,41 @@ sees whatever your team wrote into those files.
 
 Nothing about a conversation is persisted: the session store, telemetry, config
 discovery, skills, file hooks, and host-git access are all switched off.
+
+## Live dataframe schemas (data outside the workspace)
+
+`schema.py` can only inspect data files that sit *inside* the workspace. But real
+data often lives **outside** it — a network share, a warehouse export, a database
+connection, a path built at runtime — and the schema most useful for writing code
+is frequently a *derived* frame (a join/filter result) that no file holds. To help
+there, mooring can read the schema of the dataframes **already loaded in your
+running kernel**. It is **on by default** and value-free, but — like team context —
+its safety comes from *how it is built*, not from physical impossibility, so it is
+documented here in full. Turn it off with `[ai] live_schema = false`.
+
+How it stays value-blind (`ai/introspect.py`):
+
+- **The code is fixed, never model-authored.** Mooring pushes one frozen probe into
+  the kernel via `POST /api/kernel/run`. The probe walks the kernel namespace, and
+  for each polars/pandas dataframe emits **only** `{name, columns: [(name, dtype)],
+  n_rows}` using schema-only accessors (`collect_schema()` / `.schema` / `.dtypes`
+  — never `.head`, `.row`, or `.collect` of data). The one dtype that embeds
+  author-defined strings, polars `Enum`, is reduced to the bare type name.
+- **No new value channel.** `/api/kernel/run`'s HTTP response carries no outputs
+  (verified: `scripts/spike_marimo_http_control.py`), and mooring still never opens
+  the marimo websocket. The probe hands its result back through a **sidecar file it
+  writes**, which mooring reads once and deletes.
+- **Fail-closed on the way back.** The reader (`_parse_frames`) accepts only the
+  `{name, columns: [[str, str]], n_rows: int}` shape and drops everything else, so a
+  value can't ride back on a key mooring doesn't read.
+
+Honest caveat: unlike `schema.py` (which physically only ever reads a file header),
+this probe runs in a namespace that *contains* values. Its value-blindness is the
+correctness of that frozen probe plus the fail-closed reader — pinned by the
+`SECRET_VALUE_DO_NOT_LEAK` tests in `tests/test_introspect.py`, which load frames
+full of secret values (including an `Enum` whose categories are secret) and prove
+none reach the readback. If introspection can't run (no live session, frames not yet
+loaded), mooring silently falls back to the file-based schema.
 
 ## Team context (opt-in): not a structural guarantee
 
@@ -125,7 +165,9 @@ A future release will add an automatic PII/redaction guard on outbound text.
   marimo channel is HTTP-only. For the team-context surface, `tests/test_datadictionary.py`,
   `tests/test_ai_dict_tools.py`, and `tests/test_context.py` assert that
   value-bearing keys are dropped, that the dictionary tools can't reach a file, and
-  that a secret in an instructions/description field is withheld.
+  that a secret in an instructions/description field is withheld. For live-kernel
+  schemas, `tests/test_introspect.py` runs the exact probe the kernel runs and proves
+  the names-and-dtypes readback never carries a value.
 - **Live spike.** `scripts/spike_copilot_chat.py` opens a real session and asks
   the agent to read a file; it has no tool to do so.
 
