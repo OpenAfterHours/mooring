@@ -26,14 +26,60 @@ with the structured scanner's at every egress.
 from __future__ import annotations
 
 import threading
+from dataclasses import dataclass
 
 from mooring.ai.pii import SUPPRESS_MARKER, Finding
 
-# A PII-trained default; override via ``[ai.pii] name_model``. Both "person" and
-# "name" are passed as labels so detection is robust to either model's vocabulary.
-DEFAULT_MODEL = "urchade/gliner_multi_pii-v1"
+# Default model: a SAFETENSORS build (no pickle) loaded as the bf16 *variant*, which
+# is CPU-friendly and — crucially for a security review — means no ``pytorch_model.bin``
+# is ever downloaded or unpickled. Pinned to a specific commit for reproducibility.
+# Override via ``[ai.pii] name_model`` / ``name_model_revision`` / ``name_model_variant``.
+DEFAULT_MODEL = "gliner-community/gliner_small-v2.5"
+DEFAULT_REVISION = "f227d3cd637bd4e6757ae143935316d062393341"
+DEFAULT_VARIANT = "bf16"
 DEFAULT_LABELS: tuple[str, ...] = ("person", "name")
 DEFAULT_THRESHOLD = 0.7
+
+
+@dataclass(frozen=True)
+class ModelRef:
+    """A pinned GLiNER model: id + optional commit ``revision`` + safetensors
+    ``variant`` (e.g. ``bf16``/``fp16``; empty = the repo's default weights file).
+
+    Bundled so the whole ``(id, revision, variant)`` identity threads through the
+    PII guard as one value rather than three parallel parameters."""
+
+    id: str = ""
+    revision: str = ""
+    variant: str = ""
+
+
+def _resolve(model: "ModelRef | str | None") -> ModelRef:
+    """Coerce ``model`` to a ModelRef. ``None`` -> the pinned safetensors default;
+    a bare string -> that id at its latest commit and default weights file."""
+    if model is None:
+        return ModelRef(DEFAULT_MODEL, DEFAULT_REVISION, DEFAULT_VARIANT)
+    if isinstance(model, str):
+        return ModelRef(model.strip() or DEFAULT_MODEL, "", "")
+    return model
+
+
+def _allow_patterns(variant: str) -> list[str] | None:
+    """``snapshot_download`` allow-list that fetches only the safetensors ``variant``
+    (plus configs/tokenizer) — never ``pytorch_model.bin``. ``None`` (no variant)
+    downloads everything, including the repo's default weights file."""
+    if not variant:
+        return None
+    return [
+        f"model.{variant}.safetensors",
+        f"model.{variant}.safetensors.index.json",
+        f"model-*-of-*.{variant}.safetensors",
+        "*.json",
+        "*.txt",
+        "*.model",
+        "tokenizer*",
+        "*.spm",
+    ]
 
 # value-free kind labels (mirrors pii.py's CARD/EMAIL/... style).
 NAME = "person name"
@@ -57,7 +103,7 @@ _ORG_LABELS = frozenset(
 _CHUNK_CHARS = 2000
 _MAX_TOTAL_CHARS = 200_000
 
-_models: dict[str, object] = {}
+_models: dict[tuple[str, str, str], object] = {}
 _load_lock = threading.Lock()
 
 
@@ -74,18 +120,20 @@ def available() -> bool:
     return True
 
 
-def load_model(model_id: str | None = None):
+def load_model(model: "ModelRef | str | None" = None):
     """Load (and cache) the GLiNER model, downloading it on first use.
 
     Raises :class:`NerUnavailable` if the extra is missing or the model can't load.
-    Thread-safe: concurrent callers share one cached instance per model id.
+    Thread-safe: concurrent callers share one cached instance per (id, revision,
+    variant). With a variant set, only safetensors are loaded — never a pickle.
     """
-    mid = (model_id or "").strip() or DEFAULT_MODEL
-    cached = _models.get(mid)
+    ref = _resolve(model)
+    key = (ref.id, ref.revision, ref.variant)
+    cached = _models.get(key)
     if cached is not None:
         return cached
     with _load_lock:
-        cached = _models.get(mid)  # re-check under the lock
+        cached = _models.get(key)  # re-check under the lock
         if cached is not None:
             return cached
         try:
@@ -94,12 +142,110 @@ def load_model(model_id: str | None = None):
             raise NerUnavailable(
                 "name detection needs the 'pii' extra: pip install mooring[pii]"
             ) from exc
+        kwargs: dict = {}
+        if ref.revision:
+            kwargs["revision"] = ref.revision
+        if ref.variant:
+            kwargs["variant"] = ref.variant
         try:
-            model = GLiNER.from_pretrained(mid)
+            obj = GLiNER.from_pretrained(ref.id, **kwargs)
         except Exception as exc:  # noqa: BLE001 - network / disk / bad model id
-            raise NerUnavailable(f"could not load NER model {mid!r}: {exc}") from exc
-        _models[mid] = model
-        return model
+            raise NerUnavailable(f"could not load NER model {ref.id!r}: {exc}") from exc
+        _models[key] = obj
+        return obj
+
+
+def is_cached(model: "ModelRef | str | None" = None) -> bool:
+    """Whether the model is already in the local HF cache (no network, no download).
+
+    False when the extra isn't installed or the cache is absent/incomplete — so a
+    True result means ``load_model`` will be fast and offline."""
+    ref = _resolve(model)
+    if (ref.id, ref.revision, ref.variant) in _models:
+        return True
+    try:
+        from huggingface_hub import snapshot_download
+
+        kwargs: dict = {"local_files_only": True}
+        if ref.revision:
+            kwargs["revision"] = ref.revision
+        allow = _allow_patterns(ref.variant)
+        if allow:
+            kwargs["allow_patterns"] = allow
+        snapshot_download(ref.id, **kwargs)
+        return True
+    except Exception:  # noqa: BLE001 - not cached, or hub not installed
+        return False
+
+
+def download_model(model: "ModelRef | str | None" = None, on_progress=None) -> None:
+    """Fetch the model into the local cache, reporting byte progress to ``on_progress``.
+
+    ``on_progress(done_bytes, total_bytes)`` is called as the download proceeds
+    (aggregated across the model's files). With a variant set, fetches ONLY the
+    safetensors variant + configs (no ``pytorch_model.bin``). Resumes a partial
+    download. Raises :class:`NerUnavailable` if the extra is missing or it fails.
+    """
+    ref = _resolve(model)
+    try:
+        from huggingface_hub import snapshot_download
+    except Exception as exc:  # noqa: BLE001
+        raise NerUnavailable(
+            "name detection needs the 'pii' extra: pip install mooring[pii]"
+        ) from exc
+
+    kwargs: dict = {}
+    if ref.revision:
+        kwargs["revision"] = ref.revision
+    allow = _allow_patterns(ref.variant)
+    if allow:
+        kwargs["allow_patterns"] = allow
+    tqdm_class = _progress_tqdm(on_progress) if on_progress is not None else None
+    try:
+        if tqdm_class is not None:
+            try:
+                snapshot_download(ref.id, tqdm_class=tqdm_class, **kwargs)
+                return
+            except TypeError:  # older hub without tqdm_class — fall back, no % then
+                pass
+        snapshot_download(ref.id, **kwargs)
+    except Exception as exc:  # noqa: BLE001 - network / disk / bad model id
+        raise NerUnavailable(f"could not download NER model {ref.id!r}: {exc}") from exc
+
+
+def _progress_tqdm(on_progress):
+    """A tqdm subclass that reports aggregate byte progress to ``on_progress``.
+
+    huggingface_hub spins up one bar per file; we sum the byte-unit bars so the
+    callback sees overall ``(done, total)`` rather than per-file jumps."""
+    from tqdm.auto import tqdm as _BaseTqdm
+
+    bars: dict[int, tuple[int, int]] = {}
+    lock = threading.Lock()
+
+    class _ProgressTqdm(_BaseTqdm):
+        def __init__(self, *a, **k):
+            super().__init__(*a, **k)
+            self._report()
+
+        def update(self, n=1):
+            result = super().update(n)
+            self._report()
+            return result
+
+        def _report(self):
+            if self.unit != "B" or not self.total:
+                return
+            with lock:
+                bars[id(self)] = (self.n, self.total)
+                done = sum(v[0] for v in bars.values())
+                total = sum(v[1] for v in bars.values())
+            try:
+                on_progress(done, total)
+            except Exception:  # noqa: BLE001 - never let reporting break the download
+                pass
+
+    return _ProgressTqdm
 
 
 def _kind_for(label: str) -> str:
@@ -145,7 +291,7 @@ def scan_names(
     *,
     labels: tuple[str, ...] | None = None,
     threshold: float = DEFAULT_THRESHOLD,
-    model: str | None = None,
+    model: "ModelRef | str | None" = None,
 ) -> list[Finding]:
     """Value-free person-name (and configured-label) findings in ``text``.
 

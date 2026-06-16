@@ -29,6 +29,15 @@ def kinds(text: str) -> set[str]:
     return {f.kind for f in pii.scan(text)}
 
 
+@pytest.fixture
+def clean_config(tmp_path, monkeypatch):
+    """Resolve config against an empty user dir so a developer's real config.toml
+    (e.g. ai.pii enabled) can't make the default-config assertions flaky."""
+    from mooring import paths
+
+    monkeypatch.setattr(paths, "user_config_dir", lambda: tmp_path / "cfg")
+
+
 # -- detection: checksum-validated kinds ---------------------------------------
 
 
@@ -198,6 +207,8 @@ def test_guard_prompt_name_pass_unavailable_is_loud(monkeypatch):
 def test_name_prompt_held_then_confirmed_value_free(monkeypatch):
     from mooring.ai import ner
 
+    monkeypatch.setattr(ner, "available", lambda: True)
+    monkeypatch.setattr(ner, "is_cached", lambda mid=None: True)  # model ready -> name pass runs
     monkeypatch.setattr(ner, "scan_names", lambda text, **kw: [pii.Finding(1, ner.NAME)])
     sess = StubChatSession(pii_enabled=True, pii_block=True, pii_names=True)
     q = sess.subscribe()
@@ -210,6 +221,155 @@ def test_name_prompt_held_then_confirmed_value_free(monkeypatch):
 
     sess.send_confirmed(ev["token"])
     assert "idle" in [e.kind for e in _drain(q)]  # forwarded after confirm
+
+
+def test_structured_hold_survives_name_pass_failure(monkeypatch):
+    # detect_names ON but the NER backend missing must NOT bypass the structured
+    # guard: a card still HOLDS (not forwarded unchecked), with the name-pass failure
+    # subordinate to the real finding.
+    from mooring.ai import ner
+
+    def boom(_text, **_kw):
+        raise ner.NerUnavailable("no extra")
+
+    monkeypatch.setattr(ner, "available", lambda: True)
+    monkeypatch.setattr(ner, "is_cached", lambda mid=None: True)  # ready -> name pass runs (and fails)
+    monkeypatch.setattr(ner, "scan_names", boom)
+    sess = StubChatSession(pii_enabled=True, pii_block=True, pii_names=True)
+    q = sess.subscribe()
+    sess.send(f"charge {VALID_CARD} now")
+    evs = _drain(q)
+    assert [e.kind for e in evs] == ["pii"]  # held — nothing forwarded
+    ev = evs[0].data
+    assert ev.get("token") and ev["findings"][0]["kind"] == pii.CARD
+    assert "idle" not in [e.kind for e in evs]
+
+
+def test_scan_error_alone_forwards_loud(monkeypatch):
+    # No actionable finding + a failed name pass: forward, but flag scan_error loudly.
+    from mooring.ai import ner
+
+    def boom(_text, **_kw):
+        raise ner.NerUnavailable("no extra")
+
+    monkeypatch.setattr(ner, "available", lambda: True)
+    monkeypatch.setattr(ner, "is_cached", lambda mid=None: True)  # ready -> name pass runs (and fails)
+    monkeypatch.setattr(ner, "scan_names", boom)
+    sess = StubChatSession(pii_enabled=True, pii_block=True, pii_names=True)
+    q = sess.subscribe()
+    sess.send("nothing sensitive here")
+    evs = _drain(q)
+    assert any(e.kind == "pii" and e.data.get("scan_error") for e in evs)
+    assert "idle" in [e.kind for e in evs]  # forwarded (fail open)
+
+
+# -- Phase 2: NER model prepare (background download with progress) ------------
+
+
+def _await_ner(q, *, until):
+    states = []
+    for _ in range(20):
+        ev = q.get(timeout=2)
+        if ev.kind != "ner":
+            continue
+        states.append((ev.data.get("state"), ev.data.get("pct")))
+        if ev.data.get("state") == until:
+            break
+    return states
+
+
+def test_prepare_pii_model_streams_progress_then_ready(monkeypatch):
+    from mooring.ai import ner
+
+    monkeypatch.setattr(ner, "available", lambda: True)
+    monkeypatch.setattr(ner, "is_cached", lambda mid=None: False)
+
+    def fake_download(mid=None, on_progress=None):
+        on_progress(50, 100)
+        on_progress(100, 100)
+
+    monkeypatch.setattr(ner, "download_model", fake_download)
+    monkeypatch.setattr(ner, "load_model", lambda mid=None: object())
+
+    sess = StubChatSession(pii_enabled=True, pii_block=True, pii_names=True)
+    q = sess.subscribe()
+    sess.prepare_pii_model()
+    states = _await_ner(q, until="ready")
+    assert ("downloading", None) in states  # initial, indeterminate
+    assert ("downloading", 50) in states and ("downloading", 100) in states
+    assert states[-1] == ("ready", None)
+    assert sess.ner_status == {"state": "ready"}  # replayable to a late subscriber
+
+
+def test_prepare_pii_model_reports_error(monkeypatch):
+    from mooring.ai import ner
+
+    monkeypatch.setattr(ner, "available", lambda: True)
+    monkeypatch.setattr(ner, "is_cached", lambda mid=None: False)
+
+    def boom(mid=None, on_progress=None):
+        raise ner.NerUnavailable("network down")
+
+    monkeypatch.setattr(ner, "download_model", boom)
+    sess = StubChatSession(pii_enabled=True, pii_block=True, pii_names=True)
+    q = sess.subscribe()
+    sess.prepare_pii_model()
+    states = _await_ner(q, until="error")
+    assert states[-1] == ("error", None)
+
+
+def test_prepare_pii_model_silent_when_already_cached(monkeypatch):
+    from mooring.ai import ner
+
+    monkeypatch.setattr(ner, "available", lambda: True)
+    monkeypatch.setattr(ner, "is_cached", lambda mid=None: True)
+    monkeypatch.setattr(ner, "load_model", lambda mid=None: object())
+    sess = StubChatSession(pii_enabled=True, pii_block=True, pii_names=True)
+    q = sess.subscribe()
+    sess.prepare_pii_model()
+    assert _drain(q) == []  # cached -> warm in the background, no download UI
+
+
+def test_prepare_pii_model_noop_when_names_off(monkeypatch):
+    from mooring.ai import ner
+
+    monkeypatch.setattr(ner, "available", lambda: True)
+    sess = StubChatSession(pii_enabled=True, pii_block=True, pii_names=False)
+    q = sess.subscribe()
+    sess.prepare_pii_model()
+    assert _drain(q) == []
+
+
+def test_pii_gate_skips_name_pass_until_model_ready(monkeypatch):
+    from mooring.ai import ner
+
+    monkeypatch.setattr(ner, "available", lambda: True)
+    monkeypatch.setattr(ner, "is_cached", lambda mid=None: False)  # still downloading
+
+    def explode(*_a, **_k):
+        raise AssertionError("scan_names must not run before the model is ready")
+
+    monkeypatch.setattr(ner, "scan_names", explode)
+    sess = StubChatSession(pii_enabled=True, pii_block=True, pii_names=True)
+    q = sess.subscribe()
+    sess.send("contact Jon Harrison")
+    kinds = [e.kind for e in _drain(q)]
+    assert "pii" not in kinds  # not held, no scan_error — just structurally scanned
+    assert "idle" in kinds  # forwarded
+
+
+def test_pii_gate_runs_name_pass_once_ready(monkeypatch):
+    from mooring.ai import ner
+
+    monkeypatch.setattr(ner, "available", lambda: True)
+    monkeypatch.setattr(ner, "is_cached", lambda mid=None: True)
+    monkeypatch.setattr(ner, "scan_names", lambda text, **kw: [pii.Finding(1, ner.NAME)])
+    sess = StubChatSession(pii_enabled=True, pii_block=True, pii_names=True)
+    q = sess.subscribe()
+    sess.send("contact Jon Harrison")
+    evs = _drain(q)
+    assert [e.kind for e in evs] == ["pii"]  # held on the name once the model is ready
+    assert evs[0].data["findings"][0]["kind"] == ner.NAME
 
 
 # -- Channel A: prompt hold-and-confirm on a StubChatSession -------------------
@@ -357,20 +517,27 @@ def test_dictionary_description_pii_is_scrubbed(tmp_path):
 # -- config defaults -----------------------------------------------------------
 
 
-def test_config_defaults_and_env_override():
+def test_config_defaults_and_env_override(clean_config):
     c = config.load_app_config(env={})
     assert c.ai_pii is False and c.ai_pii_block_prompt is True and c.ai_pii_scan_source is True
     c2 = config.load_app_config(env={"MOORING_AI_PII": "true", "MOORING_AI_PII_BLOCK_PROMPT": "false"})
     assert c2.ai_pii is True and c2.ai_pii_block_prompt is False
 
 
-def test_config_name_detection_defaults_and_env():
+def test_config_name_detection_defaults_and_env(clean_config):
     c = config.load_app_config(env={})
     assert c.ai_pii_names is False
-    assert c.ai_pii_name_model == "urchade/gliner_multi_pii-v1"
+    assert c.ai_pii_name_model == "gliner-community/gliner_small-v2.5"  # safetensors default
+    assert c.ai_pii_name_revision == "f227d3cd637bd4e6757ae143935316d062393341"  # pinned
+    assert c.ai_pii_name_variant == "bf16"
     assert c.ai_pii_name_labels == ("person", "name")
     assert c.ai_pii_name_threshold == 0.7
     c2 = config.load_app_config(
-        env={"MOORING_AI_PII_NAMES": "true", "MOORING_AI_PII_NAME_THRESHOLD": "0.5"}
+        env={
+            "MOORING_AI_PII_NAMES": "true",
+            "MOORING_AI_PII_NAME_THRESHOLD": "0.5",
+            "MOORING_AI_PII_NAME_VARIANT": "",
+        }
     )
     assert c2.ai_pii_names is True and c2.ai_pii_name_threshold == 0.5
+    assert c2.ai_pii_name_variant == ""  # override to load a repo's default weights file

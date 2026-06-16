@@ -584,7 +584,7 @@ class Hub:
         Raises AIError (-> 502 with an install/connect hint) if Copilot isn't
         available or signed in.
         """
-        from mooring.ai import get_provider
+        from mooring.ai import get_provider, ner
 
         provider = get_provider(self.app_cfg)
         return provider.open_chat(
@@ -598,11 +598,16 @@ class Hub:
             pii_enabled=self.app_cfg.ai_pii,
             pii_block=self.app_cfg.ai_pii_block_prompt,
             # NER name detection only acts when the whole guard is on; the session
-            # lazily loads the model on first flagged prompt (best-effort, loud).
+            # downloads the model in the background (prepare_pii_model) and the
+            # prompt path skips it until ready (best-effort, loud if the extra is missing).
             pii_names=self.app_cfg.ai_pii and self.app_cfg.ai_pii_names,
             pii_name_labels=self.app_cfg.ai_pii_name_labels,
             pii_name_threshold=self.app_cfg.ai_pii_name_threshold,
-            pii_name_model=self.app_cfg.ai_pii_name_model,
+            pii_name_model=ner.ModelRef(
+                self.app_cfg.ai_pii_name_model,
+                self.app_cfg.ai_pii_name_revision,
+                self.app_cfg.ai_pii_name_variant,
+            ),
         )
 
     def _reap_idle_chats(self) -> None:
@@ -657,6 +662,9 @@ class Hub:
         # Seed the snapshot already in the system context so turn 1 doesn't redundantly
         # re-inject it; later turns refresh from the kernel (see api_chat_send).
         session.set_initial_live_schema(live_text)
+        # Kick off the (one-time) NER model download in the background with progress,
+        # so name detection doesn't hang the first chat turn silently.
+        session.prepare_pii_model()
         sid = secrets.token_urlsafe(9)
         with self._chat_lock:
             self._chats[sid] = session
@@ -681,6 +689,12 @@ class Hub:
         q = session.subscribe()
         try:
             yield ": connected\n\n"
+            # Replay the current NER-model prepare status so a subscriber that connects
+            # mid-download immediately sees progress (events emitted before this
+            # subscribe would otherwise be missed).
+            ner_status = getattr(session, "ner_status", None)
+            if ner_status:
+                yield f"event: ner\ndata: {json.dumps(ner_status)}\n\n"
             while True:
                 try:
                     event = await asyncio.to_thread(q.get, True, 15.0)

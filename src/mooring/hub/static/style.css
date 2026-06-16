@@ -152,6 +152,16 @@ footer {
   margin-top: 0.3rem;
 }
 
+/* NER name-detection model prepare/download status (Phase 2 PII guard) */
+.ner-status {
+  color: var(--muted);
+  font-size: 0.85rem;
+  margin-top: 0.3rem;
+}
+.ner-status::before { content: "● "; color: var(--accent); }
+.ner-status.ner-error { color: var(--warn); }
+.ner-status.ner-error::before { color: var(--warn); }
+
 /* --- AI copilot chat page --- */
 /* Full-height app layout: header / context / scrolling messages / pinned composer */
 body.chat-body { height: 100dvh; display: flex; flex-direction: column; }

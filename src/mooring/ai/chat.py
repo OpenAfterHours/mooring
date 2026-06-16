@@ -55,6 +55,12 @@ class ChatBroadcaster:
         self._pii_name_labels: tuple[str, ...] | None = None
         self._pii_name_threshold = 0.7
         self._pii_name_model: str | None = None
+        # NER model readiness, surfaced to the UI via "ner" events (prepare_pii_model):
+        # the model downloads in the background on first use; until ready the name
+        # pass is skipped (the prompt is still structurally scanned) rather than block.
+        self._ner_ready = False
+        self._ner_pct = -1
+        self._ner_last_data: dict | None = None
         self._pending: dict[str, str] = {}  # confirm-token -> held prompt text
         # The live-kernel schema the model has last been shown (the system-context
         # snapshot at open, then the most recent per-turn refresh). A turn re-injects
@@ -127,18 +133,29 @@ class ChatBroadcaster:
         re-enters via :meth:`_pii_take`). Fails OPEN on a scan error — but LOUD,
         broadcasting ``scan_error`` so the analyst sees the guard did not run.
         """
+        names = self._pii_names
+        if names:
+            from mooring.ai import ner
+
+            # While the model is still downloading (extra present but not yet cached),
+            # skip the name pass for this turn instead of blocking on the download —
+            # the "ner" prepare status already tells the user it isn't active yet. If
+            # the extra is missing entirely, leave names on so guard_prompt reports the
+            # loud scan_error (install the extra).
+            if ner.available() and not self._names_ready():
+                names = False
         hold, findings, scan_error = pii.guard_prompt(
             text,
             enabled=self._pii_enabled,
             block=self._pii_block,
-            names=self._pii_names,
+            names=names,
             labels=self._pii_name_labels,
             threshold=self._pii_name_threshold,
             model=self._pii_name_model,
         )
-        if scan_error:
-            self._broadcast(ChatEvent("pii", {"findings": [], "scan_error": True}))
-            return text
+        # Hold takes precedence over a scan error: act on an actionable (structured)
+        # finding even when the optional name pass could not run — otherwise enabling
+        # detect_names without the extra would silently bypass the structured guard.
         if hold:
             token = _secrets.token_urlsafe(9)
             self._pending[token] = text
@@ -146,8 +163,11 @@ class ChatBroadcaster:
                 ChatEvent("pii", {"findings": _finding_dicts(findings), "token": token})
             )
             return None
-        if findings:  # block disabled: forwarded, but flag it as a warn-only advisory
-            self._broadcast(ChatEvent("pii", {"findings": _finding_dicts(findings)}))
+        if findings or scan_error:
+            data = {"findings": _finding_dicts(findings)}
+            if scan_error:  # fail-open but LOUD: the turn proceeds unchecked
+                data["scan_error"] = True
+            self._broadcast(ChatEvent("pii", data))
         return text
 
     def _pii_take(self, token: str) -> str | None:
@@ -180,6 +200,78 @@ class ChatBroadcaster:
             "since the last message; use this in place of any earlier live-dataframe "
             "list:\n" + live + "\n\n"
         )
+
+    # -- NER model readiness (Phase 2 name detection) -----------------------
+
+    @property
+    def ner_status(self) -> dict | None:
+        """The latest ``ner`` event payload, so a late SSE subscriber can catch up
+        on a download already in progress (the hub replays it on connect)."""
+        return self._ner_last_data
+
+    def _set_ner(self, data: dict) -> None:
+        self._ner_last_data = data
+        self._broadcast(ChatEvent("ner", data))
+
+    def _names_ready(self) -> bool:
+        """Whether the NER model is loadable now (cached). Memoized once true."""
+        if self._ner_ready:
+            return True
+        from mooring.ai import ner
+
+        if ner.is_cached(self._pii_name_model):
+            self._ner_ready = True
+        return self._ner_ready
+
+    def prepare_pii_model(self) -> None:
+        """When name detection is armed, make the model ready in the background and
+        report progress over the chat via ``ner`` events. Best-effort; never raises.
+
+        Moves the (potentially large, one-time) model download out of the first chat
+        turn — where it would hang silently — into a visible, streamed prepare step.
+        """
+        if not (self._pii_enabled and self._pii_names):
+            return
+        from mooring.ai import ner
+
+        if not ner.available():
+            return  # the prompt path surfaces scan_error loudly when the extra is missing
+        mid = self._pii_name_model
+        if self._names_ready():
+            # already downloaded — warm the in-process load so the first prompt is snappy
+            threading.Thread(target=self._warm_ner, name="ner-warm", daemon=True).start()
+            return
+
+        def run() -> None:
+            self._ner_pct = -1
+            self._set_ner({"state": "downloading"})
+            try:
+                ner.download_model(mid, on_progress=self._on_ner_progress)
+                ner.load_model(mid)
+                self._ner_ready = True
+                self._set_ner({"state": "ready"})
+            except Exception:  # noqa: BLE001 - report, never crash the session
+                self._set_ner({"state": "error"})
+
+        threading.Thread(target=run, name="ner-prepare", daemon=True).start()
+
+    def _warm_ner(self) -> None:
+        from mooring.ai import ner
+
+        try:
+            ner.load_model(self._pii_name_model)
+            self._ner_ready = True
+        except Exception:  # noqa: BLE001 - best-effort warm-up
+            pass
+
+    def _on_ner_progress(self, done: int, total: int) -> None:
+        if not total:
+            return
+        pct = int(done * 100 / total)
+        if pct == self._ner_pct:
+            return  # throttle to whole-percent changes so we don't flood SSE
+        self._ner_pct = pct
+        self._set_ner({"state": "downloading", "pct": pct})
 
 
 class StubChatSession(ChatBroadcaster):
