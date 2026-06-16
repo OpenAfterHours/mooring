@@ -62,16 +62,24 @@ def build_tools(
     notebook_rel: str,
     emit_proposal: Callable[[str, str], None],
     dictionary=None,
+    pii_enabled: bool = False,
 ) -> list:
     """Build the safe tools, bound to one workspace + target notebook.
 
     Handlers follow the SDK's ``ToolHandler`` contract: a single ``ToolInvocation``
     argument (``invocation.arguments`` is the parsed args), returning a ToolResult.
     When ``dictionary`` (a :class:`mooring.ai.datadictionary.DictionaryIndex`) is
-    non-empty, the three value-free dictionary tools are added.
+    non-empty, the three value-free dictionary tools are added. When ``pii_enabled``,
+    ``get_schema`` withholds any column whose NAME is itself a PII value (a pivot/
+    transpose on a PII key) — the second, dynamic schema egress (besides the system
+    context) that the agent can reach at any time.
     """
+    from dataclasses import replace
+
     from copilot.tools import Tool, ToolResult
+
     from mooring import schema
+    from mooring.ai import pii
 
     def list_datasets(_invocation):
         found = schema.list_datasets(workspace, folders)
@@ -83,7 +91,12 @@ def build_tools(
             return ToolResult(text_result_for_llm="", result_type="error", error="dataset required")
         try:
             target = _safe(workspace, rel)
-            text = schema.format_for_ai(schema.extract_schema(target), source=rel)
+            ds = schema.extract_schema(target)
+            if pii_enabled:
+                kept, col_findings = pii.scrub_columns(ds.columns)
+                if col_findings:  # a column NAME is itself a PII value — withhold it
+                    ds = replace(ds, columns=kept)
+            text = schema.format_for_ai(ds, source=rel)
         except (ValueError, OSError) as exc:
             return ToolResult(
                 text_result_for_llm="", result_type="error", error=f"cannot read schema: {exc}"

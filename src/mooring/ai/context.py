@@ -22,7 +22,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
-from mooring.ai import secrets
+from mooring.ai import pii, secrets
 from mooring.ai.datadictionary import DictionaryIndex, Table, load_index
 
 _INSTRUCTIONS = "instructions.md"
@@ -74,12 +74,24 @@ def discover_context(
     instructions = _read_instructions(workspace, context_dir, max_kb)
     if instructions:
         rel = f"{context_dir}/{_INSTRUCTIONS}"
-        hits = secrets.scan(instructions)
-        if hits:
-            findings += [Finding(rel, f"line {h.line}", h.kind) for h in hits]
-            instructions = ""  # withheld: never send a file with a high-confidence secret
+        # Scan once, then partition into HIGH-confidence (a secret or a checksum-
+        # validated card/IBAN/NHS) and shape-only (email/NINO).
+        pii_hits = pii.scan(instructions)
+        hard = secrets.scan(instructions) + [h for h in pii_hits if h.kind in pii.CHECKSUM_KINDS]
+        soft = [h for h in pii_hits if h.kind not in pii.CHECKSUM_KINDS]
+        if hard:
+            # Withhold the WHOLE file, but record EVERY finding (hard and soft) so the
+            # value-free report never understates what the withheld file contained.
+            findings += [Finding(rel, f"line {h.line}", h.kind) for h in hard + soft]
+            instructions = ""  # withheld
         else:
-            loaded.append(rel)
+            if soft:
+                # A shape-only email/NINO drops just its own line, so a team contact
+                # address never silently deletes the whole context.
+                findings += [Finding(rel, f"line {h.line}", h.kind) for h in soft]
+                instructions = _drop_lines(instructions, {h.line for h in soft})
+            if instructions:  # only "loaded" if some content actually survives to send
+                loaded.append(rel)
 
     index = load_index(workspace, context_dir)
     index, dict_findings = _scrub_index(index)
@@ -114,6 +126,18 @@ def _read_instructions(workspace: Path, context_dir: str, max_kb: int) -> str:
     return text.strip()
 
 
+def _drop_lines(text: str, linenos: set[int]) -> str:
+    """Return ``text`` with the 1-based ``linenos`` removed (a per-line redaction)."""
+    kept = [ln for i, ln in enumerate(text.splitlines(), start=1) if i not in linenos]
+    return "\n".join(kept).strip()
+
+
+def _desc_kind(desc: str) -> str | None:
+    """First secret-or-PII kind in a free-text description, or None if clean."""
+    hits = secrets.scan(desc) or pii.scan(desc)
+    return hits[0].kind if hits else None
+
+
 def _strip_frontmatter(text: str) -> str:
     if text.startswith("---"):
         end = text.find("\n---", 3)
@@ -124,23 +148,25 @@ def _strip_frontmatter(text: str) -> str:
 
 
 def _scrub_index(index: DictionaryIndex) -> tuple[DictionaryIndex, list[Finding]]:
-    """Drop any column/table description that trips the secret scanner (the one
-    free-text slot), recording a value-free finding for each."""
+    """Drop any column/table description that trips the secret OR PII scanner (the
+    one free-text slot), recording a value-free finding for each."""
     findings: list[Finding] = []
     new_tables: list[Table] = []
     for table in index.tables:
         tdesc = table.description
-        if tdesc and secrets.has_secrets(tdesc):
-            findings.append(Finding(table.qualified, "description", secrets.scan(tdesc)[0].kind))
-            tdesc = ""
+        if tdesc:
+            kind = _desc_kind(tdesc)
+            if kind:
+                findings.append(Finding(table.qualified, "description", kind))
+                tdesc = ""
         cols = []
         for col in table.columns:
             cdesc = col.description
-            if cdesc and secrets.has_secrets(cdesc):
-                findings.append(
-                    Finding(f"{table.qualified}.{col.name}", "description", secrets.scan(cdesc)[0].kind)
-                )
-                cdesc = ""
+            if cdesc:
+                kind = _desc_kind(cdesc)
+                if kind:
+                    findings.append(Finding(f"{table.qualified}.{col.name}", "description", kind))
+                    cdesc = ""
             cols.append(replace(col, description=cdesc) if cdesc != col.description else col)
         new_tables.append(replace(table, description=tdesc, columns=tuple(cols)))
     return replace(index, tables=tuple(new_tables)), findings

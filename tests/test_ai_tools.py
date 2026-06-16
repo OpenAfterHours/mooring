@@ -74,6 +74,28 @@ def test_get_schema_rejects_traversal(ws):
     assert res.result_type == "error"
 
 
+def test_get_schema_withholds_pii_column_name_when_enabled(tmp_path):
+    # A pivot/transpose on a PII key promotes a data VALUE to a column NAME.
+    card = "4012888888881881"
+    (tmp_path / "data").mkdir()
+    pl.DataFrame({"id": [1], card: [2.0], "amount": [3]}).write_parquet(
+        tmp_path / "data" / "wide.parquet"
+    )
+    tools = {
+        t.name: t
+        for t in build_tools(
+            workspace=tmp_path,
+            folders=("data",),
+            notebook_rel="nb.py",
+            emit_proposal=lambda *a, **k: None,
+            pii_enabled=True,
+        )
+    }
+    out = tools["mooring_get_schema"].handler(_invocation(dataset="data/wide.parquet")).text_result_for_llm
+    assert "id" in out and "amount" in out  # clean columns kept
+    assert card not in out  # the PII-valued column NAME is withheld
+
+
 def test_read_notebook_source_returns_code(ws):
     tools = _tools(ws, [])
     out = tools["mooring_read_notebook_source"].handler(_invocation()).text_result_for_llm

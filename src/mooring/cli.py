@@ -193,6 +193,19 @@ def _build_parser() -> argparse.ArgumentParser:
     ai_dict_check.add_argument(
         "--repo", default=None, metavar="ALIAS", help="act on this repo instead of the active one"
     )
+    ai_pii = ai_sub.add_parser(
+        "pii", help="scan context/ and notebook source for structured-PII risks (offline)"
+    )
+    ai_pii_sub = ai_pii.add_subparsers(dest="ai_pii_command", required=True)
+    ai_pii_check = ai_pii_sub.add_parser(
+        "check", help="scan instructions, dictionaries, and notebooks for PII shapes"
+    )
+    ai_pii_check.add_argument(
+        "--repo", default=None, metavar="ALIAS", help="act on this repo instead of the active one"
+    )
+    ai_pii_check.add_argument(
+        "--notebook", default=None, metavar="REL", help="also scan a single notebook (workspace-relative)"
+    )
 
     sub.add_parser("selftest", help="verify the bundled environment")
     sub.add_parser("version", help="print the version")
@@ -682,6 +695,69 @@ def cmd_ai_dictionary_check(app_cfg: config.AppConfig, cfg: config.Config) -> in
     return 0
 
 
+_PII_FOOTER = (
+    "\n(best-effort - detects only well-formed cards, IBANs, NHS numbers, emails, and UK\n"
+    " NINOs; never names, addresses, sort codes, account numbers, SSNs, or phones. Put\n"
+    " `# mooring: pii-ok` on a line to retire a reviewed false positive. Never paste real values.)"
+)
+
+
+def cmd_ai_pii_check(app_cfg: config.AppConfig, cfg: config.Config, args: argparse.Namespace) -> int:
+    """Scan context/ and notebook sources for structured PII, offline.
+
+    Mirrors ``ai dictionary check``: no Copilot, no network, value-free output —
+    a team can lint their files before enabling the guard or sharing context.
+    """
+    from mooring.ai import datadictionary
+
+    workspace = cfg.workspace()
+    ctx_dir = app_cfg.ai_context_dir
+    index = datadictionary.load_index(workspace, ctx_dir)
+    findings = _scan_pii_targets(workspace, ctx_dir, cfg.folders, index, getattr(args, "notebook", None))
+    if not app_cfg.ai_pii:
+        print("Note: [ai.pii] enabled is OFF - set it true to actually enforce this in the chat.\n")
+    if findings:
+        print(f"pii scan: {len(findings)} finding(s) - review before sharing or using the copilot:")
+        for path, line, kind in findings:
+            print(f"  {path}:{line}  {kind}")
+        print(_PII_FOOTER)
+        return 1
+    print("pii scan: clean (best-effort — not a guarantee; never paste real values)")
+    return 0
+
+
+def _scan_pii_targets(
+    workspace: Path, ctx_dir: str, folders: tuple[str, ...], index, notebook_rel: str | None
+) -> list[tuple[str, int, str]]:
+    from mooring.ai import pii
+
+    targets = [workspace / ctx_dir / "instructions.md"]
+    targets += [workspace / r.path for r in index.reports if not r.error]
+    for folder in folders:
+        root = workspace / folder
+        if root.is_dir():
+            targets += sorted(root.rglob("*.py"))
+    if notebook_rel:
+        targets.append(workspace / notebook_rel)
+    findings: list[tuple[str, int, str]] = []
+    seen: set[Path] = set()
+    for path in targets:
+        rp = path.resolve()
+        if rp in seen or not path.is_file():
+            continue
+        seen.add(rp)
+        try:
+            text = path.read_text("utf-8", errors="replace")
+        except OSError:
+            continue
+        try:
+            rel = path.relative_to(workspace).as_posix()
+        except ValueError:
+            rel = str(path)
+        findings += [(rel, f.line, f.kind) for f in pii.scan(text)]
+    return findings
+
+
 def _scan_context_secrets(workspace: Path, ctx_dir: str, index) -> list[tuple[str, int, str]]:
     from mooring.ai import secrets
 
@@ -701,7 +777,8 @@ def _scan_context_secrets(workspace: Path, ctx_dir: str, index) -> list[tuple[st
 
 
 def cmd_ai(app_cfg: config.AppConfig, cfg: config.Config, args: argparse.Namespace) -> int:
-    """Manage the AI copilot: Copilot sign-in (login / status) and dictionary check.
+    """Manage the AI copilot: Copilot sign-in (login / status), dictionary check,
+    and the offline PII pre-flight scan (pii check).
 
     Code generation lives in the interactive chat (hub "AI" button), not the CLI.
     """
@@ -710,6 +787,11 @@ def cmd_ai(app_cfg: config.AppConfig, cfg: config.Config, args: argparse.Namespa
     if args.ai_command == "dictionary":
         if args.ai_dict_command == "check":
             return cmd_ai_dictionary_check(app_cfg, cfg)
+        return 2
+
+    if args.ai_command == "pii":
+        if args.ai_pii_command == "check":
+            return cmd_ai_pii_check(app_cfg, cfg, args)
         return 2
 
     try:

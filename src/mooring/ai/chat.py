@@ -10,13 +10,23 @@ one contract — and one privacy choke point (:func:`build_system_context`).
 from __future__ import annotations
 
 import queue
+import secrets as _secrets
 import threading
 import time
 from dataclasses import dataclass, field
 
+from mooring.ai import pii
+from mooring.ai.base import AIError
+
 # Event kinds the frontend understands. "proposal" carries a cell the agent
-# suggests; the analyst Applies it (we never inject autonomously).
+# suggests; the analyst Applies it (we never inject autonomously). "pii" carries
+# a value-free outbound-PII warning (and, when the turn is held, a confirm token).
 _QUEUE_MAX = 1000
+
+
+def _finding_dicts(findings) -> list[dict]:
+    """Value-free serialisation of PII findings for the SSE channel — kinds only."""
+    return [{"line": f.line, "kind": f.kind} for f in findings]
 
 
 @dataclass
@@ -37,6 +47,10 @@ class ChatBroadcaster:
         self._lock = threading.Lock()
         self._last_active = time.monotonic()
         self._closed = False
+        # Outbound-PII guard state (see _pii_gate). Off unless configure_pii says so.
+        self._pii_enabled = False
+        self._pii_block = True
+        self._pending: dict[str, str] = {}  # confirm-token -> held prompt text
 
     def subscribe(self) -> queue.Queue[ChatEvent]:
         q: queue.Queue[ChatEvent] = queue.Queue(maxsize=_QUEUE_MAX)
@@ -67,7 +81,46 @@ class ChatBroadcaster:
         if self._closed:
             return
         self._closed = True
+        # Never retain a held (flagged) prompt's plaintext past the session's life.
+        self._pending.clear()
         self._broadcast(ChatEvent("closed"))
+
+    # -- outbound PII guard (Channel A) -------------------------------------
+
+    def configure_pii(self, *, enabled: bool, block: bool) -> None:
+        """Arm the prompt guard for this session (called at construction)."""
+        self._pii_enabled = enabled
+        self._pii_block = block
+
+    def _pii_gate(self, text: str) -> str | None:
+        """THE shared outbound-prompt valve, used by every session class.
+
+        Returns the text to forward, or ``None`` when the turn is HELD pending
+        the analyst's confirmation (a ``pii`` event carrying a value-free finding
+        list and a one-time ``token`` is broadcast; the analyst's "Send anyway"
+        re-enters via :meth:`_pii_take`). Fails OPEN on a scan error — but LOUD,
+        broadcasting ``scan_error`` so the analyst sees the guard did not run.
+        """
+        hold, findings, scan_error = pii.guard_prompt(
+            text, enabled=self._pii_enabled, block=self._pii_block
+        )
+        if scan_error:
+            self._broadcast(ChatEvent("pii", {"findings": [], "scan_error": True}))
+            return text
+        if hold:
+            token = _secrets.token_urlsafe(9)
+            self._pending[token] = text
+            self._broadcast(
+                ChatEvent("pii", {"findings": _finding_dicts(findings), "token": token})
+            )
+            return None
+        if findings:  # block disabled: forwarded, but flag it as a warn-only advisory
+            self._broadcast(ChatEvent("pii", {"findings": _finding_dicts(findings)}))
+        return text
+
+    def _pii_take(self, token: str) -> str | None:
+        """Pop the prompt held under ``token`` (forwarded verbatim, exactly once)."""
+        return self._pending.pop(token, None)
 
 
 class StubChatSession(ChatBroadcaster):
@@ -78,12 +131,26 @@ class StubChatSession(ChatBroadcaster):
     exercised without the Copilot SDK or the org policy.
     """
 
-    def __init__(self, *, system_context: str = "") -> None:
+    def __init__(
+        self, *, system_context: str = "", pii_enabled: bool = False, pii_block: bool = True
+    ) -> None:
         super().__init__()
         self.system_context = system_context  # stored so tests can prove it's value-free
+        self.configure_pii(enabled=pii_enabled, block=pii_block)
 
     def send(self, text: str) -> None:
         self.touch()
+        if self._pii_gate(text) is None:
+            return  # held pending the analyst's confirmation
+        self._reply()
+
+    def send_confirmed(self, token: str) -> None:
+        self.touch()
+        if self._pii_take(token) is None:
+            raise AIError("That message has expired — please retype it.")
+        self._reply()
+
+    def _reply(self) -> None:
         reply = "Here is a cell that summarises the dataframe:"
         for word in reply.split():
             self._broadcast(ChatEvent("delta", {"text": word + " "}))

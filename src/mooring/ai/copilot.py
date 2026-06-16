@@ -271,6 +271,8 @@ class CopilotProvider:
         model: str | None = None,
         reasoning_effort: str | None = None,
         dictionary=None,
+        pii_enabled: bool = False,
+        pii_block: bool = True,
     ):
         """Open a long-lived, streaming, value-blind chat session (the copilot).
 
@@ -294,6 +296,8 @@ class CopilotProvider:
             folders=folders,
             notebook_rel=notebook_rel,
             dictionary=dictionary,
+            pii_enabled=pii_enabled,
+            pii_block=pii_block,
         )
         session.start()
         return session
