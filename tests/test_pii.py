@@ -147,6 +147,71 @@ def test_guard_prompt_fails_open_loud_on_scan_error(monkeypatch):
     assert hold is False and findings == [] and err is True  # fail OPEN, but report it
 
 
+# -- Phase 2: NER name detection wired into the prose scanners -----------------
+
+
+def test_scan_prose_includes_names_when_enabled(monkeypatch):
+    from mooring.ai import ner
+
+    monkeypatch.setattr(ner, "scan_names", lambda text, **kw: [pii.Finding(1, ner.NAME)])
+    out = pii.scan_prose("sum col_1 where name = Jon Harrison", names=True)
+    assert ner.NAME in {f.kind for f in out}
+
+
+def test_scan_prose_is_silent_when_ner_unavailable(monkeypatch):
+    # Advisory path (source banner / CLI): a missing extra degrades to structured-only.
+    from mooring.ai import ner
+
+    def boom(_text, **_kw):
+        raise ner.NerUnavailable("no extra")
+
+    monkeypatch.setattr(ner, "scan_names", boom)
+    assert pii.scan_prose("contact Jon Harrison", names=True) == []  # must not raise
+
+
+def test_guard_prompt_holds_on_name(monkeypatch):
+    from mooring.ai import ner
+
+    monkeypatch.setattr(ner, "scan_names", lambda text, **kw: [pii.Finding(1, ner.NAME)])
+    hold, findings, err = pii.guard_prompt(
+        "sum for Jon Harrison", enabled=True, block=True, names=True
+    )
+    assert hold is True and err is False
+    assert ner.NAME in {f.kind for f in findings}
+
+
+def test_guard_prompt_name_pass_unavailable_is_loud(monkeypatch):
+    # Enforcement path: detect_names configured but the backend missing must FAIL
+    # OPEN (don't block on nothing) yet report scan_error so the analyst is warned.
+    from mooring.ai import ner
+
+    def boom(_text, **_kw):
+        raise ner.NerUnavailable("no extra")
+
+    monkeypatch.setattr(ner, "scan_names", boom)
+    hold, findings, err = pii.guard_prompt(
+        "sum for Jon Harrison", enabled=True, block=True, names=True
+    )
+    assert hold is False and findings == [] and err is True
+
+
+def test_name_prompt_held_then_confirmed_value_free(monkeypatch):
+    from mooring.ai import ner
+
+    monkeypatch.setattr(ner, "scan_names", lambda text, **kw: [pii.Finding(1, ner.NAME)])
+    sess = StubChatSession(pii_enabled=True, pii_block=True, pii_names=True)
+    q = sess.subscribe()
+    sess.send("can you sum col_1 where the name equals Jon Harrison")
+    held = _drain(q)
+    assert [e.kind for e in held] == ["pii"]  # nothing forwarded — held
+    ev = held[0].data
+    assert ev["token"] and ev["findings"][0]["kind"] == ner.NAME
+    assert "Jon Harrison" not in json.dumps(ev)  # value-free over the wire
+
+    sess.send_confirmed(ev["token"])
+    assert "idle" in [e.kind for e in _drain(q)]  # forwarded after confirm
+
+
 # -- Channel A: prompt hold-and-confirm on a StubChatSession -------------------
 
 
@@ -297,3 +362,15 @@ def test_config_defaults_and_env_override():
     assert c.ai_pii is False and c.ai_pii_block_prompt is True and c.ai_pii_scan_source is True
     c2 = config.load_app_config(env={"MOORING_AI_PII": "true", "MOORING_AI_PII_BLOCK_PROMPT": "false"})
     assert c2.ai_pii is True and c2.ai_pii_block_prompt is False
+
+
+def test_config_name_detection_defaults_and_env():
+    c = config.load_app_config(env={})
+    assert c.ai_pii_names is False
+    assert c.ai_pii_name_model == "urchade/gliner_multi_pii-v1"
+    assert c.ai_pii_name_labels == ("person", "name")
+    assert c.ai_pii_name_threshold == 0.7
+    c2 = config.load_app_config(
+        env={"MOORING_AI_PII_NAMES": "true", "MOORING_AI_PII_NAME_THRESHOLD": "0.5"}
+    )
+    assert c2.ai_pii_names is True and c2.ai_pii_name_threshold == 0.5

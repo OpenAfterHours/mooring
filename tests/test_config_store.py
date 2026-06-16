@@ -5,6 +5,7 @@ import tomllib
 import pytest
 
 from mooring import config, config_store, paths
+from mooring.cli import _coerce_config_value, main
 
 
 @pytest.fixture(autouse=True)
@@ -123,3 +124,72 @@ def test_remove_all_repos_clears_registry_keeps_github():
     # [github] (client_id + host) survives the registry wipe
     assert app.client_id == "cid"
     assert app.host == "ghe.example"
+
+
+# -- generic `mooring config` set/get/unset ------------------------------------
+
+
+def test_coerce_value_types():
+    assert _coerce_config_value(["true"]) is True
+    assert _coerce_config_value(["false"]) is False
+    assert _coerce_config_value(["5"]) == 5
+    assert _coerce_config_value(["0.7"]) == 0.7
+    assert _coerce_config_value(["a", "b", "c"]) == ["a", "b", "c"]
+    assert _coerce_config_value(['["a", "b"]']) == ["a", "b"]
+    # a path/id is not a TOML literal -> it stays a bare string
+    assert _coerce_config_value(["urchade/gliner_multi_pii-v1"]) == "urchade/gliner_multi_pii-v1"
+
+
+def test_set_value_creates_nested_table_and_preserves_siblings():
+    config_store.set_value("github.owner", "Acme")
+    config_store.set_value("ai.pii.enabled", True)
+    config_store.set_value("ai.pii.name_threshold", 0.5)
+    data = config_store.read_user_data()
+    assert data["github"]["owner"] == "Acme"
+    assert data["ai"]["pii"] == {"enabled": True, "name_threshold": 0.5}
+
+
+def test_get_value_is_default_merged_with_file():
+    assert config_store.get_value("ai.pii.enabled") is False  # packaged default
+    config_store.set_value("ai.pii.enabled", True)
+    assert config_store.get_value("ai.pii.enabled") is True  # file override
+
+
+def test_get_value_unknown_key_raises():
+    with pytest.raises(KeyError):
+        config_store.get_value("ai.pii.nope")
+
+
+def test_unset_reverts_to_default_and_prunes_empty_tables():
+    config_store.set_value("ai.pii.enabled", True)
+    assert config_store.unset_value("ai.pii.enabled") is True
+    assert "ai" not in config_store.read_user_data()  # empty [ai.pii]/[ai] pruned away
+    assert config_store.get_value("ai.pii.enabled") is False  # back to the default
+    assert config_store.unset_value("ai.pii.enabled") is False  # already absent
+
+
+def test_set_value_does_not_materialize_repos():
+    config_store.set_value("ai.pii.enabled", True)
+    assert "repos" not in config_store.read_user_data()
+
+
+def test_invalid_dotted_key_rejected():
+    with pytest.raises(ValueError):
+        config_store.set_value("ai..enabled", True)
+
+
+def test_cli_set_then_get_roundtrip(capsys):
+    assert main(["config", "set", "ai.pii.detect_names", "true"]) == 0
+    assert main(["config", "get", "ai.pii.detect_names"]) == 0
+    assert capsys.readouterr().out.strip().endswith("true")
+    assert config_store.get_value("ai.pii.detect_names") is True
+
+
+def test_cli_set_list_value():
+    assert main(["config", "set", "ai.pii.name_labels", "person", "name", "organization"]) == 0
+    assert config_store.get_value("ai.pii.name_labels") == ["person", "name", "organization"]
+
+
+def test_cli_config_path_prints_user_file(capsys):
+    assert main(["config", "path"]) == 0
+    assert "config.toml" in capsys.readouterr().out

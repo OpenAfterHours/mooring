@@ -273,6 +273,10 @@ class CopilotProvider:
         dictionary=None,
         pii_enabled: bool = False,
         pii_block: bool = True,
+        pii_names: bool = False,
+        pii_name_labels: tuple[str, ...] | None = None,
+        pii_name_threshold: float = 0.7,
+        pii_name_model: str | None = None,
     ):
         """Open a long-lived, streaming, value-blind chat session (the copilot).
 
@@ -298,6 +302,10 @@ class CopilotProvider:
             dictionary=dictionary,
             pii_enabled=pii_enabled,
             pii_block=pii_block,
+            pii_names=pii_names,
+            pii_name_labels=pii_name_labels,
+            pii_name_threshold=pii_name_threshold,
+            pii_name_model=pii_name_model,
         )
         session.start()
         return session

@@ -436,6 +436,53 @@ def test_chat_send_streams_events(unconfigured_client, stub_chat):
     assert "delta" in kinds and "message" in kinds and "proposal" in kinds
 
 
+def test_chat_send_refreshes_live_schema(unconfigured_client, stub_chat, monkeypatch):
+    # A dataframe added to the kernel AFTER chat-open is picked up on the next turn,
+    # without reopening — and is not re-injected on later turns while unchanged.
+    from mooring.ai import introspect
+    from mooring.schema import DatasetSchema
+
+    client, hub = unconfigured_client
+    sid = _open_chat(client, hub).json()["sid"]
+    frames: list = []
+    monkeypatch.setattr(introspect, "live_dataset_schemas", lambda *a, **k: list(frames))
+
+    # No live frames yet -> the turn is forwarded as-is.
+    client.post("/api/ai/chat/send", json={"sid": sid, "text": "hello"})
+    assert hub._chats[sid].last_sent == "hello"
+
+    # The analyst loads a dataframe in the kernel -> the next turn carries its schema.
+    frames.append(
+        DatasetSchema(name="orders", columns=(("id", "Int64"), ("region", "String")), n_rows=10)
+    )
+    client.post("/api/ai/chat/send", json={"sid": sid, "text": "now what?"})
+    sent = hub._chats[sid].last_sent
+    assert "UPDATED LIVE NOTEBOOK DATAFRAMES" in sent
+    assert "orders" in sent and "region" in sent and "now what?" in sent
+
+    # Unchanged kernel -> no redundant re-injection.
+    client.post("/api/ai/chat/send", json={"sid": sid, "text": "again"})
+    assert hub._chats[sid].last_sent == "again"
+
+
+def test_chat_send_live_schema_value_free(unconfigured_client, stub_chat, monkeypatch):
+    # The per-turn refresh reuses the value-free introspect render, so a data value
+    # can never ride into the prefix — only names + dtypes do.
+    from mooring.ai import introspect
+    from mooring.schema import DatasetSchema
+
+    client, hub = unconfigured_client
+    sid = _open_chat(client, hub).json()["sid"]
+    # DatasetSchema structurally holds only (name, columns, n_rows) — no values. The
+    # render must surface the column NAME but nothing that looks like a value.
+    frames = [DatasetSchema(name="t", columns=(("acct", "String"),), n_rows=7)]
+    monkeypatch.setattr(introspect, "live_dataset_schemas", lambda *a, **k: list(frames))
+    client.post("/api/ai/chat/send", json={"sid": sid, "text": "SECRET_VALUE_DO_NOT_LEAK?"})
+    sent = hub._chats[sid].last_sent
+    assert "acct" in sent  # the column name is shown
+    assert sent.count("SECRET_VALUE_DO_NOT_LEAK") == 1  # only the analyst's own prompt
+
+
 def test_chat_apply_writes_cell_into_notebook(unconfigured_client, stub_chat):
     client, hub = unconfigured_client
     sid = _open_chat(client, hub, source=_NB_SRC).json()["sid"]

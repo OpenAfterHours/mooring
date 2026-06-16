@@ -50,7 +50,16 @@ class ChatBroadcaster:
         # Outbound-PII guard state (see _pii_gate). Off unless configure_pii says so.
         self._pii_enabled = False
         self._pii_block = True
+        # Optional NER name detection (Phase 2) — see mooring.ai.ner. Off unless armed.
+        self._pii_names = False
+        self._pii_name_labels: tuple[str, ...] | None = None
+        self._pii_name_threshold = 0.7
+        self._pii_name_model: str | None = None
         self._pending: dict[str, str] = {}  # confirm-token -> held prompt text
+        # The live-kernel schema the model has last been shown (the system-context
+        # snapshot at open, then the most recent per-turn refresh). A turn re-injects
+        # the live schema only when this changes — see _live_prefix.
+        self._last_live_schema = ""
 
     def subscribe(self) -> queue.Queue[ChatEvent]:
         q: queue.Queue[ChatEvent] = queue.Queue(maxsize=_QUEUE_MAX)
@@ -87,10 +96,27 @@ class ChatBroadcaster:
 
     # -- outbound PII guard (Channel A) -------------------------------------
 
-    def configure_pii(self, *, enabled: bool, block: bool) -> None:
-        """Arm the prompt guard for this session (called at construction)."""
+    def configure_pii(
+        self,
+        *,
+        enabled: bool,
+        block: bool,
+        names: bool = False,
+        labels: tuple[str, ...] | None = None,
+        threshold: float = 0.7,
+        model: str | None = None,
+    ) -> None:
+        """Arm the prompt guard for this session (called at construction).
+
+        ``names`` (with ``labels``/``threshold``/``model``) additionally enables the
+        local NER name pass — see :func:`mooring.ai.pii.guard_prompt`.
+        """
         self._pii_enabled = enabled
         self._pii_block = block
+        self._pii_names = names
+        self._pii_name_labels = labels
+        self._pii_name_threshold = threshold
+        self._pii_name_model = model
 
     def _pii_gate(self, text: str) -> str | None:
         """THE shared outbound-prompt valve, used by every session class.
@@ -102,7 +128,13 @@ class ChatBroadcaster:
         broadcasting ``scan_error`` so the analyst sees the guard did not run.
         """
         hold, findings, scan_error = pii.guard_prompt(
-            text, enabled=self._pii_enabled, block=self._pii_block
+            text,
+            enabled=self._pii_enabled,
+            block=self._pii_block,
+            names=self._pii_names,
+            labels=self._pii_name_labels,
+            threshold=self._pii_name_threshold,
+            model=self._pii_name_model,
         )
         if scan_error:
             self._broadcast(ChatEvent("pii", {"findings": [], "scan_error": True}))
@@ -122,6 +154,33 @@ class ChatBroadcaster:
         """Pop the prompt held under ``token`` (forwarded verbatim, exactly once)."""
         return self._pending.pop(token, None)
 
+    # -- live-kernel schema refresh -----------------------------------------
+
+    def set_initial_live_schema(self, text: str) -> None:
+        """Seed the live-schema snapshot already folded into the system context at
+        chat-open, so the first turn re-injects only if the kernel changed since."""
+        self._last_live_schema = (text or "").strip()
+
+    def _live_prefix(self, live_schema_text: str) -> str:
+        """A block to PREPEND to a turn when the kernel's dataframes changed since
+        the model last saw them — otherwise ``""``.
+
+        ``live_schema_text`` comes from the SAME ``introspect`` probe -> scrub ->
+        ``format_live_schemas`` pipeline as the system context (column names +
+        dtypes only, never a value), so re-stating it opens no new value channel.
+        Updates the stored snapshot when it changes; a held/empty refresh leaves it
+        untouched so a later turn still re-injects.
+        """
+        live = (live_schema_text or "").strip()
+        if not live or live == self._last_live_schema:
+            return ""
+        self._last_live_schema = live
+        return (
+            "UPDATED LIVE NOTEBOOK DATAFRAMES (schema only) — the kernel changed "
+            "since the last message; use this in place of any earlier live-dataframe "
+            "list:\n" + live + "\n\n"
+        )
+
 
 class StubChatSession(ChatBroadcaster):
     """A no-LLM stand-in used in Phase 0 to prove the chat → Apply → run loop.
@@ -132,22 +191,42 @@ class StubChatSession(ChatBroadcaster):
     """
 
     def __init__(
-        self, *, system_context: str = "", pii_enabled: bool = False, pii_block: bool = True
+        self,
+        *,
+        system_context: str = "",
+        pii_enabled: bool = False,
+        pii_block: bool = True,
+        pii_names: bool = False,
+        pii_name_labels: tuple[str, ...] | None = None,
+        pii_name_threshold: float = 0.7,
+        pii_name_model: str | None = None,
     ) -> None:
         super().__init__()
         self.system_context = system_context  # stored so tests can prove it's value-free
-        self.configure_pii(enabled=pii_enabled, block=pii_block)
+        self.last_sent = ""  # exact text forwarded, incl. any live-schema prefix (tests)
+        self.configure_pii(
+            enabled=pii_enabled,
+            block=pii_block,
+            names=pii_names,
+            labels=pii_name_labels,
+            threshold=pii_name_threshold,
+            model=pii_name_model,
+        )
 
-    def send(self, text: str) -> None:
+    def send(self, text: str, live_schema_text: str = "") -> None:
         self.touch()
-        if self._pii_gate(text) is None:
+        gated = self._pii_gate(text)
+        if gated is None:
             return  # held pending the analyst's confirmation
+        self.last_sent = self._live_prefix(live_schema_text) + gated
         self._reply()
 
-    def send_confirmed(self, token: str) -> None:
+    def send_confirmed(self, token: str, live_schema_text: str = "") -> None:
         self.touch()
-        if self._pii_take(token) is None:
+        text = self._pii_take(token)
+        if text is None:
             raise AIError("That message has expired — please retype it.")
+        self.last_sent = self._live_prefix(live_schema_text) + text
         self._reply()
 
     def _reply(self) -> None:

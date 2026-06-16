@@ -28,6 +28,13 @@ dependencies = [
 copilot = [
     "github-copilot-sdk>=1.0.1",
 ]
+# Optional NER name detection for the outbound-PII guard (Phase 2). GLiNER pulls
+# torch + transformers (hundreds of MB), so it ships as an extra — without it the
+# guard still does its stdlib structured-PII scan. Install with
+# `pip install mooring[pii]`. Pre-fetch the model with `mooring ai pii model`.
+pii = [
+    "gliner>=0.2.13",
+]
 
 [project.scripts]
 mooring = "mooring.cli:main"

@@ -206,6 +206,31 @@ def _build_parser() -> argparse.ArgumentParser:
     ai_pii_check.add_argument(
         "--notebook", default=None, metavar="REL", help="also scan a single notebook (workspace-relative)"
     )
+    ai_pii_model = ai_pii_sub.add_parser(
+        "model", help="download/verify the local NER name-detection model (needs the pii extra)"
+    )
+    ai_pii_model.add_argument(
+        "--repo", default=None, metavar="ALIAS", help="act on this repo instead of the active one"
+    )
+
+    cfg_cmd = sub.add_parser("config", help="view and edit settings in your user config.toml")
+    cfg_sub = cfg_cmd.add_subparsers(dest="config_command", required=True)
+    cfg_set = cfg_sub.add_parser(
+        "set", help="set a dotted key, e.g. `config set ai.pii.enabled true`"
+    )
+    cfg_set.add_argument("key", help="dotted setting name, e.g. ai.pii.detect_names")
+    cfg_set.add_argument(
+        "value",
+        nargs="+",
+        help="value: true/false, a number, or text; give several tokens for a list "
+        "(e.g. `... name_labels person name organization`)",
+    )
+    cfg_get = cfg_sub.add_parser("get", help="print the effective value of a dotted key")
+    cfg_get.add_argument("key", help="dotted setting name, e.g. ai.pii.enabled")
+    cfg_unset = cfg_sub.add_parser("unset", help="remove a dotted key (revert it to the default)")
+    cfg_unset.add_argument("key", help="dotted setting name, e.g. ai.pii.enabled")
+    cfg_sub.add_parser("list", help="print the effective merged configuration")
+    cfg_sub.add_parser("path", help="print the path to your user config.toml")
 
     sub.add_parser("selftest", help="verify the bundled environment")
     sub.add_parser("version", help="print the version")
@@ -696,24 +721,43 @@ def cmd_ai_dictionary_check(app_cfg: config.AppConfig, cfg: config.Config) -> in
 
 
 _PII_FOOTER = (
-    "\n(best-effort - detects only well-formed cards, IBANs, NHS numbers, emails, and UK\n"
-    " NINOs; never names, addresses, sort codes, account numbers, SSNs, or phones. Put\n"
-    " `# mooring: pii-ok` on a line to retire a reviewed false positive. Never paste real values.)"
+    "\n(best-effort - detects well-formed cards, IBANs, NHS numbers, emails, and UK NINOs;\n"
+    " never sort codes, account numbers, SSNs, or phones. Names need detect_names + the\n"
+    " mooring[pii] extra. Put `# mooring: pii-ok` on a line to retire a reviewed false\n"
+    " positive. Never paste real values.)"
 )
 
 
 def cmd_ai_pii_check(app_cfg: config.AppConfig, cfg: config.Config, args: argparse.Namespace) -> int:
-    """Scan context/ and notebook sources for structured PII, offline.
+    """Scan context/ and notebook sources for PII, offline.
 
     Mirrors ``ai dictionary check``: no Copilot, no network, value-free output —
-    a team can lint their files before enabling the guard or sharing context.
+    a team can lint their files before enabling the guard or sharing context. When
+    ``detect_names`` is on and the ``mooring[pii]`` extra is installed, the local
+    NER name pass runs too; otherwise it scans structured PII only.
     """
-    from mooring.ai import datadictionary
+    from mooring.ai import datadictionary, ner
 
     workspace = cfg.workspace()
     ctx_dir = app_cfg.ai_context_dir
     index = datadictionary.load_index(workspace, ctx_dir)
-    findings = _scan_pii_targets(workspace, ctx_dir, cfg.folders, index, getattr(args, "notebook", None))
+    names = app_cfg.ai_pii_names and ner.available()
+    if app_cfg.ai_pii_names and not ner.available():
+        print(
+            "Note: detect_names is ON but the 'pii' extra isn't installed - scanning\n"
+            "      structured PII only. Install it: pip install mooring[pii]\n"
+        )
+    findings = _scan_pii_targets(
+        workspace,
+        ctx_dir,
+        cfg.folders,
+        index,
+        getattr(args, "notebook", None),
+        names=names,
+        labels=app_cfg.ai_pii_name_labels,
+        threshold=app_cfg.ai_pii_name_threshold,
+        model=app_cfg.ai_pii_name_model,
+    )
     if not app_cfg.ai_pii:
         print("Note: [ai.pii] enabled is OFF - set it true to actually enforce this in the chat.\n")
     if findings:
@@ -726,8 +770,42 @@ def cmd_ai_pii_check(app_cfg: config.AppConfig, cfg: config.Config, args: argpar
     return 0
 
 
+def cmd_ai_pii_model(app_cfg: config.AppConfig, cfg: config.Config, args: argparse.Namespace) -> int:
+    """Pre-fetch and verify the local NER name-detection model.
+
+    Loading downloads the weights from Hugging Face on first use; running this
+    once means the first flagged chat prompt isn't blocked on a surprise download
+    (useful on managed/offline networks).
+    """
+    from mooring.ai import ner
+
+    if not ner.available():
+        print("The 'pii' extra is not installed. Install it: pip install mooring[pii]")
+        return 1
+    mid = app_cfg.ai_pii_name_model
+    print(f"Loading NER model {mid!r} (first run downloads it from Hugging Face)…")
+    try:
+        ner.load_model(mid)
+    except ner.NerUnavailable as exc:
+        print(f"Failed: {exc}")
+        return 1
+    print("OK - model is cached and ready for offline name detection.")
+    if not app_cfg.ai_pii_names:
+        print("Note: [ai.pii] detect_names is OFF - set it (and enabled) true to use it in the chat.")
+    return 0
+
+
 def _scan_pii_targets(
-    workspace: Path, ctx_dir: str, folders: tuple[str, ...], index, notebook_rel: str | None
+    workspace: Path,
+    ctx_dir: str,
+    folders: tuple[str, ...],
+    index,
+    notebook_rel: str | None,
+    *,
+    names: bool = False,
+    labels: tuple[str, ...] | None = None,
+    threshold: float = 0.7,
+    model: str | None = None,
 ) -> list[tuple[str, int, str]]:
     from mooring.ai import pii
 
@@ -754,7 +832,10 @@ def _scan_pii_targets(
             rel = path.relative_to(workspace).as_posix()
         except ValueError:
             rel = str(path)
-        findings += [(rel, f.line, f.kind) for f in pii.scan(text)]
+        findings += [
+            (rel, f.line, f.kind)
+            for f in pii.scan_prose(text, names=names, labels=labels, threshold=threshold, model=model)
+        ]
     return findings
 
 
@@ -792,6 +873,8 @@ def cmd_ai(app_cfg: config.AppConfig, cfg: config.Config, args: argparse.Namespa
     if args.ai_command == "pii":
         if args.ai_pii_command == "check":
             return cmd_ai_pii_check(app_cfg, cfg, args)
+        if args.ai_pii_command == "model":
+            return cmd_ai_pii_model(app_cfg, cfg, args)
         return 2
 
     try:
@@ -821,6 +904,81 @@ def cmd_ai(app_cfg: config.AppConfig, cfg: config.Config, args: argparse.Namespa
     return 2
 
 
+def _coerce_config_value(values: list[str]):
+    """Type a ``config set`` value. Several tokens become a string list; a single
+    token is parsed as a TOML value (``true``/``false`` -> bool, ``5`` -> int,
+    ``0.7`` -> float, ``["a","b"]`` -> list) and falls back to a bare string when
+    that doesn't parse — so paths/ids like ``urchade/gliner_multi_pii-v1`` stay
+    strings. Quote a value (``'"123"'``) to force a string that looks numeric."""
+    import tomllib
+
+    if len(values) > 1:
+        return list(values)
+    raw = values[0]
+    try:
+        return tomllib.loads(f"_v = {raw}")["_v"]
+    except Exception:  # noqa: BLE001 - not a TOML literal -> treat as a bare string
+        return raw
+
+
+def _format_config_value(value) -> str:
+    """Render a config value the way it appears in TOML (true, 0.7, ["a", "b"])."""
+    import tomli_w
+
+    if isinstance(value, dict):
+        return tomli_w.dumps(value).rstrip()
+    return tomli_w.dumps({"v": value}).split("=", 1)[1].strip()
+
+
+def cmd_config(args: argparse.Namespace) -> int:
+    """View and edit the user config.toml via dotted keys (e.g. ai.pii.enabled).
+
+    Writes ONLY the user file, preserving the rest; ``get``/``list`` show the
+    effective values (default merged with the file), not env-var overrides.
+    """
+    import tomli_w
+
+    from mooring import config_store, paths
+
+    sub = args.config_command
+    if sub == "path":
+        print(paths.user_config_file())
+        return 0
+    if sub == "list":
+        print(tomli_w.dumps(config.merged_data()).rstrip())
+        return 0
+    if sub == "get":
+        try:
+            value = config_store.get_value(args.key)
+        except ValueError as exc:
+            sys.exit(str(exc))
+        except KeyError:
+            sys.exit(f"No such setting: {args.key}")
+        print(_format_config_value(value))
+        return 0
+    if sub == "set":
+        value = _coerce_config_value(args.value)
+        try:
+            config_store.set_value(args.key, value)
+        except ValueError as exc:
+            sys.exit(str(exc))
+        print(f"Set {args.key} = {_format_config_value(value)}")
+        print(f"  in {paths.user_config_file()}")
+        return 0
+    if sub == "unset":
+        try:
+            removed = config_store.unset_value(args.key)
+        except ValueError as exc:
+            sys.exit(str(exc))
+        print(
+            f"Unset {args.key} (reverted to default)."
+            if removed
+            else f"{args.key} was not set in your config; nothing to do."
+        )
+        return 0
+    return 2
+
+
 def _dispatch(
     parser: argparse.ArgumentParser,
     command: str,
@@ -833,6 +991,8 @@ def _dispatch(
         return 0
     if command == "repo":
         return cmd_repo(app_cfg, args)
+    if command == "config":
+        return cmd_config(args)
     if command == "ai":
         return cmd_ai(app_cfg, cfg, args)
     if command == "selftest":

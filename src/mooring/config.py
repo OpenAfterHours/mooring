@@ -91,6 +91,12 @@ class AppConfig:
     ai_pii: bool = False
     ai_pii_block_prompt: bool = True
     ai_pii_scan_source: bool = True
+    # Phase 2: optional LOCAL NER name detection (needs the `mooring[pii]` extra).
+    # Only acts when ai_pii is also on. See mooring.ai.ner / docs/admins/ai-privacy.md.
+    ai_pii_names: bool = False
+    ai_pii_name_model: str = "urchade/gliner_multi_pii-v1"
+    ai_pii_name_labels: tuple[str, ...] = ("person", "name")
+    ai_pii_name_threshold: float = 0.7
 
     @property
     def aliases(self) -> list[str]:
@@ -302,6 +308,19 @@ def load_app_config(
         ),
         ai_pii_scan_source=_as_bool(
             env.get("MOORING_AI_PII_SCAN_SOURCE"), _as_bool(ai_pii.get("scan_notebook_source"), True)
+        ),
+        ai_pii_names=_as_bool(
+            env.get("MOORING_AI_PII_NAMES"), _as_bool(ai_pii.get("detect_names"), False)
+        ),
+        ai_pii_name_model=env.get(
+            "MOORING_AI_PII_NAME_MODEL",
+            str(ai_pii.get("name_model", "urchade/gliner_multi_pii-v1")),
+        ),
+        ai_pii_name_labels=_str_list(
+            ai_pii.get("name_labels", ("person", "name")), "name_labels"
+        ),
+        ai_pii_name_threshold=float(
+            env.get("MOORING_AI_PII_NAME_THRESHOLD", ai_pii.get("name_threshold", 0.7))
         ),
     )
 

@@ -120,6 +120,32 @@ def test_streams_delta_message_idle(fake_sdk, tmp_path):
         sess.close()
 
 
+def test_live_schema_refresh_prepended_only_on_change(fake_sdk, tmp_path):
+    # The per-turn live-schema refresh reaches the SDK as a turn PREFIX, but only
+    # when the kernel's dataframes changed since the model last saw them.
+    sess = _make(tmp_path).start()
+    try:
+        snapshot = "`orders` (10 rows):\n- id: Int64"
+        sess.set_initial_live_schema(snapshot)  # already folded into the system context
+        sent = FakeClient.last.session.sent
+
+        # Same as the open-time snapshot -> no prefix, just the analyst's turn.
+        sess.send("hi", live_schema_text=snapshot)
+        assert sent[-1] == "hi"
+
+        # A new dataframe appears -> the refreshed schema is prepended to the turn.
+        grown = snapshot + "\n`flags`:\n- ok: Boolean"
+        sess.send("now?", live_schema_text=grown)
+        assert sent[-1].startswith("UPDATED LIVE NOTEBOOK DATAFRAMES")
+        assert "flags" in sent[-1] and sent[-1].endswith("now?")
+
+        # Unchanged kernel -> no re-injection.
+        sess.send("again", live_schema_text=grown)
+        assert sent[-1] == "again"
+    finally:
+        sess.close()
+
+
 def test_tool_and_intent_events(fake_sdk, tmp_path):
     FakeSession.SCRIPT = [
         (ET.ASSISTANT_INTENT, {"intent": "Aggregate sales by region"}),

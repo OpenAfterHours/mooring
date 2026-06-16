@@ -63,8 +63,10 @@ reasoning_effort = ""       # default reasoning effort; empty = the model's defa
 chat_idle_timeout_sec = 900 # close an idle chat session after this many seconds
 live_schema = true          # read the schema of dataframes live in the running notebook
                             # kernel (covers data loaded from OUTSIDE the workspace, and
-                            # derived frames). Value-free — names + dtypes only, never a
-                            # value; set false to disable. See docs/admins/ai-privacy.md.
+                            # derived frames), refreshed on each chat turn so frames you
+                            # add mid-session are picked up without reopening. Value-free —
+                            # names + dtypes only, never a value; set false to disable.
+                            # See docs/admins/ai-privacy.md.
 
 # Team context for the copilot — OPT-IN, off by default. When `context = true`,
 # mooring reads `<workspace>/context/` and feeds the assistant:
@@ -98,3 +100,16 @@ block_prompt = true         # on a hit, HOLD the chat prompt and make the analys
                             # confirm "send anyway" (set false for a warn-only advisory)
 scan_notebook_source = true # show a one-time banner if the notebook/its schema looks
                             # like it contains PII (kill-switch for identifier-dense notebooks)
+
+# Phase 2 — optional NAME detection (catches "Jane Smith", which the structured
+# scan above cannot). Needs the `mooring[pii]` extra (pip install mooring[pii]),
+# which adds a LOCAL zero-shot NER model — text is scanned on this machine, never
+# sent anywhere to be scanned; only a one-time model download hits the network
+# (pre-fetch with `mooring ai pii model`). Best-effort, not a guarantee. Only acts
+# when `enabled` above is true.
+detect_names = false        # turn on local NER name detection
+name_model = "urchade/gliner_multi_pii-v1"  # GLiNER model id (downloaded on first use)
+name_labels = ["person", "name"]            # entity labels to flag (zero-shot, so any
+                            # label works); add "organization" to also flag business
+                            # names, e.g. ["person", "name", "organization"]
+name_threshold = 0.7        # confidence cut-off; raise for fewer/safer hits, lower for more

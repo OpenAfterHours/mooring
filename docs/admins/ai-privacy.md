@@ -85,9 +85,11 @@ data often lives **outside** it — a network share, a warehouse export, a datab
 connection, a path built at runtime — and the schema most useful for writing code
 is frequently a *derived* frame (a join/filter result) that no file holds. To help
 there, mooring can read the schema of the dataframes **already loaded in your
-running kernel**. It is **on by default** and value-free, but — like team context —
-its safety comes from *how it is built*, not from physical impossibility, so it is
-documented here in full. Turn it off with `[ai] live_schema = false`.
+running kernel**. It is **on by default**, refreshed on every chat turn (so a frame
+you load after opening the chat is picked up without reopening), and value-free — but,
+like team context, its safety comes from *how it is built*, not from physical
+impossibility, so it is documented here in full. Turn it off with
+`[ai] live_schema = false`.
 
 How it stays value-blind (`ai/introspect.py`):
 
@@ -104,6 +106,11 @@ How it stays value-blind (`ai/introspect.py`):
 - **Fail-closed on the way back.** The reader (`_parse_frames`) accepts only the
   `{name, columns: [[str, str]], n_rows: int}` shape and drops everything else, so a
   value can't ride back on a key mooring doesn't read.
+- **The per-turn refresh adds no new value channel.** The schema is captured at
+  chat-open *and* re-probed on each turn through the **same** frozen probe and
+  fail-closed reader; a turn re-states the schema only when the kernel changed, and an
+  unchanged kernel is not re-sent. The refresh re-states already-value-free schema —
+  it opens no path a value could take that the open-time capture did not.
 
 Honest caveat: unlike `schema.py` (which physically only ever reads a file header),
 this probe runs in a namespace that *contains* values. Its value-blindness is the
@@ -161,12 +168,13 @@ is best-effort, not structural.
 
 **What it catches** (precision over recall): checksum-validated **payment cards**
 (Luhn), **IBANs** (mod-97), and **NHS numbers** (mod-11), plus shape-anchored
-**emails** and **UK NINOs**. **What it does not catch, by design:** names,
-addresses, account narratives, **UK sort codes**, **bank account numbers**, US
-SSNs, phone numbers, dates of birth, IP addresses, or any value split across two
-messages. **A clean scan is not a value-free guarantee** — it is a safety net for
-the obvious, well-formed cases, and it complements (never replaces) the structural
-value-blindness above.
+**emails** and **UK NINOs**. **What it does not catch, by design:** addresses,
+account narratives, **UK sort codes**, **bank account numbers**, US SSNs, phone
+numbers, dates of birth, IP addresses, or any value split across two messages.
+Person **names** are out of reach of the structured scan too, but can be caught by
+the optional local-NER pass below. **A clean scan is not a value-free guarantee** —
+it is a safety net for the obvious, well-formed cases, and it complements (never
+replaces) the structural value-blindness above.
 
 It runs at every egress, and every finding is value-free — a line number and a
 *kind* (`payment card`, `email address`, …), never the matched value:
@@ -192,6 +200,49 @@ on a line to retire a reviewed false positive.
 Configure it under `[ai.pii]`: `enabled` (master switch), `block_prompt`
 (hold-and-confirm vs. a warn-only advisory on the chat prompt), and
 `scan_notebook_source` (the source/schema banner).
+
+## Name detection (opt-in, local NER)
+
+A person's name — `where name == "Jane Smith"` — has no checksum or fixed shape, so
+the structured scan above cannot see it. The optional **name pass** (`ai/ner.py`)
+closes that gap with a **local** zero-shot NER model ([GLiNER](https://github.com/urchade/GLiNER)),
+shipped as the `mooring[pii]` extra so the lean install and the frozen `.pyz` stay
+free of the heavy ML stack (torch + transformers). It is **off by default**, only
+acts when `[ai.pii] enabled` is also true, and is **best-effort** (NER both misses
+and false-positives — a clean scan is not proof of no names).
+
+Its privacy properties match the structured scan:
+
+- **Local only.** The model runs on the analyst's machine; the text is never sent
+  anywhere to be scanned. The single network touch is a **one-time model download**
+  from Hugging Face on first use — pre-fetch it on a managed/offline network with
+  **`mooring ai pii model`**.
+- **Value-free findings.** GLiNER returns the matched name; mooring reads **only**
+  the label and character offset, maps it to a line number, and **drops the text**.
+  A finding is `(line, "person name")` — never the name — so it logs and streams
+  over SSE as safely as the structured kinds. Pinned by `tests/test_ner.py`.
+- **Same egress + UI.** A flagged chat prompt is held with the same "Send anyway"
+  confirm; `mooring ai pii check` runs the name pass too (when the extra is present)
+  for the offline lint. At the chat prompt, a configured-but-uninstalled extra
+  **fails loud** (a `scan_error` advisory) rather than silently doing nothing.
+
+Configure under `[ai.pii]`: `detect_names` (on/off), `name_model` (the GLiNER id),
+`name_labels` (entity labels to flag), and `name_threshold` (confidence cut-off;
+raise for fewer, safer hits). GLiNER is zero-shot, so `name_labels` is not limited
+to people — add `"organization"` to also flag **business names** (surfaced as an
+`organization` finding); other entity types (e.g. `"address"`) work the same way.
+Capitalised non-person terms make organisation detection more false-positive-prone,
+so it stays out of the default. Install and enable:
+
+```toml
+[ai.pii]
+enabled = true
+detect_names = true
+```
+```
+pip install mooring[pii]      # or: uvx mooring[pii]
+mooring ai pii model          # pre-download the model (optional but recommended)
+```
 
 ## The one thing to watch
 
@@ -228,3 +279,8 @@ The copilot needs the optional extra (`pip install mooring[copilot]` /
 `uvx mooring[copilot]`), a GitHub Copilot licence (`mooring ai login`), and your
 organisation's Copilot **CLI/agent policy** enabled. See
 [Configuration](configuration.md) for the `[ai]` settings.
+
+Optional **name detection** (the structured-PII guard's NER pass) needs the
+separate `mooring[pii]` extra (`pip install mooring[pii]`); without it the guard
+still does its stdlib structured-PII scan. See
+[Name detection](#name-detection-opt-in-local-ner).
