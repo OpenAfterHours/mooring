@@ -20,7 +20,10 @@ jobs:
         run: uv python install 3.13
 
       - name: Sync dependencies
-        run: uv sync
+        # --extra copilot pulls github-copilot-sdk (the `copilot` module) so the
+        # copilot chat-session tests can import it. It lives in the optional extra,
+        # not the shipped base deps, so CI must opt in to run those tests.
+        run: uv sync --extra copilot
 
       - name: Lint
         run: uv run ruff check src tests

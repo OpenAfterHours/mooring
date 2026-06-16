@@ -1,6 +1,6 @@
 [project]
 name = "mooring"
-version = "0.3.1"
+version = "0.3.0"
 description = "Git-free marimo notebook sharing via GitHub"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -48,6 +48,13 @@ dev = [
     "httpx",
     # builds the docs/ site (see zensical.toml); `uv run zensical serve|build`
     "zensical>=0.0.45",
+    # Test-only data readers: the schema-inspection and AI tests load real data
+    # files — polars + fastexcel extract parquet/csv/xlsx schemas, openpyxl writes
+    # the xlsx fixtures. These never enter the shipped wheel (which stays lean —
+    # see [project.dependencies]); they only need to exist when the suite runs.
+    "polars",
+    "openpyxl",
+    "fastexcel",
 ]
 
 [build-system]
