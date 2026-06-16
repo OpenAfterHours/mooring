@@ -80,6 +80,9 @@ class AppConfig:
     ai_context: bool = False
     ai_context_dir: str = "context"
     ai_context_max_kb: int = 256
+    # Read the schema of dataframes live in the running kernel (covers data loaded
+    # from outside the workspace). Value-free; on by default, kill-switch to off.
+    ai_live_schema: bool = True
 
     @property
     def aliases(self) -> list[str]:
@@ -280,6 +283,9 @@ def load_app_config(
         ai_context_dir=env.get("MOORING_AI_CONTEXT_DIR", str(ai.get("context_dir", "context"))),
         ai_context_max_kb=int(
             env.get("MOORING_AI_CONTEXT_MAX_KB", ai.get("context_max_kb", 256))
+        ),
+        ai_live_schema=_as_bool(
+            env.get("MOORING_AI_LIVE_SCHEMA"), _as_bool(ai.get("live_schema"), True)
         ),
     )
 

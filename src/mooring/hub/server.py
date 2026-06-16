@@ -463,6 +463,22 @@ class Hub:
 
         source = self._ws_file(workspace, notebook_rel, suffix=".py").read_text("utf-8")
 
+        # Schemas of dataframes LIVE in the running kernel — covers data loaded
+        # from OUTSIDE the workspace (network/warehouse/DB) and derived frames no
+        # file holds. Value-free (names + dtypes only) and best-effort: any failure
+        # leaves live_text empty and we fall back to the file-based schema above.
+        live_text = ""
+        if self.app_cfg.ai_live_schema:
+            from mooring.ai import introspect
+
+            try:
+                frames = introspect.live_dataset_schemas(
+                    self.editors.get(str(workspace)), notebook_rel
+                )
+                live_text = introspect.format_live_schemas(frames)
+            except Exception:  # noqa: BLE001 - never block chat-open on introspection
+                live_text = ""
+
         dictionary_text = ""
         if has_dict:
             dataset_cols = (
@@ -482,6 +498,7 @@ class Hub:
             schema_text=schema_text,
             notebook_source=source,
             notebook_rel=notebook_rel,
+            live_schemas_text=live_text,
             instructions_text=repo_ctx.instructions,
             dictionary_text=dictionary_text,
         )

@@ -61,6 +61,10 @@ provider = "copilot"        # AI backend; "copilot" = GitHub Copilot (pluggable)
 model = ""                  # default model id; empty = the provider's default (users can pick in the chat)
 reasoning_effort = ""       # default reasoning effort; empty = the model's default (users can pick per model)
 chat_idle_timeout_sec = 900 # close an idle chat session after this many seconds
+live_schema = true          # read the schema of dataframes live in the running notebook
+                            # kernel (covers data loaded from OUTSIDE the workspace, and
+                            # derived frames). Value-free — names + dtypes only, never a
+                            # value; set false to disable. See docs/admins/ai-privacy.md.
 
 # Team context for the copilot — OPT-IN, off by default. When `context = true`,
 # mooring reads `<workspace>/context/` and feeds the assistant:
