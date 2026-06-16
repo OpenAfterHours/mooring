@@ -39,11 +39,15 @@ sees whatever your team wrote into those files.
 
 ## The four structural guarantees
 
-1. **Single choke point.** The context handed to the model is assembled in one
-   place (`ai/chat.py:build_system_context`) — from the schema text and the
-   notebook source, plus (only when team context is enabled) the team instructions
-   and the value-minimised data-dictionary slice. Nothing reaches the model except
-   through this one function.
+1. **Single choke point for the system context.** The context handed to the model
+   is assembled in one place (`ai/chat.py:build_system_context`) — from the schema
+   text and the notebook source, plus (only when team context is enabled) the team
+   instructions and the value-minimised data-dictionary slice. Two further egresses
+   exist by design and are value-free by construction: your **chat turns**, and the
+   agent's **tool reads** (it can re-read the notebook source via
+   `mooring_read_notebook_source`, and fetch dataset schemas). The opt-in
+   [structured-PII scan](#structured-pii-pre-flight-scan-opt-in-best-effort) runs at
+   all of these, not only `build_system_context`.
 2. **Value-free tools only.** The agent is given mooring's own tools (`ai/tools.py`):
    list datasets, get a schema, read the notebook source, and *propose* a cell —
    each value-free by construction. When a data dictionary is configured, three more
@@ -145,13 +149,60 @@ Run `mooring ai dictionary check` to see exactly how your files parse — which 
 was detected, how many tables/columns were kept, which keys were dropped, and any
 secret-scan findings — *before* enabling the feature or sharing the files.
 
+## Structured-PII pre-flight scan (opt-in, best-effort)
+
+The guarantees above stop the *data* from reaching the model. They cannot stop a
+human from **typing a real value** into a cell or the chat —
+`df.filter(pl.col("pan") == "4012 8888 8888 1881")`, or "why does account
+4012888888881881 fail?". As a thin extra floor, mooring can scan text on its way
+out for **well-formed structured identifiers** and warn before it leaves. It is
+**off by default** (`[ai.pii] enabled = false`) and, like team context, its safety
+is best-effort, not structural.
+
+**What it catches** (precision over recall): checksum-validated **payment cards**
+(Luhn), **IBANs** (mod-97), and **NHS numbers** (mod-11), plus shape-anchored
+**emails** and **UK NINOs**. **What it does not catch, by design:** names,
+addresses, account narratives, **UK sort codes**, **bank account numbers**, US
+SSNs, phone numbers, dates of birth, IP addresses, or any value split across two
+messages. **A clean scan is not a value-free guarantee** — it is a safety net for
+the obvious, well-formed cases, and it complements (never replaces) the structural
+value-blindness above.
+
+It runs at every egress, and every finding is value-free — a line number and a
+*kind* (`payment card`, `email address`, …), never the matched value:
+
+- **Your chat prompt.** With `block_prompt = true` (the default once the feature is
+  on), a prompt that looks like it contains a card/IBAN/NHS/email/NINO is **held**;
+  you see which kinds tripped it and must click **"Send anyway"** — nothing reaches
+  the model until you confirm. (Set `block_prompt = false` for a warn-only advisory.)
+- **The notebook source and its schema.** On opening the copilot you get a one-time,
+  value-free banner if the notebook or a dataset schema looks like it contains PII.
+  The source is never rewritten (that would break your code). But a schema **column
+  name** that is itself a value — the result of a pivot/transpose on a PII key, e.g.
+  `df.pivot(on="customer_pan")` — is **withheld** from the schema the model sees.
+- **Team context.** An `instructions.md` carrying a checksum-validated card/IBAN/NHS
+  (or a secret) is withheld entirely; a stray email/NINO drops just that line; a
+  data-dictionary description that trips the scan is dropped.
+
+Run **`mooring ai pii check`** to scan your `context/` files and notebook sources
+**offline** (no Copilot, no network) before enabling the feature — it prints
+`path:line  kind` for each finding and never echoes a value. Put `# mooring: pii-ok`
+on a line to retire a reviewed false positive.
+
+Configure it under `[ai.pii]`: `enabled` (master switch), `block_prompt`
+(hold-and-confirm vs. a warn-only advisory on the chat prompt), and
+`scan_notebook_source` (the source/schema banner).
+
 ## The one thing to watch
 
 Anything **you type into a cell or the chat** is, by definition, visible to the
 assistant. If you hard-code a real value into a cell —
 `df.filter(pl.col("ssn") == "123-45-6789")` — that literal is part of the source
 the assistant can read. The chat reminds you of this; **never paste real values**.
-A future release will add an automatic PII/redaction guard on outbound text.
+The opt-in [structured-PII scan](#structured-pii-pre-flight-scan-opt-in-best-effort)
+above catches *well-formed* cards/IBANs/NHS numbers/emails/NINOs as a safety net,
+but it cannot catch a name, a sort code, an account number, or a value typed into
+prose — so the rule stands regardless.
 
 ## Verifying it yourself
 

@@ -39,12 +39,14 @@ class FakeSession:
         self.create_kwargs = create_kwargs
         self._handler = None
         self.disconnected = False
+        self.sent = []  # prompts actually forwarded to the SDK
 
     def on(self, handler):
         self._handler = handler
         return lambda: None
 
     async def send(self, prompt, **kw):
+        self.sent.append(prompt)
         # Drive the streaming handler exactly like the real SDK would.
         for etype, data in type(self).SCRIPT:
             self._handler(_event(etype, **data))
@@ -190,6 +192,30 @@ def test_start_raises_on_not_authed(fake_sdk, tmp_path):
     FakeClient.authed = False
     with pytest.raises(AIError):
         _make(tmp_path).start()
+
+
+def test_pii_prompt_is_held_until_confirmed(fake_sdk, tmp_path):
+    # With the guard armed (block mode), a PII-shaped prompt must NOT reach the SDK
+    # until the analyst confirms — proving the hold is strictly upstream of dispatch.
+    sess = _make(tmp_path, pii_enabled=True, pii_block=True).start()
+    try:
+        q = sess.subscribe()
+        sess.send("why does 4012888888881881 fail validation?")
+        held = q.get(timeout=2)
+        assert held.kind == "pii" and held.data["token"]
+        assert FakeClient.last.session.sent == []  # the SDK was sent nothing
+
+        sess.send_confirmed(held.data["token"])
+        kinds = []
+        while True:
+            ev = q.get(timeout=2)
+            kinds.append(ev.kind)
+            if ev.kind == "idle":
+                break
+        assert "message" in kinds and "idle" in kinds
+        assert FakeClient.last.session.sent  # forwarded verbatim, exactly now
+    finally:
+        sess.close()
 
 
 def test_close_tears_down(fake_sdk, tmp_path):

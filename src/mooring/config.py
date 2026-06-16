@@ -83,6 +83,14 @@ class AppConfig:
     # Read the schema of dataframes live in the running kernel (covers data loaded
     # from outside the workspace). Value-free; on by default, kill-switch to off.
     ai_live_schema: bool = True
+    # Best-effort structured-PII pre-flight scan on text leaving for the AI server
+    # (chat prompt, notebook source, schema column names, team context). Opt-in:
+    # when off, the copilot behaves exactly as before. block_prompt = warn-and-hold
+    # on the chat prompt (the analyst confirms "send anyway"); scan_source = the
+    # one-time notebook-source banner. See docs/admins/ai-privacy.md.
+    ai_pii: bool = False
+    ai_pii_block_prompt: bool = True
+    ai_pii_scan_source: bool = True
 
     @property
     def aliases(self) -> list[str]:
@@ -222,6 +230,7 @@ def load_app_config(
     ws = data.get("workspace", {})
     log = data.get("logging", {})
     ai = data.get("ai", {})
+    ai_pii = ai.get("pii", {}) if isinstance(ai.get("pii"), dict) else {}
 
     specs, active = repo_specs_from_data(data)
     if env.get("MOORING_ACTIVE_REPO") in {s.alias for s in specs}:
@@ -286,6 +295,13 @@ def load_app_config(
         ),
         ai_live_schema=_as_bool(
             env.get("MOORING_AI_LIVE_SCHEMA"), _as_bool(ai.get("live_schema"), True)
+        ),
+        ai_pii=_as_bool(env.get("MOORING_AI_PII"), _as_bool(ai_pii.get("enabled"), False)),
+        ai_pii_block_prompt=_as_bool(
+            env.get("MOORING_AI_PII_BLOCK_PROMPT"), _as_bool(ai_pii.get("block_prompt"), True)
+        ),
+        ai_pii_scan_source=_as_bool(
+            env.get("MOORING_AI_PII_SCAN_SOURCE"), _as_bool(ai_pii.get("scan_notebook_source"), True)
         ),
     )
 

@@ -424,19 +424,29 @@ class Hub:
         return target
 
     def _build_chat_context(self, workspace: Path, notebook_rel: str, dataset_rel: str):
-        """Return ``(system_context, dictionary_index)`` for a chat.
+        """Return ``(system_context, dictionary_index, pii_banner)`` for a chat.
 
         The value-free core is the dataset SCHEMA + notebook SOURCE. When the
         opt-in context feature is on, it also folds in the team instructions and
         a locality-selected, value-minimised data-dictionary slice (with the
         selected dataset's schema enriched by matching dictionary entries), and
         returns the parsed index so the session can offer the pull tools.
+
+        When the opt-in PII guard is on, it additionally withholds any schema
+        column whose NAME is itself a PII value (a pivot/transpose on a PII key)
+        and, with ``scan_notebook_source``, collects value-free findings for the
+        notebook source into ``pii_banner`` (a one-time, warn-only UI banner —
+        the source is never mutated).
         """
+        from dataclasses import replace
+
         from mooring import schema
         from mooring.ai import context as ctxmod
-        from mooring.ai import locality
+        from mooring.ai import locality, pii
         from mooring.ai.chat import build_system_context
         from mooring.ai.datadictionary import DictionaryIndex
+
+        pii_banner: list[dict] = []
 
         repo_ctx = ctxmod.discover_context(
             workspace,
@@ -455,6 +465,13 @@ class Hub:
                 dataset_schema = schema.extract_schema(ds)
             except (ValueError, OSError) as exc:
                 raise ValueError(f"Could not read the schema for {dataset_rel}: {exc}") from exc
+            if self.app_cfg.ai_pii:
+                kept, col_findings = pii.scrub_columns(dataset_schema.columns)
+                if col_findings:  # a column NAME is itself a PII value — withhold it
+                    dataset_schema = replace(dataset_schema, columns=kept)
+                    pii_banner += [
+                        {"where": f"{dataset_rel} column", "kind": f.kind} for f in col_findings
+                    ]
             schema_text = (
                 locality.enrich_dataset_schema(dataset_schema, index, dataset_rel)
                 if has_dict
@@ -462,6 +479,12 @@ class Hub:
             )
 
         source = self._ws_file(workspace, notebook_rel, suffix=".py").read_text("utf-8")
+        if self.app_cfg.ai_pii and self.app_cfg.ai_pii_scan_source:
+            # Warn-only: the notebook source is the analyst's own working file, so we
+            # never mutate it — we surface a value-free banner and let them decide.
+            pii_banner += [
+                {"where": f"{notebook_rel}:{f.line}", "kind": f.kind} for f in pii.scan(source)
+            ]
 
         # Schemas of dataframes LIVE in the running kernel — covers data loaded
         # from OUTSIDE the workspace (network/warehouse/DB) and derived frames no
@@ -475,6 +498,17 @@ class Hub:
                 frames = introspect.live_dataset_schemas(
                     self.editors.get(str(workspace)), notebook_rel
                 )
+                if self.app_cfg.ai_pii:
+                    scrubbed = []
+                    for fr in frames:
+                        kept, ff = pii.scrub_columns(fr.columns)
+                        if ff:  # a pivot/transpose put a PII value in a column NAME
+                            pii_banner += [
+                                {"where": f"live `{fr.name}` column", "kind": f.kind} for f in ff
+                            ]
+                            fr = replace(fr, columns=kept)
+                        scrubbed.append(fr)
+                    frames = scrubbed
                 live_text = introspect.format_live_schemas(frames)
             except Exception:  # noqa: BLE001 - never block chat-open on introspection
                 live_text = ""
@@ -502,7 +536,7 @@ class Hub:
             instructions_text=repo_ctx.instructions,
             dictionary_text=dictionary_text,
         )
-        return context, (index if has_dict else DictionaryIndex())
+        return context, (index if has_dict else DictionaryIndex()), pii_banner
 
     def _make_chat_session(
         self,
@@ -531,6 +565,8 @@ class Hub:
             model=model,
             reasoning_effort=reasoning_effort,
             dictionary=dictionary,
+            pii_enabled=self.app_cfg.ai_pii,
+            pii_block=self.app_cfg.ai_pii_block_prompt,
         )
 
     def _reap_idle_chats(self) -> None:
@@ -563,7 +599,7 @@ class Hub:
             return JSONResponse({"error": "A notebook is required."}, status_code=400)
         workspace = self.cfg.workspace()
         try:
-            context, index = self._build_chat_context(workspace, notebook, dataset)
+            context, index, pii_banner = self._build_chat_context(workspace, notebook, dataset)
         except ValueError as exc:
             return JSONResponse({"error": str(exc)}, status_code=400)
         except FileNotFoundError as exc:
@@ -585,7 +621,9 @@ class Hub:
             self._chats[sid] = session
             self._chat_targets[sid] = (str(workspace), notebook)
         telemetry.log_event("ai_chat_open")
-        return JSONResponse({"sid": sid, "notebook": notebook})
+        if pii_banner:  # count only — never a kind/value reaches the central sink
+            telemetry.log_event("ai_pii", findings=len(pii_banner))
+        return JSONResponse({"sid": sid, "notebook": notebook, "pii": pii_banner})
 
     async def api_chat_stream(self, request: Request) -> StreamingResponse | JSONResponse:
         sid = request.path_params["sid"]
@@ -617,10 +655,19 @@ class Hub:
     async def api_chat_send(self, request: Request) -> JSONResponse:
         data = await request.json()
         sid = str(data.get("sid", ""))
-        text = str(data.get("text", "")).strip()
         session = self._chats.get(sid)
         if session is None:
             return JSONResponse({"error": "Unknown chat session."}, status_code=404)
+        # "Send anyway" path: forward a prompt the PII guard held, verbatim, once.
+        confirm = str(data.get("confirm_token", "")).strip()
+        if confirm:
+            try:
+                await asyncio.to_thread(session.send_confirmed, confirm)
+            except Exception as exc:  # noqa: BLE001 - AIError surfaces to the UI
+                return JSONResponse({"error": str(exc)}, status_code=502)
+            telemetry.log_event("ai_chat_send", confirmed=1)
+            return JSONResponse({"ok": True})
+        text = str(data.get("text", "")).strip()
         if not text:
             return JSONResponse({"error": "Type a message."}, status_code=400)
         try:

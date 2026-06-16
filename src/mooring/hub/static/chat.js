@@ -206,6 +206,77 @@ function addProposal(code) {
   maybeScroll();
 }
 
+// -- outbound-PII guard -----------------------------------------------------
+
+let shownPii = new Set(); // finding-set signatures already surfaced this page-load
+
+// Distinct, value-free kind labels (e.g. "payment card, email address").
+function summarizeKinds(findings) {
+  return [...new Set((findings || []).map((f) => f.kind))].join(", ");
+}
+
+// One-time banner at chat-open: the notebook/its schema looks like it has PII.
+function showPiiBanner(items) {
+  if (!items || !items.length) return;
+  const sig = items.map((i) => `${i.where}|${i.kind}`).sort().join(";");
+  if (shownPii.has(sig)) return; // don't re-nag on a model/dataset re-open
+  shownPii.add(sig);
+  const el = addMessage("assistant", "");
+  el.className = "msg msg-assistant pii-notice";
+  el.textContent =
+    "Note: this notebook or its schema looks like it may contain " +
+    summarizeKinds(items) +
+    ". Schema columns that were themselves values have been withheld. Review the " +
+    "notebook and avoid sending real values — this scan is best-effort, not a guarantee.";
+}
+
+// A held chat turn (block_prompt): nothing was sent; offer "Send anyway".
+function addPiiHold(findings, token) {
+  const wrap = document.createElement("div");
+  wrap.className = "msg msg-assistant pii-hold";
+  const p = document.createElement("p");
+  p.textContent =
+    "Held before sending — this message looks like it may contain " +
+    summarizeKinds(findings) +
+    ". Nothing was sent to the assistant. Never paste real values; send anyway only " +
+    "if this is safe (e.g. a synthetic example).";
+  const bar = document.createElement("div");
+  bar.className = "toolbar";
+  const sendBtn = document.createElement("button");
+  sendBtn.className = "primary small";
+  sendBtn.textContent = "Send anyway";
+  const note = document.createElement("span");
+  note.className = "muted";
+  sendBtn.addEventListener("click", async () => {
+    sendBtn.disabled = true;
+    note.textContent = " sending…";
+    assistantEl = null;
+    setTurnState("thinking");
+    showThinking();
+    const { data } = await api("/api/ai/chat/send", { sid, confirm_token: token });
+    if (data.error) {
+      showError(data.error);
+      setTurnState("error");
+      sendBtn.disabled = false; // don't leave the hold card stuck on an error
+      note.textContent = "";
+    }
+  });
+  bar.append(sendBtn, note);
+  wrap.append(p, bar);
+  $("messages").appendChild(wrap);
+  maybeScroll();
+}
+
+// A warn-only advisory (block_prompt off): the turn was already forwarded.
+function addPiiNotice(findings) {
+  const el = addMessage("assistant", "");
+  el.className = "msg msg-assistant pii-notice";
+  el.textContent =
+    "Heads up: your message looks like it may contain " +
+    summarizeKinds(findings) +
+    ". It was sent — avoid pasting real values.";
+}
+
 // -- activity chip ----------------------------------------------------------
 
 function setActivity(text) {
@@ -280,12 +351,28 @@ async function openChat() {
   source.addEventListener("tool_done", () => clearActivity());
   source.addEventListener("intent", (e) => setActivity(JSON.parse(e.data).text));
   source.addEventListener("idle", () => setTurnState("idle"));
+  source.addEventListener("pii", (e) => {
+    const d = JSON.parse(e.data);
+    if (d.scan_error) {
+      // Fail-open but loud: the guard could not run; the turn proceeds unchecked.
+      showError("PII pre-flight scan could not run — your message was sent unchecked.");
+      return;
+    }
+    const findings = d.findings || [];
+    if (d.token) {
+      setTurnState("idle"); // drop the thinking bubble; the turn is held
+      addPiiHold(findings, d.token);
+    } else if (findings.length) {
+      addPiiNotice(findings); // advisory only; the turn was forwarded
+    }
+  });
   source.addEventListener("fail", (e) => {
     showError(JSON.parse(e.data).text || "The assistant reported an error.");
     setTurnState("error");
   });
   source.addEventListener("closed", () => setStatus("Session closed."));
   source.onerror = () => setStatus("Reconnecting…");
+  showPiiBanner(data.pii);
   const bits = [];
   if (dataset) bits.push(`schema: ${dataset}`);
   if (model) bits.push(model + (reasoning_effort ? ` · ${reasoning_effort}` : ""));

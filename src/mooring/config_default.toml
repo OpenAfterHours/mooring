@@ -82,3 +82,19 @@ live_schema = true          # read the schema of dataframes live in the running 
 context = false             # set true to enable team instructions + data dictionary
 context_dir = "context"     # workspace-relative folder mooring reads context from
 context_max_kb = 256        # cap on the instructions text injected per chat
+
+# Best-effort structured-PII pre-flight scan — OPT-IN, off by default. When
+# `enabled = true`, mooring scans text on its way to the AI server (your chat
+# prompt, the notebook source, schema column names, and team context) for
+# well-formed payment cards, IBANs, NHS numbers, emails, and UK NINOs, and
+# warns/withholds before it leaves. It is DEFENCE IN DEPTH, NOT a guarantee: it
+# catches NONE of names, addresses, sort codes, account numbers, SSNs, phones, or
+# values typed into prose — those are out of scope of a regex scan. The real
+# guarantee remains the schema-only design (see docs/admins/ai-privacy.md). Run
+# `mooring ai pii check` to scan your files offline before enabling it.
+[ai.pii]
+enabled = false             # master switch; off = behaviour is byte-identical to today
+block_prompt = true         # on a hit, HOLD the chat prompt and make the analyst
+                            # confirm "send anyway" (set false for a warn-only advisory)
+scan_notebook_source = true # show a one-time banner if the notebook/its schema looks
+                            # like it contains PII (kill-switch for identifier-dense notebooks)

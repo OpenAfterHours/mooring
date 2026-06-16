@@ -41,6 +41,13 @@ Keep both tabs side by side: chat on one, the marimo notebook on the other.
     Anything you type into a cell or the chat is visible to the assistant. Refer
     to columns by name — don't paste actual data values.
 
+    If your admin has turned on the **structured-PII scan**, a message that looks
+    like it contains a payment card, IBAN, NHS number, email, or UK NINO is **held**
+    and you'll see a **"Send anyway"** prompt — nothing is sent until you confirm.
+    It's a best-effort safety net: it won't catch names, sort codes, or account
+    numbers, so the rule still stands. See
+    [the privacy page](../admins/ai-privacy.md#structured-pii-pre-flight-scan-opt-in-best-effort).
+
 ## Team context (optional)
 
 If your admin enables it (`[ai] context = true`), the copilot also reads a

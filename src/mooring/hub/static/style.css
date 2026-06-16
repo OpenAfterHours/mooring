@@ -209,6 +209,15 @@ body.chat-body { height: 100dvh; display: flex; flex-direction: column; }
   max-width: 95%;
 }
 .msg.proposal { width: 100%; max-width: 100%; }
+/* outbound-PII guard: held prompt (warn-and-confirm) and warn-only advisories */
+.msg.pii-hold, .msg.pii-notice {
+  width: 100%;
+  max-width: 100%;
+  border-color: var(--warn);
+  border-left: 3px solid var(--warn);
+}
+.msg.pii-notice { color: var(--warn); font-size: 0.92rem; }
+.msg.pii-hold p { margin-bottom: 0.6rem; }
 /* rendered markdown inside assistant bubbles */
 .msg-assistant p { margin: 0 0 0.5rem; }
 .msg-assistant p:last-child { margin-bottom: 0; }

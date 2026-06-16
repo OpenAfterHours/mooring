@@ -65,6 +65,8 @@ class AIProvider(Protocol):
         model: str | None = None,
         reasoning_effort: str | None = None,
         dictionary=None,
+        pii_enabled: bool = False,
+        pii_block: bool = True,
     ):
         """Open a long-lived, streaming chat session (a ``ChatBroadcaster``).
 

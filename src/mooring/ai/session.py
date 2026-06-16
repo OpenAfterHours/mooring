@@ -61,8 +61,11 @@ class CopilotChatSession(ChatBroadcaster):
         notebook_rel: str,
         reasoning_effort: str | None = None,
         dictionary=None,
+        pii_enabled: bool = False,
+        pii_block: bool = True,
     ) -> None:
         super().__init__()
+        self.configure_pii(enabled=pii_enabled, block=pii_block)
         self._model = (model or "").strip()
         self._reasoning_effort = (reasoning_effort or "").strip() or None
         guide = _TOOL_GUIDE
@@ -143,6 +146,7 @@ class CopilotChatSession(ChatBroadcaster):
             notebook_rel=self._notebook_rel,
             emit_proposal=self._emit_proposal,
             dictionary=self._dictionary,
+            pii_enabled=self._pii_enabled,
         )
         extra = {}
         if self._reasoning_effort:
@@ -209,6 +213,22 @@ class CopilotChatSession(ChatBroadcaster):
         self.touch()
         if self._loop is None or self._session is None:
             raise AIError("Chat session is not ready.")
+        text = self._pii_gate(text)
+        if text is None:
+            return  # held pending the analyst's "Send anyway" (see send_confirmed)
+        self._forward(text)
+
+    def send_confirmed(self, token: str) -> None:
+        """Forward a prompt the analyst chose to send despite the PII warning."""
+        self.touch()
+        if self._loop is None or self._session is None:
+            raise AIError("Chat session is not ready.")
+        text = self._pii_take(token)
+        if text is None:
+            raise AIError("That message has expired — please retype it.")
+        self._forward(text)
+
+    def _forward(self, text: str) -> None:
         future = asyncio.run_coroutine_threadsafe(self._session.send(text), self._loop)
         try:
             future.result(timeout=_SEND_TIMEOUT)
