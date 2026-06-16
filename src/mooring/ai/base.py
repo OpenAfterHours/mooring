@@ -67,6 +67,10 @@ class AIProvider(Protocol):
         dictionary=None,
         pii_enabled: bool = False,
         pii_block: bool = True,
+        pii_names: bool = False,
+        pii_name_labels: tuple[str, ...] | None = None,
+        pii_name_threshold: float = 0.7,
+        pii_name_model: str | None = None,
     ):
         """Open a long-lived, streaming chat session (a ``ChatBroadcaster``).
 

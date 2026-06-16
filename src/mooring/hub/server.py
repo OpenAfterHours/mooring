@@ -483,7 +483,14 @@ class Hub:
             # Warn-only: the notebook source is the analyst's own working file, so we
             # never mutate it — we surface a value-free banner and let them decide.
             pii_banner += [
-                {"where": f"{notebook_rel}:{f.line}", "kind": f.kind} for f in pii.scan(source)
+                {"where": f"{notebook_rel}:{f.line}", "kind": f.kind}
+                for f in pii.scan_prose(
+                    source,
+                    names=self.app_cfg.ai_pii_names,
+                    labels=self.app_cfg.ai_pii_name_labels,
+                    threshold=self.app_cfg.ai_pii_name_threshold,
+                    model=self.app_cfg.ai_pii_name_model,
+                )
             ]
 
         # Schemas of dataframes LIVE in the running kernel — covers data loaded
@@ -590,6 +597,12 @@ class Hub:
             dictionary=dictionary,
             pii_enabled=self.app_cfg.ai_pii,
             pii_block=self.app_cfg.ai_pii_block_prompt,
+            # NER name detection only acts when the whole guard is on; the session
+            # lazily loads the model on first flagged prompt (best-effort, loud).
+            pii_names=self.app_cfg.ai_pii and self.app_cfg.ai_pii_names,
+            pii_name_labels=self.app_cfg.ai_pii_name_labels,
+            pii_name_threshold=self.app_cfg.ai_pii_name_threshold,
+            pii_name_model=self.app_cfg.ai_pii_name_model,
         )
 
     def _reap_idle_chats(self) -> None:

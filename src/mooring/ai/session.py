@@ -63,9 +63,20 @@ class CopilotChatSession(ChatBroadcaster):
         dictionary=None,
         pii_enabled: bool = False,
         pii_block: bool = True,
+        pii_names: bool = False,
+        pii_name_labels: tuple[str, ...] | None = None,
+        pii_name_threshold: float = 0.7,
+        pii_name_model: str | None = None,
     ) -> None:
         super().__init__()
-        self.configure_pii(enabled=pii_enabled, block=pii_block)
+        self.configure_pii(
+            enabled=pii_enabled,
+            block=pii_block,
+            names=pii_names,
+            labels=pii_name_labels,
+            threshold=pii_name_threshold,
+            model=pii_name_model,
+        )
         self._model = (model or "").strip()
         self._reasoning_effort = (reasoning_effort or "").strip() or None
         guide = _TOOL_GUIDE

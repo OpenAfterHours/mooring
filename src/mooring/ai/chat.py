@@ -50,6 +50,11 @@ class ChatBroadcaster:
         # Outbound-PII guard state (see _pii_gate). Off unless configure_pii says so.
         self._pii_enabled = False
         self._pii_block = True
+        # Optional NER name detection (Phase 2) — see mooring.ai.ner. Off unless armed.
+        self._pii_names = False
+        self._pii_name_labels: tuple[str, ...] | None = None
+        self._pii_name_threshold = 0.7
+        self._pii_name_model: str | None = None
         self._pending: dict[str, str] = {}  # confirm-token -> held prompt text
         # The live-kernel schema the model has last been shown (the system-context
         # snapshot at open, then the most recent per-turn refresh). A turn re-injects
@@ -91,10 +96,27 @@ class ChatBroadcaster:
 
     # -- outbound PII guard (Channel A) -------------------------------------
 
-    def configure_pii(self, *, enabled: bool, block: bool) -> None:
-        """Arm the prompt guard for this session (called at construction)."""
+    def configure_pii(
+        self,
+        *,
+        enabled: bool,
+        block: bool,
+        names: bool = False,
+        labels: tuple[str, ...] | None = None,
+        threshold: float = 0.7,
+        model: str | None = None,
+    ) -> None:
+        """Arm the prompt guard for this session (called at construction).
+
+        ``names`` (with ``labels``/``threshold``/``model``) additionally enables the
+        local NER name pass — see :func:`mooring.ai.pii.guard_prompt`.
+        """
         self._pii_enabled = enabled
         self._pii_block = block
+        self._pii_names = names
+        self._pii_name_labels = labels
+        self._pii_name_threshold = threshold
+        self._pii_name_model = model
 
     def _pii_gate(self, text: str) -> str | None:
         """THE shared outbound-prompt valve, used by every session class.
@@ -106,7 +128,13 @@ class ChatBroadcaster:
         broadcasting ``scan_error`` so the analyst sees the guard did not run.
         """
         hold, findings, scan_error = pii.guard_prompt(
-            text, enabled=self._pii_enabled, block=self._pii_block
+            text,
+            enabled=self._pii_enabled,
+            block=self._pii_block,
+            names=self._pii_names,
+            labels=self._pii_name_labels,
+            threshold=self._pii_name_threshold,
+            model=self._pii_name_model,
         )
         if scan_error:
             self._broadcast(ChatEvent("pii", {"findings": [], "scan_error": True}))
@@ -163,12 +191,27 @@ class StubChatSession(ChatBroadcaster):
     """
 
     def __init__(
-        self, *, system_context: str = "", pii_enabled: bool = False, pii_block: bool = True
+        self,
+        *,
+        system_context: str = "",
+        pii_enabled: bool = False,
+        pii_block: bool = True,
+        pii_names: bool = False,
+        pii_name_labels: tuple[str, ...] | None = None,
+        pii_name_threshold: float = 0.7,
+        pii_name_model: str | None = None,
     ) -> None:
         super().__init__()
         self.system_context = system_context  # stored so tests can prove it's value-free
         self.last_sent = ""  # exact text forwarded, incl. any live-schema prefix (tests)
-        self.configure_pii(enabled=pii_enabled, block=pii_block)
+        self.configure_pii(
+            enabled=pii_enabled,
+            block=pii_block,
+            names=pii_names,
+            labels=pii_name_labels,
+            threshold=pii_name_threshold,
+            model=pii_name_model,
+        )
 
     def send(self, text: str, live_schema_text: str = "") -> None:
         self.touch()

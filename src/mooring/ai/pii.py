@@ -24,7 +24,10 @@ it trains analysts to ignore the warning):
   matched substring — so the scanner's own output can be logged and shown safely.
 * What it CANNOT catch, by construction: names, addresses, account/customer
   narratives, UK sort codes, US SSNs, phone numbers, dates of birth, IP
-  addresses. A clean scan is **not** a value-free guarantee.
+  addresses. A clean scan is **not** a value-free guarantee. (Person NAMES can be
+  caught by the optional local NER pass in :mod:`mooring.ai.ner` — Phase 2, opt-in
+  via the ``mooring[pii]`` extra; combined with this scanner in :func:`scan_prose`
+  and :func:`guard_prompt`.)
 
 Pure stdlib (``re`` + integer arithmetic): no third-party dependency, so it ships
 in the lean wheel and freezes into the single-minor ``.pyz`` with no size impact.
@@ -246,20 +249,68 @@ def scrub_columns(
     return tuple(kept), findings
 
 
-def guard_prompt(text: str, *, enabled: bool, block: bool) -> tuple[bool, list[Finding], bool]:
+def scan_prose(
+    text: str,
+    *,
+    names: bool = False,
+    labels: tuple[str, ...] | None = None,
+    threshold: float = 0.7,
+    model: str | None = None,
+) -> list[Finding]:
+    """Structured-PII findings, plus NER names when ``names`` and the extra is ready.
+
+    The ADVISORY scanner (notebook-source banner, ``mooring ai pii check``): a
+    missing/failed NER backend degrades SILENTLY to structured-only. The enforcing
+    prompt valve (:func:`guard_prompt`) is strict instead — it reports the failure.
+    """
+    findings = scan(text)
+    if names:
+        try:
+            from mooring.ai import ner
+
+            findings = findings + ner.scan_names(
+                text, labels=labels, threshold=threshold, model=model
+            )
+        except Exception:  # noqa: BLE001 - advisory path: never fail the caller
+            pass
+    return findings
+
+
+def guard_prompt(
+    text: str,
+    *,
+    enabled: bool,
+    block: bool,
+    names: bool = False,
+    labels: tuple[str, ...] | None = None,
+    threshold: float = 0.7,
+    model: str | None = None,
+) -> tuple[bool, list[Finding], bool]:
     """Evaluate an outbound chat prompt. Returns ``(hold, findings, scan_error)``.
 
     THE shared prompt valve, called identically by both chat-session classes so
     the policy and its fail mode live in one place. ``hold`` is True only when the
-    feature is on, ``block`` is on, the scan succeeded, and there is a hit — the
-    caller must then NOT forward the text. On a scan exception it FAILS OPEN
-    (``hold=False``) but reports ``scan_error=True`` so the caller can be loud
-    about the guard not having run.
+    feature is on, ``block`` is on, a scan succeeded, and there is a hit — the
+    caller must then NOT forward the text.
+
+    When ``names`` is set, an optional LOCAL NER pass (:mod:`mooring.ai.ner`) also
+    flags person names. Either scanner failing FAILS OPEN for that scanner but sets
+    ``scan_error=True`` so the caller can be loud that the guard did not fully run —
+    e.g. ``names`` is configured but the ``mooring[pii]`` extra isn't installed.
     """
     if not enabled:
         return False, [], False
+    findings: list[Finding] = []
+    scan_error = False
     try:
-        findings = scan(text)
+        findings += scan(text)
     except Exception:  # noqa: BLE001 - fail open on the live path, but report it
-        return False, [], True
-    return (bool(findings) and block), findings, False
+        scan_error = True
+    if names:
+        try:
+            from mooring.ai import ner
+
+            findings += ner.scan_names(text, labels=labels, threshold=threshold, model=model)
+        except Exception:  # noqa: BLE001 - extra missing / model load / inference error
+            scan_error = True
+    return (bool(findings) and block), findings, scan_error

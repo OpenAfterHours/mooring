@@ -189,6 +189,32 @@ a fallback when no OS credential store is available; normally it's in the
 credential store instead. Run `selftest` to print the exact paths on a given
 machine.
 
+## Editing the user config from the command line
+
+Rather than hand-editing the file, `mooring config` reads and writes it by
+**dotted key** (`section.subsection.key`). It touches only the user file and
+leaves every other setting in place:
+
+```
+mooring config set ai.pii.enabled true          # bool
+mooring config set ai.pii.name_threshold 0.6     # number
+mooring config set ai.pii.name_labels person name organization   # several tokens = a list
+mooring config get ai.pii.enabled                # print the effective value
+mooring config unset ai.pii.enabled              # remove the key (revert to the default)
+mooring config list                              # print the whole effective config
+mooring config path                              # print the config.toml location
+```
+
+Value typing is automatic: `true`/`false` become booleans, `5`/`0.6` become
+numbers, **several tokens become a string list**, and anything else (a path or
+model id like `urchade/gliner_multi_pii-v1`) stays a string. To force a string
+that looks numeric, quote it as a TOML literal, e.g. `set some.key '"123"'`.
+
+`get` and `list` show the **effective** value (packaged default merged with your
+file); they do **not** reflect a one-run [environment-variable](#environment-variables)
+override. This works for any key, including the `[ai]` / `[ai.pii]` settings
+documented in [AI privacy](ai-privacy.md).
+
 ## The runtime setup form
 
 If a build ships **without** `client_id` / `owner` / `repo`, the hub shows a

@@ -36,6 +36,8 @@ python mooring.pyz deps remove polars
 python mooring.pyz deps list
 python mooring.pyz deps lock
 python mooring.pyz build-requirements [-o FILE]
+python mooring.pyz config set <key> <value...> | config get <key>
+python mooring.pyz config unset <key> | config list | config path
 python mooring.pyz selftest
 python mooring.pyz version
 ```
@@ -177,6 +179,24 @@ notebook then shows as *deleted locally* in `status`. Run `push` (or `propose`)
 afterwards to remove it from the team repo for everyone; a notebook you never
 shared just disappears. You are asked to confirm first — pass `-y`/`--yes` to
 skip the prompt (required when running non-interactively, e.g. from a script).
+
+### `config`
+
+Read and edit your user `config.toml` by **dotted key**, without hand-editing the
+file (every other setting is preserved):
+
+```
+python mooring.pyz config set ai.pii.enabled true
+python mooring.pyz config set ai.pii.name_labels person name organization
+python mooring.pyz config get ai.pii.enabled        # effective value
+python mooring.pyz config unset ai.pii.enabled      # revert to the default
+python mooring.pyz config list                      # whole effective config
+python mooring.pyz config path                      # config.toml location
+```
+
+`true`/`false` become booleans and numbers are parsed; several tokens become a
+list; anything else stays a string. See
+[Configuration → editing from the command line](../admins/configuration.md#editing-the-user-config-from-the-command-line).
 
 ### `selftest`
 

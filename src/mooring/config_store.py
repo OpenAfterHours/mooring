@@ -128,3 +128,73 @@ def set_active(alias: str) -> None:
         raise KeyError(alias)
     data["repos"]["active"] = alias
     write_user_data(data)
+
+
+# -- generic dotted-key access (the `mooring config` command) -------------------
+
+
+def _split_key(dotted_key: str) -> list[str]:
+    parts = [p.strip() for p in dotted_key.split(".")]
+    if not dotted_key or any(not p for p in parts):
+        raise ValueError(
+            f"Invalid config key {dotted_key!r}: use dotted names like 'ai.pii.enabled'."
+        )
+    return parts
+
+
+def set_value(dotted_key: str, value) -> None:
+    """Set a dotted key (e.g. ``ai.pii.enabled``) in the user config.toml, creating
+    intermediate tables as needed. Every other setting in the file is preserved.
+
+    Deliberately does NOT materialize the repo registry (unlike the repo helpers):
+    a generic edit must not inject a ``[repos]`` section and disturb repo resolution.
+    """
+    keys = _split_key(dotted_key)
+    data = read_user_data()
+    node = data
+    for k in keys[:-1]:
+        child = node.get(k)
+        if not isinstance(child, dict):
+            child = {}
+            node[k] = child
+        node = child
+    node[keys[-1]] = value
+    write_user_data(data)
+
+
+def unset_value(dotted_key: str) -> bool:
+    """Remove a dotted key from the user config.toml (reverting it to the packaged
+    default). Returns False if the key wasn't present. Prunes tables left empty."""
+    keys = _split_key(dotted_key)
+    data = read_user_data()
+    node = data
+    parents = [node]
+    for k in keys[:-1]:
+        child = node.get(k)
+        if not isinstance(child, dict):
+            return False
+        node = child
+        parents.append(node)
+    if keys[-1] not in node:
+        return False
+    del node[keys[-1]]
+    for k, parent in zip(reversed(keys[:-1]), reversed(parents[:-1])):
+        child = parent.get(k)
+        if isinstance(child, dict) and not child:
+            del parent[k]
+        else:
+            break
+    write_user_data(data)
+    return True
+
+
+def get_value(dotted_key: str):
+    """The effective value (packaged default merged with the user file) for a dotted
+    key. Raises KeyError if it is set nowhere. Reflects the config FILES, not
+    ephemeral environment-variable overrides applied at load time."""
+    node: object = config.merged_data()
+    for k in _split_key(dotted_key):
+        if not isinstance(node, dict) or k not in node:
+            raise KeyError(dotted_key)
+        node = node[k]
+    return node

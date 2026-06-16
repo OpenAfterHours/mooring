@@ -100,3 +100,16 @@ block_prompt = true         # on a hit, HOLD the chat prompt and make the analys
                             # confirm "send anyway" (set false for a warn-only advisory)
 scan_notebook_source = true # show a one-time banner if the notebook/its schema looks
                             # like it contains PII (kill-switch for identifier-dense notebooks)
+
+# Phase 2 — optional NAME detection (catches "Jane Smith", which the structured
+# scan above cannot). Needs the `mooring[pii]` extra (pip install mooring[pii]),
+# which adds a LOCAL zero-shot NER model — text is scanned on this machine, never
+# sent anywhere to be scanned; only a one-time model download hits the network
+# (pre-fetch with `mooring ai pii model`). Best-effort, not a guarantee. Only acts
+# when `enabled` above is true.
+detect_names = false        # turn on local NER name detection
+name_model = "urchade/gliner_multi_pii-v1"  # GLiNER model id (downloaded on first use)
+name_labels = ["person", "name"]            # entity labels to flag (zero-shot, so any
+                            # label works); add "organization" to also flag business
+                            # names, e.g. ["person", "name", "organization"]
+name_threshold = 0.7        # confidence cut-off; raise for fewer/safer hits, lower for more
