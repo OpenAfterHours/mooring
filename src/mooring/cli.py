@@ -741,11 +741,21 @@ def cmd_ai_pii_check(app_cfg: config.AppConfig, cfg: config.Config, args: argpar
     workspace = cfg.workspace()
     ctx_dir = app_cfg.ai_context_dir
     index = datadictionary.load_index(workspace, ctx_dir)
-    names = app_cfg.ai_pii_names and ner.available()
+    ref = ner.ModelRef(
+        app_cfg.ai_pii_name_model, app_cfg.ai_pii_name_revision, app_cfg.ai_pii_name_variant
+    )
+    # Only run NER when the model is already cached — a lint must not trigger a
+    # surprise download. Otherwise fall back to structured-only with a note.
+    names = app_cfg.ai_pii_names and ner.available() and ner.is_cached(ref)
     if app_cfg.ai_pii_names and not ner.available():
         print(
             "Note: detect_names is ON but the 'pii' extra isn't installed - scanning\n"
             "      structured PII only. Install it: pip install mooring[pii]\n"
+        )
+    elif app_cfg.ai_pii_names and not names:
+        print(
+            "Note: detect_names is ON but the model isn't downloaded yet - scanning\n"
+            "      structured PII only. Fetch it first: mooring ai pii model\n"
         )
     findings = _scan_pii_targets(
         workspace,
@@ -756,7 +766,7 @@ def cmd_ai_pii_check(app_cfg: config.AppConfig, cfg: config.Config, args: argpar
         names=names,
         labels=app_cfg.ai_pii_name_labels,
         threshold=app_cfg.ai_pii_name_threshold,
-        model=app_cfg.ai_pii_name_model,
+        model=ref,
     )
     if not app_cfg.ai_pii:
         print("Note: [ai.pii] enabled is OFF - set it true to actually enforce this in the chat.\n")
@@ -782,17 +792,37 @@ def cmd_ai_pii_model(app_cfg: config.AppConfig, cfg: config.Config, args: argpar
     if not ner.available():
         print("The 'pii' extra is not installed. Install it: pip install mooring[pii]")
         return 1
-    mid = app_cfg.ai_pii_name_model
-    print(f"Loading NER model {mid!r} (first run downloads it from Hugging Face)…")
+    ref = ner.ModelRef(
+        app_cfg.ai_pii_name_model, app_cfg.ai_pii_name_revision, app_cfg.ai_pii_name_variant
+    )
+    label = app_cfg.ai_pii_name_model + (f" (variant {ref.variant})" if ref.variant else "")
+    if ner.is_cached(ref):
+        print(f"NER model {label} is already downloaded and ready.")
+        if not app_cfg.ai_pii_names:
+            print("Note: [ai.pii] detect_names is OFF - set it (and enabled) true to use it.")
+        return 0
+    print(f"Downloading NER model {label} from Hugging Face (safetensors only).")
+    print("This is a one-time download and resumes if interrupted;")
+    print("it caches under your home directory and won't download again on later runs.\n")
     try:
-        ner.load_model(mid)
+        ner.download_model(ref, on_progress=_print_download_progress)
+        ner.load_model(ref)
     except ner.NerUnavailable as exc:
-        print(f"Failed: {exc}")
+        print(f"\nFailed: {exc}")
+        print("Tip: an HF_TOKEN raises the anonymous rate limit; a smaller model id in")
+        print("[ai.pii] name_model downloads faster. Re-run to resume.")
         return 1
-    print("OK - model is cached and ready for offline name detection.")
+    print("\nOK - model is cached and ready for offline name detection.")
     if not app_cfg.ai_pii_names:
         print("Note: [ai.pii] detect_names is OFF - set it (and enabled) true to use it in the chat.")
     return 0
+
+
+def _print_download_progress(done: int, total: int) -> None:
+    pct = int(done * 100 / total) if total else 0
+    mb = 1024 * 1024
+    sys.stdout.write(f"\r  downloading… {pct:3d}%  ({done // mb} / {total // mb} MB)")
+    sys.stdout.flush()
 
 
 def _scan_pii_targets(

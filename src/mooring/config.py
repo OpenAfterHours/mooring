@@ -93,8 +93,12 @@ class AppConfig:
     ai_pii_scan_source: bool = True
     # Phase 2: optional LOCAL NER name detection (needs the `mooring[pii]` extra).
     # Only acts when ai_pii is also on. See mooring.ai.ner / docs/admins/ai-privacy.md.
+    # The default model is a SAFETENSORS build loaded as its bf16 variant (no pickle),
+    # pinned to a commit for reproducibility.
     ai_pii_names: bool = False
-    ai_pii_name_model: str = "urchade/gliner_multi_pii-v1"
+    ai_pii_name_model: str = "gliner-community/gliner_small-v2.5"
+    ai_pii_name_revision: str = "f227d3cd637bd4e6757ae143935316d062393341"
+    ai_pii_name_variant: str = "bf16"
     ai_pii_name_labels: tuple[str, ...] = ("person", "name")
     ai_pii_name_threshold: float = 0.7
 
@@ -314,7 +318,14 @@ def load_app_config(
         ),
         ai_pii_name_model=env.get(
             "MOORING_AI_PII_NAME_MODEL",
-            str(ai_pii.get("name_model", "urchade/gliner_multi_pii-v1")),
+            str(ai_pii.get("name_model", "gliner-community/gliner_small-v2.5")),
+        ),
+        ai_pii_name_revision=env.get(
+            "MOORING_AI_PII_NAME_REVISION",
+            str(ai_pii.get("name_model_revision", "f227d3cd637bd4e6757ae143935316d062393341")),
+        ),
+        ai_pii_name_variant=env.get(
+            "MOORING_AI_PII_NAME_VARIANT", str(ai_pii.get("name_model_variant", "bf16"))
         ),
         ai_pii_name_labels=_str_list(
             ai_pii.get("name_labels", ("person", "name")), "name_labels"

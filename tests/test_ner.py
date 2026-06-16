@@ -78,6 +78,29 @@ def test_scan_names_passes_labels_and_threshold(fake_ner):
 # -- kind mapping --------------------------------------------------------------
 
 
+def test_resolve_model_ref_defaults():
+    # None -> the pinned safetensors default (id + revision + bf16 variant)
+    ref = ner._resolve(None)
+    assert ref.id == "gliner-community/gliner_small-v2.5"
+    assert ref.revision == "f227d3cd637bd4e6757ae143935316d062393341"
+    assert ref.variant == "bf16"
+    # a bare string -> that id, latest commit, repo-default weights (no variant)
+    bare = ner._resolve("some/model")
+    assert bare == ner.ModelRef("some/model", "", "")
+    # an explicit ref passes through untouched
+    explicit = ner.ModelRef("x/y", "abc", "fp16")
+    assert ner._resolve(explicit) is explicit
+
+
+def test_allow_patterns_fetch_only_safetensors_variant():
+    # a variant restricts the download to that safetensors file (never pytorch_model.bin)
+    pats = ner._allow_patterns("bf16")
+    assert "model.bf16.safetensors" in pats
+    assert not any("pytorch_model.bin" in p for p in pats)
+    # no variant -> no restriction (download the repo's default weights file)
+    assert ner._allow_patterns("") is None
+
+
 def test_kind_for_maps_person_and_org_labels():
     assert ner._kind_for("person") == ner.NAME
     assert ner._kind_for("Name") == ner.NAME
@@ -98,3 +121,12 @@ def test_unavailable_without_extra_raises_loudly():
     assert ner.available() is False
     with pytest.raises(ner.NerUnavailable):
         ner.scan_names("contact Jon Harrison")
+
+
+def test_cli_pii_model_reports_already_cached(monkeypatch, capsys):
+    from mooring.cli import main
+
+    monkeypatch.setattr(ner, "available", lambda: True)
+    monkeypatch.setattr(ner, "is_cached", lambda mid=None: True)
+    assert main(["ai", "pii", "model"]) == 0
+    assert "already downloaded" in capsys.readouterr().out

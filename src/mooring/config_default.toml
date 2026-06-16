@@ -108,7 +108,13 @@ scan_notebook_source = true # show a one-time banner if the notebook/its schema 
 # (pre-fetch with `mooring ai pii model`). Best-effort, not a guarantee. Only acts
 # when `enabled` above is true.
 detect_names = false        # turn on local NER name detection
-name_model = "urchade/gliner_multi_pii-v1"  # GLiNER model id (downloaded on first use)
+# Default model is a SAFETENSORS build loaded as its bf16 variant — no pickle
+# (`pytorch_model.bin`) is ever downloaded or loaded — pinned to a commit for
+# reproducibility/review. Set name_model_variant = "" for a model that has no
+# variant safetensors (it then loads the repo's default weights file).
+name_model = "gliner-community/gliner_small-v2.5"  # GLiNER model id (downloaded on first use)
+name_model_revision = "f227d3cd637bd4e6757ae143935316d062393341"  # pinned commit ("" = latest)
+name_model_variant = "bf16" # safetensors variant to load ("" = repo default weights file)
 name_labels = ["person", "name"]            # entity labels to flag (zero-shot, so any
                             # label works); add "organization" to also flag business
                             # names, e.g. ["person", "name", "organization"]

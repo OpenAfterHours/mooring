@@ -16,9 +16,6 @@
   <main>
     <section class="card context-bar">
       <div class="context-row">
-        <label>Dataset
-          <select id="chat-dataset"><option value="">(none — notebook source only)</option></select>
-        </label>
         <label>Model
           <select id="chat-model"></select>
         </label>
@@ -27,9 +24,11 @@
         </label>
       </div>
       <div id="chat-status" class="muted"></div>
-      <p class="hint">The assistant can see this notebook's code and the selected dataset's
-        <b>schema</b> (column names &amp; types) — never the data itself. Don't paste real values
-        into a cell or this chat.</p>
+      <div id="ner-status" class="ner-status hidden"></div>
+      <p class="hint">The assistant can see this notebook's code and the <b>schema</b>
+        (column names &amp; types) of your datasets and loaded dataframes — never the data
+        itself. It looks schemas up on its own; just ask. Don't paste real values into a
+        cell or this chat.</p>
     </section>
 
     <section id="messages" class="card"></section>

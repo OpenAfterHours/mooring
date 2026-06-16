@@ -221,18 +221,27 @@ Its privacy properties match the structured scan:
   the label and character offset, maps it to a line number, and **drops the text**.
   A finding is `(line, "person name")` — never the name — so it logs and streams
   over SSE as safely as the structured kinds. Pinned by `tests/test_ner.py`.
+- **No pickle, pinned.** The default model (`gliner-community/gliner_small-v2.5`) is
+  loaded as its **safetensors** `bf16` variant — `mooring ai pii model` fetches *only*
+  the safetensors file, never the repo's `pytorch_model.bin`, so nothing is unpickled.
+  It is **pinned to a specific commit** (`name_model_revision`) for reproducibility and
+  so a security review is against a fixed artifact.
 - **Same egress + UI.** A flagged chat prompt is held with the same "Send anyway"
-  confirm; `mooring ai pii check` runs the name pass too (when the extra is present)
-  for the offline lint. At the chat prompt, a configured-but-uninstalled extra
-  **fails loud** (a `scan_error` advisory) rather than silently doing nothing.
+  confirm; `mooring ai pii check` runs the name pass too (when the model is already
+  cached) for the offline lint. At the chat prompt, a configured-but-uninstalled extra
+  **fails loud** (a `scan_error` advisory) rather than silently doing nothing; while the
+  model is still downloading the name pass is skipped (the message is still structurally
+  scanned) and the chat shows a "preparing model" status.
 
-Configure under `[ai.pii]`: `detect_names` (on/off), `name_model` (the GLiNER id),
-`name_labels` (entity labels to flag), and `name_threshold` (confidence cut-off;
-raise for fewer, safer hits). GLiNER is zero-shot, so `name_labels` is not limited
-to people — add `"organization"` to also flag **business names** (surfaced as an
-`organization` finding); other entity types (e.g. `"address"`) work the same way.
-Capitalised non-person terms make organisation detection more false-positive-prone,
-so it stays out of the default. Install and enable:
+Configure under `[ai.pii]`: `detect_names` (on/off), `name_model` / `name_model_revision`
+/ `name_model_variant` (which model, pinned commit, and safetensors variant —
+`name_model_variant = ""` loads a repo's default weights file for a model that has no
+variant safetensors), `name_labels` (entity labels to flag), and `name_threshold`
+(confidence cut-off; raise for fewer, safer hits). GLiNER is zero-shot, so `name_labels`
+is not limited to people — add `"organization"` to also flag **business names** (surfaced
+as an `organization` finding); other entity types (e.g. `"address"`) work the same way.
+Capitalised non-person terms make organisation detection more false-positive-prone, so it
+stays out of the default. Install and enable:
 
 ```toml
 [ai.pii]
@@ -240,9 +249,35 @@ enabled = true
 detect_names = true
 ```
 ```
-pip install mooring[pii]      # or: uvx mooring[pii]
-mooring ai pii model          # pre-download the model (optional but recommended)
+pip install mooring[pii]      # or: uvx mooring[pii]  (combine extras: mooring[copilot,pii])
+mooring ai pii model          # pre-download the model (recommended)
 ```
+
+## Deploying name detection in an institutional / offline environment
+
+The model download is the only part of mooring that reaches a non-GitHub host
+(Hugging Face). In a locked-down environment, plan for:
+
+- **Firewall allow-list.** Outbound HTTPS is needed to `huggingface.co` **and** the
+  file backends — the LFS CDN and the newer **Xet** hosts (`cas-bridge.xethub.hf.co`,
+  `*.xethub.hf.co`). Allow-listing only `huggingface.co` passes the metadata fetch and
+  then fails on the actual download.
+- **TLS / SSL-intercepting proxy.** mooring enables the **OS trust store** globally
+  (`truststore`), so Hugging Face traffic honours your proxy's root CA automatically,
+  the same way GitHub traffic does — no separate CA bundle needed in the normal case.
+  `REQUESTS_CA_BUNDLE` / `SSL_CERT_FILE` still take precedence if you set them.
+- **Proxy / rate limits.** `HTTPS_PROXY` / `NO_PROXY` are honoured; set an `HF_TOKEN`
+  to lift the anonymous-download rate limit (faster, fewer throttles).
+- **Air-gapped (no egress).** Either point at an internal mirror with
+  `HF_ENDPOINT=https://<your-hf-proxy>` (e.g. Artifactory/Nexus), **or** provision the
+  cache out-of-band: run `mooring ai pii model` on a connected machine, copy
+  `~/.cache/huggingface` (or set a shared `HF_HOME`) to the target machines, and set
+  `HF_HUB_OFFLINE=1`. Relocate the cache with `HF_HOME` if the user profile is small
+  or roaming.
+- **Model governance.** The weights are a third-party artifact. The pinned default is
+  safetensors (no code-execution-on-load risk that a pickle `pytorch_model.bin` carries),
+  loaded locally; review the pinned `name_model` + `name_model_revision` through your
+  model-risk process, and re-pin a new revision only after review.
 
 ## The one thing to watch
 

@@ -45,6 +45,21 @@ function setStatus(text) {
   $("chat-status").textContent = text || "";
 }
 
+let nerHideTimer = null;
+function setNerStatus(text, { error = false, transient = false } = {}) {
+  const el = $("ner-status");
+  if (nerHideTimer) {
+    clearTimeout(nerHideTimer);
+    nerHideTimer = null;
+  }
+  el.textContent = text || "";
+  el.classList.toggle("ner-error", !!error);
+  el.classList.toggle("hidden", !text);
+  if (text && transient) {
+    nerHideTimer = setTimeout(() => el.classList.add("hidden"), 4000);
+  }
+}
+
 // -- scrolling --------------------------------------------------------------
 
 function isNearBottom() {
@@ -323,11 +338,10 @@ function selectedEffort() {
 async function openChat() {
   closeStream();
   showError("");
-  const dataset = $("chat-dataset").value;
   const model = $("chat-model").value;
   const reasoning_effort = selectedEffort();
   const { status, data } = await api("/api/ai/chat/open", {
-    notebook: NOTEBOOK, dataset, model, reasoning_effort,
+    notebook: NOTEBOOK, model, reasoning_effort,
   });
   if (!data.sid) {
     showError(data.error || `Could not start the copilot (${status}).`);
@@ -353,17 +367,31 @@ async function openChat() {
   source.addEventListener("idle", () => setTurnState("idle"));
   source.addEventListener("pii", (e) => {
     const d = JSON.parse(e.data);
-    if (d.scan_error) {
-      // Fail-open but loud: the guard could not run; the turn proceeds unchecked.
-      showError("PII pre-flight scan could not run — your message was sent unchecked.");
-      return;
-    }
     const findings = d.findings || [];
     if (d.token) {
       setTurnState("idle"); // drop the thinking bubble; the turn is held
-      addPiiHold(findings, d.token);
-    } else if (findings.length) {
-      addPiiNotice(findings); // advisory only; the turn was forwarded
+      addPiiHold(findings, d.token); // hold wins, even if a scan also errored
+      return;
+    }
+    if (findings.length) addPiiNotice(findings); // advisory only; the turn was forwarded
+    if (d.scan_error) {
+      // Fail-open but loud: a configured scan could not run; the turn went unchecked.
+      showError("PII pre-flight scan could not run — your message was sent unchecked.");
+    }
+  });
+  source.addEventListener("ner", (e) => {
+    const d = JSON.parse(e.data);
+    if (d.state === "downloading") {
+      const pct = typeof d.pct === "number" ? ` ${d.pct}%` : "";
+      setNerStatus(`Preparing name-detection model — one-time download…${pct}`);
+    } else if (d.state === "ready") {
+      setNerStatus("Name detection ready.", { transient: true });
+    } else if (d.state === "error") {
+      setNerStatus(
+        "Name-detection model couldn't be prepared — messages are scanned without it. " +
+          "Try `mooring ai pii model`.",
+        { error: true },
+      );
     }
   });
   source.addEventListener("fail", (e) => {
@@ -374,7 +402,6 @@ async function openChat() {
   source.onerror = () => setStatus("Reconnecting…");
   showPiiBanner(data.pii);
   const bits = [];
-  if (dataset) bits.push(`schema: ${dataset}`);
   if (model) bits.push(model + (reasoning_effort ? ` · ${reasoning_effort}` : ""));
   setStatus(bits.join("  ·  ") || "Notebook source in context.");
 }
@@ -458,18 +485,9 @@ async function init() {
     showError("Open the copilot from a notebook's “AI” button.");
     return;
   }
-  const { data: state } = await api("/api/state");
-  const select = $("chat-dataset");
-  for (const ds of state.datasets || []) {
-    const opt = document.createElement("option");
-    opt.value = ds;
-    opt.textContent = ds;
-    select.appendChild(opt);
-  }
   setStatus("Loading models…");
   await loadModels();
 
-  select.addEventListener("change", openChat);
   $("chat-model").addEventListener("change", () => {
     localStorage.setItem(LS_MODEL, $("chat-model").value);
     populateEfforts();
