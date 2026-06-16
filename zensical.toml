@@ -45,11 +45,13 @@ nav = [
     { "Resolving conflicts" = "users/conflicts.md" },
     { "Command-line reference" = "users/cli.md" },
   ] },
+  # Top-level (not nested under "For admins") so the privacy guarantee is always
+  # visible in the nav — it's a trust doc for analysts and reviewers, not just admins.
+  { "AI copilot privacy" = "admins/ai-privacy.md" },
   { "For admins" = [
     { "Overview & checklist" = "admins/index.md" },
     { "GitHub setup" = "admins/github-setup.md" },
     { "Configuration" = "admins/configuration.md" },
-    { "AI copilot privacy" = "admins/ai-privacy.md" },
     { "Build & distribute" = "admins/build-and-distribute.md" },
   ] },
   { "For developers" = [
