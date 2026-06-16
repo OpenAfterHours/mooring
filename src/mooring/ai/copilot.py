@@ -270,11 +270,13 @@ class CopilotProvider:
         notebook_rel: str,
         model: str | None = None,
         reasoning_effort: str | None = None,
+        dictionary=None,
     ):
         """Open a long-lived, streaming, value-blind chat session (the copilot).
 
         The session reuses :func:`hardened_session_kwargs` (the audited privacy
-        config) and adds mooring's safe tools. ``model``/``reasoning_effort``
+        config) and adds mooring's safe tools (plus the dictionary tools when
+        ``dictionary`` is a non-empty index). ``model``/``reasoning_effort``
         override the configured defaults when given. Raises :class:`AIError` on a
         startup/auth/policy failure.
         """
@@ -291,6 +293,7 @@ class CopilotProvider:
             workspace=workspace,
             folders=folders,
             notebook_rel=notebook_rel,
+            dictionary=dictionary,
         )
         session.start()
         return session

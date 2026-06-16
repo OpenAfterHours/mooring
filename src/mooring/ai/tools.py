@@ -16,12 +16,23 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Callable
 
-# The tool names, used as the create_session ``available_tools`` allowlist.
+# The always-on tools. The session's ``available_tools`` allowlist is derived
+# from the tools actually built (these plus the dictionary tools when a data
+# dictionary is present), so it stays in lock-step with what is registered.
 TOOL_NAMES = [
     "mooring_list_datasets",
     "mooring_get_schema",
     "mooring_read_notebook_source",
     "mooring_propose_cell",
+]
+
+# Added only when the workspace has a parsed data dictionary. Each is value-free:
+# it serves the already five-slot-allowlisted in-memory index, looking up by table
+# NAME (never a filesystem path), so it can reach no data file or value.
+DICT_TOOL_NAMES = [
+    "mooring_list_tables",
+    "mooring_describe_table",
+    "mooring_search_dictionary",
 ]
 
 
@@ -50,11 +61,14 @@ def build_tools(
     folders: tuple[str, ...],
     notebook_rel: str,
     emit_proposal: Callable[[str, str], None],
+    dictionary=None,
 ) -> list:
     """Build the safe tools, bound to one workspace + target notebook.
 
     Handlers follow the SDK's ``ToolHandler`` contract: a single ``ToolInvocation``
     argument (``invocation.arguments`` is the parsed args), returning a ToolResult.
+    When ``dictionary`` (a :class:`mooring.ai.datadictionary.DictionaryIndex`) is
+    non-empty, the three value-free dictionary tools are added.
     """
     from copilot.tools import Tool, ToolResult
     from mooring import schema
@@ -94,7 +108,36 @@ def build_tools(
             text_result_for_llm="Proposed the cell to the analyst, who will review and apply it."
         )
 
-    return [
+    def list_tables(_invocation):
+        from mooring.ai.datadictionary import render_listing
+
+        return ToolResult(
+            text_result_for_llm=render_listing(dictionary) or "(the data dictionary is empty)"
+        )
+
+    def describe_table(invocation):
+        from mooring.ai.datadictionary import render_table
+
+        name = str(_args(invocation).get("table", "")).strip()
+        if not name:
+            return ToolResult(text_result_for_llm="", result_type="error", error="table required")
+        table = dictionary.get(name)
+        if table is None:
+            return ToolResult(text_result_for_llm=f"No table named {name!r} in the data dictionary.")
+        return ToolResult(text_result_for_llm=render_table(table))
+
+    def search_dictionary(invocation):
+        from mooring.ai.datadictionary import render_table
+
+        query = str(_args(invocation).get("query", "")).strip()
+        if not query:
+            return ToolResult(text_result_for_llm="", result_type="error", error="query required")
+        hits = dictionary.search(query, limit=8)
+        if not hits:
+            return ToolResult(text_result_for_llm=f"No dictionary tables match {query!r}.")
+        return ToolResult(text_result_for_llm="\n\n".join(render_table(t, max_cols=12) for t in hits))
+
+    tools = [
         Tool(
             "mooring_list_datasets",
             "List the dataset files (parquet/csv/xlsx) available in this workspace.",
@@ -142,3 +185,47 @@ def build_tools(
             skip_permission=True,  # only surfaces a proposal to the analyst; never injects
         ),
     ]
+
+    if dictionary is not None and not dictionary.is_empty():
+        tools += [
+            Tool(
+                "mooring_list_tables",
+                "List the tables in the team data dictionary (grouped by domain). "
+                "Returns table names, column counts, and descriptions — never any data value.",
+                handler=list_tables,
+                parameters={"type": "object", "properties": {}},
+                skip_permission=True,  # serves the value-minimised in-memory index
+            ),
+            Tool(
+                "mooring_describe_table",
+                "Describe one data-dictionary table: its columns' names, types, "
+                "nullability, foreign keys, and descriptions. Never any data value.",
+                handler=describe_table,
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "table": {
+                            "type": "string",
+                            "description": "a table name (optionally domain-qualified, e.g. credit.fact_loans)",
+                        }
+                    },
+                    "required": ["table"],
+                },
+                skip_permission=True,  # name lookup in-memory; never a path, never a value
+            ),
+            Tool(
+                "mooring_search_dictionary",
+                "Search the data dictionary for tables/columns matching a query "
+                "(use before writing a JOIN). Returns matching schemas — never any value.",
+                handler=search_dictionary,
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "a table/column term to search for"}
+                    },
+                    "required": ["query"],
+                },
+                skip_permission=True,  # searches the value-minimised in-memory index
+            ),
+        ]
+    return tools

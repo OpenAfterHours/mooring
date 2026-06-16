@@ -183,6 +183,16 @@ def _build_parser() -> argparse.ArgumentParser:
     ai_login.add_argument(
         "--host", default=None, help="GitHub host URL for Copilot (GHE data residency)"
     )
+    ai_dict = ai_sub.add_parser(
+        "dictionary", help="inspect how the team data dictionary (context/) parses"
+    )
+    ai_dict_sub = ai_dict.add_subparsers(dest="ai_dict_command", required=True)
+    ai_dict_check = ai_dict_sub.add_parser(
+        "check", help="parse context/ dictionaries and report tables, columns, and dropped keys"
+    )
+    ai_dict_check.add_argument(
+        "--repo", default=None, metavar="ALIAS", help="act on this repo instead of the active one"
+    )
 
     sub.add_parser("selftest", help="verify the bundled environment")
     sub.add_parser("version", help="print the version")
@@ -634,13 +644,73 @@ def _unknown_alias(alias: str, app_cfg: config.AppConfig) -> str:
     return f"Unknown repo alias {alias!r}. Known: {known}"
 
 
-def cmd_ai(app_cfg: config.AppConfig, args: argparse.Namespace) -> int:
-    """Manage the AI copilot's Copilot sign-in (login / status).
+def cmd_ai_dictionary_check(app_cfg: config.AppConfig, cfg: config.Config) -> int:
+    """Parse the workspace's data dictionary and report what mooring understood.
 
-    Code generation now lives in the interactive chat (hub "AI" button), not the
-    CLI; this command only handles authentication and readiness.
+    Runs offline (no Copilot needed) so a team can validate their YAML — and the
+    secret scan — before enabling the feature or pushing context to the team.
+    """
+    from mooring.ai import datadictionary
+
+    workspace = cfg.workspace()
+    ctx_dir = app_cfg.ai_context_dir
+    index = datadictionary.load_index(workspace, ctx_dir)
+    if not app_cfg.ai_context:
+        print("Note: [ai] context is OFF — set it true to actually use this in the chat.\n")
+    if not index.reports:
+        print(f"No dictionary files under {ctx_dir}/dictionaries/*.yaml or {ctx_dir}/datadictionary.yaml.")
+        return 0
+    for r in index.reports:
+        if r.error:
+            print(f"  {r.path}: ERROR — {r.error}")
+            continue
+        print(f"  {r.path}: detected {r.shape} - {r.n_tables} tables, {r.n_columns} columns")
+        if r.dropped_keys:
+            print(f"      dropped keys: {', '.join(r.dropped_keys)}")
+    if index.tables:
+        print("\nSample parsed table:")
+        for line in datadictionary.render_table(index.tables[0], max_cols=8).splitlines():
+            print(f"  {line}")
+    findings = _scan_context_secrets(workspace, ctx_dir, index)
+    print("")
+    if findings:
+        print(f"secret scan: {len(findings)} high-confidence finding(s) - fix before sharing:")
+        for path, line, kind in findings:
+            print(f"  {path}:{line}  {kind}")
+        return 1
+    print("secret scan: clean (best-effort - not a guarantee; never paste real values)")
+    return 0
+
+
+def _scan_context_secrets(workspace: Path, ctx_dir: str, index) -> list[tuple[str, int, str]]:
+    from mooring.ai import secrets
+
+    targets = [workspace / ctx_dir / "instructions.md"]
+    targets += [workspace / r.path for r in index.reports if not r.error]
+    findings: list[tuple[str, int, str]] = []
+    for path in targets:
+        if not path.is_file():
+            continue
+        try:
+            text = path.read_text("utf-8", errors="replace")
+        except OSError:
+            continue
+        rel = path.relative_to(workspace).as_posix()
+        findings += [(rel, f.line, f.kind) for f in secrets.scan(text)]
+    return findings
+
+
+def cmd_ai(app_cfg: config.AppConfig, cfg: config.Config, args: argparse.Namespace) -> int:
+    """Manage the AI copilot: Copilot sign-in (login / status) and dictionary check.
+
+    Code generation lives in the interactive chat (hub "AI" button), not the CLI.
     """
     from mooring.ai import AIError, get_provider
+
+    if args.ai_command == "dictionary":
+        if args.ai_dict_command == "check":
+            return cmd_ai_dictionary_check(app_cfg, cfg)
+        return 2
 
     try:
         provider = get_provider(app_cfg)
@@ -682,7 +752,7 @@ def _dispatch(
     if command == "repo":
         return cmd_repo(app_cfg, args)
     if command == "ai":
-        return cmd_ai(app_cfg, args)
+        return cmd_ai(app_cfg, cfg, args)
     if command == "selftest":
         return cmd_selftest(app_cfg, cfg)
     if command == "hub":

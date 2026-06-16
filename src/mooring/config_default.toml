@@ -61,3 +61,20 @@ provider = "copilot"        # AI backend; "copilot" = GitHub Copilot (pluggable)
 model = ""                  # default model id; empty = the provider's default (users can pick in the chat)
 reasoning_effort = ""       # default reasoning effort; empty = the model's default (users can pick per model)
 chat_idle_timeout_sec = 900 # close an idle chat session after this many seconds
+
+# Team context for the copilot — OPT-IN, off by default. When `context = true`,
+# mooring reads `<workspace>/context/` and feeds the assistant:
+#   - instructions.md            free-text guidance (the copilot-instructions.md
+#                                equivalent), sent VERBATIM — never put real values
+#                                or secrets in it; it is secret-scanned and withheld
+#                                on a hit, but that is best-effort, not a guarantee.
+#   - dictionaries/*.yaml        per-domain data dictionaries (dbt schema.yml and
+#                                other shapes auto-detected); reduced to column
+#                                names/types/keys/descriptions only and pulled in
+#                                relevant slices. Run `mooring ai dictionary check`
+#                                to see how your files parse.
+# Unlike the dataset schema (which structurally cannot carry a value), this team
+# context carries whatever the author wrote — see docs/admins/ai-privacy.md.
+context = false             # set true to enable team instructions + data dictionary
+context_dir = "context"     # workspace-relative folder mooring reads context from
+context_max_kb = 256        # cap on the instructions text injected per chat
