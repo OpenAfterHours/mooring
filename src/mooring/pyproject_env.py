@@ -22,8 +22,9 @@ import tomllib
 from pathlib import Path
 
 # The seed only carries marimo (the editor needs it); everything else is the
-# team's choice. Floor matches mooring's own marimo floor.
-MARIMO_REQUIREMENT = "marimo>=0.13"
+# team's choice. Floor matches mooring's own marimo floor (mooring.marimo_rt
+# asserts the same minimum at runtime; kept in sync by test_marimo_floor).
+MARIMO_REQUIREMENT = "marimo>=0.23.9"
 
 PYPROJECT_NAME = "pyproject.toml"
 LOCK_NAME = "uv.lock"

@@ -5,7 +5,7 @@ description = "Git-free marimo notebook sharing via GitHub"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "marimo>=0.13",
+    "marimo>=0.23.9",
     "starlette",
     "uvicorn",
     "requests",

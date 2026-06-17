@@ -15,12 +15,13 @@
 # each maps to a finding in the architecture review and passes today.
 #
 # As later migration phases land, contracts tighten. Phase 3 added runtime.py
-# (a neutral L1 helper below both adapters) and removed the hub->cli edge, so the
-# hub-not-cli contract below is now fully enforced (no ignore_imports). Future
-# phases add a marimo-internal isolation contract (Phase 8) once marimo_rt.py exists.
+# (a neutral L1 helper below both adapters) and removed the hub->cli edge; Phase 8
+# added marimo_rt.py and the marimo-internals-isolated contract below (which needs
+# include_external_packages so the forbidden marimo._*/urllib edges are seen).
 
 [importlinter]
 root_package = mooring
+include_external_packages = True
 
 [importlinter:contract:foundation-is-pure]
 name = L0 foundation leaves import nothing else in mooring (stdlib-pure, callable at load time)
@@ -97,3 +98,21 @@ source_modules =
     mooring.hub
 forbidden_modules =
     mooring.cli
+
+[importlinter:contract:marimo-internals-isolated]
+name = The ai/ layer touches neither marimo nor raw HTTP directly — both go through marimo_rt (the transport seam); editor.py keeps marimo's subprocess/.marimo.toml
+type = forbidden
+# import-linter can only forbid top-level external packages (not submodules), which
+# is the right granularity here: ai/ must not import marimo (private codegen lives
+# in marimo_rt) nor do its own HTTP control (urllib/http live in marimo_rt's
+# KernelControl). marimo_rt and editor.py are not sources, so they keep access.
+source_modules =
+    mooring.ai
+forbidden_modules =
+    marimo
+    urllib
+    http
+# Only DIRECT imports are forbidden: ai -> marimo_rt -> marimo (the legitimate path
+# through the seam) is indirect and allowed; a NEW direct ai -> marimo/urllib import
+# is the violation we want to catch.
+allow_indirect_imports = True

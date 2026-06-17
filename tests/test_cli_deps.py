@@ -24,7 +24,7 @@ def test_init_creates_minimal_pyproject(workspace, monkeypatch, capsys):
     monkeypatch.setattr(pe, "uv_available", lambda: False)  # skip the real lock
     assert cli.main(["init"]) == 0
     text = (workspace / "pyproject.toml").read_text(encoding="utf-8")
-    assert "marimo>=0.13" in text
+    assert "marimo>=0.23.9" in text
     assert "polars" not in text  # lean seed
     assert "Created" in capsys.readouterr().out
 
