@@ -8,7 +8,7 @@ from mooring import pyproject_env as pe
 def test_scaffold_writes_minimal_pyproject_and_is_idempotent(tmp_path):
     assert pe.scaffold(tmp_path, name="acme/notebooks", lock=False) is True
     text = pe.pyproject_path(tmp_path).read_text(encoding="utf-8")
-    assert "marimo>=0.13" in text
+    assert "marimo>=0.23.9" in text
     assert "package = false" in text
     # Lean: the old baked-in analyst stack is never seeded.
     for pkg in ("polars", "altair", "plotly", "openpyxl", "fastexcel"):

@@ -29,27 +29,24 @@ test in tests/test_introspect.py and docs/admins/ai-privacy.md.
 from __future__ import annotations
 
 import contextlib
-import http.cookiejar
 import json
-import re
 import secrets
 import tempfile
 import time
-import urllib.error
-import urllib.parse
-import urllib.request
 from pathlib import Path
 
+from mooring import marimo_rt
 from mooring.schema import DatasetSchema
 
-# A fixed cell id: reusing it means repeated probes replace, never accumulate.
-# /api/kernel/run does not add a cell to the frontend document (see ai/cellwrite.py),
-# so this never becomes visible in the analyst's tab.
-_PROBE_CELL_ID = "mooring-introspect"
+# The marimo HTTP control client + server-token scraping live in mooring.marimo_rt
+# (the transport seam). Re-exported here so this module's public surface — and the
+# tests that import these names — are unchanged.
+_DEFAULT_TIMEOUT = marimo_rt.DEFAULT_TIMEOUT
+_extract_server_token = marimo_rt.extract_server_token
 
-# Defaults: introspection is best-effort context enrichment, so it is bounded
-# and never blocks chat-open for long.
-_DEFAULT_TIMEOUT = 4.0
+# A transport failure from the seam (incl. a too-old marimo) means we fall back to
+# the file-based schema — live introspection is best-effort and never raises.
+_LIVE_ERRORS = (marimo_rt.MarimoTransportError, marimo_rt.MarimoTooOld, OSError, ValueError)
 
 # --- the frozen probe ------------------------------------------------------
 #
@@ -128,106 +125,6 @@ def probe_source(out_path: str | Path) -> str:
     return f"{_COLLECT_SRC}\n{_PROBE_WRAPPER}\n_mooring_probe({str(out_path)!r})\n"
 
 
-# --- the control-API client ------------------------------------------------
-
-# marimo serves the skew-protection token in a dedicated element:
-#   <marimo-server-token data-token="..." hidden></marimo-server-token>
-# (verified against marimo 0.23.9). This is authoritative — an empty token means
-# skew protection is off, so use it as-is. The JS-blob patterns are fallbacks for
-# other marimo builds.
-_MARIMO_TOKEN_RE = re.compile(
-    r"<marimo-server-token[^>]*\bdata-token=\"([^\"]*)\"", re.IGNORECASE
-)
-_SERVER_TOKEN_RES = (
-    re.compile(r"serverToken[\"']?\s*[:=]\s*[\"']([^\"']+)[\"']", re.IGNORECASE),
-    re.compile(r"serverToken[\"']?\s*[:=]\s*([A-Za-z0-9_\-]+)", re.IGNORECASE),
-    re.compile(r"server[_-]?token[\"']?\s*[:=]\s*[\"']?([A-Za-z0-9_\-]+)", re.IGNORECASE),
-)
-
-
-def _extract_server_token(html: str) -> str:
-    m = _MARIMO_TOKEN_RE.search(html)
-    if m:
-        return m.group(1)
-    for pat in _SERVER_TOKEN_RES:
-        m = pat.search(html)
-        if m:
-            return m.group(1)
-    return ""
-
-
-class KernelControl:
-    """Minimal client for marimo's authenticated HTTP control API (localhost).
-
-    Mirrors scripts/spike_marimo_http_control.py: scrape the skew (server) token
-    from the served HTML, discover the notebook's session id, then run code in
-    the kernel. It never opens the websocket, so it never receives an output.
-    """
-
-    def __init__(self, port: int, token: str, *, timeout: float = _DEFAULT_TIMEOUT) -> None:
-        self.base = f"http://127.0.0.1:{port}"
-        self.token = token
-        self.timeout = timeout
-        self._server_token: str | None = None
-        # marimo's "/" handler 303-redirects to strip ?access_token, setting an
-        # auth cookie on that redirect; we must keep the cookie across the follow
-        # to land on the authenticated (token-bearing) page, exactly as a browser
-        # does. A plain urlopen drops it and lands on the login page.
-        self._opener = urllib.request.build_opener(
-            urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar())
-        )
-
-    def _get(self, path: str, params: dict | None = None) -> str:
-        url = self.base + path
-        if params:
-            url += "?" + urllib.parse.urlencode(params)
-        req = urllib.request.Request(url)  # noqa: S310 - localhost only
-        with self._opener.open(req, timeout=self.timeout) as resp:  # noqa: S310
-            return resp.read().decode("utf-8", "replace")
-
-    def _post(self, path: str, headers: dict, json_body: dict | None = None) -> tuple[int, str]:
-        if json_body is None:
-            data = b""
-        else:
-            data = json.dumps(json_body).encode("utf-8")
-            headers = {**headers, "Content-Type": "application/json"}
-        req = urllib.request.Request(self.base + path, data=data, method="POST")  # noqa: S310
-        for key, value in headers.items():
-            req.add_header(key, value)
-        with self._opener.open(req, timeout=self.timeout) as resp:  # noqa: S310
-            return resp.status, resp.read().decode("utf-8", "replace")
-
-    def _server_token_value(self) -> str:
-        if self._server_token is None:
-            self._server_token = _extract_server_token(self._get("/", {"access_token": self.token}))
-        return self._server_token
-
-    def _auth_headers(self) -> dict:
-        return {
-            "Authorization": f"Bearer {self.token}",
-            "Marimo-Server-Token": self._server_token_value(),
-        }
-
-    def session_for(self, notebook_rel: str) -> str | None:
-        """The marimo session id serving ``notebook_rel`` (None if not open)."""
-        status, body = self._post("/api/home/running_notebooks", self._auth_headers())
-        if status != 200:
-            return None
-        files = json.loads(body).get("files", [])
-        target = notebook_rel.replace("\\", "/").lstrip("./")
-        target_name = Path(target).name
-        for f in files:
-            path = str(f.get("path", "")).replace("\\", "/")
-            if path.endswith(target) or Path(path).name == target_name:
-                sid = f.get("sessionId")
-                return str(sid) if sid else None
-        return None
-
-    def run(self, session_id: str, code: str, *, cell_id: str = _PROBE_CELL_ID) -> None:
-        headers = {**self._auth_headers(), "Marimo-Session-Id": session_id}
-        self._post("/api/kernel/run", headers, {"cellIds": [cell_id], "codes": [code]})
-
-
 # --- public entry point ----------------------------------------------------
 
 
@@ -240,17 +137,19 @@ def live_dataset_schemas(editor, notebook_rel: str, *, timeout: float = _DEFAULT
     """
     if editor is None or not getattr(editor, "running", False) or not getattr(editor, "port", None):
         return []
-    kc = KernelControl(editor.port, editor.token, timeout=timeout)
     try:
+        # Construction asserts the marimo floor (MarimoTooOld), so it must be inside
+        # the guard — this function must never raise; the caller falls back to file schema.
+        kc = marimo_rt.KernelControl(editor.port, editor.token, timeout=timeout)
         session_id = kc.session_for(notebook_rel)
-    except (urllib.error.URLError, OSError, ValueError):
+    except _LIVE_ERRORS:
         return []
     if not session_id:
         return []
     out = Path(tempfile.gettempdir()) / f"mooring-introspect-{secrets.token_hex(8)}.json"
     try:
         kc.run(session_id, probe_source(out))
-    except (urllib.error.URLError, OSError, ValueError):
+    except _LIVE_ERRORS:
         with contextlib.suppress(OSError):
             out.unlink()
         return []

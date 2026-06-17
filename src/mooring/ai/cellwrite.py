@@ -20,6 +20,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from mooring import marimo_rt
+
 
 class CellWriteError(Exception):
     """The notebook source could not be read/parsed/written."""
@@ -28,30 +30,16 @@ class CellWriteError(Exception):
 def append_cell(notebook_path: str | Path, code: str) -> None:
     """Append a new cell containing ``code`` to the marimo notebook at ``notebook_path``.
 
-    Uses marimo's codegen so the cell's ``def`` signature and ``return`` are
-    derived correctly; writes plain UTF-8 (no BOM — the marimo parser rejects a
-    BOM). Raises :class:`CellWriteError` on any failure.
+    The marimo codegen (so the cell's ``def`` signature and ``return`` are derived
+    correctly) lives in :mod:`mooring.marimo_rt`; this only owns the FILE concern —
+    read the source, hand it to the seam, write plain UTF-8 (no BOM — the marimo
+    parser rejects a BOM). Raises :class:`CellWriteError` on any failure (including
+    a too-old marimo, surfaced by the seam's loud floor check).
     """
     path = Path(notebook_path)
     try:
-        from marimo._ast import codegen
-        from marimo._convert.converters import MarimoConvert
-    except Exception as exc:  # noqa: BLE001 - marimo always present, but be explicit
-        raise CellWriteError(f"marimo codegen unavailable: {exc}") from exc
-
-    try:
         source = path.read_text("utf-8")
-        ir = MarimoConvert.from_py(source).to_ir()
-        ir.cells.append(_new_cell(ir, code))
-        path.write_text(codegen.generate_filecontents_from_ir(ir), encoding="utf-8")
-    except (OSError, ValueError, SyntaxError) as exc:
+        result = marimo_rt.append_cell_source(source, code)
+        path.write_text(result, encoding="utf-8")
+    except (OSError, ValueError, SyntaxError, marimo_rt.MarimoTooOld, marimo_rt.MarimoTransportError) as exc:
         raise CellWriteError(f"could not apply the cell to {path.name}: {exc}") from exc
-
-
-def _new_cell(ir, code: str):
-    """A fresh CellDef for ``code`` (reuse the notebook's cell class, or import it)."""
-    if ir.cells:
-        cell_cls = type(ir.cells[0])
-    else:  # empty notebook — import the class directly
-        from marimo._schemas.serialization import CellDef as cell_cls
-    return cell_cls(code=code, name="_")
