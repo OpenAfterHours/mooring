@@ -139,12 +139,12 @@ def test_scrub_columns_withholds_only_checksum_named_columns():
 
 
 def test_guard_prompt_modes():
-    assert pii.guard_prompt(f"x {VALID_CARD}", enabled=False, block=True) == (False, [], False)
+    assert pii.guard_prompt(f"x {VALID_CARD}", enabled=False, block=True) == (False, [], "")
     hold, findings, err = pii.guard_prompt(f"x {VALID_CARD}", enabled=True, block=True)
-    assert hold is True and findings and err is False
+    assert hold is True and findings and err == ""
     hold, findings, err = pii.guard_prompt(f"x {VALID_CARD}", enabled=True, block=False)
-    assert hold is False and findings and err is False  # warn-only: forward, but flagged
-    assert pii.guard_prompt("nothing here", enabled=True, block=True) == (False, [], False)
+    assert hold is False and findings and err == ""  # warn-only: forward, but flagged
+    assert pii.guard_prompt("nothing here", enabled=True, block=True) == (False, [], "")
 
 
 def test_guard_prompt_fails_open_loud_on_scan_error(monkeypatch):
@@ -153,7 +153,8 @@ def test_guard_prompt_fails_open_loud_on_scan_error(monkeypatch):
 
     monkeypatch.setattr(pii, "scan", boom)
     hold, findings, err = pii.guard_prompt("anything", enabled=True, block=True)
-    assert hold is False and findings == [] and err is True  # fail OPEN, but report it
+    # the STRUCTURED scan failed -> the prompt went truly unchecked (fail OPEN, reported)
+    assert hold is False and findings == [] and err == "structured"
 
 
 # -- Phase 2: NER name detection wired into the prose scanners -----------------
@@ -185,13 +186,14 @@ def test_guard_prompt_holds_on_name(monkeypatch):
     hold, findings, err = pii.guard_prompt(
         "sum for Jon Harrison", enabled=True, block=True, names=True
     )
-    assert hold is True and err is False
+    assert hold is True and err == ""
     assert ner.NAME in {f.kind for f in findings}
 
 
 def test_guard_prompt_name_pass_unavailable_is_loud(monkeypatch):
-    # Enforcement path: detect_names configured but the backend missing must FAIL
-    # OPEN (don't block on nothing) yet report scan_error so the analyst is warned.
+    # Enforcement path: detect_names configured but the name pass raised must FAIL
+    # OPEN (don't block on nothing) yet report scan_error="names" — the STRUCTURED
+    # scan still ran, so the caller can say so rather than claim "unchecked".
     from mooring.ai import ner
 
     def boom(_text, **_kw):
@@ -201,7 +203,7 @@ def test_guard_prompt_name_pass_unavailable_is_loud(monkeypatch):
     hold, findings, err = pii.guard_prompt(
         "sum for Jon Harrison", enabled=True, block=True, names=True
     )
-    assert hold is False and findings == [] and err is True
+    assert hold is False and findings == [] and err == "names"
 
 
 def test_name_prompt_held_then_confirmed_value_free(monkeypatch):
@@ -370,6 +372,69 @@ def test_pii_gate_runs_name_pass_once_ready(monkeypatch):
     evs = _drain(q)
     assert [e.kind for e in evs] == ["pii"]  # held on the name once the model is ready
     assert evs[0].data["findings"][0]["kind"] == ner.NAME
+
+
+def test_pii_gate_skips_name_pass_when_backend_unavailable(monkeypatch):
+    # detect_names ON but the NER extra/model is absent: the name pass is skipped
+    # gracefully (the structured scan still runs), so NO "sent unchecked" scan_error
+    # fires on every message. The topbar "PII-partial" badge carries the signal.
+    from mooring.ai import ner
+
+    monkeypatch.setattr(ner, "available", lambda backend="gliner": False)
+
+    def explode(*_a, **_k):
+        raise AssertionError("scan_names must not run when the backend is unavailable")
+
+    monkeypatch.setattr(ner, "scan_names", explode)
+    sess = StubChatSession(pii_enabled=True, pii_block=True, pii_names=True)
+    q = sess.subscribe()
+    sess.send("contact Jon Harrison")
+    kinds = [e.kind for e in _drain(q)]
+    assert "pii" not in kinds  # no scan_error, no hold — structured scan ran clean
+    assert "idle" in kinds  # forwarded
+
+
+def test_pii_gate_skips_name_pass_for_unavailable_spacy(monkeypatch):
+    # spaCy backend selected but not installed: previously the name pass ran and
+    # raised on EVERY message (the contradiction); now it is skipped like any other
+    # unavailable backend — no scan_error.
+    from mooring.ai import ner
+
+    monkeypatch.setattr(ner, "available", lambda backend="gliner": backend != "spacy")
+
+    def explode(*_a, **_k):
+        raise AssertionError("scan_names must not run when spaCy is unavailable")
+
+    monkeypatch.setattr(ner, "scan_names", explode)
+    sess = StubChatSession(
+        pii_enabled=True, pii_block=True, pii_names=True, pii_name_backend="spacy"
+    )
+    q = sess.subscribe()
+    sess.send("contact Jon Harrison")
+    kinds = [e.kind for e in _drain(q)]
+    assert "pii" not in kinds
+    assert "idle" in kinds
+
+
+def test_pii_gate_holds_card_even_when_name_backend_unavailable(monkeypatch):
+    # Skipping the unavailable name pass must NOT weaken the always-on structured
+    # guard: a card still HOLDS (never forwarded), and the name pass never runs.
+    from mooring.ai import ner
+
+    monkeypatch.setattr(ner, "available", lambda backend="gliner": False)
+
+    def explode(*_a, **_k):
+        raise AssertionError("scan_names must not run when the backend is unavailable")
+
+    monkeypatch.setattr(ner, "scan_names", explode)
+    sess = StubChatSession(pii_enabled=True, pii_block=True, pii_names=True)
+    q = sess.subscribe()
+    sess.send(f"charge {VALID_CARD} now")
+    evs = _drain(q)
+    assert [e.kind for e in evs] == ["pii"]  # held — the structured guard still fires
+    ev = evs[0].data
+    assert ev.get("token") and ev["findings"][0]["kind"] == pii.CARD
+    assert "idle" not in [e.kind for e in evs]  # NOT forwarded
 
 
 # -- Channel A: prompt hold-and-confirm on a StubChatSession -------------------

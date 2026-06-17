@@ -127,17 +127,31 @@ test("piiBadge: guard on, names ready -> green 'PII-active' naming the backend",
   assert.match(b.title, /holds the message for your confirmation/);
 });
 
-test("piiBadge: guard on, names configured but not ready -> green with a caveat", () => {
+test("piiBadge: guard on, names configured but not available -> amber 'PII-partial'", () => {
   const b = C.piiBadge({ enabled: true, block: false, names: true, names_active: false, backend: "gliner" });
-  assert.equal(b.cls, "on");
-  assert.match(b.title, /isn't ready yet/);
+  assert.equal(b.text, "PII-partial");
+  assert.equal(b.cls, "partial"); // NOT solid green — names aren't actually scanned
+  assert.match(b.title, /NAMES are NOT/);
   assert.match(b.title, /still sent/); // warn-only mode
 });
 
 test("piiBadge: guard on, name detection off -> green, no names clause", () => {
   const b = C.piiBadge({ enabled: true, block: true, names: false, names_active: false });
+  assert.equal(b.text, "PII-active");
   assert.equal(b.cls, "on");
-  assert.ok(!/names/.test(b.title), "no names clause when detection is off");
+  assert.ok(!/names/i.test(b.title), "no names clause when detection is off");
+});
+
+test("scanErrorMessage: names-only failure does NOT claim the message went unchecked", () => {
+  const m = C.scanErrorMessage("names");
+  assert.match(m, /Name detection couldn't run/);
+  assert.match(m, /scanned for structured PII/);
+  assert.ok(!/unchecked/.test(m), "a names-only failure still scanned structured PII");
+});
+
+test("scanErrorMessage: a structured failure is the only 'sent unchecked' case", () => {
+  assert.match(C.scanErrorMessage("structured"), /sent unchecked/);
+  assert.match(C.scanErrorMessage("both"), /sent unchecked/);
 });
 
 test("highlightCode: wraps keywords/strings/comments", () => {

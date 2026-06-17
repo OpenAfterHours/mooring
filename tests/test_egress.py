@@ -81,7 +81,7 @@ def test_guard_prompt_routes_through_egress():
     # The outbound-prompt valve is re-exported, so a session calls egress.guard_prompt.
     assert egress.guard_prompt is pii.guard_prompt
     hold, findings, err = egress.guard_prompt(f"x {VALID_CARD}", enabled=True, block=True)
-    assert hold is True and findings and err is False
+    assert hold is True and findings and err == ""
 
 
 # -- build_system_context: scrubs every value-bearing fragment ------------------

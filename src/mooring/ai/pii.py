@@ -289,7 +289,7 @@ def guard_prompt(
     threshold: float = 0.7,
     model: str | None = None,
     backend: str = "gliner",
-) -> tuple[bool, list[Finding], bool]:
+) -> tuple[bool, list[Finding], str]:
     """Evaluate an outbound chat prompt. Returns ``(hold, findings, scan_error)``.
 
     THE shared prompt valve, called identically by both chat-session classes so
@@ -299,18 +299,22 @@ def guard_prompt(
 
     When ``names`` is set, an optional LOCAL NER pass (:mod:`mooring.ai.ner`) also
     flags person names; ``backend`` selects which local model runs (``"gliner"`` /
-    ``"spacy"`` / ``"auto"``). Either scanner failing FAILS OPEN for that scanner but
-    sets ``scan_error=True`` so the caller can be loud that the guard did not fully
-    run — e.g. ``names`` is configured but the ``mooring[pii]`` extra isn't installed.
+    ``"spacy"`` / ``"auto"``). Either scanner failing FAILS OPEN for that scanner.
+    ``scan_error`` names WHICH scanner could not run so the caller can be precise
+    rather than alarming: ``""`` (all ran), ``"structured"`` (the always-on card /
+    IBAN / NHS / email / NINO scan failed — the prompt went truly unchecked),
+    ``"names"`` (only the optional name pass failed — structured PII WAS scanned),
+    or ``"both"``.
     """
     if not enabled:
-        return False, [], False
+        return False, [], ""
     findings: list[Finding] = []
-    scan_error = False
+    structured_failed = False
+    names_failed = False
     try:
         findings += scan(text)
     except Exception:  # noqa: BLE001 - fail open on the live path, but report it
-        scan_error = True
+        structured_failed = True
     if names:
         try:
             from mooring.ai import ner
@@ -319,5 +323,11 @@ def guard_prompt(
                 text, labels=labels, threshold=threshold, model=model, backend=backend
             )
         except Exception:  # noqa: BLE001 - extra missing / model load / inference error
-            scan_error = True
+            names_failed = True
+    scan_error = (
+        "both" if structured_failed and names_failed
+        else "structured" if structured_failed
+        else "names" if names_failed
+        else ""
+    )
     return (bool(findings) and block), findings, scan_error
