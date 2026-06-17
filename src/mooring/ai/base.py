@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
+    from mooring.ai_config import PiiConfig
     from mooring.config import AppConfig
 
 
@@ -65,19 +66,16 @@ class AIProvider(Protocol):
         model: str | None = None,
         reasoning_effort: str | None = None,
         dictionary=None,
-        pii_enabled: bool = False,
-        pii_block: bool = True,
-        pii_names: bool = False,
-        pii_name_labels: tuple[str, ...] | None = None,
-        pii_name_threshold: float = 0.7,
-        pii_name_model: str | None = None,
+        pii: "PiiConfig | None" = None,
     ):
         """Open a long-lived, streaming chat session (a ``ChatBroadcaster``).
 
         Sends the model ONLY ``system_context`` (schema + notebook source, plus
         any opt-in team context already folded in) and the analyst's turns.
         ``dictionary`` (a parsed index) enables the value-free dictionary tools.
-        Raises :class:`AIError` if unavailable/not signed in.
+        ``pii`` is the whole :class:`~mooring.ai_config.PiiConfig`, passed as one
+        object so a guard field can't be silently dropped in transit; None
+        disables the guard. Raises :class:`AIError` if unavailable/not signed in.
         """
         ...
 

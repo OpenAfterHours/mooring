@@ -11,11 +11,12 @@ from __future__ import annotations
 import os
 import tomllib
 from collections.abc import Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from importlib import resources
 from pathlib import Path
 
-from mooring import githost, paths
+from mooring import ai_config, githost, paths
+from mooring.ai_config import AiConfig
 
 
 @dataclass(frozen=True)
@@ -70,37 +71,11 @@ class AppConfig:
     max_file_mb: int = 45
     log_endpoint: str = ""
     log_level: str = "info"
-    ai_enabled: bool = True
-    ai_provider: str = "copilot"
-    ai_model: str = ""
-    ai_reasoning_effort: str = ""
-    ai_chat_idle_timeout: int = 900
-    # Team context (instructions + data dictionary). Opt-in: when off, the copilot
-    # behaves exactly as before (dataset schema + notebook source only).
-    ai_context: bool = False
-    ai_context_dir: str = "context"
-    ai_context_max_kb: int = 256
-    # Read the schema of dataframes live in the running kernel (covers data loaded
-    # from outside the workspace). Value-free; on by default, kill-switch to off.
-    ai_live_schema: bool = True
-    # Best-effort structured-PII pre-flight scan on text leaving for the AI server
-    # (chat prompt, notebook source, schema column names, team context). Opt-in:
-    # when off, the copilot behaves exactly as before. block_prompt = warn-and-hold
-    # on the chat prompt (the analyst confirms "send anyway"); scan_source = the
-    # one-time notebook-source banner. See docs/admins/ai-privacy.md.
-    ai_pii: bool = False
-    ai_pii_block_prompt: bool = True
-    ai_pii_scan_source: bool = True
-    # Phase 2: optional LOCAL NER name detection (needs the `mooring[pii]` extra).
-    # Only acts when ai_pii is also on. See mooring.ai.ner / docs/admins/ai-privacy.md.
-    # The default model is a SAFETENSORS build loaded as its bf16 variant (no pickle),
-    # pinned to a commit for reproducibility.
-    ai_pii_names: bool = False
-    ai_pii_name_model: str = "gliner-community/gliner_small-v2.5"
-    ai_pii_name_revision: str = "f227d3cd637bd4e6757ae143935316d062393341"
-    ai_pii_name_variant: str = "bf16"
-    ai_pii_name_labels: tuple[str, ...] = ("person", "name")
-    ai_pii_name_threshold: float = 0.7
+    # The copilot's settings, nested (see mooring.ai_config). The whole PiiConfig
+    # travels to the chat session as one object, so a guard field can't be dropped
+    # in transit. Flat ai_*/ai_pii_* read-only properties below forward here so
+    # existing readers are unchanged.
+    ai: AiConfig = field(default_factory=AiConfig)
 
     @property
     def aliases(self) -> list[str]:
@@ -142,6 +117,81 @@ class AppConfig:
             max_file_mb=self.max_file_mb,
             workspace_path=s.workspace_path,
         )
+
+    # -- flat AI/PII accessors -----------------------------------------------
+    # Forward to the nested `ai` config so every existing reader (server, cli,
+    # base, tests) is unchanged; `self.ai` (mooring.ai_config) is the canonical store.
+    @property
+    def ai_enabled(self) -> bool:
+        return self.ai.enabled
+
+    @property
+    def ai_provider(self) -> str:
+        return self.ai.provider
+
+    @property
+    def ai_model(self) -> str:
+        return self.ai.model
+
+    @property
+    def ai_reasoning_effort(self) -> str:
+        return self.ai.reasoning_effort
+
+    @property
+    def ai_chat_idle_timeout(self) -> int:
+        return self.ai.chat_idle_timeout
+
+    @property
+    def ai_context(self) -> bool:
+        return self.ai.context
+
+    @property
+    def ai_context_dir(self) -> str:
+        return self.ai.context_dir
+
+    @property
+    def ai_context_max_kb(self) -> int:
+        return self.ai.context_max_kb
+
+    @property
+    def ai_live_schema(self) -> bool:
+        return self.ai.live_schema
+
+    @property
+    def ai_pii(self) -> bool:
+        return self.ai.pii.enabled
+
+    @property
+    def ai_pii_block_prompt(self) -> bool:
+        return self.ai.pii.block_prompt
+
+    @property
+    def ai_pii_scan_source(self) -> bool:
+        return self.ai.pii.scan_source
+
+    @property
+    def ai_pii_names(self) -> bool:
+        return self.ai.pii.names
+
+    @property
+    def ai_pii_name_model(self) -> str:
+        return self.ai.pii.name_model
+
+    @property
+    def ai_pii_name_revision(self) -> str:
+        return self.ai.pii.name_revision
+
+    @property
+    def ai_pii_name_variant(self) -> str:
+        return self.ai.pii.name_variant
+
+    @property
+    def ai_pii_name_labels(self) -> tuple[str, ...]:
+        return self.ai.pii.name_labels
+
+    @property
+    def ai_pii_name_threshold(self) -> float:
+        return self.ai.pii.name_threshold
 
 
 def _str_list(raw: object, key: str) -> tuple[str, ...]:
@@ -240,7 +290,6 @@ def load_app_config(
     ws = data.get("workspace", {})
     log = data.get("logging", {})
     ai = data.get("ai", {})
-    ai_pii = ai.get("pii", {}) if isinstance(ai.get("pii"), dict) else {}
 
     specs, active = repo_specs_from_data(data)
     if env.get("MOORING_ACTIVE_REPO") in {s.alias for s in specs}:
@@ -289,50 +338,7 @@ def load_app_config(
         max_file_mb=int(sync.get("max_file_mb", 45)),
         log_endpoint=env.get("MOORING_LOG_ENDPOINT", str(log.get("endpoint", ""))),
         log_level=env.get("MOORING_LOG_LEVEL", str(log.get("level", "info"))),
-        ai_enabled=_as_bool(env.get("MOORING_AI_ENABLED"), _as_bool(ai.get("enabled"), True)),
-        ai_provider=env.get("MOORING_AI_PROVIDER", str(ai.get("provider", "copilot"))),
-        ai_model=env.get("MOORING_AI_MODEL", str(ai.get("model", ""))),
-        ai_reasoning_effort=env.get(
-            "MOORING_AI_REASONING_EFFORT", str(ai.get("reasoning_effort", ""))
-        ),
-        ai_chat_idle_timeout=int(
-            env.get("MOORING_AI_CHAT_IDLE_SEC", ai.get("chat_idle_timeout_sec", 900))
-        ),
-        ai_context=_as_bool(env.get("MOORING_AI_CONTEXT"), _as_bool(ai.get("context"), False)),
-        ai_context_dir=env.get("MOORING_AI_CONTEXT_DIR", str(ai.get("context_dir", "context"))),
-        ai_context_max_kb=int(
-            env.get("MOORING_AI_CONTEXT_MAX_KB", ai.get("context_max_kb", 256))
-        ),
-        ai_live_schema=_as_bool(
-            env.get("MOORING_AI_LIVE_SCHEMA"), _as_bool(ai.get("live_schema"), True)
-        ),
-        ai_pii=_as_bool(env.get("MOORING_AI_PII"), _as_bool(ai_pii.get("enabled"), False)),
-        ai_pii_block_prompt=_as_bool(
-            env.get("MOORING_AI_PII_BLOCK_PROMPT"), _as_bool(ai_pii.get("block_prompt"), True)
-        ),
-        ai_pii_scan_source=_as_bool(
-            env.get("MOORING_AI_PII_SCAN_SOURCE"), _as_bool(ai_pii.get("scan_notebook_source"), True)
-        ),
-        ai_pii_names=_as_bool(
-            env.get("MOORING_AI_PII_NAMES"), _as_bool(ai_pii.get("detect_names"), False)
-        ),
-        ai_pii_name_model=env.get(
-            "MOORING_AI_PII_NAME_MODEL",
-            str(ai_pii.get("name_model", "gliner-community/gliner_small-v2.5")),
-        ),
-        ai_pii_name_revision=env.get(
-            "MOORING_AI_PII_NAME_REVISION",
-            str(ai_pii.get("name_model_revision", "f227d3cd637bd4e6757ae143935316d062393341")),
-        ),
-        ai_pii_name_variant=env.get(
-            "MOORING_AI_PII_NAME_VARIANT", str(ai_pii.get("name_model_variant", "bf16"))
-        ),
-        ai_pii_name_labels=_str_list(
-            ai_pii.get("name_labels", ("person", "name")), "name_labels"
-        ),
-        ai_pii_name_threshold=float(
-            env.get("MOORING_AI_PII_NAME_THRESHOLD", ai_pii.get("name_threshold", 0.7))
-        ),
+        ai=ai_config.load_ai_config(ai, env),
     )
 
 

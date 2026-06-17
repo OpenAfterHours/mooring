@@ -583,7 +583,7 @@ class Hub:
         Raises AIError (-> 502 with an install/connect hint) if Copilot isn't
         available or signed in.
         """
-        from mooring.ai import get_provider, ner
+        from mooring.ai import get_provider
 
         provider = get_provider(self.app_cfg)
         return provider.open_chat(
@@ -594,19 +594,10 @@ class Hub:
             model=model,
             reasoning_effort=reasoning_effort,
             dictionary=dictionary,
-            pii_enabled=self.app_cfg.ai_pii,
-            pii_block=self.app_cfg.ai_pii_block_prompt,
-            # NER name detection only acts when the whole guard is on; the session
-            # downloads the model in the background (prepare_pii_model) and the
-            # prompt path skips it until ready (best-effort, loud if the extra is missing).
-            pii_names=self.app_cfg.ai_pii and self.app_cfg.ai_pii_names,
-            pii_name_labels=self.app_cfg.ai_pii_name_labels,
-            pii_name_threshold=self.app_cfg.ai_pii_name_threshold,
-            pii_name_model=ner.ModelRef(
-                self.app_cfg.ai_pii_name_model,
-                self.app_cfg.ai_pii_name_revision,
-                self.app_cfg.ai_pii_name_variant,
-            ),
+            # The whole guard config travels as ONE object, so a field can't be
+            # silently dropped on the way to the session (the session downloads any
+            # NER model in the background and the prompt path skips it until ready).
+            pii=self.app_cfg.ai.pii,
         )
 
     def _reap_idle_chats(self) -> None:
