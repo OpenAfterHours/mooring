@@ -9,7 +9,7 @@ name: docs
 
 on:
   push:
-    branches: [main]
+    branches: [master]
     paths:
       - "docs/**"
       - "zensical.toml"

@@ -1,0 +1,9 @@
+{
+  "name": "mooring-js-tests",
+  "private": true,
+  "type": "commonjs",
+  "description": "Node built-in test-runner suite for the copilot REPL's pure helpers (chat_core.js).",
+  "scripts": {
+    "test": "node --test ."
+  }
+}

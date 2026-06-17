@@ -32,11 +32,9 @@ import threading
 import time
 from pathlib import Path
 
-from mooring.ai import prompt
 from mooring.ai.base import AIError, ProviderStatus
 from mooring.ai_config import PiiConfig
 
-_GENERATE_TIMEOUT = 120.0  # seconds the model may take to answer
 _PROBE_TIMEOUT = 30.0  # seconds to check sign-in status
 _STATUS_TTL = 45.0  # cache the (CLI-spawning) auth probe this long
 _MODELS_TTL = 300.0  # cache the model list this long (it changes rarely)
@@ -229,39 +227,6 @@ class CopilotProvider:
         self._invalidate_cache()
         return result.returncode
 
-    # -- generation ---------------------------------------------------------
-
-    def generate(self, *, schema_context: str, instruction: str, target: str = "polars") -> str:
-        if not self.available():
-            raise AIError("The Copilot CLI is not available in this build.")
-        if not instruction.strip():
-            raise AIError("Describe what you want the code to do.")
-        system, user = prompt.build_messages(
-            schema_context=schema_context, instruction=instruction, target=target
-        )
-        try:
-            text = self._run(self._agenerate(system, user, self.model), _GENERATE_TIMEOUT + 45)
-        except AIError:
-            raise
-        except (asyncio.TimeoutError, TimeoutError) as exc:
-            raise AIError("Copilot timed out. Try a simpler request or try again.") from exc
-        except Exception as exc:  # noqa: BLE001 - surface a clean message to the UI
-            raise AIError(friendly_error(str(exc))) from exc
-        # A successful call proves we're connected — refresh the cache positively
-        # so the card doesn't flip to "not connected" on the next state poll.
-        prev = self._cached_status
-        account = prev.account if prev else ""
-        self._store_status(
-            ProviderStatus(
-                self.name,
-                available=True,
-                connected=True,
-                account=account,
-                detail=f"Connected{(' as ' + account) if account else ''}.",
-            )
-        )
-        return _extract_code(text)
-
     def open_chat(
         self,
         *,
@@ -346,26 +311,6 @@ class CopilotProvider:
             if not is_authed(auth):
                 return []
             return [_model_dict(m) for m in await client.list_models()]
-
-    async def _agenerate(self, system: str, user: str, model: str) -> str:
-        from copilot import CopilotClient
-        from copilot.session_events import AssistantMessageData
-
-        client = CopilotClient(use_logged_in_user=True)
-        async with client:
-            auth = await client.get_auth_status()
-            if not is_authed(auth):
-                raise AIError("Copilot isn't connected. Run `mooring ai login` to sign in.")
-            session = await client.create_session(
-                model=model or None,
-                available_tools=[],  # no tools => the agent can never read a file
-                **hardened_session_kwargs(system),
-            )
-            async with session:
-                event = await session.send_and_wait(user, timeout=_GENERATE_TIMEOUT)
-                if event is not None and isinstance(event.data, AssistantMessageData):
-                    return event.data.content or ""
-                return ""
 
     async def _aauth(self) -> tuple[bool, str]:
         from copilot import CopilotClient
@@ -453,17 +398,3 @@ def friendly_error(msg: str) -> str:
             "the relevant Copilot policy (CLI / agent access) for your organization."
         )
     return f"Copilot request failed: {msg}"
-
-
-def _extract_code(text: str) -> str:
-    """Pull the code out of the first fenced block so it pastes straight in."""
-    text = (text or "").strip()
-    if "```" not in text:
-        return text
-    after = text.split("```", 1)[1]
-    # drop an optional language tag on the opening fence line
-    if "\n" in after:
-        first, rest = after.split("\n", 1)
-        if first.strip().isalpha():
-            after = rest
-    return after.split("```", 1)[0].strip()
