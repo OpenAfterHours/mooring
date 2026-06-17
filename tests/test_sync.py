@@ -238,6 +238,22 @@ def test_push_refuses_oversized_files(cfg):
     assert any("refused" in line for line in result.lines)
 
 
+def test_propose_refuses_oversized_files(cfg):
+    # propose shares push's size limit via the same _read_checked helper: an
+    # oversized candidate is refused and no review branch is created for it.
+    client = FakeClient()
+    write_local(cfg, "data/big.bin", "")
+    (cfg.workspace() / "data/big.bin").write_bytes(b"x" * (2 * 1024 * 1024))
+    small_cfg = Config(
+        client_id="cid", owner="acme", repo="nbs",
+        workspace_path=cfg.workspace_path, max_file_mb=1,
+    )
+    result = sync.propose(client, small_cfg, sleep=lambda s: None)
+    assert result.proposed == 0
+    assert result.review_branch == ""
+    assert any("refused" in line for line in result.lines)
+
+
 def test_push_specific_paths_only(cfg):
     client = FakeClient()
     write_local(cfg, "notebooks/a.py", "a\n")
@@ -574,6 +590,35 @@ def test_resolve_theirs(cfg):
     sync.resolve(client, cfg, "notebooks/a.py", ConflictStrategy.THEIRS)
     assert read_local(cfg, "notebooks/a.py") == "theirs\n"
     assert sync.status(client, cfg).by_state(FileState.CONFLICT) == []
+
+
+def test_resolve_keep_both_saves_remote_copy(cfg):
+    # The shared _apply_remote_or_keep_both path: remote still exists, so keep mine
+    # and save theirs as a .remote-<sha> copy; my file becomes MODIFIED (pushable).
+    client = FakeClient()
+    _make_conflict(cfg, client)
+    sync.resolve(client, cfg, "notebooks/a.py", ConflictStrategy.KEEP_BOTH)
+    assert read_local(cfg, "notebooks/a.py") == "mine\n"
+    copies = list((cfg.workspace() / "notebooks").glob("a.remote-*.py"))
+    assert len(copies) == 1 and copies[0].read_text("utf-8") == "theirs\n"
+    report = sync.status(client, cfg)
+    assert [f.state for f in report.files if f.path == "notebooks/a.py"] == [FileState.MODIFIED]
+
+
+def test_resolve_keep_both_remote_deleted_keeps_local(cfg):
+    # The resolve-only branch the helper declines: the remote was deleted, so keep
+    # my file and drop the base — it survives as a NEW_LOCAL, pushable file.
+    client = FakeClient()
+    client.seed("notebooks/a.py", b"v1\n")
+    sync.pull(client, cfg)
+    write_local(cfg, "notebooks/a.py", "mine\n")  # changed here
+    client.remove("notebooks/a.py")  # deleted there -> CONFLICT
+    result = sync.resolve(client, cfg, "notebooks/a.py", ConflictStrategy.KEEP_BOTH)
+    assert read_local(cfg, "notebooks/a.py") == "mine\n"
+    assert any("remote deleted it" in line for line in result.lines)
+    report = sync.status(client, cfg)
+    assert [f.state for f in report.files if f.path == "notebooks/a.py"] == [FileState.NEW_LOCAL]
+    assert report.by_state(FileState.CONFLICT) == []
 
 
 # -- hygiene ----------------------------------------------------------------------
