@@ -1,0 +1,54 @@
+name: ci
+
+# Runs on every push to master and on every pull request, so changes self-check
+# before merge. (release.yml runs the same Python checks again at tag time, just
+# before it builds the frozen artifacts.) Windows to match the primary target and
+# the release environment.
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Install Python 3.13
+        run: uv python install 3.13
+
+      - name: Sync dependencies
+        # --extra copilot pulls the github-copilot-sdk so the chat-session tests
+        # can import it (it is an optional extra, not a shipped base dependency).
+        run: uv sync --extra copilot
+
+      - name: Lint
+        run: uv run ruff check src tests
+
+      - name: Check architecture layering
+        # Enforces the dependency-direction contracts in .importlinter. Skipped
+        # until that file lands (it arrives with the layering PR); auto-activates
+        # once present.
+        if: hashFiles('.importlinter') != ''
+        run: uv run lint-imports
+
+      - name: Test (Python)
+        run: uv run pytest -q
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Test (JS — copilot REPL pure helpers)
+        # The chat REPL's risky pure logic (slash parser, history ring, @-mentions,
+        # XSS-safe highlighter). Zero deps: Node's built-in test runner.
+        run: node --test tests/js/
