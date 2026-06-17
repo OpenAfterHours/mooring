@@ -47,7 +47,7 @@ forbidden_modules =
     mooring.telemetry
 
 [importlinter:contract:identity-below-domain]
-name = L1 config/identity/runtime does not depend on the domain, AI, or the adapters
+name = L1 config/identity/runtime/ai_config does not depend on the domain, AI, or the adapters
 type = forbidden
 source_modules =
     mooring.config
@@ -55,6 +55,7 @@ source_modules =
     mooring.auth
     mooring.github
     mooring.runtime
+    mooring.ai_config
 forbidden_modules =
     mooring.sync
     mooring.manifest

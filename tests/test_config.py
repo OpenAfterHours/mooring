@@ -4,6 +4,7 @@ import platformdirs
 import pytest
 
 from mooring import paths
+from mooring.ai_config import AiConfig, PiiConfig
 from mooring.config import load_app_config, load_config
 
 
@@ -14,6 +15,30 @@ def test_defaults_when_no_user_config(tmp_path):
     assert cfg.folders == ("notebooks", "data", "reports")
     assert cfg.exclude == ()
     assert cfg.warn_file_mb == 10
+
+
+def test_ai_config_is_nested_with_flat_shims(tmp_path):
+    # The canonical store is the nested ai/ai.pii config; the flat ai_*/ai_pii_*
+    # accessors forward to it, and the guard defaults OFF.
+    app = load_app_config(user_config_path=tmp_path / "missing.toml", env={})
+    assert isinstance(app.ai, AiConfig) and isinstance(app.ai.pii, PiiConfig)
+    assert app.ai.pii.enabled is False  # default OFF preserved
+    assert app.ai_enabled is app.ai.enabled
+    assert app.ai_pii is app.ai.pii.enabled
+    assert app.ai_pii_block_prompt is app.ai.pii.block_prompt
+    assert app.ai_pii_name_model == app.ai.pii.name_model
+    assert app.ai_pii_name_labels == app.ai.pii.name_labels
+
+
+def test_ai_pii_toml_and_env_populate_the_nested_object(tmp_path):
+    user = tmp_path / "config.toml"
+    user.write_text("[ai.pii]\nenabled = true\nblock_prompt = false\n", "utf-8")
+    app = load_app_config(user_config_path=user, env={})
+    assert app.ai.pii.enabled is True and app.ai.pii.block_prompt is False
+    assert app.ai_pii is True  # the flat shim agrees with the nested store
+    # env overrides the file, written straight onto the nested object
+    app2 = load_app_config(user_config_path=user, env={"MOORING_AI_PII": "0"})
+    assert app2.ai.pii.enabled is False
 
 
 def test_sync_exclude_is_parsed(tmp_path):

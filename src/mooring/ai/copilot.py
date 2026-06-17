@@ -34,6 +34,7 @@ from pathlib import Path
 
 from mooring.ai import prompt
 from mooring.ai.base import AIError, ProviderStatus
+from mooring.ai_config import PiiConfig
 
 _GENERATE_TIMEOUT = 120.0  # seconds the model may take to answer
 _PROBE_TIMEOUT = 30.0  # seconds to check sign-in status
@@ -271,12 +272,7 @@ class CopilotProvider:
         model: str | None = None,
         reasoning_effort: str | None = None,
         dictionary=None,
-        pii_enabled: bool = False,
-        pii_block: bool = True,
-        pii_names: bool = False,
-        pii_name_labels: tuple[str, ...] | None = None,
-        pii_name_threshold: float = 0.7,
-        pii_name_model: str | None = None,
+        pii: PiiConfig | None = None,
     ):
         """Open a long-lived, streaming, value-blind chat session (the copilot).
 
@@ -290,8 +286,10 @@ class CopilotProvider:
             raise AIError(
                 "Copilot isn't available. Install the extra: pip install mooring[copilot]"
             )
+        from mooring.ai import ner
         from mooring.ai.session import CopilotChatSession
 
+        pii = pii or PiiConfig()
         session = CopilotChatSession(
             model=(model or "").strip() or self.model,
             reasoning_effort=reasoning_effort,
@@ -300,12 +298,13 @@ class CopilotProvider:
             folders=folders,
             notebook_rel=notebook_rel,
             dictionary=dictionary,
-            pii_enabled=pii_enabled,
-            pii_block=pii_block,
-            pii_names=pii_names,
-            pii_name_labels=pii_name_labels,
-            pii_name_threshold=pii_name_threshold,
-            pii_name_model=pii_name_model,
+            pii_enabled=pii.enabled,
+            pii_block=pii.block_prompt,
+            # NER name detection only acts when the whole guard is on.
+            pii_names=pii.enabled and pii.names,
+            pii_name_labels=pii.name_labels,
+            pii_name_threshold=pii.name_threshold,
+            pii_name_model=ner.ModelRef(pii.name_model, pii.name_revision, pii.name_variant),
         )
         session.start()
         return session

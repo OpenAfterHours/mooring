@@ -549,7 +549,7 @@ def test_chat_stream_unknown_sid_404(unconfigured_client):
 def test_chat_disabled_when_ai_off(tmp_path, monkeypatch):
     monkeypatch.setattr(paths, "user_config_dir", lambda: tmp_path / "appdata")
     spec = config.RepoSpec(alias="ws", owner="", repo="", workspace_path=str(tmp_path / "ws"))
-    hub = Hub(config.AppConfig(repos=(spec,), active_alias="ws", ai_enabled=False))
+    hub = Hub(config.AppConfig(repos=(spec,), active_alias="ws", ai=config.AiConfig(enabled=False)))
     with TestClient(create_app(hub)) as client:
         assert client.get("/ai/chat").status_code == 404
         assert client.post("/api/ai/chat/open", json={"notebook": "nb.py"}).status_code == 404
@@ -587,7 +587,7 @@ def test_chat_models_lists_models(unconfigured_client, monkeypatch):
 def test_chat_models_disabled_when_ai_off(tmp_path, monkeypatch):
     monkeypatch.setattr(paths, "user_config_dir", lambda: tmp_path / "appdata")
     spec = config.RepoSpec(alias="ws", owner="", repo="", workspace_path=str(tmp_path / "ws"))
-    hub = Hub(config.AppConfig(repos=(spec,), active_alias="ws", ai_enabled=False))
+    hub = Hub(config.AppConfig(repos=(spec,), active_alias="ws", ai=config.AiConfig(enabled=False)))
     with TestClient(create_app(hub)) as client:
         assert client.get("/api/ai/models").status_code == 404
 
