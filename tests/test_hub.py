@@ -422,6 +422,37 @@ def test_chat_open_rejects_traversal(unconfigured_client):
     assert resp.status_code == 400
 
 
+def test_chat_open_includes_guard_status(unconfigured_client, stub_chat):
+    # The open response carries the outbound-PII guard status so the UI can show a
+    # before-you-send badge. Default config: the guard is off.
+    client, hub = unconfigured_client
+    guard = _open_chat(client, hub).json()["guard"]
+    assert set(guard) == {"enabled", "block", "names", "names_active", "backend"}
+    assert guard["enabled"] is False
+
+
+def test_pii_status_reflects_config(tmp_path, monkeypatch):
+    # Isolate against the developer's real config.toml, then read the guard snapshot
+    # the chat badge is built from straight off the Hub.
+    from mooring import paths
+    from mooring.hub.server import Hub
+
+    monkeypatch.setattr(paths, "user_config_dir", lambda: tmp_path / "cfg")
+
+    off = Hub(config.load_app_config(env={}))._pii_status()
+    assert off == {
+        "enabled": False, "block": True, "names": False, "names_active": False, "backend": "",
+    }
+
+    on = Hub(
+        config.load_app_config(env={"MOORING_AI_PII": "true", "MOORING_AI_PII_NAMES": "true"})
+    )._pii_status()
+    assert on["enabled"] is True and on["names"] is True and on["block"] is True
+    assert on["backend"] in ("gliner", "spacy")  # "auto" resolved to a concrete backend
+    # No NER extra is installed in CI, so the name pass can't actually run yet.
+    assert on["names_active"] is False
+
+
 def test_chat_send_streams_events(unconfigured_client, stub_chat):
     client, hub = unconfigured_client
     sid = _open_chat(client, hub).json()["sid"]
