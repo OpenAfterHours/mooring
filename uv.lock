@@ -2,12 +2,6 @@ version = 1
 revision = 3
 requires-python = ">=3.12"
 
-[manifest]
-members = [
-    "mooring",
-    "mooring-spacy-en-md",
-]
-
 [[package]]
 name = "annotated-doc"
 version = "0.0.4"
@@ -1046,7 +1040,7 @@ requires-dist = [
     { name = "gliner", marker = "extra == 'pii'", specifier = ">=0.2.13" },
     { name = "keyring" },
     { name = "marimo", specifier = ">=0.23.9" },
-    { name = "mooring-spacy-en-md", marker = "extra == 'pii-spacy'", editable = "packages/mooring-spacy-en-md" },
+    { name = "mooring-spacy-en-md", marker = "extra == 'pii-spacy'", directory = "packages/mooring-spacy-en-md" },
     { name = "platformdirs" },
     { name = "pyyaml", specifier = ">=6" },
     { name = "requests" },
@@ -1074,7 +1068,7 @@ dev = [
 [[package]]
 name = "mooring-spacy-en-md"
 version = "0.1.0"
-source = { editable = "packages/mooring-spacy-en-md" }
+source = { directory = "packages/mooring-spacy-en-md" }
 
 [[package]]
 name = "more-itertools"

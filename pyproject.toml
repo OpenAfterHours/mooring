@@ -87,17 +87,16 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/mooring"]
 
-# A uv workspace: the root `mooring` package plus the optional model companion in
-# packages/. The companion is pulled only by the `pii-spacy` extra, so a default
-# `uv sync` never installs spaCy or the model; `uv sync --extra pii-spacy` does.
-[tool.uv.workspace]
-members = ["packages/*"]
-
-# In this repo the `mooring-spacy-en-md` dependency resolves to the local member;
-# the published `mooring` wheel just lists it as a normal PyPI dependency (uv strips
-# the source override from published metadata).
+# The model companion lives in packages/ and is published to PyPI separately. It is
+# wired as a local PATH dependency rather than a uv *workspace* member: a workspace
+# makes `uv build` / moonlit (the frozen-build tool) require a `--package` selector,
+# which moonlit can't pass — so the workspace broke the release build. As a path dep
+# it stays in-repo and dev-resolvable without that. The companion is pulled only by
+# the `pii-spacy` extra (a default `uv sync` installs neither spaCy nor the model),
+# and the published `mooring` wheel lists `mooring-spacy-en-md` as a normal PyPI
+# dependency (uv strips this source override from published metadata).
 [tool.uv.sources]
-mooring-spacy-en-md = { workspace = true }
+mooring-spacy-en-md = { path = "packages/mooring-spacy-en-md" }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
