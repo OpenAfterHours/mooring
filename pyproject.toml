@@ -22,8 +22,9 @@ dependencies = [
 
 # The AI copilot is opt-in: the GitHub Copilot SDK bundles a ~150 MB native CLI,
 # so it ships as an extra rather than a base dependency. Install with
-# `pip install mooring[copilot]` / `uvx mooring[copilot]`. Without it, the chat
-# surfaces a "install the copilot extra" hint and the rest of mooring is lean.
+# `pip install "mooring[copilot]"` / `uvx "mooring[copilot]"` / `uv add
+# "mooring[copilot]"` (quote the brackets). Without it, the chat surfaces an
+# "install the copilot extra" hint and the rest of mooring is lean.
 [project.optional-dependencies]
 copilot = [
     "github-copilot-sdk>=1.0.1",
@@ -31,14 +32,15 @@ copilot = [
 # Optional NER name detection for the outbound-PII guard (Phase 2). GLiNER pulls
 # torch + transformers (hundreds of MB), so it ships as an extra — without it the
 # guard still does its stdlib structured-PII scan. Install with
-# `pip install mooring[pii]`. Pre-fetch the model with `mooring ai pii model`.
+# `pip install "mooring[pii]"` (quote the brackets). Pre-fetch the model with
+# `mooring ai pii model`.
 pii = [
     "gliner>=0.2.13",
 ]
 # Offline NER name/organisation detection for PyPI-only / air-gapped teams that
 # can't reach Hugging Face (GLiNER) or GitHub (spaCy's own models). Uses spaCy
 # with an MIT-licensed model republished to PyPI as `mooring-spacy-en-md`, so
-# `pip install mooring[pii-spacy]` needs no other channel. Select it with
+# `pip install "mooring[pii-spacy]"` needs no other channel. Select it with
 # `[ai.pii] name_backend = "spacy"`. See docs/admins/ai-privacy.md.
 pii-spacy = [
     "spacy>=3.8,<3.9",

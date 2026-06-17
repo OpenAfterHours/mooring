@@ -40,6 +40,38 @@ per file (never silently overwritten).
   OS trust store, so SSL-intercepting proxies with an IT-installed root CA
   just work.
 
+## Install from PyPI
+
+With **Python 3.12+** and [uv](https://docs.astral.sh/uv/), run Mooring straight
+from PyPI — no frozen build needed:
+
+```
+uvx mooring                  # run it as a one-off tool
+uv tool install mooring      # …or install it as a persistent CLI
+pip install mooring          # …or into the active environment
+```
+
+### Optional extras
+
+Mooring ships lean; opt-in features live behind extras. **Quote the brackets** —
+`[...]` is a shell glob, so an unquoted `mooring[copilot]` can expand to nothing:
+
+| Extra | Enables |
+|-------|---------|
+| `copilot` | the AI copilot |
+| `pii` | NER name detection for the PII guard |
+| `pii-spacy` | offline name detection (air-gapped teams) |
+
+```
+uvx "mooring[copilot]"               # one-off tool run
+uv tool install "mooring[copilot]"   # persistent CLI tool
+uv add "mooring[copilot]"            # add to your own uv project
+pip install "mooring[copilot]"       # plain pip
+```
+
+Combine with a comma (`"mooring[copilot,pii]"`). Full reference:
+[optional extras](docs/admins/build-and-distribute.md#optional-extras).
+
 ## Documentation
 
 Full docs live in [`docs/`](docs/) and build into a searchable site with

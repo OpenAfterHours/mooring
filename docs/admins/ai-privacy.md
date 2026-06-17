@@ -249,7 +249,7 @@ enabled = true
 detect_names = true
 ```
 ```
-pip install mooring[pii]      # or: uvx mooring[pii]  (combine extras: mooring[copilot,pii])
+pip install "mooring[pii]"    # or uv add / uv tool install / uvx — quote the brackets
 mooring ai pii model          # pre-download the model (recommended)
 ```
 
@@ -279,7 +279,7 @@ The model download is the only part of mooring that reaches a non-GitHub host
   loaded locally; review the pinned `name_model` + `name_model_revision` through your
   model-risk process, and re-pin a new revision only after review.
 
-### PyPI-only / fully air-gapped: the spaCy backend
+### PyPI-only / fully air-gapped: the spaCy backend { #spacy-backend }
 
 If Hugging Face is **unreachable at all** — no allow-list, no mirror, and your only
 package channel is an internal PyPI — switch the name backend from GLiNER to **spaCy**.
@@ -295,8 +295,8 @@ name_backend = "spacy"
 name_labels = ["person", "organization"]
 ```
 ```
-pip install mooring[pii-spacy]   # spaCy + the bundled model, both from PyPI
-mooring ai pii model             # verifies the model loads (nothing to download)
+pip install "mooring[pii-spacy]"   # spaCy + bundled model, both from PyPI (or uv add / uvx)
+mooring ai pii model               # verifies the model loads (nothing to download)
 ```
 
 - **Delivery options if even the companion isn't on your mirror.** The model is a static
@@ -341,12 +341,13 @@ prose — so the rule stands regardless.
 
 ## Requirements
 
-The copilot needs the optional extra (`pip install mooring[copilot]` /
-`uvx mooring[copilot]`), a GitHub Copilot licence (`mooring ai login`), and your
-organisation's Copilot **CLI/agent policy** enabled. See
-[Configuration](configuration.md) for the `[ai]` settings.
+The copilot needs the optional extra (`pip install "mooring[copilot]"` — or
+`uv add` / `uv tool install` / `uvx`; see
+[optional extras](build-and-distribute.md#optional-extras)), a GitHub Copilot
+licence (`mooring ai login`), and your organisation's Copilot **CLI/agent
+policy** enabled. See [Configuration](configuration.md) for the `[ai]` settings.
 
 Optional **name detection** (the structured-PII guard's NER pass) needs the
-separate `mooring[pii]` extra (`pip install mooring[pii]`); without it the guard
+separate `pii` extra (`pip install "mooring[pii]"`); without it the guard
 still does its stdlib structured-PII scan. See
 [Name detection](#name-detection-opt-in-local-ner).

@@ -51,6 +51,33 @@ getting the app to your team.
     whatever the admin built in (see [§4](#changing-the-bundled-package-stack)).
     Opening a notebook that needs a package the bundle lacks shows a warning.
 
+## Optional extras
+
+Mooring ships **lean** — the base install is just its own runtime. Three opt-in
+features live behind *extras*, so their heavy dependencies stay out of the
+default install (and out of the frozen `.pyz`):
+
+| Extra | Adds | Enables |
+|-------|------|---------|
+| `copilot` | `github-copilot-sdk` (bundles a native CLI) | the [AI copilot](../users/ai-copilot.md) |
+| `pii` | `gliner` (torch + transformers) | [NER name detection](ai-privacy.md#name-detection-opt-in-local-ner) for the PII guard |
+| `pii-spacy` | `spacy` + the bundled `mooring-spacy-en-md` model | [offline name detection](ai-privacy.md#spacy-backend) for air-gapped teams |
+
+Install the extra with whichever uv idiom matches how you run mooring. **Quote
+the brackets** — `[...]` is a glob in zsh and bash and is special to PowerShell,
+so an unquoted `mooring[copilot]` can silently expand to nothing:
+
+```bash
+uvx "mooring[copilot]"               # run as a one-off tool (nothing stays installed)
+uv tool install "mooring[copilot]"   # install mooring as a persistent CLI tool
+uv add "mooring[copilot]"            # add mooring to your own uv project
+pip install "mooring[copilot]"       # plain pip, into the active environment
+```
+
+Combine extras with a comma — `"mooring[copilot,pii]"`. The base package is
+identical regardless; an extra only pulls in its own extra dependencies. To drop
+back to lean, reinstall (or `uv add`) without the brackets.
+
 ## Prerequisites
 
 - [uv](https://docs.astral.sh/uv/) installed.

@@ -12,13 +12,27 @@ see [why the copilot can't see your data](../admins/ai-privacy.md).
 
 ## One-time setup
 
-The copilot ships as an optional extra (it bundles GitHub's Copilot CLI):
+The copilot ships as an optional extra (it bundles GitHub's Copilot CLI).
+Install mooring with the `copilot` extra — pick the form that matches how you
+run it, and quote the brackets so the shell doesn't glob them:
 
 ```
-pip install "mooring[copilot]"      # or: uvx "mooring[copilot]"
+uv tool install "mooring[copilot]"   # install as a persistent CLI (recommended)
+uv add "mooring[copilot]"            # …or add it to your own uv project
+pip install "mooring[copilot]"       # …or with plain pip
+uvx "mooring[copilot]"               # …or a one-off run (doesn't stay installed)
+```
+
+Then sign in — these assume `mooring` is on your `PATH` (installed via one of the
+first three forms, not a one-off `uvx` run):
+
+```
 mooring ai login                    # sign in to GitHub Copilot (opens a browser)
 mooring ai status                   # check you're connected
 ```
+
+See [optional extras](../admins/build-and-distribute.md#optional-extras) for the
+full list (`pii`, `pii-spacy`) and how to combine them.
 
 You need a GitHub Copilot licence, and your organisation must have the Copilot
 CLI/agent policy enabled. If the extra isn't installed, the chat will tell you.

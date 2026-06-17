@@ -13,7 +13,7 @@ mirror. The `en_core_web_md` pipeline is MIT-licensed, so this package republish
 its model directory as ordinary **PyPI package data**, the one channel such teams
 have. No Hugging Face, no GitHub, no model mirror at install time.
 
-You don't install this directly — `pip install mooring[pii-spacy]` pulls it in,
+You don't install this directly — `pip install "mooring[pii-spacy]"` pulls it in,
 then set `[ai.pii] name_backend = "spacy"` in your mooring config.
 
 ## For maintainers: vendoring the model before a release
