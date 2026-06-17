@@ -14,6 +14,7 @@ dependencies = [
     "platformdirs",
     "tomli-w>=1.2.0",
     "pyyaml>=6",
+    "spacy>=3.8.14",
 ]
 # Mooring ships lean: only its own runtime is bundled. A repo's notebook
 # dependencies live in that repo's own pyproject.toml (synced via GitHub) — see
