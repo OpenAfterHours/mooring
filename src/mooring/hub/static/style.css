@@ -210,6 +210,12 @@ footer {
   border-color: #3fb950;
   background: transparent;
 }
+/* the PII-guard badge when the outbound scan is OFF (you are not protected) */
+.chat-body #topbar .badge.danger {
+  color: #f85149;
+  border-color: #f85149;
+  background: transparent;
+}
 .chat-body #statusbar .status-ctrl {
   margin: 0;
   display: inline-flex;

@@ -38,6 +38,7 @@ let toolStack = []; // open tool-call rows in this turn
 
 let latestProposal = null; // { card, code, applyBtn, note, applied, skipped }
 let lastUserText = ""; // for /retry
+let currentGuard = null; // outbound-PII guard status for this session (topbar badge)
 const history = new ChatCore.HistoryRing(); // in-memory ONLY (never persisted)
 
 async function api(path, body) {
@@ -73,6 +74,23 @@ function setNerStatus(text, { error = false, transient = false } = {}) {
   if (text && transient) {
     nerHideTimer = setTimeout(() => el.classList.add("hidden"), 4000);
   }
+}
+
+// Paint the topbar PII-guard badge from the session's guard status (green when
+// the outbound scan is active, red when off). Re-rendered when the NER model
+// becomes ready/unavailable so the "names" detail stays truthful mid-session.
+function setPiiBadge(guard) {
+  const el = $("pii-badge");
+  if (!el) return;
+  const b = ChatCore.piiBadge(guard);
+  if (!b) {
+    el.classList.add("hidden");
+    return;
+  }
+  el.textContent = b.text;
+  el.title = b.title;
+  el.classList.remove("hidden", "synced", "danger");
+  el.classList.add(b.cls === "on" ? "synced" : "danger");
 }
 
 // -- scrolling --------------------------------------------------------------
@@ -565,8 +583,16 @@ async function openChat() {
       setNerStatus(`preparing name-detection model…${pct}`);
     } else if (d.state === "ready") {
       setNerStatus("name detection ready", { transient: true });
+      if (currentGuard) {
+        currentGuard.names_active = true;
+        setPiiBadge(currentGuard); // badge tooltip now reflects that names are scanned
+      }
     } else if (d.state === "error") {
       setNerStatus("name-detection model unavailable — scanned without it", { error: true });
+      if (currentGuard) {
+        currentGuard.names_active = false;
+        setPiiBadge(currentGuard);
+      }
     }
   });
   source.addEventListener("fail", (e) => {
@@ -575,6 +601,8 @@ async function openChat() {
   });
   source.addEventListener("closed", () => setStatus("closed"));
   source.onerror = () => setStatus("reconnecting…");
+  currentGuard = data.guard || null;
+  setPiiBadge(currentGuard);
   showPiiBanner(data.pii);
   setTurnState("idle");
 }

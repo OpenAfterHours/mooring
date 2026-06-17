@@ -672,7 +672,35 @@ class Hub:
         telemetry.log_event("ai_chat_open")
         if pii_banner:  # count only — never a kind/value reaches the central sink
             telemetry.log_event("ai_pii", findings=len(pii_banner))
-        return JSONResponse({"sid": sid, "notebook": notebook, "pii": pii_banner})
+        return JSONResponse(
+            {"sid": sid, "notebook": notebook, "pii": pii_banner, "guard": self._pii_status()}
+        )
+
+    def _pii_status(self) -> dict:
+        """Value-free snapshot of the outbound-PII guard for the chat UI badge: is
+        the pre-flight scan on, does a hit block, and can the optional name pass
+        actually run right now. Carries no finding, value, or path — only config
+        booleans plus the resolved backend name."""
+        cfg = self.app_cfg
+        enabled = bool(cfg.ai_pii)
+        names = bool(cfg.ai_pii_names)
+        backend = ""
+        names_active = False
+        if enabled and names:
+            from mooring.ai import ner
+
+            backend = ner.resolve_backend(cfg.ai_pii_name_backend)
+            model = ner.model_for(
+                backend, cfg.ai_pii_name_model, cfg.ai_pii_name_revision, cfg.ai_pii_name_variant
+            )
+            names_active = bool(ner.available(backend) and ner.is_ready(model, backend))
+        return {
+            "enabled": enabled,
+            "block": bool(cfg.ai_pii_block_prompt),
+            "names": names,
+            "names_active": names_active,
+            "backend": backend,
+        }
 
     async def api_chat_stream(self, request: Request) -> StreamingResponse | JSONResponse:
         sid = request.path_params["sid"]

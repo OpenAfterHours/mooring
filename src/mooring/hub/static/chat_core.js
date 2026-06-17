@@ -129,6 +129,41 @@ var ChatCore = (function () {
     return src.split("\n").map((line) => ({ gutter: "+", text: line }));
   }
 
+  // -- outbound-PII guard badge --------------------------------------------
+  // Map the guard status (from /api/ai/chat/open) into a topbar badge so the
+  // analyst sees BEFORE sending whether their prompt is scanned for PII — not
+  // only after a finding comes back. Pure: returns {text, cls, title} (cls is
+  // "on"/"off"; chat.js paints it), or null when no status was supplied.
+  function piiBadge(guard) {
+    if (!guard) return null;
+    const scanned = "cards, IBANs, NHS numbers, emails and UK NINOs";
+    if (!guard.enabled) {
+      return {
+        text: "PII-off",
+        cls: "off",
+        title:
+          "Outbound PII pre-flight scan is OFF — your prompts are NOT scanned for " +
+          scanned +
+          " before being sent. (The schema-only guarantee still holds.) Turn it on " +
+          "with ai.pii.enabled; run `mooring ai pii doctor` to check.",
+      };
+    }
+    let title =
+      "Outbound PII guard is ON — each prompt is scanned for " +
+      scanned +
+      " before it leaves";
+    if (guard.names && guard.names_active) {
+      title += ", plus person/organisation names (" + (guard.backend || "ner") + ")";
+    } else if (guard.names) {
+      title +=
+        " (name detection is configured but its model isn't ready yet, so names are not scanned)";
+    }
+    title += guard.block
+      ? ". A hit holds the message for your confirmation."
+      : ". A hit warns you, but the message is still sent.";
+    return { text: "PII-active", cls: "on", title };
+  }
+
   // -- conservative Python highlight, XSS-safe by contract -----------------
   // MUST be called with text that is ALREADY HTML-escaped. It runs in a SINGLE
   // pass and only wraps <span>s around whole source tokens (comment / string /
@@ -169,6 +204,7 @@ var ChatCore = (function () {
     filterDatasets,
     applyMention,
     additiveBlockLines,
+    piiBadge,
     highlightCode,
     PY_KW,
   };

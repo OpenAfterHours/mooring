@@ -106,6 +106,40 @@ test("additiveBlockLines: one '+' entry per line, trailing newline trimmed", () 
   ]);
 });
 
+test("piiBadge: null status renders nothing", () => {
+  assert.equal(C.piiBadge(null), null);
+  assert.equal(C.piiBadge(undefined), null);
+});
+
+test("piiBadge: guard off -> red 'PII-off' with a not-protected tooltip", () => {
+  const b = C.piiBadge({ enabled: false, block: true, names: false, names_active: false });
+  assert.equal(b.text, "PII-off");
+  assert.equal(b.cls, "off");
+  assert.match(b.title, /OFF/);
+  assert.match(b.title, /schema-only guarantee still holds/);
+});
+
+test("piiBadge: guard on, names ready -> green 'PII-active' naming the backend", () => {
+  const b = C.piiBadge({ enabled: true, block: true, names: true, names_active: true, backend: "spacy" });
+  assert.equal(b.text, "PII-active");
+  assert.equal(b.cls, "on");
+  assert.match(b.title, /person\/organisation names \(spacy\)/);
+  assert.match(b.title, /holds the message for your confirmation/);
+});
+
+test("piiBadge: guard on, names configured but not ready -> green with a caveat", () => {
+  const b = C.piiBadge({ enabled: true, block: false, names: true, names_active: false, backend: "gliner" });
+  assert.equal(b.cls, "on");
+  assert.match(b.title, /isn't ready yet/);
+  assert.match(b.title, /still sent/); // warn-only mode
+});
+
+test("piiBadge: guard on, name detection off -> green, no names clause", () => {
+  const b = C.piiBadge({ enabled: true, block: true, names: false, names_active: false });
+  assert.equal(b.cls, "on");
+  assert.ok(!/names/.test(b.title), "no names clause when detection is off");
+});
+
 test("highlightCode: wraps keywords/strings/comments", () => {
   const out = C.highlightCode(escapeHtml('def f():  # note\n    return "x"'));
   assert.match(out, /<span class="tok-kw">def<\/span>/);
