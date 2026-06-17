@@ -1001,7 +1001,7 @@ wheels = [
 
 [[package]]
 name = "mooring"
-version = "0.3.4"
+version = "0.3.5"
 source = { editable = "." }
 dependencies = [
     { name = "keyring" },
@@ -1009,7 +1009,6 @@ dependencies = [
     { name = "platformdirs" },
     { name = "pyyaml" },
     { name = "requests" },
-    { name = "spacy" },
     { name = "starlette" },
     { name = "tomli-w" },
     { name = "truststore" },
@@ -1051,8 +1050,7 @@ requires-dist = [
     { name = "platformdirs" },
     { name = "pyyaml", specifier = ">=6" },
     { name = "requests" },
-    { name = "spacy", specifier = ">=3.8.14" },
-    { name = "spacy", marker = "extra == 'pii-spacy'", specifier = ">=3.7,<4" },
+    { name = "spacy", marker = "extra == 'pii-spacy'", specifier = ">=3.8,<3.9" },
     { name = "starlette" },
     { name = "tomli-w", specifier = ">=1.2.0" },
     { name = "truststore" },

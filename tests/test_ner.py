@@ -123,9 +123,14 @@ def test_unavailable_without_extra_raises_loudly():
         ner.scan_names("contact Jon Harrison")
 
 
-def test_cli_pii_model_reports_already_cached(monkeypatch, capsys):
+def test_cli_pii_model_reports_already_cached(tmp_path, monkeypatch, capsys):
+    from mooring import paths
     from mooring.cli import main
 
+    # Isolate the config against an empty user dir, so the developer's real
+    # config.toml (which may select name_backend = "spacy") can't change which
+    # backend branch `ai pii model` takes. Defaults -> the GLiNER backend.
+    monkeypatch.setattr(paths, "user_config_dir", lambda: tmp_path / "cfg")
     monkeypatch.setattr(ner, "available", lambda: True)
     monkeypatch.setattr(ner, "is_cached", lambda mid=None: True)
     assert main(["ai", "pii", "model"]) == 0
