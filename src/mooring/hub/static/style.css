@@ -216,6 +216,12 @@ footer {
   border-color: #f85149;
   background: transparent;
 }
+/* PARTIAL: structured scan runs but a configured name pass can't (model absent) */
+.chat-body #topbar .badge.warn {
+  color: #d29922;
+  border-color: #d29922;
+  background: transparent;
+}
 .chat-body #statusbar .status-ctrl {
   margin: 0;
   display: inline-flex;

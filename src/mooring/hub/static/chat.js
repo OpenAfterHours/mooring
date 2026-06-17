@@ -89,8 +89,8 @@ function setPiiBadge(guard) {
   }
   el.textContent = b.text;
   el.title = b.title;
-  el.classList.remove("hidden", "synced", "danger");
-  el.classList.add(b.cls === "on" ? "synced" : "danger");
+  el.classList.remove("hidden", "synced", "danger", "warn");
+  el.classList.add(b.cls === "on" ? "synced" : b.cls === "partial" ? "warn" : "danger");
 }
 
 // -- scrolling --------------------------------------------------------------
@@ -572,8 +572,9 @@ async function openChat() {
     }
     if (findings.length) addPiiNotice(findings); // advisory only; the turn was forwarded
     if (d.scan_error) {
-      // Fail-open but loud: a configured scan could not run; the turn went unchecked.
-      showError("PII pre-flight scan could not run — your message was sent unchecked.");
+      // Fail-open but accurate: only a structured-scan failure means "unchecked";
+      // a names-only failure still scanned structured PII (see ChatCore).
+      showError(ChatCore.scanErrorMessage(d.scan_error));
     }
   });
   source.addEventListener("ner", (e) => {

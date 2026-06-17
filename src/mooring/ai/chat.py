@@ -151,16 +151,16 @@ class ChatBroadcaster:
         broadcasting ``scan_error`` so the analyst sees the guard did not run.
         """
         names = self._pii_names
-        if names and self._pii_name_backend != "spacy":
+        if names:
             from mooring.ai import ner
 
-            # GLiNER only: while the model is still downloading (extra present but not
-            # yet cached), skip the name pass for this turn instead of blocking — the
-            # "ner" prepare status tells the user it isn't active yet. If the extra is
-            # missing entirely, leave names on so guard_prompt reports the loud
-            # scan_error. (spaCy has no background download: run it and be loud if the
-            # model is absent, rather than skipping forever.)
-            if ner.available() and not self._names_ready():
+            # Run the optional name pass ONLY when its backend is installed AND the
+            # model is ready. Otherwise skip it for this turn rather than letting it
+            # raise — the structured scan still runs, so the prompt is NOT unchecked,
+            # and the topbar PII badge already shows "PII-partial" before the user
+            # sends. (A model still downloading just isn't ready yet; the "ner"
+            # prepare status covers that and the badge flips to green when it lands.)
+            if not (ner.available(self._pii_name_backend) and self._names_ready()):
                 names = False
         hold, findings, scan_error = egress.guard_prompt(
             text,
@@ -184,8 +184,8 @@ class ChatBroadcaster:
             return None
         if findings or scan_error:
             data = {"findings": _finding_dicts(findings)}
-            if scan_error:  # fail-open but LOUD: the turn proceeds unchecked
-                data["scan_error"] = True
+            if scan_error:  # fail-open but report WHICH scanner failed (see guard_prompt)
+                data["scan_error"] = scan_error
             self._broadcast(ChatEvent("pii", data))
         return text
 

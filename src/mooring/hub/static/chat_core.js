@@ -148,20 +148,39 @@ var ChatCore = (function () {
           "with ai.pii.enabled; run `mooring ai pii doctor` to check.",
       };
     }
-    let title =
-      "Outbound PII guard is ON — each prompt is scanned for " +
-      scanned +
-      " before it leaves";
+    // "partial": the guard runs the structured scan, but a configured name pass
+    // can't (its model/extra isn't available) — so the badge must NOT read as full
+    // protection. This is the state that used to surface, contradictorily, as a
+    // green badge plus a "sent unchecked" error after sending.
+    const partial = !!guard.names && !guard.names_active;
+    let title = "Outbound PII guard is ON — each prompt is scanned for " + scanned + " before it leaves";
     if (guard.names && guard.names_active) {
       title += ", plus person/organisation names (" + (guard.backend || "ner") + ")";
-    } else if (guard.names) {
+    } else if (partial) {
       title +=
-        " (name detection is configured but its model isn't ready yet, so names are not scanned)";
+        ". Name detection is configured but its model isn't available, so NAMES are NOT " +
+        "scanned (structured PII still is) — run `mooring ai pii doctor`";
     }
     title += guard.block
       ? ". A hit holds the message for your confirmation."
       : ". A hit warns you, but the message is still sent.";
-    return { text: "PII-active", cls: "on", title };
+    return partial
+      ? { text: "PII-partial", cls: "partial", title }
+      : { text: "PII-active", cls: "on", title };
+  }
+
+  // The analyst-facing message for a guard_prompt scan_error code (see
+  // mooring.ai.pii.guard_prompt): only a STRUCTURED-scan failure means the prompt
+  // went truly unchecked; a NAMES-only failure still scanned structured PII, so it
+  // must not claim "unchecked".
+  function scanErrorMessage(code) {
+    if (code === "names") {
+      return (
+        "Name detection couldn't run — your message was scanned for structured PII " +
+        "(cards, IBANs, NHS numbers, emails, NINOs) but not names."
+      );
+    }
+    return "PII pre-flight scan could not run — your message was sent unchecked.";
   }
 
   // -- conservative Python highlight, XSS-safe by contract -----------------
@@ -205,6 +224,7 @@ var ChatCore = (function () {
     applyMention,
     additiveBlockLines,
     piiBadge,
+    scanErrorMessage,
     highlightCode,
     PY_KW,
   };
