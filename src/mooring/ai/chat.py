@@ -61,6 +61,7 @@ class ChatBroadcaster:
         self._pii_name_labels: tuple[str, ...] | None = None
         self._pii_name_threshold = 0.7
         self._pii_name_model: str | None = None
+        self._pii_name_backend = "gliner"  # "gliner" (HF) or "spacy" (offline)
         # NER model readiness, surfaced to the UI via "ner" events (prepare_pii_model):
         # the model downloads in the background on first use; until ready the name
         # pass is skipped (the prompt is still structurally scanned) rather than block.
@@ -117,11 +118,13 @@ class ChatBroadcaster:
         labels: tuple[str, ...] | None = None,
         threshold: float = 0.7,
         model: str | None = None,
+        backend: str = "gliner",
     ) -> None:
         """Arm the prompt guard for this session (called at construction).
 
-        ``names`` (with ``labels``/``threshold``/``model``) additionally enables the
-        local NER name pass — see :func:`mooring.ai.pii.guard_prompt`.
+        ``names`` (with ``labels``/``threshold``/``model``/``backend``) additionally
+        enables the local NER name pass — see :func:`mooring.ai.pii.guard_prompt`.
+        ``backend`` picks ``"gliner"`` (Hugging Face) or ``"spacy"`` (offline).
         """
         self._pii_enabled = enabled
         self._pii_block = block
@@ -129,6 +132,7 @@ class ChatBroadcaster:
         self._pii_name_labels = labels
         self._pii_name_threshold = threshold
         self._pii_name_model = model
+        self._pii_name_backend = backend or "gliner"
 
     def _pii_gate(self, text: str) -> str | None:
         """THE shared outbound-prompt valve, used by every session class.
@@ -140,14 +144,15 @@ class ChatBroadcaster:
         broadcasting ``scan_error`` so the analyst sees the guard did not run.
         """
         names = self._pii_names
-        if names:
+        if names and self._pii_name_backend != "spacy":
             from mooring.ai import ner
 
-            # While the model is still downloading (extra present but not yet cached),
-            # skip the name pass for this turn instead of blocking on the download —
-            # the "ner" prepare status already tells the user it isn't active yet. If
-            # the extra is missing entirely, leave names on so guard_prompt reports the
-            # loud scan_error (install the extra).
+            # GLiNER only: while the model is still downloading (extra present but not
+            # yet cached), skip the name pass for this turn instead of blocking — the
+            # "ner" prepare status tells the user it isn't active yet. If the extra is
+            # missing entirely, leave names on so guard_prompt reports the loud
+            # scan_error. (spaCy has no background download: run it and be loud if the
+            # model is absent, rather than skipping forever.)
             if ner.available() and not self._names_ready():
                 names = False
         hold, findings, scan_error = egress.guard_prompt(
@@ -158,6 +163,7 @@ class ChatBroadcaster:
             labels=self._pii_name_labels,
             threshold=self._pii_name_threshold,
             model=self._pii_name_model,
+            backend=self._pii_name_backend,
         )
         # Hold takes precedence over a scan error: act on an actionable (structured)
         # finding even when the optional name pass could not run — otherwise enabling
@@ -220,12 +226,12 @@ class ChatBroadcaster:
         self._broadcast(ChatEvent("ner", data))
 
     def _names_ready(self) -> bool:
-        """Whether the NER model is loadable now (cached). Memoized once true."""
+        """Whether the NER model is loadable now (no download). Memoized once true."""
         if self._ner_ready:
             return True
         from mooring.ai import ner
 
-        if ner.is_cached(self._pii_name_model):
+        if ner.is_ready(self._pii_name_model, self._pii_name_backend):
             self._ner_ready = True
         return self._ner_ready
 
@@ -240,13 +246,15 @@ class ChatBroadcaster:
             return
         from mooring.ai import ner
 
-        if not ner.available():
+        if not ner.available(self._pii_name_backend):
             return  # the prompt path surfaces scan_error loudly when the extra is missing
-        mid = self._pii_name_model
         if self._names_ready():
-            # already downloaded — warm the in-process load so the first prompt is snappy
+            # already present — warm the in-process load so the first prompt is snappy
             threading.Thread(target=self._warm_ner, name="ner-warm", daemon=True).start()
             return
+        if self._pii_name_backend == "spacy":
+            return  # spaCy models are install-time, never fetched at runtime — nothing to prepare
+        mid = self._pii_name_model
 
         def run() -> None:
             self._ner_pct = -1
@@ -262,10 +270,15 @@ class ChatBroadcaster:
         threading.Thread(target=run, name="ner-prepare", daemon=True).start()
 
     def _warm_ner(self) -> None:
-        from mooring.ai import ner
-
         try:
-            ner.load_model(self._pii_name_model)
+            if self._pii_name_backend == "spacy":
+                from mooring.ai import ner_spacy
+
+                ner_spacy.load(self._pii_name_model if isinstance(self._pii_name_model, str) else "")
+            else:
+                from mooring.ai import ner
+
+                ner.load_model(self._pii_name_model)
             self._ner_ready = True
         except Exception:  # noqa: BLE001 - best-effort warm-up
             pass
@@ -298,6 +311,7 @@ class StubChatSession(ChatBroadcaster):
         pii_name_labels: tuple[str, ...] | None = None,
         pii_name_threshold: float = 0.7,
         pii_name_model: str | None = None,
+        pii_name_backend: str = "gliner",
     ) -> None:
         super().__init__()
         self.system_context = system_context  # stored so tests can prove it's value-free
@@ -309,6 +323,7 @@ class StubChatSession(ChatBroadcaster):
             labels=pii_name_labels,
             threshold=pii_name_threshold,
             model=pii_name_model,
+            backend=pii_name_backend,
         )
 
     def send(self, text: str, live_schema_text: str = "") -> None:

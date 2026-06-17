@@ -108,7 +108,16 @@ scan_notebook_source = true # show a one-time banner if the notebook/its schema 
 # (pre-fetch with `mooring ai pii model`). Best-effort, not a guarantee. Only acts
 # when `enabled` above is true.
 detect_names = false        # turn on local NER name detection
-# Default model is a SAFETENSORS build loaded as its bf16 variant — no pickle
+# Which backend detects names/orgs:
+#   "gliner" (default) — a zero-shot model downloaded from Hugging Face on first use.
+#   "spacy"            — OFFLINE, for PyPI-only / air-gapped teams that can't reach
+#                        Hugging Face. Needs `pip install mooring[pii-spacy]`, which
+#                        bundles an MIT-licensed model from PyPI (no HF, no GitHub).
+#                        The name_model_* settings below are GLiNER's and are ignored.
+name_backend = "gliner"
+# For name_backend = "spacy": leave name_model = "" to use the bundled model, or set
+# it to a spaCy model name / a folder you've sideloaded. (No revision/variant.)
+# Default GLiNER model is a SAFETENSORS build loaded as its bf16 variant — no pickle
 # (`pytorch_model.bin`) is ever downloaded or loaded — pinned to a commit for
 # reproducibility/review. Set name_model_variant = "" for a model that has no
 # variant safetensors (it then loads the repo's default weights file).

@@ -26,10 +26,12 @@ def scan_pii_targets(
     labels: tuple[str, ...] | None = None,
     threshold: float = 0.7,
     model=None,
+    backend: str = "gliner",
 ) -> list[tuple[str, int, str]]:
     """Structured-PII (and optional NER name) findings across the scannable files:
     the team ``instructions.md``, the parsed dictionary files, every ``*.py`` in
-    the synced folders, and the open notebook. Paths are deduped by real path."""
+    the synced folders, and the open notebook. Paths are deduped by real path.
+    ``backend`` picks the NER backend (``"gliner"`` or the offline ``"spacy"``)."""
     targets = [workspace / ctx_dir / "instructions.md"]
     targets += [workspace / r.path for r in index.reports if not r.error]
     for folder in folders:
@@ -55,7 +57,9 @@ def scan_pii_targets(
             rel = str(path)
         findings += [
             (rel, f.line, f.kind)
-            for f in pii.scan_prose(text, names=names, labels=labels, threshold=threshold, model=model)
+            for f in pii.scan_prose(
+                text, names=names, labels=labels, threshold=threshold, model=model, backend=backend
+            )
         ]
     return findings
 

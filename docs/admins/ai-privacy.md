@@ -279,6 +279,37 @@ The model download is the only part of mooring that reaches a non-GitHub host
   loaded locally; review the pinned `name_model` + `name_model_revision` through your
   model-risk process, and re-pin a new revision only after review.
 
+### PyPI-only / fully air-gapped: the spaCy backend
+
+If Hugging Face is **unreachable at all** — no allow-list, no mirror, and your only
+package channel is an internal PyPI — switch the name backend from GLiNER to **spaCy**.
+spaCy's own models aren't on PyPI either (they ship from GitHub), so mooring republishes
+an **MIT-licensed** model to PyPI as the `mooring-spacy-en-md` companion, pulled by the
+`pii-spacy` extra. Nothing reaches Hugging Face or GitHub at install time:
+
+```toml
+[ai.pii]
+enabled = true
+detect_names = true
+name_backend = "spacy"
+name_labels = ["person", "organization"]
+```
+```
+pip install mooring[pii-spacy]   # spaCy + the bundled model, both from PyPI
+mooring ai pii model             # verifies the model loads (nothing to download)
+```
+
+- **Delivery options if even the companion isn't on your mirror.** The model is a static
+  folder, so deliver it however mooring itself reaches the box: sideload the folder and
+  point `[ai.pii] name_model` at its path, or **bundle it into the frozen `.pyz`/`.exe`**
+  your admin builds (the channel that already works), or have IT add the one static
+  companion wheel to the mirror. The maintainer vendors the model once with
+  `scripts/vendor_spacy_model.py`.
+- **Same privacy posture.** Local-only, value-free `(line, kind)` findings — identical to
+  GLiNER. The trade-offs are accuracy (spaCy `md` is solid for people/orgs but weaker than
+  GLiNER) and **no confidence threshold** (`name_threshold` is ignored for spaCy; it relies
+  on the label set). Org detection needs only the `"organization"` label above.
+
 ## The one thing to watch
 
 Anything **you type into a cell or the chat** is, by definition, visible to the

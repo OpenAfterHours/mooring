@@ -714,22 +714,30 @@ def cmd_ai_pii_check(app_cfg: config.AppConfig, cfg: config.Config, args: argpar
     workspace = cfg.workspace()
     ctx_dir = app_cfg.ai_context_dir
     index = datadictionary.load_index(workspace, ctx_dir)
-    ref = ner.ModelRef(
-        app_cfg.ai_pii_name_model, app_cfg.ai_pii_name_revision, app_cfg.ai_pii_name_variant
+    backend = app_cfg.ai_pii_name_backend
+    model = (
+        app_cfg.ai_pii_name_model
+        if backend == "spacy"
+        else ner.ModelRef(
+            app_cfg.ai_pii_name_model, app_cfg.ai_pii_name_revision, app_cfg.ai_pii_name_variant
+        )
     )
-    # Only run NER when the model is already cached — a lint must not trigger a
+    # Only run NER when the model is already present — a lint must not trigger a
     # surprise download. Otherwise fall back to structured-only with a note.
-    names = app_cfg.ai_pii_names and ner.available() and ner.is_cached(ref)
-    if app_cfg.ai_pii_names and not ner.available():
+    names = app_cfg.ai_pii_names and ner.available(backend) and ner.is_ready(model, backend)
+    if app_cfg.ai_pii_names and not ner.available(backend):
+        extra = "pii-spacy" if backend == "spacy" else "pii"
         print(
-            "Note: detect_names is ON but the 'pii' extra isn't installed - scanning\n"
-            "      structured PII only. Install it: pip install mooring[pii]\n"
+            f"Note: detect_names is ON but the '{extra}' extra isn't installed - scanning\n"
+            f"      structured PII only. Install it: pip install mooring[{extra}]\n"
         )
     elif app_cfg.ai_pii_names and not names:
-        print(
-            "Note: detect_names is ON but the model isn't downloaded yet - scanning\n"
-            "      structured PII only. Fetch it first: mooring ai pii model\n"
+        hint = (
+            "the spaCy model isn't present (install mooring[pii-spacy] or bundle it)"
+            if backend == "spacy"
+            else "the model isn't downloaded yet (fetch it: mooring ai pii model)"
         )
+        print(f"Note: detect_names is ON but {hint} - scanning structured PII only.\n")
     findings = scan.scan_pii_targets(
         workspace,
         ctx_dir,
@@ -739,7 +747,8 @@ def cmd_ai_pii_check(app_cfg: config.AppConfig, cfg: config.Config, args: argpar
         names=names,
         labels=app_cfg.ai_pii_name_labels,
         threshold=app_cfg.ai_pii_name_threshold,
-        model=ref,
+        model=model,
+        backend=backend,
     )
     if not app_cfg.ai_pii:
         print("Note: [ai.pii] enabled is OFF - set it true to actually enforce this in the chat.\n")
@@ -754,13 +763,17 @@ def cmd_ai_pii_check(app_cfg: config.AppConfig, cfg: config.Config, args: argpar
 
 
 def cmd_ai_pii_model(app_cfg: config.AppConfig, cfg: config.Config, args: argparse.Namespace) -> int:
-    """Pre-fetch and verify the local NER name-detection model.
+    """Pre-fetch (GLiNER) or verify (spaCy) the local NER name-detection model.
 
-    Loading downloads the weights from Hugging Face on first use; running this
-    once means the first flagged chat prompt isn't blocked on a surprise download
-    (useful on managed/offline networks).
+    GLiNER downloads its weights from Hugging Face on first use; running this once
+    means the first flagged chat prompt isn't blocked on a surprise download. The
+    spaCy backend has nothing to download (the model ships via the pii-spacy extra
+    or is bundled), so this just confirms it loads.
     """
     from mooring.ai import ner
+
+    if app_cfg.ai_pii_name_backend == "spacy":
+        return _cmd_ai_pii_model_spacy(app_cfg)
 
     if not ner.available():
         print("The 'pii' extra is not installed. Install it: pip install mooring[pii]")
@@ -789,6 +802,26 @@ def cmd_ai_pii_model(app_cfg: config.AppConfig, cfg: config.Config, args: argpar
     if not app_cfg.ai_pii_names:
         print("Note: [ai.pii] detect_names is OFF - set it (and enabled) true to use it in the chat.")
     return 0
+
+
+def _cmd_ai_pii_model_spacy(app_cfg: config.AppConfig) -> int:
+    """Verify the offline spaCy model loads (nothing to download)."""
+    from mooring.ai import ner_spacy
+
+    if not ner_spacy.available():
+        print("The 'pii-spacy' extra is not installed. Install it: pip install mooring[pii-spacy]")
+        return 1
+    model = app_cfg.ai_pii_name_model
+    if ner_spacy.is_ready(model):
+        print(f"spaCy model ({model or 'bundled mooring-spacy-en-md'}) is present and loads -")
+        print("ready for offline name detection (no Hugging Face / internet needed).")
+        if not app_cfg.ai_pii_names:
+            print("Note: [ai.pii] detect_names is OFF - set it (and enabled) true to use it.")
+        return 0
+    print("The spaCy model isn't available. Either install mooring[pii-spacy] (which bundles")
+    print("en_core_web_md from PyPI), or set [ai.pii] name_model to a model name / folder you")
+    print("have sideloaded. No Hugging Face or internet is needed either way.")
+    return 1
 
 
 def _print_download_progress(done: int, total: int) -> None:

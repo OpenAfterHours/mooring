@@ -174,6 +174,10 @@ class AppConfig:
         return self.ai.pii.names
 
     @property
+    def ai_pii_name_backend(self) -> str:
+        return self.ai.pii.name_backend
+
+    @property
     def ai_pii_name_model(self) -> str:
         return self.ai.pii.name_model
 
