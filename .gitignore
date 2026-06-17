@@ -7,3 +7,8 @@ dist/
 *.egg-info/
 .idea
 site/
+
+# The vendored spaCy model bytes (~40 MB) — populated by scripts/vendor_spacy_model.py
+# at release time, force-included into the wheel via the companion's [tool.hatch]
+# artifacts. Never committed to keep the repo lean.
+/packages/mooring-spacy-en-md/src/mooring_spacy_en_md/_model/

@@ -35,6 +35,15 @@ copilot = [
 pii = [
     "gliner>=0.2.13",
 ]
+# Offline NER name/organisation detection for PyPI-only / air-gapped teams that
+# can't reach Hugging Face (GLiNER) or GitHub (spaCy's own models). Uses spaCy
+# with an MIT-licensed model republished to PyPI as `mooring-spacy-en-md`, so
+# `pip install mooring[pii-spacy]` needs no other channel. Select it with
+# `[ai.pii] name_backend = "spacy"`. See docs/admins/ai-privacy.md.
+pii-spacy = [
+    "spacy>=3.7,<4",
+    "mooring-spacy-en-md",
+]
 
 [project.scripts]
 mooring = "mooring.cli:main"
@@ -77,6 +86,18 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/mooring"]
+
+# A uv workspace: the root `mooring` package plus the optional model companion in
+# packages/. The companion is pulled only by the `pii-spacy` extra, so a default
+# `uv sync` never installs spaCy or the model; `uv sync --extra pii-spacy` does.
+[tool.uv.workspace]
+members = ["packages/*"]
+
+# In this repo the `mooring-spacy-en-md` dependency resolves to the local member;
+# the published `mooring` wheel just lists it as a normal PyPI dependency (uv strips
+# the source override from published metadata).
+[tool.uv.sources]
+mooring-spacy-en-md = { workspace = true }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
