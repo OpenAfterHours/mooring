@@ -661,7 +661,7 @@ def cmd_ai_dictionary_check(app_cfg: config.AppConfig, cfg: config.Config) -> in
     Runs offline (no Copilot needed) so a team can validate their YAML — and the
     secret scan — before enabling the feature or pushing context to the team.
     """
-    from mooring.ai import datadictionary
+    from mooring.ai import datadictionary, scan
 
     workspace = cfg.workspace()
     ctx_dir = app_cfg.ai_context_dir
@@ -682,7 +682,7 @@ def cmd_ai_dictionary_check(app_cfg: config.AppConfig, cfg: config.Config) -> in
         print("\nSample parsed table:")
         for line in datadictionary.render_table(index.tables[0], max_cols=8).splitlines():
             print(f"  {line}")
-    findings = _scan_context_secrets(workspace, ctx_dir, index)
+    findings = scan.scan_context_secrets(workspace, ctx_dir, index)
     print("")
     if findings:
         print(f"secret scan: {len(findings)} high-confidence finding(s) - fix before sharing:")
@@ -709,7 +709,7 @@ def cmd_ai_pii_check(app_cfg: config.AppConfig, cfg: config.Config, args: argpar
     ``detect_names`` is on and the ``mooring[pii]`` extra is installed, the local
     NER name pass runs too; otherwise it scans structured PII only.
     """
-    from mooring.ai import datadictionary, ner
+    from mooring.ai import datadictionary, ner, scan
 
     workspace = cfg.workspace()
     ctx_dir = app_cfg.ai_context_dir
@@ -730,7 +730,7 @@ def cmd_ai_pii_check(app_cfg: config.AppConfig, cfg: config.Config, args: argpar
             "Note: detect_names is ON but the model isn't downloaded yet - scanning\n"
             "      structured PII only. Fetch it first: mooring ai pii model\n"
         )
-    findings = _scan_pii_targets(
+    findings = scan.scan_pii_targets(
         workspace,
         ctx_dir,
         cfg.folders,
@@ -796,68 +796,6 @@ def _print_download_progress(done: int, total: int) -> None:
     mb = 1024 * 1024
     sys.stdout.write(f"\r  downloading… {pct:3d}%  ({done // mb} / {total // mb} MB)")
     sys.stdout.flush()
-
-
-def _scan_pii_targets(
-    workspace: Path,
-    ctx_dir: str,
-    folders: tuple[str, ...],
-    index,
-    notebook_rel: str | None,
-    *,
-    names: bool = False,
-    labels: tuple[str, ...] | None = None,
-    threshold: float = 0.7,
-    model: str | None = None,
-) -> list[tuple[str, int, str]]:
-    from mooring.ai import pii
-
-    targets = [workspace / ctx_dir / "instructions.md"]
-    targets += [workspace / r.path for r in index.reports if not r.error]
-    for folder in folders:
-        root = workspace / folder
-        if root.is_dir():
-            targets += sorted(root.rglob("*.py"))
-    if notebook_rel:
-        targets.append(workspace / notebook_rel)
-    findings: list[tuple[str, int, str]] = []
-    seen: set[Path] = set()
-    for path in targets:
-        rp = path.resolve()
-        if rp in seen or not path.is_file():
-            continue
-        seen.add(rp)
-        try:
-            text = path.read_text("utf-8", errors="replace")
-        except OSError:
-            continue
-        try:
-            rel = path.relative_to(workspace).as_posix()
-        except ValueError:
-            rel = str(path)
-        findings += [
-            (rel, f.line, f.kind)
-            for f in pii.scan_prose(text, names=names, labels=labels, threshold=threshold, model=model)
-        ]
-    return findings
-
-
-def _scan_context_secrets(workspace: Path, ctx_dir: str, index) -> list[tuple[str, int, str]]:
-    from mooring.ai import secrets
-
-    targets = [workspace / ctx_dir / "instructions.md"]
-    targets += [workspace / r.path for r in index.reports if not r.error]
-    findings: list[tuple[str, int, str]] = []
-    for path in targets:
-        if not path.is_file():
-            continue
-        try:
-            text = path.read_text("utf-8", errors="replace")
-        except OSError:
-            continue
-        rel = path.relative_to(workspace).as_posix()
-        findings += [(rel, f.line, f.kind) for f in secrets.scan(text)]
-    return findings
 
 
 def cmd_ai(app_cfg: config.AppConfig, cfg: config.Config, args: argparse.Namespace) -> int:
