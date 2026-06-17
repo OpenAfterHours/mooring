@@ -207,7 +207,7 @@ def test_guard_prompt_name_pass_unavailable_is_loud(monkeypatch):
 def test_name_prompt_held_then_confirmed_value_free(monkeypatch):
     from mooring.ai import ner
 
-    monkeypatch.setattr(ner, "available", lambda: True)
+    monkeypatch.setattr(ner, "available", lambda backend="gliner": True)
     monkeypatch.setattr(ner, "is_cached", lambda mid=None: True)  # model ready -> name pass runs
     monkeypatch.setattr(ner, "scan_names", lambda text, **kw: [pii.Finding(1, ner.NAME)])
     sess = StubChatSession(pii_enabled=True, pii_block=True, pii_names=True)
@@ -232,7 +232,7 @@ def test_structured_hold_survives_name_pass_failure(monkeypatch):
     def boom(_text, **_kw):
         raise ner.NerUnavailable("no extra")
 
-    monkeypatch.setattr(ner, "available", lambda: True)
+    monkeypatch.setattr(ner, "available", lambda backend="gliner": True)
     monkeypatch.setattr(ner, "is_cached", lambda mid=None: True)  # ready -> name pass runs (and fails)
     monkeypatch.setattr(ner, "scan_names", boom)
     sess = StubChatSession(pii_enabled=True, pii_block=True, pii_names=True)
@@ -252,7 +252,7 @@ def test_scan_error_alone_forwards_loud(monkeypatch):
     def boom(_text, **_kw):
         raise ner.NerUnavailable("no extra")
 
-    monkeypatch.setattr(ner, "available", lambda: True)
+    monkeypatch.setattr(ner, "available", lambda backend="gliner": True)
     monkeypatch.setattr(ner, "is_cached", lambda mid=None: True)  # ready -> name pass runs (and fails)
     monkeypatch.setattr(ner, "scan_names", boom)
     sess = StubChatSession(pii_enabled=True, pii_block=True, pii_names=True)
@@ -281,7 +281,7 @@ def _await_ner(q, *, until):
 def test_prepare_pii_model_streams_progress_then_ready(monkeypatch):
     from mooring.ai import ner
 
-    monkeypatch.setattr(ner, "available", lambda: True)
+    monkeypatch.setattr(ner, "available", lambda backend="gliner": True)
     monkeypatch.setattr(ner, "is_cached", lambda mid=None: False)
 
     def fake_download(mid=None, on_progress=None):
@@ -304,7 +304,7 @@ def test_prepare_pii_model_streams_progress_then_ready(monkeypatch):
 def test_prepare_pii_model_reports_error(monkeypatch):
     from mooring.ai import ner
 
-    monkeypatch.setattr(ner, "available", lambda: True)
+    monkeypatch.setattr(ner, "available", lambda backend="gliner": True)
     monkeypatch.setattr(ner, "is_cached", lambda mid=None: False)
 
     def boom(mid=None, on_progress=None):
@@ -321,7 +321,7 @@ def test_prepare_pii_model_reports_error(monkeypatch):
 def test_prepare_pii_model_silent_when_already_cached(monkeypatch):
     from mooring.ai import ner
 
-    monkeypatch.setattr(ner, "available", lambda: True)
+    monkeypatch.setattr(ner, "available", lambda backend="gliner": True)
     monkeypatch.setattr(ner, "is_cached", lambda mid=None: True)
     monkeypatch.setattr(ner, "load_model", lambda mid=None: object())
     sess = StubChatSession(pii_enabled=True, pii_block=True, pii_names=True)
@@ -333,7 +333,7 @@ def test_prepare_pii_model_silent_when_already_cached(monkeypatch):
 def test_prepare_pii_model_noop_when_names_off(monkeypatch):
     from mooring.ai import ner
 
-    monkeypatch.setattr(ner, "available", lambda: True)
+    monkeypatch.setattr(ner, "available", lambda backend="gliner": True)
     sess = StubChatSession(pii_enabled=True, pii_block=True, pii_names=False)
     q = sess.subscribe()
     sess.prepare_pii_model()
@@ -343,7 +343,7 @@ def test_prepare_pii_model_noop_when_names_off(monkeypatch):
 def test_pii_gate_skips_name_pass_until_model_ready(monkeypatch):
     from mooring.ai import ner
 
-    monkeypatch.setattr(ner, "available", lambda: True)
+    monkeypatch.setattr(ner, "available", lambda backend="gliner": True)
     monkeypatch.setattr(ner, "is_cached", lambda mid=None: False)  # still downloading
 
     def explode(*_a, **_k):
@@ -361,7 +361,7 @@ def test_pii_gate_skips_name_pass_until_model_ready(monkeypatch):
 def test_pii_gate_runs_name_pass_once_ready(monkeypatch):
     from mooring.ai import ner
 
-    monkeypatch.setattr(ner, "available", lambda: True)
+    monkeypatch.setattr(ner, "available", lambda backend="gliner": True)
     monkeypatch.setattr(ner, "is_cached", lambda mid=None: True)
     monkeypatch.setattr(ner, "scan_names", lambda text, **kw: [pii.Finding(1, ner.NAME)])
     sess = StubChatSession(pii_enabled=True, pii_block=True, pii_names=True)

@@ -111,8 +111,15 @@ class NerUnavailable(RuntimeError):
     """The ``mooring[pii]`` extra isn't installed, or the model couldn't load."""
 
 
-def available() -> bool:
-    """True if the GLiNER backend imports (the ``pii`` extra is installed)."""
+def available(backend: str = "gliner") -> bool:
+    """True if the chosen NER backend's library imports (its extra is installed).
+
+    ``backend`` is ``"gliner"`` (the ``pii`` extra) or ``"spacy"`` (the offline
+    ``pii-spacy`` extra — see :mod:`mooring.ai.ner_spacy`)."""
+    if (backend or "gliner").strip().lower() == "spacy":
+        from mooring.ai import ner_spacy
+
+        return ner_spacy.available()
     try:
         import gliner  # noqa: F401
     except Exception:  # noqa: BLE001 - any import failure means "not available"
@@ -153,6 +160,16 @@ def load_model(model: "ModelRef | str | None" = None):
             raise NerUnavailable(f"could not load NER model {ref.id!r}: {exc}") from exc
         _models[key] = obj
         return obj
+
+
+def is_ready(model: "ModelRef | str | None" = None, backend: str = "gliner") -> bool:
+    """Whether the chosen backend AND its model are present and loadable now (no
+    download). Dispatches to the GLiNER cache check or the spaCy presence check."""
+    if (backend or "gliner").strip().lower() == "spacy":
+        from mooring.ai import ner_spacy
+
+        return ner_spacy.is_ready(model if isinstance(model, str) else "")
+    return is_cached(model)
 
 
 def is_cached(model: "ModelRef | str | None" = None) -> bool:
@@ -292,33 +309,57 @@ def scan_names(
     labels: tuple[str, ...] | None = None,
     threshold: float = DEFAULT_THRESHOLD,
     model: "ModelRef | str | None" = None,
+    backend: str = "gliner",
 ) -> list[Finding]:
     """Value-free person-name (and configured-label) findings in ``text``.
 
-    Raises :class:`NerUnavailable` if the backend/model isn't ready — the caller
+    ``backend`` selects the model: ``"gliner"`` (default; the Hugging Face model)
+    or ``"spacy"`` (the offline :mod:`mooring.ai.ner_spacy` backend). Raises
+    :class:`NerUnavailable` if the chosen backend/model isn't ready — the caller
     chooses whether that is loud (the prompt valve) or a silent structured-only
     fallback (advisory scans). Returns ``[]`` on clean text. Best-effort: a chunk
     that errors in inference is skipped, never aborting the whole scan.
     """
-    model_obj = load_model(model)
-    label_list = list(labels) if labels else list(DEFAULT_LABELS)
+    predict = _predictor(labels, threshold, model, backend)
     seen: set[tuple[int, str]] = set()
     findings: list[Finding] = []
     for chunk, first in _chunks(text):
         if not chunk.strip():
             continue
         try:
-            ents = model_obj.predict_entities(chunk, label_list, threshold=threshold)
+            ents = predict(chunk)
         except Exception:  # noqa: BLE001 - a bad chunk must not abort the scan
             continue
-        for ent in ents:
-            start = ent.get("start") if isinstance(ent, dict) else None
+        for kind, start in ents:
             if not isinstance(start, int):
                 continue
             line = first + chunk.count("\n", 0, start)
-            kind = _kind_for(str(ent.get("label", "")))
             key = (line, kind)
             if key not in seen:
                 seen.add(key)
                 findings.append(Finding(line, kind))
     return sorted(findings, key=lambda f: (f.line, f.kind))
+
+
+def _predictor(labels, threshold, model, backend):
+    """Build a ``predict(chunk) -> list[(value-free kind, start_char)]`` for the
+    chosen backend. The model is loaded HERE, so an unready backend raises
+    :class:`NerUnavailable` before the scan loop runs."""
+    if (backend or "gliner").strip().lower() == "spacy":
+        from mooring.ai import ner_spacy
+
+        nlp = ner_spacy.load(model if isinstance(model, str) else "")
+        return lambda chunk: ner_spacy.predict(nlp, chunk, labels)
+
+    model_obj = load_model(model)
+    label_list = list(labels) if labels else list(DEFAULT_LABELS)
+
+    def predict(chunk: str) -> list[tuple[str, int]]:
+        out: list[tuple[str, int]] = []
+        for ent in model_obj.predict_entities(chunk, label_list, threshold=threshold):
+            start = ent.get("start") if isinstance(ent, dict) else None
+            if isinstance(start, int):
+                out.append((_kind_for(str(ent.get("label", ""))), start))
+        return out
+
+    return predict

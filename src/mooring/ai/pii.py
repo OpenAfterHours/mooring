@@ -256,12 +256,14 @@ def scan_prose(
     labels: tuple[str, ...] | None = None,
     threshold: float = 0.7,
     model: str | None = None,
+    backend: str = "gliner",
 ) -> list[Finding]:
     """Structured-PII findings, plus NER names when ``names`` and the extra is ready.
 
     The ADVISORY scanner (notebook-source banner, ``mooring ai pii check``): a
     missing/failed NER backend degrades SILENTLY to structured-only. The enforcing
     prompt valve (:func:`guard_prompt`) is strict instead — it reports the failure.
+    ``backend`` picks the NER backend (``"gliner"`` or the offline ``"spacy"``).
     """
     findings = scan(text)
     if names:
@@ -269,7 +271,7 @@ def scan_prose(
             from mooring.ai import ner
 
             findings = findings + ner.scan_names(
-                text, labels=labels, threshold=threshold, model=model
+                text, labels=labels, threshold=threshold, model=model, backend=backend
             )
         except Exception:  # noqa: BLE001 - advisory path: never fail the caller
             pass
@@ -285,6 +287,7 @@ def guard_prompt(
     labels: tuple[str, ...] | None = None,
     threshold: float = 0.7,
     model: str | None = None,
+    backend: str = "gliner",
 ) -> tuple[bool, list[Finding], bool]:
     """Evaluate an outbound chat prompt. Returns ``(hold, findings, scan_error)``.
 
@@ -310,7 +313,9 @@ def guard_prompt(
         try:
             from mooring.ai import ner
 
-            findings += ner.scan_names(text, labels=labels, threshold=threshold, model=model)
+            findings += ner.scan_names(
+                text, labels=labels, threshold=threshold, model=model, backend=backend
+            )
         except Exception:  # noqa: BLE001 - extra missing / model load / inference error
             scan_error = True
     return (bool(findings) and block), findings, scan_error

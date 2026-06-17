@@ -255,6 +255,13 @@ class CopilotProvider:
         from mooring.ai.session import CopilotChatSession
 
         pii = pii or PiiConfig()
+        # GLiNER takes a pinned ModelRef; spaCy takes a model name/path (or "" = the
+        # vendored model) and has no revision/variant.
+        name_model = (
+            pii.name_model
+            if pii.name_backend == "spacy"
+            else ner.ModelRef(pii.name_model, pii.name_revision, pii.name_variant)
+        )
         session = CopilotChatSession(
             model=(model or "").strip() or self.model,
             reasoning_effort=reasoning_effort,
@@ -269,7 +276,8 @@ class CopilotProvider:
             pii_names=pii.enabled and pii.names,
             pii_name_labels=pii.name_labels,
             pii_name_threshold=pii.name_threshold,
-            pii_name_model=ner.ModelRef(pii.name_model, pii.name_revision, pii.name_variant),
+            pii_name_model=name_model,
+            pii_name_backend=pii.name_backend,
         )
         session.start()
         return session

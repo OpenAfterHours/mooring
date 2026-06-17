@@ -489,6 +489,7 @@ class Hub:
                     labels=self.app_cfg.ai_pii_name_labels,
                     threshold=self.app_cfg.ai_pii_name_threshold,
                     model=self.app_cfg.ai_pii_name_model,
+                    backend=self.app_cfg.ai_pii_name_backend,
                 )
             ]
 

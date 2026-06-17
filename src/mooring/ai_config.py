@@ -37,6 +37,11 @@ class PiiConfig:
     block_prompt: bool = True
     scan_source: bool = True
     names: bool = False
+    # Which NER backend detects names/orgs: "gliner" (default; downloads from
+    # Hugging Face) or "spacy" (offline, for PyPI-only/air-gapped teams — needs the
+    # `pii-spacy` extra). The name_model/revision/variant below are GLiNER's; for
+    # spaCy, name_model is empty (the vendored model) or a model name/path.
+    name_backend: str = "gliner"
     name_model: str = _DEFAULT_NAME_MODEL
     name_revision: str = _DEFAULT_NAME_REVISION
     name_variant: str = "bf16"
@@ -97,6 +102,7 @@ def load_ai_config(ai: Mapping, env: Mapping[str, str]) -> AiConfig:
             env.get("MOORING_AI_PII_SCAN_SOURCE"), _as_bool(p.get("scan_notebook_source"), True)
         ),
         names=_as_bool(env.get("MOORING_AI_PII_NAMES"), _as_bool(p.get("detect_names"), False)),
+        name_backend=env.get("MOORING_AI_PII_NAME_BACKEND", str(p.get("name_backend", "gliner"))),
         name_model=env.get("MOORING_AI_PII_NAME_MODEL", str(p.get("name_model", _DEFAULT_NAME_MODEL))),
         name_revision=env.get(
             "MOORING_AI_PII_NAME_REVISION", str(p.get("name_model_revision", _DEFAULT_NAME_REVISION))
