@@ -7,44 +7,44 @@
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body class="chat-body">
-  <header>
-    <h1>&#9875; mooring</h1>
-    <span class="badge synced" title="The assistant only ever sees column names &amp; types, never data values">schema-only</span>
-    <div id="chat-target" class="muted"></div>
-  </header>
+  <!-- A terminal-style REPL beside the marimo tab. The model streams over SSE;
+       proposed cells are Applied (appended + run) into the open notebook. mooring
+       talks to marimo over HTTP only — outputs/values never reach this page. -->
+  <div id="term">
+    <div id="topbar">
+      <span class="prompt-glyph">&#9875;</span>
+      <span class="topbar-title">mooring copilot</span>
+      <span id="chat-target" class="muted"></span>
+      <span class="badge synced" title="The assistant only ever sees column names &amp; types, never data values">schema-only</span>
+    </div>
 
-  <main>
-    <section class="card context-bar">
-      <div class="context-row">
-        <label>Model
-          <select id="chat-model"></select>
-        </label>
-        <label id="effort-wrap" class="hidden">Effort
-          <select id="chat-effort"></select>
-        </label>
+    <section id="messages" aria-live="polite"></section>
+
+    <div id="prompt-area">
+      <div id="autocomplete" class="hidden" role="listbox"></div>
+      <div class="prompt-row">
+        <span class="prompt-gutter">&gt;</span>
+        <textarea id="chat-input" rows="1" spellcheck="false" autocomplete="off"
+          placeholder="Ask for help — try /help, or @ to reference a dataset"></textarea>
       </div>
-      <div id="chat-status" class="muted"></div>
-      <div id="ner-status" class="ner-status hidden"></div>
-      <p class="hint">The assistant can see this notebook's code and the <b>schema</b>
-        (column names &amp; types) of your datasets and loaded dataframes — never the data
-        itself. It looks schemas up on its own; just ask. Don't paste real values into a
-        cell or this chat.</p>
-    </section>
+    </div>
 
-    <section id="messages" class="card"></section>
+    <div id="statusbar">
+      <label class="status-ctrl">model
+        <select id="chat-model"></select>
+      </label>
+      <label id="effort-wrap" class="status-ctrl hidden">effort
+        <select id="chat-effort"></select>
+      </label>
+      <span class="status-sep">&#9474;</span>
+      <span id="ner-status" class="status-seg hidden"></span>
+      <span id="chat-status" class="status-state"></span>
+    </div>
+  </div>
 
-    <div id="activity" class="activity hidden"></div>
+  <div id="error-banner" class="hidden"></div>
 
-    <section class="card composer-card">
-      <div class="composer">
-        <textarea id="chat-input" rows="1" placeholder="Ask for help, e.g. &quot;filter to 2024 and total amount by region&quot;"></textarea>
-        <button id="chat-send" class="primary">Send</button>
-      </div>
-    </section>
-
-    <div id="error-banner" class="hidden"></div>
-  </main>
-
+  <script src="/static/chat_core.js"></script>
   <script src="/static/chat.js"></script>
 </body>
 </html>
