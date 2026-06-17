@@ -4,6 +4,16 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>mooring</title>
+  <!-- Apply the theme before first paint to avoid a light/dark flash. Prefer the
+       last-used theme (localStorage); on a fresh browser fall back to the server's
+       configured default, inlined here so even the first paint is correct. The
+       server (config.toml) remains the source of truth — /api/state reconciles. -->
+  <script>
+    try {
+      document.documentElement.setAttribute(
+        "data-theme", localStorage.getItem("mooring.ui.theme") || "__MOORING_DEFAULT_THEME__");
+    } catch (e) {}
+  </script>
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
@@ -11,6 +21,11 @@
     <h1>&#9875; mooring</h1>
     <div id="repo-info"></div>
     <select id="repo-select" class="hidden" title="Switch repo"></select>
+    <select id="theme-select" title="Appearance (hub, chat &amp; notebooks)">
+      <option value="light">&#9728; Light</option>
+      <option value="dark">&#9789; Dark</option>
+      <option value="system">&#9881; System</option>
+    </select>
     <div id="user-info"></div>
   </header>
 

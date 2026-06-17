@@ -18,6 +18,24 @@ from pathlib import Path
 from mooring import ai_config, githost, paths
 from mooring.ai_config import AiConfig
 
+# Appearance: the hub, the AI chat, and the marimo notebooks all follow one
+# theme set on the hub. "system" (the default) follows the OS; "light"/"dark"
+# pin it. Stored once in [ui] theme; the hub writes it into each workspace's
+# .marimo.toml display.theme so notebooks open in the same theme.
+VALID_THEMES = ("light", "dark", "system")
+DEFAULT_THEME = "system"
+
+
+def normalize_theme(value: object) -> str:
+    """Coerce a config/env/request value to a valid theme, else the default.
+
+    Tolerant by design: an unset, empty, or unknown value falls back to
+    :data:`DEFAULT_THEME` rather than raising, so a stray config entry can
+    never wedge the hub on an invalid appearance.
+    """
+    text = str(value or "").strip().lower()
+    return text if text in VALID_THEMES else DEFAULT_THEME
+
 
 @dataclass(frozen=True)
 class Config:
@@ -71,6 +89,8 @@ class AppConfig:
     max_file_mb: int = 45
     log_endpoint: str = ""
     log_level: str = "info"
+    # Appearance shared by the hub, the chat, and the notebooks (see normalize_theme).
+    ui_theme: str = DEFAULT_THEME
     # The copilot's settings, nested (see mooring.ai_config). The whole PiiConfig
     # travels to the chat session as one object, so a guard field can't be dropped
     # in transit. Flat ai_*/ai_pii_* read-only properties below forward here so
@@ -293,6 +313,7 @@ def load_app_config(
     sync = data.get("sync", {})
     ws = data.get("workspace", {})
     log = data.get("logging", {})
+    ui = data.get("ui", {})
     ai = data.get("ai", {})
 
     specs, active = repo_specs_from_data(data)
@@ -342,6 +363,7 @@ def load_app_config(
         max_file_mb=int(sync.get("max_file_mb", 45)),
         log_endpoint=env.get("MOORING_LOG_ENDPOINT", str(log.get("endpoint", ""))),
         log_level=env.get("MOORING_LOG_LEVEL", str(log.get("level", "info"))),
+        ui_theme=normalize_theme(env.get("MOORING_UI_THEME", ui.get("theme", DEFAULT_THEME))),
         ai=ai_config.load_ai_config(ai, env),
     )
 

@@ -8,6 +8,73 @@
   --ok: #1a7f37;
   --warn: #9a6700;
   --bad: #cf222e;
+  --review: #8250df;
+  --banner-bad-bg: #ffebe9;
+  color-scheme: light;
+}
+
+/* --- Theme switching (set on the hub; mirrored to the chat + notebooks) -----
+   The hub writes data-theme={light,dark,system} on <html>. Light is the base
+   above. Dark overrides only the *variables*, so every themed surface (hub +
+   the .chat-body terminal) follows from one place. "system" follows the OS via
+   color-scheme + the prefers-color-scheme media query below. */
+:root[data-theme="light"] { color-scheme: light; }
+:root[data-theme="dark"] { color-scheme: dark; }
+:root[data-theme="system"] { color-scheme: light dark; }
+
+:root[data-theme="dark"] {
+  --bg: #0d1117;
+  --card: #161b22;
+  --ink: #e6edf3;
+  --muted: #8b949e;
+  --border: #30363d;
+  --accent: #2f81f7;
+  --ok: #3fb950;
+  --warn: #d29922;
+  --bad: #f85149;
+  --review: #a371f7;
+  --banner-bad-bg: #2d1417;
+}
+:root[data-theme="dark"] .chat-body {
+  --term-bg: #0d1117;
+  --term-ink: #e6edf3;
+  --term-dim: #8b949e;
+  --term-rule: #30363d;
+  --term-surface: #161b22;
+  --term-accent: #2f81f7;
+  --term-add: #3fb950;
+  --tok-kw: #ff7b72;
+  --tok-str: #a5d6ff;
+  --tok-com: #8b949e;
+  --pii-bg: #3a2e12;
+}
+@media (prefers-color-scheme: dark) {
+  :root[data-theme="system"] {
+    --bg: #0d1117;
+    --card: #161b22;
+    --ink: #e6edf3;
+    --muted: #8b949e;
+    --border: #30363d;
+    --accent: #2f81f7;
+    --ok: #3fb950;
+    --warn: #d29922;
+    --bad: #f85149;
+    --review: #a371f7;
+    --banner-bad-bg: #2d1417;
+  }
+  :root[data-theme="system"] .chat-body {
+    --term-bg: #0d1117;
+    --term-ink: #e6edf3;
+    --term-dim: #8b949e;
+    --term-rule: #30363d;
+    --term-surface: #161b22;
+    --term-accent: #2f81f7;
+    --term-add: #3fb950;
+    --tok-kw: #ff7b72;
+    --tok-str: #a5d6ff;
+    --tok-com: #8b949e;
+    --pii-bg: #3a2e12;
+  }
 }
 
 * { box-sizing: border-box; }
@@ -30,13 +97,15 @@ header {
 
 header h1 { font-size: 1.2rem; margin: 0; }
 #repo-info { color: var(--muted); flex: 1; }
-#repo-select {
+#repo-select,
+#theme-select {
   font: inherit;
   font-size: 0.85rem;
   padding: 0.25rem 0.4rem;
   border: 1px solid var(--border);
   border-radius: 6px;
   background: var(--card);
+  color: var(--ink);
 }
 
 main { max-width: 60rem; margin: 1.5rem auto; padding: 0 1rem; }
@@ -113,7 +182,7 @@ td.path { font-family: Consolas, monospace; font-size: 0.9rem; }
 /* artifact has changes in both directions (some to push, some to pull) */
 .badge.mixed { color: var(--warn); border-color: var(--warn); font-weight: 600; }
 /* proposed on a review branch, awaiting its pull request (GitHub PR purple) */
-.badge.review { color: #8250df; border-color: #8250df; }
+.badge.review { color: var(--review); border-color: var(--review); }
 
 tr.member td.path { padding-left: 2.2rem; }
 button.caret {
@@ -124,7 +193,7 @@ button.caret {
 }
 
 #error-banner {
-  background: #ffebe9;
+  background: var(--banner-bad-bg);
   border: 1px solid var(--bad);
   color: var(--bad);
   border-radius: 8px;
@@ -179,6 +248,11 @@ footer {
   --term-bar: #24292f;
   --term-bar-ink: #e6edf3;
   --term-bar-dim: #9aa4ad;
+  /* syntax-highlight + PII-row colours; themed via the dark blocks at the top */
+  --tok-kw: #cf222e;
+  --tok-str: #0a3069;
+  --tok-com: #6e7781;
+  --pii-bg: #fff8e6;
   height: 100dvh;
   background: var(--term-bg);
   color: var(--term-ink);
@@ -354,9 +428,9 @@ footer {
 .chat-body .add-line { display: flex; white-space: pre; }
 .chat-body .add-gutter { width: 1.4em; color: var(--term-add); user-select: none; flex: 0 0 auto; }
 .chat-body .add-code { white-space: pre; }
-.chat-body .tok-kw { color: #cf222e; }
-.chat-body .tok-str { color: #0a3069; }
-.chat-body .tok-com { color: #6e7781; font-style: italic; }
+.chat-body .tok-kw { color: var(--tok-kw); }
+.chat-body .tok-str { color: var(--tok-str); }
+.chat-body .tok-com { color: var(--tok-com); font-style: italic; }
 .chat-body .proposal-actions {
   display: flex;
   align-items: center;
@@ -373,7 +447,7 @@ footer {
   border-left: 3px solid var(--warn);
   padding: 0.3rem 0.6rem;
   margin: 0.3rem 0;
-  background: #fff8e6;
+  background: var(--pii-bg);
   color: var(--warn);
 }
 .chat-body .row-pii .toolbar { margin: 0.4rem 0 0; }

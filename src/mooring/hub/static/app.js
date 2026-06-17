@@ -17,6 +17,19 @@ const STATE_BADGES = {
 
 const PUSH_STATES = ["modified", "new local", "deleted locally"];
 
+// Appearance, shared with the chat window (same origin) via this localStorage
+// key; a `storage` event lets an open chat re-theme live. The server is the
+// source of truth — /api/state carries the value and we mirror it here.
+const LS_THEME = "mooring.ui.theme";
+
+function applyTheme(theme) {
+  document.documentElement.setAttribute("data-theme", theme);
+  try {
+    // Only rewrite on a real change so we don't fire redundant storage events.
+    if (localStorage.getItem(LS_THEME) !== theme) localStorage.setItem(LS_THEME, theme);
+  } catch (e) {}
+}
+
 let busy = false;
 let showAddRepo = false;
 let lastFiles = [];
@@ -277,6 +290,10 @@ function renderRepoSelect(state) {
 async function refresh() {
   const state = await api("/api/state");
   showError(state.error || "");
+  if (state.ui_theme) {
+    applyTheme(state.ui_theme);
+    $("theme-select").value = state.ui_theme;
+  }
   const hostSuffix = state.host && state.host !== "github.com" ? ` · ${state.host}` : "";
   $("repo-info").textContent = state.repo ? `${state.repo} @ ${state.branch}${hostSuffix}` : "";
   $("workspace-info").textContent = `Workspace: ${state.workspace}`;
@@ -386,5 +403,27 @@ $("setup-cancel").addEventListener("click", () => {
   showAddRepo = false;
   refresh();
 });
+
+// Appearance toggle: apply locally at once, then persist server-side (which
+// also re-themes the notebooks' .marimo.toml). Deliberately not routed through
+// action(): an appearance change shouldn't disable the toolbar or refresh.
+$("theme-select").addEventListener("change", async (event) => {
+  const theme = event.target.value;
+  applyTheme(theme);
+  const data = await api("/api/ui/theme", { theme });
+  if (data.error) showError(data.error);
+});
+
+// Another same-origin window (the open chat) changed the theme — follow it.
+window.addEventListener("storage", (event) => {
+  if (event.key === LS_THEME && event.newValue) {
+    applyTheme(event.newValue);
+    $("theme-select").value = event.newValue;
+  }
+});
+
+// Match the toggle to the theme the pre-paint script already applied, so it's
+// never momentarily out of sync; refresh() reconciles with the server value.
+$("theme-select").value = document.documentElement.getAttribute("data-theme") || "system";
 
 refresh();

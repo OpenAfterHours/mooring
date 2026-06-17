@@ -22,7 +22,7 @@ from pathlib import Path
 import uvicorn
 from starlette.applications import Starlette
 from starlette.requests import Request
-from starlette.responses import FileResponse, JSONResponse, StreamingResponse
+from starlette.responses import HTMLResponse, JSONResponse, StreamingResponse
 from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
@@ -84,7 +84,9 @@ class Hub:
         return self.ensure_editor_for(self.cfg.workspace())
 
     def ensure_editor_for(self, workspace: Path) -> EditorServer:
-        editor = self.editors.setdefault(str(workspace), EditorServer(workspace))
+        editor = self.editors.setdefault(
+            str(workspace), EditorServer(workspace, theme=self.app_cfg.ui_theme)
+        )
         editor.ensure_started()
         return editor
 
@@ -125,6 +127,7 @@ class Hub:
                 for s in self.app_cfg.repos
             ],
             "active_repo": self.app_cfg.active_alias,
+            "ui_theme": self.app_cfg.ui_theme,
             "packages": sorted(SELFTEST_PACKAGES),
             "ai_chat": self.app_cfg.ai_enabled,
             "datasets": [],
@@ -238,6 +241,27 @@ class Hub:
         return JSONResponse(
             {"ok": True, "lines": [f"Removed {alias!r}; workspace folder kept at {workspace}"]}
         )
+
+    async def api_set_theme(self, request: Request) -> JSONResponse:
+        """Set the shared appearance (light/dark/system) from the hub toggle.
+
+        Persists it to the user config, updates the live config, and re-themes
+        every running editor's workspace ``.marimo.toml`` so open notebooks pick
+        up the new theme on reopen/reload. The chat UI re-themes itself via the
+        ``/api/state`` value plus a same-origin storage event. Does NOT reload
+        the whole config (that would drop open chat sessions for an appearance
+        change)."""
+        from dataclasses import replace
+
+        data = await request.json()
+        theme = config.normalize_theme(data.get("theme", ""))
+        config_store.set_value("ui.theme", theme)
+        with self._lock:
+            self.app_cfg = replace(self.app_cfg, ui_theme=theme)
+        for editor in list(self.editors.values()):
+            editor.apply_theme(theme)
+        telemetry.log_event("ui_theme", theme=theme)
+        return JSONResponse({"ok": True, "theme": theme})
 
     def api_login_start(self, request: Request) -> JSONResponse:
         try:
@@ -621,10 +645,25 @@ class Hub:
             with contextlib.suppress(Exception):
                 session.close()  # type: ignore[attr-defined]
 
-    def chat_page(self, request: Request) -> FileResponse | JSONResponse:
+    def _themed_page(self, filename: str) -> HTMLResponse:
+        """Serve a hub HTML page with the configured default theme inlined.
+
+        The page's pre-paint script applies ``localStorage`` first, falling back
+        to this server default — so a brand-new browser (empty localStorage)
+        paints in the admin's configured theme immediately, with no flash, and
+        consistent with what ``/api/state`` later reports. The value comes from
+        :func:`config.normalize_theme`, so it is always one of light/dark/system
+        (no injection risk)."""
+        html = (_static_dir() / filename).read_text("utf-8")
+        return HTMLResponse(html.replace("__MOORING_DEFAULT_THEME__", self.app_cfg.ui_theme))
+
+    def index_page(self, request: Request) -> HTMLResponse:
+        return self._themed_page("index.html")
+
+    def chat_page(self, request: Request) -> HTMLResponse | JSONResponse:
         if not self.app_cfg.ai_enabled:
             return JSONResponse({"error": "The AI copilot is disabled."}, status_code=404)
-        return FileResponse(_static_dir() / "chat.html")
+        return self._themed_page("chat.html")
 
     async def api_chat_open(self, request: Request) -> JSONResponse:
         if not self.app_cfg.ai_enabled:
@@ -824,11 +863,12 @@ def create_app(hub: Hub) -> Starlette:
 
     return Starlette(
         routes=[
-            Route("/", lambda r: FileResponse(static / "index.html")),
+            Route("/", hub.index_page),
             Route("/api/state", hub.api_state),
             Route("/api/setup", hub.api_setup, methods=["POST"]),
             Route("/api/repo/switch", hub.api_repo_switch, methods=["POST"]),
             Route("/api/repo/remove", hub.api_repo_remove, methods=["POST"]),
+            Route("/api/ui/theme", hub.api_set_theme, methods=["POST"]),
             Route("/api/login/start", hub.api_login_start, methods=["POST"]),
             Route("/api/login/poll", hub.api_login_poll),
             Route("/api/logout", hub.api_logout, methods=["POST"]),

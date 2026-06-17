@@ -4,6 +4,16 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>mooring · AI copilot</title>
+  <!-- Apply the theme before first paint (mirrors the hub): last-used theme, else
+       the server's inlined default — so opening this window directly (empty
+       localStorage) is correct too. The hub owns the toggle; this window follows
+       via /api/state and a same-origin storage event when the theme changes. -->
+  <script>
+    try {
+      document.documentElement.setAttribute(
+        "data-theme", localStorage.getItem("mooring.ui.theme") || "__MOORING_DEFAULT_THEME__");
+    } catch (e) {}
+  </script>
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body class="chat-body">
