@@ -1,14 +1,15 @@
 """The AI-provider seam.
 
-A provider is the thing the hub's "AI helper" calls to turn a dataset schema +
-a goal into code. The contract every provider must honour: ``generate`` is sent
-**only** the schema text and the instruction it is given — never any data
-values. (The schema text is built by :mod:`mooring.schema`, which emits names
-and dtypes only.)
+A provider is the thing the hub's "AI helper" calls to open a streaming chat over
+a dataset schema + the analyst's goal. The contract every provider must honour:
+it is sent **only** the value-blind system context (schema names + dtypes, the
+notebook source, any opt-in team context) and the analyst's turns — never a data
+value. (The schema text is built by :mod:`mooring.schema`, which emits names and
+dtypes only.)
 
 GitHub Copilot is the only provider implemented today. ``get_provider`` lazily
 imports the concrete backend so that importing this package never drags in the
-Copilot SDK (and its bundled CLI) until a generation actually happens.
+Copilot SDK (and its bundled CLI) until a chat actually opens.
 """
 
 from __future__ import annotations
@@ -49,10 +50,6 @@ class AIProvider(Protocol):
 
     def connect(self) -> ProviderStatus:
         """Best-effort: drive/await sign-in. Raises :class:`AIError` on failure."""
-        ...
-
-    def generate(self, *, schema_context: str, instruction: str, target: str = "polars") -> str:
-        """Return generated code. Sends ONLY ``schema_context`` + ``instruction``."""
         ...
 
     def open_chat(
