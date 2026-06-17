@@ -57,6 +57,39 @@ def test_ai_pii_name_backend_defaults_and_parses(tmp_path):
     )
 
 
+def test_ui_theme_defaults_to_system(tmp_path):
+    app = load_app_config(user_config_path=tmp_path / "missing.toml", env={})
+    assert app.ui_theme == "system"  # the shipped default = follow the OS
+
+
+def test_ui_theme_parses_file_and_env(tmp_path):
+    user = tmp_path / "config.toml"
+    user.write_text('[ui]\ntheme = "dark"\n', "utf-8")
+    assert load_app_config(user_config_path=user, env={}).ui_theme == "dark"
+    # env overrides the file
+    assert (
+        load_app_config(user_config_path=user, env={"MOORING_UI_THEME": "light"}).ui_theme
+        == "light"
+    )
+
+
+def test_ui_theme_invalid_falls_back_to_default(tmp_path):
+    # A stray/unknown value must never wedge the hub on an invalid appearance.
+    user = tmp_path / "config.toml"
+    user.write_text('[ui]\ntheme = "neon"\n', "utf-8")
+    assert load_app_config(user_config_path=user, env={}).ui_theme == "system"
+
+
+def test_normalize_theme():
+    from mooring.config import DEFAULT_THEME, normalize_theme
+
+    assert normalize_theme("Dark") == "dark"  # case-insensitive, trimmed
+    assert normalize_theme("  light ") == "light"
+    assert normalize_theme("") == DEFAULT_THEME
+    assert normalize_theme(None) == DEFAULT_THEME
+    assert normalize_theme("bogus") == DEFAULT_THEME
+
+
 def test_sync_exclude_is_parsed(tmp_path):
     user = tmp_path / "config.toml"
     user.write_text('[sync]\nexclude = ["*.tmp", "scratch", "reports/drafts/*"]\n', "utf-8")

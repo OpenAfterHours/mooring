@@ -37,6 +37,53 @@ def test_state_unconfigured(unconfigured_client):
     assert state["files"] == []
 
 
+def test_state_includes_ui_theme(unconfigured_client):
+    client, _ = unconfigured_client
+    assert client.get("/api/state").json()["ui_theme"] == "system"  # default
+
+
+def test_index_inlines_the_default_theme(unconfigured_client):
+    # The pre-paint script's server-default fallback is rendered, not the literal
+    # token — so a fresh browser paints in the configured theme with no flash.
+    client, hub = unconfigured_client
+    text = client.get("/").text
+    assert "__MOORING_DEFAULT_THEME__" not in text
+    assert '|| "system"' in text  # the default
+
+    from dataclasses import replace
+
+    hub.app_cfg = replace(hub.app_cfg, ui_theme="dark")
+    assert '|| "dark"' in client.get("/").text
+
+
+def test_set_theme_persists_and_state_reflects(unconfigured_client):
+    client, hub = unconfigured_client
+    resp = client.post("/api/ui/theme", json={"theme": "dark"})
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True, "theme": "dark"}
+    assert hub.app_cfg.ui_theme == "dark"  # live config updated (no full reload)
+    data = tomllib.loads(paths.user_config_file().read_text("utf-8"))
+    assert data["ui"]["theme"] == "dark"  # persisted to the user config
+    assert client.get("/api/state").json()["ui_theme"] == "dark"
+
+
+def test_set_theme_invalid_falls_back_to_system(unconfigured_client):
+    client, _ = unconfigured_client
+    assert client.post("/api/ui/theme", json={"theme": "neon"}).json()["theme"] == "system"
+
+
+def test_set_theme_rethemes_running_editor_marimo_config(unconfigured_client):
+    client, hub = unconfigured_client
+    from mooring.editor import EditorServer
+
+    ws = hub.cfg.workspace()
+    ws.mkdir(parents=True, exist_ok=True)
+    hub.editors[str(ws)] = EditorServer(ws, theme="light")  # an open editor
+    client.post("/api/ui/theme", json={"theme": "dark"})
+    data = tomllib.loads((ws / ".marimo.toml").read_text("utf-8"))
+    assert data["display"]["theme"] == "dark"  # notebooks follow the hub theme
+
+
 def test_setup_writes_user_config_and_reloads(unconfigured_client):
     client, hub = unconfigured_client
     resp = client.post(
@@ -191,8 +238,9 @@ def test_switch_changes_editor_workspace(configured, monkeypatch):
     class FakeEditor:
         instances = []
 
-        def __init__(self, workspace):
+        def __init__(self, workspace, theme="system"):
             self.workspace = workspace
+            self.theme = theme
             FakeEditor.instances.append(self)
 
         def ensure_started(self):

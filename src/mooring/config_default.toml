@@ -49,6 +49,17 @@ path = ""        # empty = ~/PythonProjects/mooring/<owner>/<repo>
 endpoint = ""
 level = "info"   # "info" logs usage + errors; "error" logs only errors
 
+# Appearance, shared by the hub page, the AI chat, and the marimo notebooks.
+# Users switch it from the toggle in the hub header; this is just the default.
+#   "system" — follow the operating system's light/dark setting (the default)
+#   "light"  — always light
+#   "dark"   — always dark
+# Whatever is chosen on the hub is written into each workspace's .marimo.toml
+# (display.theme) so notebooks open in the same theme — newly opened notebooks
+# pick it up immediately; reload an already-open notebook to re-theme it.
+[ui]
+theme = "system"
+
 # AI copilot. When enabled and Copilot is connected, the hub's "AI" button
 # opens an interactive chat that helps write notebook code. It is schema-only:
 # the assistant sees a dataset's column names + types (never any data value) and

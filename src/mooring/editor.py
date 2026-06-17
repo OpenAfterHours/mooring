@@ -53,8 +53,12 @@ def free_port() -> int:
 
 
 class EditorServer:
-    def __init__(self, workspace: Path) -> None:
+    def __init__(self, workspace: Path, theme: str = "system") -> None:
         self.workspace = workspace
+        # The appearance mooring writes into this workspace's .marimo.toml so
+        # notebooks open in the same theme as the hub. Updated live by the hub
+        # via apply_theme() when the user switches the toggle.
+        self.theme = theme
         self.port: int | None = None
         self.token = secrets.token_urlsafe(16)
         self._proc: subprocess.Popen | None = None
@@ -117,7 +121,7 @@ class EditorServer:
     def _ensure_marimo_config(self) -> None:
         """Write the workspace ``.marimo.toml`` mooring relies on, for every editor.
 
-        Two things:
+        Three things:
         1. Turn marimo's OWN AI off (``ai.enabled``/``completion.copilot`` =
            false). marimo's built-in AI would send real column *sample values* to
            whatever model is configured — a data-confidentiality leak outside
@@ -126,6 +130,10 @@ class EditorServer:
         2. ``runtime.watcher_on_save = "autorun"`` so that when the copilot applies
            a cell (by writing the .py source), ``--watch`` reloads AND runs it —
            matching the "Apply = add + run" behaviour.
+        3. ``display.theme`` = the hub's appearance (``self.theme``) so notebooks
+           open in the same light/dark/system theme the user picked on the hub.
+           mooring owns this key: the hub is the single control point, so a value
+           set here intentionally overrides marimo's own appearance toggle.
 
         marimo resolves its user config from the first ``.marimo.toml`` found
         searching the cwd (the workspace) upward, so a file written here wins over
@@ -142,25 +150,46 @@ class EditorServer:
             ai = data.get("ai")
             completion = data.get("completion")
             runtime = data.get("runtime")
+            display = data.get("display")
             if not isinstance(ai, dict):
                 ai = data["ai"] = {}
             if not isinstance(completion, dict):
                 completion = data["completion"] = {}
             if not isinstance(runtime, dict):
                 runtime = data["runtime"] = {}
+            if not isinstance(display, dict):
+                display = data["display"] = {}
             already = (
                 ai.get("enabled") is False
                 and completion.get("copilot") is False
                 and runtime.get("watcher_on_save") == "autorun"
+                and display.get("theme") == self.theme
             )
             if already:
                 return  # nothing to change — don't rewrite the file
             ai["enabled"] = False
             completion["copilot"] = False
             runtime["watcher_on_save"] = "autorun"
-            path.write_text(tomli_w.dumps(data), encoding="utf-8")
+            display["theme"] = self.theme
+            # Write atomically: apply_theme() can rewrite this WHILE marimo is
+            # running, and marimo re-reads the file on every page render. A
+            # truncated read would make marimo fall back to its AI-on default —
+            # momentarily re-enabling the value-leaking built-in AI this very
+            # file disables. os.replace swaps it in one step, so a render sees
+            # either the old or the new file, never a partial one.
+            tmp = path.parent / (path.name + ".tmp")
+            tmp.write_text(tomli_w.dumps(data), encoding="utf-8")
+            os.replace(tmp, path)
         except (OSError, tomllib.TOMLDecodeError):
             pass
+
+    def apply_theme(self, theme: str) -> None:
+        """Re-theme this workspace's notebooks: update ``self.theme`` and rewrite
+        ``.marimo.toml``. marimo re-reads its config on each page render, so a
+        notebook opened (or reloaded) after this picks up the new theme without
+        restarting the editor subprocess. Best-effort — never raises."""
+        self.theme = theme
+        self._ensure_marimo_config()
 
     def _wait_ready(self) -> None:
         deadline = time.monotonic() + STARTUP_TIMEOUT

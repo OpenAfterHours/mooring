@@ -10,6 +10,17 @@ const $ = (id) => document.getElementById(id);
 const NOTEBOOK = new URLSearchParams(location.search).get("notebook") || "";
 const LS_MODEL = "mooring.ai.model";
 const LS_EFFORT = "mooring.ai.effort";
+const LS_THEME = "mooring.ui.theme"; // shared with the hub (same origin)
+
+// Appearance follows the hub: applied here from /api/state, and live via a
+// same-origin `storage` event when the hub's toggle changes it.
+function applyTheme(theme) {
+  if (!theme) return;
+  document.documentElement.setAttribute("data-theme", theme);
+  try {
+    if (localStorage.getItem(LS_THEME) !== theme) localStorage.setItem(LS_THEME, theme);
+  } catch (e) {}
+}
 
 const TOOL_LABELS = {
   mooring_list_datasets: "listing datasets",
@@ -905,6 +916,7 @@ async function loadDatasets() {
   try {
     const { data } = await api("/api/state");
     DATASETS = data.datasets || [];
+    applyTheme(data.ui_theme); // follow the hub's appearance
   } catch (_e) {
     DATASETS = [];
   }
@@ -944,6 +956,10 @@ async function init() {
   // a/s apply/skip the latest proposal — only when the prompt isn't focused, so
   // they never hijack typing.
   document.addEventListener("keydown", onGlobalKeydown);
+  // The hub changed the appearance (same origin) — re-theme this window live.
+  window.addEventListener("storage", (event) => {
+    if (event.key === LS_THEME) applyTheme(event.newValue);
+  });
 
   await openChat();
 }
