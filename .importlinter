@@ -1,0 +1,101 @@
+# Architecture guardrails for mooring — the dependency-direction rules from the
+# migration plan, enforced by `uv run lint-imports` (in release CI beside ruff).
+#
+# The codebase has a clean implicit layering that the flat module namespace hides:
+#
+#   L4  cli, hub            the two presentation adapters
+#   L3  ai/*                AI orchestration + privacy/safety
+#   L2  sync/manifest/pbip/deletion (domain core) · editor/schema (marimo bridge)
+#   L1  config/config_store/auth/github            identity + config
+#   L0  githost/paths/gitsha                       stdlib-pure leaves
+#
+# These contracts lock that direction so a backwards import can't silently
+# re-enter as the fast-moving ai/ subsystem keeps growing. They are intentionally
+# a small, high-value set of `forbidden` rules (not a full strict layering) —
+# each maps to a finding in the architecture review and passes today.
+#
+# As later migration phases land, contracts tighten: Phase 3 removes the one
+# documented `ignore_imports` exception below; future phases add a marimo-internal
+# isolation contract (Phase 8) once marimo_rt.py exists.
+
+[importlinter]
+root_package = mooring
+
+[importlinter:contract:foundation-is-pure]
+name = L0 foundation leaves import nothing else in mooring (stdlib-pure, callable at load time)
+type = forbidden
+source_modules =
+    mooring.githost
+    mooring.paths
+    mooring.gitsha
+forbidden_modules =
+    mooring.config
+    mooring.config_store
+    mooring.auth
+    mooring.github
+    mooring.sync
+    mooring.manifest
+    mooring.pbip
+    mooring.deletion
+    mooring.editor
+    mooring.pyproject_env
+    mooring.schema
+    mooring.ai
+    mooring.hub
+    mooring.cli
+    mooring.telemetry
+
+[importlinter:contract:identity-below-domain]
+name = L1 config/identity does not depend on the domain, AI, or the adapters
+type = forbidden
+source_modules =
+    mooring.config
+    mooring.config_store
+    mooring.auth
+    mooring.github
+forbidden_modules =
+    mooring.sync
+    mooring.manifest
+    mooring.pbip
+    mooring.deletion
+    mooring.editor
+    mooring.schema
+    mooring.ai
+    mooring.hub
+    mooring.cli
+
+[importlinter:contract:sync-domain-is-core]
+name = L2 sync domain (the product core) does not depend on AI, the editor, or the adapters
+type = forbidden
+source_modules =
+    mooring.sync
+    mooring.manifest
+    mooring.pbip
+    mooring.deletion
+forbidden_modules =
+    mooring.ai
+    mooring.editor
+    mooring.hub
+    mooring.cli
+
+[importlinter:contract:ai-below-adapters]
+name = L3 AI orchestration sits below the adapters and never imports the web hub or the CLI
+type = forbidden
+source_modules =
+    mooring.ai
+forbidden_modules =
+    mooring.hub
+    mooring.cli
+
+[importlinter:contract:hub-not-cli]
+name = The web hub and the CLI are sibling adapters; the hub must not import the CLI
+type = forbidden
+source_modules =
+    mooring.hub
+forbidden_modules =
+    mooring.cli
+ignore_imports =
+    # KNOWN VIOLATION, removed in Phase 3: hub/server.py imports SELFTEST_PACKAGES
+    # and workspace_hint from cli.py. Phase 3 relocates both to a neutral
+    # runtime.py below both adapters; delete this line then to enforce the rule.
+    mooring.hub.server -> mooring.cli
