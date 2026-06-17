@@ -255,13 +255,11 @@ class CopilotProvider:
         from mooring.ai.session import CopilotChatSession
 
         pii = pii or PiiConfig()
-        # GLiNER takes a pinned ModelRef; spaCy takes a model name/path (or "" = the
-        # vendored model) and has no revision/variant.
-        name_model = (
-            pii.name_model
-            if pii.name_backend == "spacy"
-            else ner.ModelRef(pii.name_model, pii.name_revision, pii.name_variant)
-        )
+        # Resolve "auto" -> a concrete backend ONCE here, then shape name_model for it
+        # (GLiNER: a pinned ModelRef; spaCy: a name/path string, "" = vendored model)
+        # and pass the concrete backend down, so the session never re-resolves.
+        backend = ner.resolve_backend(pii.name_backend)
+        name_model = ner.model_for(backend, pii.name_model, pii.name_revision, pii.name_variant)
         session = CopilotChatSession(
             model=(model or "").strip() or self.model,
             reasoning_effort=reasoning_effort,
@@ -277,7 +275,7 @@ class CopilotProvider:
             pii_name_labels=pii.name_labels,
             pii_name_threshold=pii.name_threshold,
             pii_name_model=name_model,
-            pii_name_backend=pii.name_backend,
+            pii_name_backend=backend,
         )
         session.start()
         return session

@@ -40,8 +40,9 @@ pii = [
 # Offline NER name/organisation detection for PyPI-only / air-gapped teams that
 # can't reach Hugging Face (GLiNER) or GitHub (spaCy's own models). Uses spaCy
 # with an MIT-licensed model republished to PyPI as `mooring-spacy-en-md`, so
-# `pip install "mooring[pii-spacy]"` needs no other channel. Select it with
-# `[ai.pii] name_backend = "spacy"`. See docs/admins/ai-privacy.md.
+# `pip install "mooring[pii-spacy]"` needs no other channel. The default
+# `[ai.pii] name_backend = "auto"` then selects it automatically (no config edit;
+# pin `= "spacy"` to force it). See docs/admins/ai-privacy.md.
 pii-spacy = [
     "spacy>=3.8,<3.9",
     "mooring-spacy-en-md",

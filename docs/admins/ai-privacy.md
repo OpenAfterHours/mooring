@@ -282,20 +282,28 @@ The model download is the only part of mooring that reaches a non-GitHub host
 ### PyPI-only / fully air-gapped: the spaCy backend { #spacy-backend }
 
 If Hugging Face is **unreachable at all** — no allow-list, no mirror, and your only
-package channel is an internal PyPI — switch the name backend from GLiNER to **spaCy**.
+package channel is an internal PyPI — use the **spaCy** name backend instead of GLiNER.
 spaCy's own models aren't on PyPI either (they ship from GitHub), so mooring republishes
 an **MIT-licensed** model to PyPI as the `mooring-spacy-en-md` companion, pulled by the
-`pii-spacy` extra. Nothing reaches Hugging Face or GitHub at install time:
+`pii-spacy` extra. Nothing reaches Hugging Face or GitHub at install time.
+
+You don't have to hand-pick the backend: `name_backend` ships as `"auto"`, which uses
+the offline spaCy backend automatically whenever the `pii-spacy` extra and its model are
+present (otherwise GLiNER). So **installing the extra is enough** — the only settings you
+still choose are turning the guard and name detection on:
 
 ```toml
 [ai.pii]
 enabled = true
 detect_names = true
-name_backend = "spacy"
 name_labels = ["person", "organization"]
+# name_backend = "auto"   # the default; auto-selects spaCy once pii-spacy is installed.
+#                         # Pin it to "spacy" only if you want to force the offline backend
+#                         # even when GLiNER is also installed.
 ```
 ```
 pip install "mooring[pii-spacy]"   # spaCy + bundled model, both from PyPI (or uv add / uvx)
+mooring ai pii doctor              # shows which backend will run + whether it's ready
 mooring ai pii model               # verifies the model loads (nothing to download)
 ```
 

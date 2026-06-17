@@ -111,12 +111,54 @@ class NerUnavailable(RuntimeError):
     """The ``mooring[pii]`` extra isn't installed, or the model couldn't load."""
 
 
+def resolve_backend(backend: "str | None") -> str:
+    """Resolve a configured ``name_backend`` to a concrete ``"gliner"`` / ``"spacy"``.
+
+    ``"auto"`` (the shipped default) means "just work with whatever is installed":
+    it picks the OFFLINE spaCy backend when its extra AND model are present locally
+    — so ``pip install mooring[pii-spacy]`` is enough, with no config edit — and
+    otherwise GLiNER. An explicit ``"gliner"`` / ``"spacy"`` is honoured as a pin
+    and returns instantly without importing spaCy. Never raises: an ``"auto"`` with
+    nothing installed falls back to ``"gliner"``, whose missing-extra hint then
+    guides the install.
+    """
+    b = (backend or "auto").strip().lower()
+    if b in ("gliner", "spacy"):
+        return b
+    # auto / unknown: prefer spaCy when it is actually READY locally (it needs no
+    # network), since that is the air-gapped reason to install it; else GLiNER.
+    from mooring.ai import ner_spacy
+
+    if ner_spacy.available() and ner_spacy.is_ready(""):
+        return "spacy"
+    return "gliner"
+
+
+def model_for(
+    backend: str, name_model: str, revision: str = "", variant: str = ""
+) -> "ModelRef | str":
+    """Shape the shared ``name_model`` config into the argument the (already
+    concrete) ``backend`` expects.
+
+    GLiNER takes a pinned :class:`ModelRef` (id + revision + safetensors variant).
+    spaCy takes a model name / directory path string, where ``""`` means the
+    bundled ``mooring-spacy-en-md`` companion. Because ``name_model`` is shared and
+    DEFAULTS to a GLiNER id, that default is meaningless to spaCy and maps to ``""``
+    (the companion) — only an explicitly-set, non-default value is passed through.
+    """
+    if backend == "spacy":
+        nm = (name_model or "").strip()
+        return "" if nm == DEFAULT_MODEL else nm
+    return ModelRef(name_model, revision, variant)
+
+
 def available(backend: str = "gliner") -> bool:
     """True if the chosen NER backend's library imports (its extra is installed).
 
-    ``backend`` is ``"gliner"`` (the ``pii`` extra) or ``"spacy"`` (the offline
-    ``pii-spacy`` extra — see :mod:`mooring.ai.ner_spacy`)."""
-    if (backend or "gliner").strip().lower() == "spacy":
+    ``backend`` is ``"gliner"`` (the ``pii`` extra), ``"spacy"`` (the offline
+    ``pii-spacy`` extra — see :mod:`mooring.ai.ner_spacy`), or ``"auto"`` (let
+    :func:`resolve_backend` pick the locally-available one)."""
+    if resolve_backend(backend) == "spacy":
         from mooring.ai import ner_spacy
 
         return ner_spacy.available()
@@ -164,8 +206,9 @@ def load_model(model: "ModelRef | str | None" = None):
 
 def is_ready(model: "ModelRef | str | None" = None, backend: str = "gliner") -> bool:
     """Whether the chosen backend AND its model are present and loadable now (no
-    download). Dispatches to the GLiNER cache check or the spaCy presence check."""
-    if (backend or "gliner").strip().lower() == "spacy":
+    download). Dispatches to the GLiNER cache check or the spaCy presence check.
+    ``backend`` may be ``"auto"`` — :func:`resolve_backend` picks the concrete one."""
+    if resolve_backend(backend) == "spacy":
         from mooring.ai import ner_spacy
 
         return ner_spacy.is_ready(model if isinstance(model, str) else "")
@@ -313,8 +356,9 @@ def scan_names(
 ) -> list[Finding]:
     """Value-free person-name (and configured-label) findings in ``text``.
 
-    ``backend`` selects the model: ``"gliner"`` (default; the Hugging Face model)
-    or ``"spacy"`` (the offline :mod:`mooring.ai.ner_spacy` backend). Raises
+    ``backend`` selects the model: ``"gliner"`` (the Hugging Face model), ``"spacy"``
+    (the offline :mod:`mooring.ai.ner_spacy` backend), or ``"auto"`` (resolved by
+    :func:`resolve_backend` — what an unset config defaults to). Raises
     :class:`NerUnavailable` if the chosen backend/model isn't ready — the caller
     chooses whether that is loud (the prompt valve) or a silent structured-only
     fallback (advisory scans). Returns ``[]`` on clean text. Best-effort: a chunk
@@ -345,7 +389,7 @@ def _predictor(labels, threshold, model, backend):
     """Build a ``predict(chunk) -> list[(value-free kind, start_char)]`` for the
     chosen backend. The model is loaded HERE, so an unready backend raises
     :class:`NerUnavailable` before the scan loop runs."""
-    if (backend or "gliner").strip().lower() == "spacy":
+    if resolve_backend(backend) == "spacy":
         from mooring.ai import ner_spacy
 
         nlp = ner_spacy.load(model if isinstance(model, str) else "")

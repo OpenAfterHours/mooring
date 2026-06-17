@@ -112,6 +112,57 @@ def test_kind_for_maps_person_and_org_labels():
     assert ner._kind_for("address") == "address"  # any other label, surfaced as-is
 
 
+# -- backend resolution ("auto") + per-backend model shaping --------------------
+
+
+def test_resolve_backend_honours_explicit_pins(monkeypatch):
+    from mooring.ai import ner_spacy
+
+    # an explicit pin returns as-is and must NOT probe spaCy at all
+    def boom():
+        raise AssertionError("an explicit pin must not probe spaCy availability")
+
+    monkeypatch.setattr(ner_spacy, "available", boom)
+    assert ner.resolve_backend("gliner") == "gliner"
+    assert ner.resolve_backend(" SpaCy ") == "spacy"  # trimmed + case-folded
+
+
+def test_resolve_backend_auto_prefers_ready_spacy(monkeypatch):
+    from mooring.ai import ner_spacy
+
+    monkeypatch.setattr(ner_spacy, "available", lambda: True)
+    monkeypatch.setattr(ner_spacy, "is_ready", lambda model="": True)
+    # auto / blank / None all mean "auto-select", and pick offline spaCy when ready
+    assert ner.resolve_backend("auto") == "spacy"
+    assert ner.resolve_backend("") == "spacy"
+    assert ner.resolve_backend(None) == "spacy"
+
+
+def test_resolve_backend_auto_falls_back_to_gliner(monkeypatch):
+    from mooring.ai import ner_spacy
+
+    # extra not installed -> gliner
+    monkeypatch.setattr(ner_spacy, "available", lambda: False)
+    assert ner.resolve_backend("auto") == "gliner"
+    # extra installed but the model isn't present -> still gliner (never pick a dead backend)
+    monkeypatch.setattr(ner_spacy, "available", lambda: True)
+    monkeypatch.setattr(ner_spacy, "is_ready", lambda model="": False)
+    assert ner.resolve_backend("auto") == "gliner"
+
+
+def test_model_for_shapes_per_backend():
+    # GLiNER gets the pinned ModelRef (id + revision + safetensors variant)
+    assert ner.model_for("gliner", "some/model", "rev", "bf16") == ner.ModelRef(
+        "some/model", "rev", "bf16"
+    )
+    # spaCy gets a name/path string; the shared GLiNER-default id is meaningless to
+    # spaCy, so it maps to "" (the bundled companion) — only an explicit value passes
+    assert ner.model_for("spacy", ner.DEFAULT_MODEL) == ""
+    assert ner.model_for("spacy", "") == ""
+    assert ner.model_for("spacy", "en_core_web_md") == "en_core_web_md"
+    assert ner.model_for("spacy", "/path/to/model") == "/path/to/model"
+
+
 # -- backend-missing failure mode (real: the extra is not installed in CI) ------
 
 
@@ -127,11 +178,65 @@ def test_cli_pii_model_reports_already_cached(tmp_path, monkeypatch, capsys):
     from mooring import paths
     from mooring.cli import main
 
-    # Isolate the config against an empty user dir, so the developer's real
-    # config.toml (which may select name_backend = "spacy") can't change which
-    # backend branch `ai pii model` takes. Defaults -> the GLiNER backend.
+    # Isolate the config against an empty user dir AND pin name_backend = gliner via
+    # env, so neither the developer's real config.toml nor a locally-installed
+    # pii-spacy extra can change which backend branch `ai pii model` takes.
     monkeypatch.setattr(paths, "user_config_dir", lambda: tmp_path / "cfg")
-    monkeypatch.setattr(ner, "available", lambda: True)
+    monkeypatch.setenv("MOORING_AI_PII_NAME_BACKEND", "gliner")
+    monkeypatch.setattr(ner, "available", lambda *a: True)
     monkeypatch.setattr(ner, "is_cached", lambda mid=None: True)
     assert main(["ai", "pii", "model"]) == 0
     assert "already downloaded" in capsys.readouterr().out
+
+
+def test_cli_pii_doctor_off_guard_prints_flips(tmp_path, monkeypatch, capsys):
+    from mooring import paths
+    from mooring.cli import main
+
+    # Default config: guard off, names off. Nothing is broken (no names requested),
+    # so it exits 0 and prints the exact config flips to turn the guard on.
+    monkeypatch.setattr(paths, "user_config_dir", lambda: tmp_path / "cfg")
+    for var in ("MOORING_AI_PII", "MOORING_AI_PII_NAMES", "MOORING_AI_PII_NAME_BACKEND"):
+        monkeypatch.delenv(var, raising=False)
+    assert main(["ai", "pii", "doctor"]) == 0
+    out = capsys.readouterr().out
+    assert "guard enabled:     OFF" in out
+    assert "name backend:" in out  # resolved value is environment-dependent
+    assert "mooring config set ai.pii.enabled true" in out
+    assert "mooring config set ai.pii.detect_names true" in out
+
+
+def test_cli_pii_doctor_flags_unready_name_backend(tmp_path, monkeypatch, capsys):
+    from mooring import paths
+    from mooring.cli import main
+
+    if ner.available("gliner"):
+        pytest.skip("the 'pii' extra (gliner) is installed in this environment")
+    # Guard + names on, backend pinned to gliner whose extra is absent in CI: name
+    # detection can't run, so doctor reports it and exits 1 (would silently degrade).
+    monkeypatch.setattr(paths, "user_config_dir", lambda: tmp_path / "cfg")
+    monkeypatch.setenv("MOORING_AI_PII", "true")
+    monkeypatch.setenv("MOORING_AI_PII_NAMES", "true")
+    monkeypatch.setenv("MOORING_AI_PII_NAME_BACKEND", "gliner")
+    assert main(["ai", "pii", "doctor"]) == 1
+    out = capsys.readouterr().out
+    assert "name detection is ON but the gliner backend isn't ready" in out
+    assert "pip install mooring[pii]" in out
+
+
+def test_cli_pii_doctor_ready_exits_zero(tmp_path, monkeypatch, capsys):
+    from mooring import paths
+    from mooring.cli import main
+
+    # Guard + names on, backend gliner, extra + model both present (mocked): the
+    # happy path -> exit 0 with a "ready" verdict and no install/fix steps.
+    monkeypatch.setattr(paths, "user_config_dir", lambda: tmp_path / "cfg")
+    monkeypatch.setenv("MOORING_AI_PII", "true")
+    monkeypatch.setenv("MOORING_AI_PII_NAMES", "true")
+    monkeypatch.setenv("MOORING_AI_PII_NAME_BACKEND", "gliner")
+    monkeypatch.setattr(ner, "available", lambda *a: True)
+    monkeypatch.setattr(ner, "is_cached", lambda mid=None: True)
+    assert main(["ai", "pii", "doctor"]) == 0
+    out = capsys.readouterr().out
+    assert "ready: the guard enforces in the chat, names via the gliner backend." in out
+    assert "pip install" not in out  # nothing to fix

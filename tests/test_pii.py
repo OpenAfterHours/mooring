@@ -541,3 +541,66 @@ def test_config_name_detection_defaults_and_env(clean_config):
     )
     assert c2.ai_pii_names is True and c2.ai_pii_name_threshold == 0.5
     assert c2.ai_pii_name_variant == ""  # override to load a repo's default weights file
+
+
+# -- "auto" name_backend resolution at the session boundaries ------------------
+
+
+def test_configure_pii_resolves_auto_backend(monkeypatch):
+    """configure_pii turns name_backend = "auto" into a concrete backend at
+    construction — but only when name detection is armed, so a guard without names
+    never imports spaCy just to choose."""
+    from mooring.ai import ner_spacy
+
+    # names armed + spaCy ready -> auto resolves to the offline backend
+    monkeypatch.setattr(ner_spacy, "available", lambda: True)
+    monkeypatch.setattr(ner_spacy, "is_ready", lambda model="": True)
+    sess = StubChatSession(pii_enabled=True, pii_names=True, pii_name_backend="auto")
+    assert sess._pii_name_backend == "spacy"
+
+    # spaCy not present -> auto falls back to gliner (never a dead backend)
+    monkeypatch.setattr(ner_spacy, "available", lambda: False)
+    sess2 = StubChatSession(pii_enabled=True, pii_names=True, pii_name_backend="auto")
+    assert sess2._pii_name_backend == "gliner"
+
+    # name detection OFF -> backend left unresolved and spaCy is never probed
+    def boom():
+        raise AssertionError("must not probe spaCy when name detection is off")
+
+    monkeypatch.setattr(ner_spacy, "available", boom)
+    sess3 = StubChatSession(pii_enabled=True, pii_names=False, pii_name_backend="auto")
+    assert sess3._pii_name_backend == "auto"
+
+
+def test_open_chat_resolves_auto_and_shapes_model(monkeypatch):
+    """CopilotProvider.open_chat resolves "auto" to a concrete backend and shapes
+    the shared name_model for it before handing them to the session: the
+    GLiNER-default id is meaningless to spaCy, so it becomes "" (the bundled model)."""
+    from mooring.ai import ner_spacy
+    from mooring.ai import session as session_mod
+    from mooring.ai.copilot import CopilotProvider
+    from mooring.ai_config import PiiConfig
+
+    captured: dict = {}
+
+    class _StubSession:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        def start(self):
+            return self
+
+    monkeypatch.setattr(session_mod, "CopilotChatSession", _StubSession)
+    monkeypatch.setattr(ner_spacy, "available", lambda: True)
+    monkeypatch.setattr(ner_spacy, "is_ready", lambda model="": True)
+
+    provider = CopilotProvider()
+    monkeypatch.setattr(provider, "available", lambda: True)
+    # name_model is left at its GLiNER default — auto picks spaCy, so it maps to ""
+    pii_cfg = PiiConfig(enabled=True, names=True, name_backend="auto")
+    provider.open_chat(
+        system_context="ctx", workspace=".", folders=(), notebook_rel="nb.py", pii=pii_cfg
+    )
+    assert captured["pii_name_backend"] == "spacy"  # resolved, not the raw "auto"
+    assert captured["pii_name_model"] == ""  # GLiNER-default id shaped to bundled model
+    assert captured["pii_names"] is True
