@@ -483,9 +483,14 @@ def test_pii_status_reflects_config(tmp_path, monkeypatch):
     # Isolate against the developer's real config.toml, then read the guard snapshot
     # the chat badge is built from straight off the Hub.
     from mooring import paths
+    from mooring.ai import ner
     from mooring.hub.server import Hub
 
     monkeypatch.setattr(paths, "user_config_dir", lambda: tmp_path / "cfg")
+    # Force the name pass "not ready" so names_active is deterministic regardless of
+    # whether a NER extra/model is installed locally (a ready spaCy model would
+    # otherwise flip names_active to True). Backend resolution stays real.
+    monkeypatch.setattr(ner, "is_ready", lambda *a, **k: False)
 
     off = Hub(config.load_app_config(env={}))._pii_status()
     assert off == {

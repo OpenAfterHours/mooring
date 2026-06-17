@@ -285,6 +285,10 @@ def test_prepare_pii_model_streams_progress_then_ready(monkeypatch):
 
     monkeypatch.setattr(ner, "available", lambda backend="gliner": True)
     monkeypatch.setattr(ner, "is_cached", lambda mid=None: False)
+    # Pin GLiNER: a locally-installed spaCy extra would otherwise make
+    # resolve_backend("auto") -> "spacy" and report the model already ready,
+    # bypassing the is_cached download path this test exercises.
+    monkeypatch.setattr(ner, "resolve_backend", lambda b=None: "gliner")
 
     def fake_download(mid=None, on_progress=None):
         on_progress(50, 100)
@@ -308,6 +312,9 @@ def test_prepare_pii_model_reports_error(monkeypatch):
 
     monkeypatch.setattr(ner, "available", lambda backend="gliner": True)
     monkeypatch.setattr(ner, "is_cached", lambda mid=None: False)
+    # Pin GLiNER so a locally-installed spaCy extra can't short-circuit the
+    # download path (resolve_backend("auto") -> "spacy" would report ready).
+    monkeypatch.setattr(ner, "resolve_backend", lambda b=None: "gliner")
 
     def boom(mid=None, on_progress=None):
         raise ner.NerUnavailable("network down")
@@ -347,6 +354,10 @@ def test_pii_gate_skips_name_pass_until_model_ready(monkeypatch):
 
     monkeypatch.setattr(ner, "available", lambda backend="gliner": True)
     monkeypatch.setattr(ner, "is_cached", lambda mid=None: False)  # still downloading
+    # Pin GLiNER so the "not ready" state holds even when a spaCy extra is
+    # installed locally (else resolve_backend("auto") -> "spacy" reports ready
+    # and the name pass would run instead of being skipped).
+    monkeypatch.setattr(ner, "resolve_backend", lambda b=None: "gliner")
 
     def explode(*_a, **_k):
         raise AssertionError("scan_names must not run before the model is ready")
