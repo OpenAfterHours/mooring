@@ -27,9 +27,9 @@ from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
 from mooring import __version__, auth, config, config_store, pbip, pyproject_env, sync, telemetry
-from mooring.cli import SELFTEST_PACKAGES, workspace_hint
-from mooring.editor import EditorServer, _free_port
+from mooring.editor import EditorServer, free_port
 from mooring.github import AuthFailed, GitHubClient, GitHubError, compare_url
+from mooring.runtime import SELFTEST_PACKAGES, workspace_hint
 
 
 def _static_dir() -> Path:
@@ -825,7 +825,7 @@ def create_app(hub: Hub) -> Starlette:
 def run_hub(app_cfg: config.AppConfig, open_browser: bool = True, port: int | None = None) -> int:
     hub = Hub(app_cfg)
     app = create_app(hub)
-    port = port or _free_port()
+    port = port or free_port()
     url = f"http://127.0.0.1:{port}/"
     telemetry.log_event("hub_start")
     print(f"mooring hub running at {url} (Ctrl+C to quit)")

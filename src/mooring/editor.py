@@ -46,7 +46,7 @@ class EditorError(Exception):
     pass
 
 
-def _free_port() -> int:
+def free_port() -> int:
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         return sock.getsockname()[1]
@@ -109,7 +109,7 @@ class EditorServer:
             return
         self.workspace.mkdir(parents=True, exist_ok=True)
         self._ensure_marimo_config()
-        self.port = _free_port()
+        self.port = free_port()
         cmd, env = self._invocation()
         self._proc = subprocess.Popen(cmd, cwd=str(self.workspace), env=env)
         self._wait_ready()

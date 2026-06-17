@@ -245,7 +245,7 @@ class CopilotProvider:
         except (asyncio.TimeoutError, TimeoutError) as exc:
             raise AIError("Copilot timed out. Try a simpler request or try again.") from exc
         except Exception as exc:  # noqa: BLE001 - surface a clean message to the UI
-            raise AIError(_friendly_error(str(exc))) from exc
+            raise AIError(friendly_error(str(exc))) from exc
         # A successful call proves we're connected — refresh the cache positively
         # so the card doesn't flip to "not connected" on the next state poll.
         prev = self._cached_status
@@ -344,7 +344,7 @@ class CopilotProvider:
         client = CopilotClient(use_logged_in_user=True)
         async with client:
             auth = await client.get_auth_status()
-            if not _is_authed(auth):
+            if not is_authed(auth):
                 return []
             return [_model_dict(m) for m in await client.list_models()]
 
@@ -355,7 +355,7 @@ class CopilotProvider:
         client = CopilotClient(use_logged_in_user=True)
         async with client:
             auth = await client.get_auth_status()
-            if not _is_authed(auth):
+            if not is_authed(auth):
                 raise AIError("Copilot isn't connected. Run `mooring ai login` to sign in.")
             session = await client.create_session(
                 model=model or None,
@@ -374,7 +374,7 @@ class CopilotProvider:
         client = CopilotClient(use_logged_in_user=True)
         async with client:
             auth = await client.get_auth_status()
-            return _is_authed(auth), _login_of(auth)
+            return is_authed(auth), _login_of(auth)
 
     @staticmethod
     def _run(coro, timeout: float):
@@ -430,7 +430,7 @@ def hardened_session_kwargs(system_context: str) -> dict:
     }
 
 
-def _is_authed(auth: object) -> bool:
+def is_authed(auth: object) -> bool:
     for attr in ("isAuthenticated", "is_authenticated", "authenticated"):
         if hasattr(auth, attr):
             return bool(getattr(auth, attr))
@@ -445,7 +445,7 @@ def _login_of(auth: object) -> str:
     return ""
 
 
-def _friendly_error(msg: str) -> str:
+def friendly_error(msg: str) -> str:
     low = msg.lower()
     if "not authorized" in low or "policy" in low or "enterprise or organization" in low:
         return (

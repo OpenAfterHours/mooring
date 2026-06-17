@@ -14,9 +14,10 @@
 # a small, high-value set of `forbidden` rules (not a full strict layering) —
 # each maps to a finding in the architecture review and passes today.
 #
-# As later migration phases land, contracts tighten: Phase 3 removes the one
-# documented `ignore_imports` exception below; future phases add a marimo-internal
-# isolation contract (Phase 8) once marimo_rt.py exists.
+# As later migration phases land, contracts tighten. Phase 3 added runtime.py
+# (a neutral L1 helper below both adapters) and removed the hub->cli edge, so the
+# hub-not-cli contract below is now fully enforced (no ignore_imports). Future
+# phases add a marimo-internal isolation contract (Phase 8) once marimo_rt.py exists.
 
 [importlinter]
 root_package = mooring
@@ -46,13 +47,14 @@ forbidden_modules =
     mooring.telemetry
 
 [importlinter:contract:identity-below-domain]
-name = L1 config/identity does not depend on the domain, AI, or the adapters
+name = L1 config/identity/runtime does not depend on the domain, AI, or the adapters
 type = forbidden
 source_modules =
     mooring.config
     mooring.config_store
     mooring.auth
     mooring.github
+    mooring.runtime
 forbidden_modules =
     mooring.sync
     mooring.manifest
@@ -94,8 +96,3 @@ source_modules =
     mooring.hub
 forbidden_modules =
     mooring.cli
-ignore_imports =
-    # KNOWN VIOLATION, removed in Phase 3: hub/server.py imports SELFTEST_PACKAGES
-    # and workspace_hint from cli.py. Phase 3 relocates both to a neutral
-    # runtime.py below both adapters; delete this line then to enforce the rule.
-    mooring.hub.server -> mooring.cli
