@@ -442,8 +442,7 @@ class Hub:
 
         from mooring import schema
         from mooring.ai import context as ctxmod
-        from mooring.ai import locality, pii
-        from mooring.ai.chat import build_system_context
+        from mooring.ai import egress, locality, pii
         from mooring.ai.datadictionary import DictionaryIndex
 
         pii_banner: list[dict] = []
@@ -466,7 +465,7 @@ class Hub:
             except (ValueError, OSError) as exc:
                 raise ValueError(f"Could not read the schema for {dataset_rel}: {exc}") from exc
             if self.app_cfg.ai_pii:
-                kept, col_findings = pii.scrub_columns(dataset_schema.columns)
+                kept, col_findings = egress.scrub_columns(dataset_schema.columns)
                 if col_findings:  # a column NAME is itself a PII value — withhold it
                     dataset_schema = replace(dataset_schema, columns=kept)
                     pii_banner += [
@@ -516,7 +515,7 @@ class Hub:
             )
             dictionary_text = locality.seed_text(tables, reasons, n_more)
 
-        context = build_system_context(
+        context = egress.build_system_context(
             schema_text=schema_text,
             notebook_source=source,
             notebook_rel=notebook_rel,
@@ -539,7 +538,7 @@ class Hub:
             return "", []
         from dataclasses import replace
 
-        from mooring.ai import introspect, pii
+        from mooring.ai import egress, introspect
 
         banner: list[dict] = []
         try:
@@ -547,7 +546,7 @@ class Hub:
             if self.app_cfg.ai_pii:
                 scrubbed = []
                 for fr in frames:
-                    kept, ff = pii.scrub_columns(fr.columns)
+                    kept, ff = egress.scrub_columns(fr.columns)
                     if ff:  # a pivot/transpose put a PII value in a column NAME
                         banner += [
                             {"where": f"live `{fr.name}` column", "kind": f.kind} for f in ff

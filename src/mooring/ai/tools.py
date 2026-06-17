@@ -79,7 +79,7 @@ def build_tools(
     from copilot.tools import Tool, ToolResult
 
     from mooring import schema
-    from mooring.ai import pii
+    from mooring.ai import egress
 
     def list_datasets(_invocation):
         found = schema.list_datasets(workspace, folders)
@@ -93,7 +93,7 @@ def build_tools(
             target = _safe(workspace, rel)
             ds = schema.extract_schema(target)
             if pii_enabled:
-                kept, col_findings = pii.scrub_columns(ds.columns)
+                kept, col_findings = egress.scrub_columns(ds.columns)
                 if col_findings:  # a column NAME is itself a PII value — withhold it
                     ds = replace(ds, columns=kept)
             text = schema.format_for_ai(ds, source=rel)
