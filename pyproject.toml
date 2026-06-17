@@ -50,6 +50,12 @@ dev = [
     "pytest",
     "responses",
     "ruff",
+    # Architecture guardrail: `lint-imports` enforces the layering contracts in
+    # .importlinter (the dependency-direction rules from the migration plan) so a
+    # backwards import can't silently re-enter the tree. Runs in release CI beside
+    # ruff; pure static analysis (grimp parses source) so optional extras need not
+    # be installed for it to work.
+    "import-linter",
     # starlette.testclient backend. starlette now prefers `httpx2` (the
     # Pydantic-stewarded httpx successor); plain httpx still works behind a
     # deprecation warning and is kept here as the conservative choice.

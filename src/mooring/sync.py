@@ -323,15 +323,11 @@ def _reconcile_review(
 
 
 def status(client: GitHubClient, cfg: Config) -> StatusReport:
-    workspace = cfg.workspace()
-    mft = manifest_mod.load(workspace)
-    head = client.get_branch_head(cfg.branch)
-    local = scan_local(workspace, cfg.folders, cfg.exclude)
-    remote = _remote_entries(client, cfg, head, mft)
-    if _reconcile_review(client, mft, remote, cfg.exclude):
-        manifest_mod.save(workspace, mft)
-    report = compute_status(mft, local, remote, head, review=mft.review_files)
-    report.review_branch = mft.review_branch
+    prep = _prepare(client, cfg)
+    if prep.review_changed:
+        manifest_mod.save(prep.workspace, prep.mft)
+    report = prep.report
+    report.review_branch = prep.mft.review_branch
     return report
 
 
@@ -348,19 +344,128 @@ def _remote_copy_name(rel_path: str, remote_sha: str) -> str:
     )
 
 
+@dataclass
+class _Prepared:
+    """The shared sync preamble result: the workspace, the loaded manifest,
+    cfg.branch's head, the local/remote blob maps, the three-way status report,
+    and whether _reconcile_review changed the manifest (so status can persist it)."""
+
+    workspace: Path
+    mft: manifest_mod.Manifest
+    head: str
+    local: dict[str, str]
+    remote: dict[str, str]
+    report: StatusReport
+    review_changed: bool
+
+
+def _prepare(client: GitHubClient, cfg: Config, *, make_workspace: bool = False) -> _Prepared:
+    """The identical opening of status/pull/push/propose: load the manifest, fetch
+    cfg.branch's head + remote tree, scan the local tree, reconcile any open review
+    state, and compute the three-way status.
+
+    Callers that mutate and persist the manifest themselves (pull/push/propose)
+    ignore ``review_changed``; status uses it to avoid rewriting the manifest on a
+    no-op. Only pull creates the workspace (``make_workspace``)."""
+    workspace = cfg.workspace()
+    if make_workspace:
+        workspace.mkdir(parents=True, exist_ok=True)
+    mft = manifest_mod.load(workspace)
+    head = client.get_branch_head(cfg.branch)
+    local = scan_local(workspace, cfg.folders, cfg.exclude)
+    remote = _remote_entries(client, cfg, head, mft)
+    review_changed = _reconcile_review(client, mft, remote, cfg.exclude)
+    report = compute_status(mft, local, remote, head, review=mft.review_files)
+    return _Prepared(workspace, mft, head, local, remote, report, review_changed)
+
+
+def _gather_candidates(
+    report: StatusReport,
+    paths: list[str] | None,
+    result: SyncResult,
+    *,
+    in_review_note: str,
+) -> list[FileStatus]:
+    """The push/propose candidate set, plus the conflict-blocked and in-review
+    reporting both share. ``paths`` (if given) restricts to those workspace-relative
+    paths; an in-scope conflict is recorded as blocked and left out of the set. Only
+    the in-review wording differs between the two callers (``in_review_note``)."""
+    wanted = {p.replace("\\", "/") for p in paths} if paths else None
+    candidates = [f for f in report.by_state(*PUSH_STATES) if wanted is None or f.path in wanted]
+    for f in report.by_state(FileState.CONFLICT):
+        if wanted is None or f.path in wanted:
+            result.blocked_conflicts.append(f.path)
+            result.lines.append(
+                f"conflict {f.path} (blocked — pull first, or resolve in the hub)"
+            )
+    if wanted:
+        for f in report.by_state(FileState.IN_REVIEW):
+            if f.path in wanted:
+                result.lines.append(f"in review {f.path} {in_review_note}")
+    return candidates
+
+
+def _read_checked(
+    workspace: Path, f: FileStatus, cfg: Config, result: SyncResult
+) -> bytes | None:
+    """Read a candidate's bytes for upload, enforcing the size limits shared by push
+    and propose. Returns the bytes, or None when the file exceeds cfg.max_file_mb (a
+    'refused' line is recorded and the caller skips it); a file over cfg.warn_file_mb
+    is read but flagged."""
+    data = gitsha.read_for_push(workspace / f.path, f.path)
+    size_mb = len(data) / (1024 * 1024)
+    if size_mb > cfg.max_file_mb:
+        result.lines.append(
+            f"refused  {f.path} ({size_mb:.0f} MB > {cfg.max_file_mb} MB limit)"
+        )
+        return None
+    if size_mb > cfg.warn_file_mb:
+        result.lines.append(f"warning  {f.path} is {size_mb:.0f} MB")
+    return data
+
+
+def _apply_remote_or_keep_both(
+    client: GitHubClient,
+    workspace: Path,
+    mft: manifest_mod.Manifest,
+    rel_path: str,
+    remote_sha: str | None,
+    strategy: ConflictStrategy,
+    result: SyncResult,
+) -> bool:
+    """Apply the two conflict strategies pull and resolve share: THEIRS (take the
+    remote, or delete locally when the remote is gone) and KEEP_BOTH while the
+    remote still exists (save it as a .remote-<sha> copy, keep local pushable).
+
+    Returns True when it handled the strategy; False leaves the caller to handle the
+    cases that legitimately differ between pull and resolve — SKIP, KEEP_BOTH with
+    the remote already deleted, and resolve's PUSH_COPY."""
+    if strategy is ConflictStrategy.THEIRS:
+        if remote_sha is None:
+            (workspace / rel_path).unlink(missing_ok=True)
+            mft.files.pop(rel_path, None)
+        else:
+            _write_blob(workspace, rel_path, client.get_blob(remote_sha))
+            mft.files[rel_path] = remote_sha
+        result.pulled += 1
+        result.lines.append(f"pulled   {rel_path} (overwrote local edits)")
+        return True
+    if strategy is ConflictStrategy.KEEP_BOTH and remote_sha is not None:
+        copy_path = _remote_copy_name(rel_path, remote_sha)
+        _write_blob(workspace, copy_path, client.get_blob(remote_sha))
+        mft.files[rel_path] = remote_sha  # local file is now "modified", pushable
+        result.lines.append(f"kept     {rel_path}; remote saved as {copy_path}")
+        return True
+    return False
+
+
 def pull(
     client: GitHubClient,
     cfg: Config,
     strategy: ConflictStrategy = ConflictStrategy.SKIP,
 ) -> SyncResult:
-    workspace = cfg.workspace()
-    workspace.mkdir(parents=True, exist_ok=True)
-    mft = manifest_mod.load(workspace)
-    head = client.get_branch_head(cfg.branch)
-    local = scan_local(workspace, cfg.folders, cfg.exclude)
-    remote = _remote_entries(client, cfg, head, mft)
-    _reconcile_review(client, mft, remote, cfg.exclude)  # pull saves the manifest below
-    report = compute_status(mft, local, remote, head, review=mft.review_files)
+    prep = _prepare(client, cfg, make_workspace=True)
+    workspace, mft, report = prep.workspace, prep.mft, prep.report
     result = SyncResult()
 
     for f in report.files:
@@ -378,31 +483,19 @@ def pull(
             if f.local_sha and f.base_sha != f.local_sha:
                 mft.files[f.path] = f.local_sha  # same change on both sides
         elif f.state is FileState.CONFLICT:
-            if strategy is ConflictStrategy.THEIRS:
-                if f.remote_sha is None:
-                    (workspace / f.path).unlink(missing_ok=True)
-                    mft.files.pop(f.path, None)
-                else:
-                    _write_blob(workspace, f.path, client.get_blob(f.remote_sha))
-                    mft.files[f.path] = f.remote_sha
-                result.pulled += 1
-                result.lines.append(f"pulled   {f.path} (overwrote local edits)")
-            elif strategy is ConflictStrategy.KEEP_BOTH and f.remote_sha is not None:
-                copy_path = _remote_copy_name(f.path, f.remote_sha)
-                _write_blob(workspace, copy_path, client.get_blob(f.remote_sha))
-                mft.files[f.path] = f.remote_sha  # local file is now "modified", pushable
-                result.lines.append(f"kept     {f.path}; remote saved as {copy_path}")
-            else:
+            if not _apply_remote_or_keep_both(
+                client, workspace, mft, f.path, f.remote_sha, strategy, result
+            ):
                 result.skipped_conflicts.append(f.path)
                 result.lines.append(f"conflict {f.path} (skipped — resolve in the hub)")
 
     # Drop manifest entries for files deleted on both sides.
     for path in list(mft.files):
-        if path not in local and path not in remote:
+        if path not in prep.local and path not in prep.remote:
             del mft.files[path]
 
     mft.branch = cfg.branch
-    mft.head_commit = head
+    mft.head_commit = prep.head
     manifest_mod.save(workspace, mft)
     return result
 
@@ -415,33 +508,16 @@ def push(
     throttle: float = 0.8,
     sleep=time.sleep,
 ) -> SyncResult:
-    workspace = cfg.workspace()
-    mft = manifest_mod.load(workspace)
-    head = client.get_branch_head(cfg.branch)
-    local = scan_local(workspace, cfg.folders, cfg.exclude)
-    remote = _remote_entries(client, cfg, head, mft)
-    _reconcile_review(client, mft, remote, cfg.exclude)  # push saves the manifest below
-    report = compute_status(mft, local, remote, head, review=mft.review_files)
+    prep = _prepare(client, cfg)
+    workspace, mft, report = prep.workspace, prep.mft, prep.report
     result = SyncResult()
 
-    wanted = {p.replace("\\", "/") for p in paths} if paths else None
-    candidates = [
-        f
-        for f in report.by_state(*PUSH_STATES)
-        if wanted is None or f.path in wanted
-    ]
-    for f in report.by_state(FileState.CONFLICT):
-        if wanted is None or f.path in wanted:
-            result.blocked_conflicts.append(f.path)
-            result.lines.append(
-                f"conflict {f.path} (blocked — pull first, or resolve in the hub)"
-            )
-    if wanted:
-        for f in report.by_state(FileState.IN_REVIEW):
-            if f.path in wanted:
-                result.lines.append(
-                    f"in review {f.path} (no local changes — already in the proposal)"
-                )
+    candidates = _gather_candidates(
+        report,
+        paths,
+        result,
+        in_review_note="(no local changes — already in the proposal)",
+    )
 
     # A candidate that belongs to an open proposal keeps going to the review
     # branch, so the (still-unapproved) PR picks up the new edits instead of them
@@ -481,15 +557,9 @@ def push(
                 mft.review_files[f.path] = None
                 result.lines.append(f"deleted  {f.path} (already absent on review branch)")
         else:
-            data = gitsha.read_for_push(workspace / f.path, f.path)
-            size_mb = len(data) / (1024 * 1024)
-            if size_mb > cfg.max_file_mb:
-                result.lines.append(
-                    f"refused  {f.path} ({size_mb:.0f} MB > {cfg.max_file_mb} MB limit)"
-                )
+            data = _read_checked(workspace, f, cfg, result)
+            if data is None:
                 continue
-            if size_mb > cfg.warn_file_mb:
-                result.lines.append(f"warning  {f.path} is {size_mb:.0f} MB")
             try:
                 response = client.put_file(
                     f.path,
@@ -556,38 +626,18 @@ def propose(
     """Upload push candidates to an auto-created review branch instead of
     cfg.branch, so the user can open a pull request on GitHub. The sync base
     (manifest files/head_commit/branch) stays pointed at cfg.branch."""
-    workspace = cfg.workspace()
-    mft = manifest_mod.load(workspace)
-    head = client.get_branch_head(cfg.branch)
-    local = scan_local(workspace, cfg.folders, cfg.exclude)
-    remote = _remote_entries(client, cfg, head, mft)
-    _reconcile_review(client, mft, remote, cfg.exclude)
-    report = compute_status(mft, local, remote, head, review=mft.review_files)
+    prep = _prepare(client, cfg)
+    workspace, mft, report = prep.workspace, prep.mft, prep.report
     result = SyncResult()
 
-    wanted = {p.replace("\\", "/") for p in paths} if paths else None
-    candidates = [
-        f
-        for f in report.by_state(*PUSH_STATES)
-        if wanted is None or f.path in wanted
-    ]
-    for f in report.by_state(FileState.CONFLICT):
-        if wanted is None or f.path in wanted:
-            result.blocked_conflicts.append(f.path)
-            result.lines.append(
-                f"conflict {f.path} (blocked — pull first, or resolve in the hub)"
-            )
-    if wanted:
-        for f in report.by_state(FileState.IN_REVIEW):
-            if f.path in wanted:
-                result.lines.append(f"in review {f.path} (already proposed)")
+    candidates = _gather_candidates(report, paths, result, in_review_note="(already proposed)")
 
     branch_name = mft.review_branch
     if branch_name:
         review_tree = _review_tree(client, cfg, branch_name)
     else:
         # A fresh branch forks from head, so its tree is exactly `remote`.
-        review_tree = dict(remote)
+        review_tree = dict(prep.remote)
 
     def ensure_branch() -> str:
         # Created lazily so an all-refused propose leaves no empty branch.
@@ -598,7 +648,7 @@ def propose(
         name = f"mooring/{login}/{time.strftime('%Y%m%d-%H%M', now())}"
         for suffix in ("", "-2", "-3", "-4"):
             try:
-                client.create_ref(name + suffix, head)
+                client.create_ref(name + suffix, prep.head)
                 branch_name = name + suffix
                 return branch_name
             except RefAlreadyExists:
@@ -622,15 +672,9 @@ def propose(
                 result.lines.append(f"proposed {f.path} (already absent on review branch)")
             mft.review_files[f.path] = None
         else:
-            data = gitsha.read_for_push(workspace / f.path, f.path)
-            size_mb = len(data) / (1024 * 1024)
-            if size_mb > cfg.max_file_mb:
-                result.lines.append(
-                    f"refused  {f.path} ({size_mb:.0f} MB > {cfg.max_file_mb} MB limit)"
-                )
+            data = _read_checked(workspace, f, cfg, result)
+            if data is None:
                 continue
-            if size_mb > cfg.warn_file_mb:
-                result.lines.append(f"warning  {f.path} is {size_mb:.0f} MB")
             try:
                 response = client.put_file(
                     f.path,
@@ -684,24 +728,11 @@ def resolve(
     remote_sha = remote.get(rel_path)
     result = SyncResult()
 
-    if strategy is ConflictStrategy.THEIRS:
-        if remote_sha is None:
-            (workspace / rel_path).unlink(missing_ok=True)
-            mft.files.pop(rel_path, None)
-        else:
-            _write_blob(workspace, rel_path, client.get_blob(remote_sha))
-            mft.files[rel_path] = remote_sha
-        result.pulled += 1
-        result.lines.append(f"pulled   {rel_path} (overwrote local edits)")
-    elif strategy is ConflictStrategy.KEEP_BOTH:
-        if remote_sha is not None:
-            copy_path = _remote_copy_name(rel_path, remote_sha)
-            _write_blob(workspace, copy_path, client.get_blob(remote_sha))
-            mft.files[rel_path] = remote_sha
-            result.lines.append(f"kept     {rel_path}; remote saved as {copy_path}")
-        else:
-            mft.files.pop(rel_path, None)  # remote deleted; local survives as new
-            result.lines.append(f"kept     {rel_path} (remote deleted it)")
+    if _apply_remote_or_keep_both(client, workspace, mft, rel_path, remote_sha, strategy, result):
+        pass  # THEIRS or KEEP_BOTH-with-remote-present handled by the shared helper
+    elif strategy is ConflictStrategy.KEEP_BOTH:  # helper declined: the remote was deleted
+        mft.files.pop(rel_path, None)  # remote deleted; local survives as new
+        result.lines.append(f"kept     {rel_path} (remote deleted it)")
     elif strategy is ConflictStrategy.PUSH_COPY:
         p = Path(rel_path)
         suffix = username or "copy"

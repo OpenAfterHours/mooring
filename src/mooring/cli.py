@@ -12,17 +12,14 @@ from pathlib import Path
 
 from mooring import __version__, config, paths, pyproject_env, telemetry
 
-# Mooring's own runtime — what the lean bundle must always carry. A repo's
-# notebook packages are not listed here: they live in the repo's pyproject.toml
-# and are verified per-workspace by pyproject_env.missing_deps().
-SELFTEST_PACKAGES = (
-    "marimo",
-    "requests",
-    "truststore",
-    "keyring",
-    "starlette",
-    "uvicorn",
-    "platformdirs",
+# SELFTEST_PACKAGES, workspace_hint and legacy_workspace_hint now live in
+# mooring.runtime — a neutral module below both presentation adapters, so the web
+# hub no longer imports the CLI for them (Phase 3 of the architecture migration).
+# Re-exported here for back-compat with callers/tests that import them via mooring.cli.
+from mooring.runtime import (  # noqa: F401
+    SELFTEST_PACKAGES,
+    legacy_workspace_hint,
+    workspace_hint,
 )
 
 
@@ -244,30 +241,6 @@ def _print_paths(cfg: config.Config) -> None:
     hints = (legacy_workspace_hint(cfg), paths.synced_folder_hint(cfg.workspace()))
     for hint in (h for h in hints if h):
         print(f"  note        : {hint}")
-
-
-def legacy_workspace_hint(cfg: config.Config) -> str:
-    """Warn when files live at a past default location but the current default
-    doesn't exist yet, so the user can migrate and keep their sync history."""
-    if not cfg.repo or cfg.workspace_path:
-        return ""
-    new = cfg.workspace()
-    if (new / ".mooring").is_dir():
-        return ""
-    for old in paths.legacy_workspaces(cfg.owner or "_", cfg.repo):
-        if old != new and (old / ".mooring").is_dir():
-            return (
-                f"Found an old workspace at {old} — move the folder to {new} "
-                "(or set its 'workspace' in the config) to keep your sync history."
-            )
-    return ""
-
-
-def workspace_hint(cfg: config.Config) -> str:
-    """Combined workspace warnings (legacy location + cloud-sync folder) for the
-    hub and selftest, joined into one line."""
-    hints = (legacy_workspace_hint(cfg), paths.synced_folder_hint(cfg.workspace()))
-    return "  ".join(h for h in hints if h)
 
 
 def cmd_selftest(app_cfg: config.AppConfig, cfg: config.Config) -> int:

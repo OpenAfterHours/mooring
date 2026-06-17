@@ -113,10 +113,10 @@ class CopilotChatSession(ChatBroadcaster):
         try:
             loop.run_until_complete(self._aopen())
         except BaseException as exc:  # noqa: BLE001 - surfaced via start()
-            from mooring.ai.copilot import _friendly_error
+            from mooring.ai.copilot import friendly_error
 
             self._start_error = (
-                exc if isinstance(exc, AIError) else AIError(_friendly_error(str(exc)))
+                exc if isinstance(exc, AIError) else AIError(friendly_error(str(exc)))
             )
             self._ready.set()
             self._teardown(loop)
@@ -139,7 +139,7 @@ class CopilotChatSession(ChatBroadcaster):
     async def _aopen(self) -> None:
         from copilot import CopilotClient
 
-        from mooring.ai.copilot import _is_authed, hardened_session_kwargs
+        from mooring.ai.copilot import is_authed, hardened_session_kwargs
         from mooring.ai.tools import build_tools
 
         # An empty working dir: even if a built-in file tool slipped the allowlist,
@@ -149,7 +149,7 @@ class CopilotChatSession(ChatBroadcaster):
         await client.start()
         self._client = client
         auth = await client.get_auth_status()
-        if not _is_authed(auth):
+        if not is_authed(auth):
             raise AIError("Copilot isn't connected. Run `mooring ai login` to sign in.")
         tools = build_tools(
             workspace=self._workspace,
@@ -246,9 +246,9 @@ class CopilotChatSession(ChatBroadcaster):
         try:
             future.result(timeout=_SEND_TIMEOUT)
         except Exception as exc:  # noqa: BLE001 - surface to the chat, don't crash the hub
-            from mooring.ai.copilot import _friendly_error
+            from mooring.ai.copilot import friendly_error
 
-            self._broadcast(ChatEvent("fail", {"text": _friendly_error(str(exc))}))
+            self._broadcast(ChatEvent("fail", {"text": friendly_error(str(exc))}))
 
     def close(self) -> None:
         super().close()  # broadcast "closed" to subscribers (idempotent)

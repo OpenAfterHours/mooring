@@ -28,6 +28,11 @@ jobs:
       - name: Lint
         run: uv run ruff check src tests
 
+      - name: Check architecture layering
+        # Enforces the dependency-direction contracts in .importlinter so a
+        # backwards import (e.g. the web hub reaching into the CLI) can't slip in.
+        run: uv run lint-imports
+
       - name: Test
         run: uv run pytest -q
 
