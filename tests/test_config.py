@@ -43,11 +43,18 @@ def test_ai_pii_toml_and_env_populate_the_nested_object(tmp_path):
 
 def test_ai_pii_name_backend_defaults_and_parses(tmp_path):
     app = load_app_config(user_config_path=tmp_path / "missing.toml", env={})
-    assert app.ai.pii.name_backend == "gliner"  # default backend
-    assert app.ai_pii_name_backend == "gliner"  # flat shim agrees
+    assert app.ai.pii.name_backend == "auto"  # default: auto-select at runtime
+    assert app.ai_pii_name_backend == "auto"  # flat shim agrees
     user = tmp_path / "config.toml"
     user.write_text('[ai.pii]\nname_backend = "spacy"\n', "utf-8")
     assert load_app_config(user_config_path=user, env={}).ai.pii.name_backend == "spacy"
+    # env override still wins over the file/default
+    assert (
+        load_app_config(
+            user_config_path=user, env={"MOORING_AI_PII_NAME_BACKEND": "gliner"}
+        ).ai.pii.name_backend
+        == "gliner"
+    )
 
 
 def test_sync_exclude_is_parsed(tmp_path):

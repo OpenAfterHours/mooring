@@ -61,7 +61,7 @@ class ChatBroadcaster:
         self._pii_name_labels: tuple[str, ...] | None = None
         self._pii_name_threshold = 0.7
         self._pii_name_model: str | None = None
-        self._pii_name_backend = "gliner"  # "gliner" (HF) or "spacy" (offline)
+        self._pii_name_backend = "auto"  # resolved to "gliner"/"spacy" by configure_pii
         # NER model readiness, surfaced to the UI via "ner" events (prepare_pii_model):
         # the model downloads in the background on first use; until ready the name
         # pass is skipped (the prompt is still structurally scanned) rather than block.
@@ -118,13 +118,15 @@ class ChatBroadcaster:
         labels: tuple[str, ...] | None = None,
         threshold: float = 0.7,
         model: str | None = None,
-        backend: str = "gliner",
+        backend: str = "auto",
     ) -> None:
         """Arm the prompt guard for this session (called at construction).
 
         ``names`` (with ``labels``/``threshold``/``model``/``backend``) additionally
         enables the local NER name pass — see :func:`mooring.ai.pii.guard_prompt`.
-        ``backend`` picks ``"gliner"`` (Hugging Face) or ``"spacy"`` (offline).
+        ``backend`` is ``"gliner"`` / ``"spacy"`` or ``"auto"``; it is resolved to a
+        concrete backend here (only when ``names`` is armed, so a session without
+        name detection never imports spaCy just to choose a backend).
         """
         self._pii_enabled = enabled
         self._pii_block = block
@@ -132,7 +134,12 @@ class ChatBroadcaster:
         self._pii_name_labels = labels
         self._pii_name_threshold = threshold
         self._pii_name_model = model
-        self._pii_name_backend = backend or "gliner"
+        if names:
+            from mooring.ai import ner
+
+            self._pii_name_backend = ner.resolve_backend(backend)
+        else:
+            self._pii_name_backend = (backend or "auto").strip().lower() or "auto"
 
     def _pii_gate(self, text: str) -> str | None:
         """THE shared outbound-prompt valve, used by every session class.
@@ -311,7 +318,7 @@ class StubChatSession(ChatBroadcaster):
         pii_name_labels: tuple[str, ...] | None = None,
         pii_name_threshold: float = 0.7,
         pii_name_model: str | None = None,
-        pii_name_backend: str = "gliner",
+        pii_name_backend: str = "auto",
     ) -> None:
         super().__init__()
         self.system_context = system_context  # stored so tests can prove it's value-free

@@ -209,6 +209,10 @@ def _build_parser() -> argparse.ArgumentParser:
     ai_pii_model.add_argument(
         "--repo", default=None, metavar="ALIAS", help="act on this repo instead of the active one"
     )
+    ai_pii_sub.add_parser(
+        "doctor",
+        help="check the PII guard config end-to-end: which backend runs, what's ready, what to fix",
+    )
 
     cfg_cmd = sub.add_parser("config", help="view and edit settings in your user config.toml")
     cfg_sub = cfg_cmd.add_subparsers(dest="config_command", required=True)
@@ -714,13 +718,9 @@ def cmd_ai_pii_check(app_cfg: config.AppConfig, cfg: config.Config, args: argpar
     workspace = cfg.workspace()
     ctx_dir = app_cfg.ai_context_dir
     index = datadictionary.load_index(workspace, ctx_dir)
-    backend = app_cfg.ai_pii_name_backend
-    model = (
-        app_cfg.ai_pii_name_model
-        if backend == "spacy"
-        else ner.ModelRef(
-            app_cfg.ai_pii_name_model, app_cfg.ai_pii_name_revision, app_cfg.ai_pii_name_variant
-        )
+    backend = ner.resolve_backend(app_cfg.ai_pii_name_backend)
+    model = ner.model_for(
+        backend, app_cfg.ai_pii_name_model, app_cfg.ai_pii_name_revision, app_cfg.ai_pii_name_variant
     )
     # Only run NER when the model is already present — a lint must not trigger a
     # surprise download. Otherwise fall back to structured-only with a note.
@@ -772,10 +772,14 @@ def cmd_ai_pii_model(app_cfg: config.AppConfig, cfg: config.Config, args: argpar
     """
     from mooring.ai import ner
 
-    if app_cfg.ai_pii_name_backend == "spacy":
-        return _cmd_ai_pii_model_spacy(app_cfg)
+    configured = app_cfg.ai_pii_name_backend
+    backend = ner.resolve_backend(configured)
+    if (configured or "").strip().lower() not in ("gliner", "spacy"):
+        print(f"name_backend = {configured!r} resolved to the {backend} backend.\n")
+    if backend == "spacy":
+        return _cmd_ai_pii_model_spacy(app_cfg, ner.model_for("spacy", app_cfg.ai_pii_name_model))
 
-    if not ner.available():
+    if not ner.available("gliner"):
         print("The 'pii' extra is not installed. Install it: pip install mooring[pii]")
         return 1
     ref = ner.ModelRef(
@@ -804,14 +808,14 @@ def cmd_ai_pii_model(app_cfg: config.AppConfig, cfg: config.Config, args: argpar
     return 0
 
 
-def _cmd_ai_pii_model_spacy(app_cfg: config.AppConfig) -> int:
-    """Verify the offline spaCy model loads (nothing to download)."""
+def _cmd_ai_pii_model_spacy(app_cfg: config.AppConfig, model: str) -> int:
+    """Verify the offline spaCy model loads (nothing to download). ``model`` is the
+    spaCy model name/path ("" = the bundled companion), already shaped for spaCy."""
     from mooring.ai import ner_spacy
 
     if not ner_spacy.available():
         print("The 'pii-spacy' extra is not installed. Install it: pip install mooring[pii-spacy]")
         return 1
-    model = app_cfg.ai_pii_name_model
     if ner_spacy.is_ready(model):
         print(f"spaCy model ({model or 'bundled mooring-spacy-en-md'}) is present and loads -")
         print("ready for offline name detection (no Hugging Face / internet needed).")
@@ -822,6 +826,90 @@ def _cmd_ai_pii_model_spacy(app_cfg: config.AppConfig) -> int:
     print("en_core_web_md from PyPI), or set [ai.pii] name_model to a model name / folder you")
     print("have sideloaded. No Hugging Face or internet is needed either way.")
     return 1
+
+
+def cmd_ai_pii_doctor(app_cfg: config.AppConfig) -> int:
+    """End-to-end check of the PII guard config: which name backend will actually
+    run, whether its extra + model are present, and exactly what to flip to enforce.
+
+    Read-only — it never edits config or downloads anything; it prints the
+    `mooring config set ...` / install commands for anything that's off. Exit 0 when
+    the guard is ready (or name detection is intentionally off); 1 when name
+    detection is requested but its backend isn't ready (so it would silently fall
+    back to structured-only).
+    """
+    from mooring.ai import ner, ner_spacy
+
+    enabled = app_cfg.ai_pii
+    names = app_cfg.ai_pii_names
+    configured = app_cfg.ai_pii_name_backend
+    backend = ner.resolve_backend(configured)
+    pinned = (configured or "").strip().lower() in ("gliner", "spacy")
+
+    print("PII guard (ai.pii):\n")
+    print(f"  guard enabled:     {'on' if enabled else 'OFF'}")
+    print(f"  prompt on a hit:   {'block + confirm' if app_cfg.ai_pii_block_prompt else 'warn-only'}")
+    print("  structured scan:   always on  (cards, IBANs, NHS numbers, emails, UK NINOs)")
+    print(f"  name detection:    {'on' if names else 'off'}")
+    print(f"  name backend:      {backend}  (pinned)" if pinned else f"  name backend:      {configured} -> {backend}")
+
+    # Backend/model readiness. `ready` only matters when name detection is on.
+    ready = True
+    todo: list[str] = []
+    if backend == "spacy":
+        if not ner_spacy.available():
+            ready = False
+            print("  spaCy model:       the 'pii-spacy' extra is not installed")
+            todo.append("pip install mooring[pii-spacy]   # spaCy + bundled model, offline from PyPI")
+        else:
+            mdl = ner.model_for("spacy", app_cfg.ai_pii_name_model)
+            if ner_spacy.is_ready(mdl):
+                print(f"  spaCy model:       {mdl or 'bundled mooring-spacy-en-md'} present, loads OK (offline)")
+            else:
+                ready = False
+                print(f"  spaCy model:       not found ({mdl or 'bundled companion missing'})")
+                todo.append("pip install mooring[pii-spacy]   # or set ai.pii.name_model to a model you have")
+    else:  # gliner
+        if not ner.available("gliner"):
+            ready = False
+            print("  GLiNER model:      the 'pii' extra is not installed")
+            todo.append("pip install mooring[pii]   # GLiNER (downloads its model from Hugging Face)")
+        else:
+            ref = ner.model_for(
+                "gliner", app_cfg.ai_pii_name_model, app_cfg.ai_pii_name_revision, app_cfg.ai_pii_name_variant
+            )
+            if ner.is_cached(ref):
+                print(f"  GLiNER model:      {app_cfg.ai_pii_name_model} cached, ready (offline)")
+            else:
+                ready = False
+                print(f"  GLiNER model:      {app_cfg.ai_pii_name_model} not downloaded yet")
+                todo.append("mooring ai pii model   # one-time download from Hugging Face")
+
+    print()
+    if names and not ready:
+        print(f"-> name detection is ON but the {backend} backend isn't ready: names won't")
+        print("   be scanned (the structured scan still runs when the guard is on).")
+        print("   Install / prepare it:")
+        for step in todo:
+            print(f"     {step}")
+    elif enabled and names:
+        print(f"-> ready: the guard enforces in the chat, names via the {backend} backend.")
+    elif enabled:
+        print("-> ready: the structured scan enforces in the chat (name detection is off).")
+    else:
+        print("-> the guard is OFF, so nothing is enforced in the chat yet.")
+
+    flips = []
+    if not enabled:
+        flips.append("mooring config set ai.pii.enabled true       # turn the guard on")
+    if not names:
+        flips.append("mooring config set ai.pii.detect_names true  # optional: also catch person/org names")
+    if flips:
+        print("\nConfig:")
+        for flip in flips:
+            print(f"  {flip}")
+
+    return 0 if (not names or ready) else 1
 
 
 def _print_download_progress(done: int, total: int) -> None:
@@ -849,6 +937,8 @@ def cmd_ai(app_cfg: config.AppConfig, cfg: config.Config, args: argparse.Namespa
             return cmd_ai_pii_check(app_cfg, cfg, args)
         if args.ai_pii_command == "model":
             return cmd_ai_pii_model(app_cfg, cfg, args)
+        if args.ai_pii_command == "doctor":
+            return cmd_ai_pii_doctor(app_cfg)
         return 2
 
     try:

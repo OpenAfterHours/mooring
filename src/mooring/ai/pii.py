@@ -263,7 +263,8 @@ def scan_prose(
     The ADVISORY scanner (notebook-source banner, ``mooring ai pii check``): a
     missing/failed NER backend degrades SILENTLY to structured-only. The enforcing
     prompt valve (:func:`guard_prompt`) is strict instead — it reports the failure.
-    ``backend`` picks the NER backend (``"gliner"`` or the offline ``"spacy"``).
+    ``backend`` picks the NER backend — ``"gliner"``, the offline ``"spacy"``, or
+    ``"auto"`` (resolved to a concrete one by :func:`mooring.ai.ner.resolve_backend`).
     """
     findings = scan(text)
     if names:
@@ -297,9 +298,10 @@ def guard_prompt(
     caller must then NOT forward the text.
 
     When ``names`` is set, an optional LOCAL NER pass (:mod:`mooring.ai.ner`) also
-    flags person names. Either scanner failing FAILS OPEN for that scanner but sets
-    ``scan_error=True`` so the caller can be loud that the guard did not fully run —
-    e.g. ``names`` is configured but the ``mooring[pii]`` extra isn't installed.
+    flags person names; ``backend`` selects which local model runs (``"gliner"`` /
+    ``"spacy"`` / ``"auto"``). Either scanner failing FAILS OPEN for that scanner but
+    sets ``scan_error=True`` so the caller can be loud that the guard did not fully
+    run — e.g. ``names`` is configured but the ``mooring[pii]`` extra isn't installed.
     """
     if not enabled:
         return False, [], False

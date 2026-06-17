@@ -442,10 +442,19 @@ class Hub:
 
         from mooring import schema
         from mooring.ai import context as ctxmod
-        from mooring.ai import egress, locality, pii
+        from mooring.ai import egress, locality, ner, pii
         from mooring.ai.datadictionary import DictionaryIndex
 
         pii_banner: list[dict] = []
+        # Resolve "auto" -> concrete and shape the name model for it once, shared by
+        # the notebook-source warn scan below (and consistent with the chat session).
+        pii_backend = ner.resolve_backend(self.app_cfg.ai_pii_name_backend)
+        pii_name_model = ner.model_for(
+            pii_backend,
+            self.app_cfg.ai_pii_name_model,
+            self.app_cfg.ai_pii_name_revision,
+            self.app_cfg.ai_pii_name_variant,
+        )
 
         repo_ctx = ctxmod.discover_context(
             workspace,
@@ -488,8 +497,8 @@ class Hub:
                     names=self.app_cfg.ai_pii_names,
                     labels=self.app_cfg.ai_pii_name_labels,
                     threshold=self.app_cfg.ai_pii_name_threshold,
-                    model=self.app_cfg.ai_pii_name_model,
-                    backend=self.app_cfg.ai_pii_name_backend,
+                    model=pii_name_model,
+                    backend=pii_backend,
                 )
             ]
 

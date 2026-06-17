@@ -67,7 +67,7 @@ class CopilotChatSession(ChatBroadcaster):
         pii_name_labels: tuple[str, ...] | None = None,
         pii_name_threshold: float = 0.7,
         pii_name_model: str | None = None,
-        pii_name_backend: str = "gliner",
+        pii_name_backend: str = "auto",
     ) -> None:
         super().__init__()
         self.configure_pii(
