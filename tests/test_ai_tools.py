@@ -234,3 +234,20 @@ def test_propose_tools_normalize_returns_in_cell_bodies(ws):
         _invocation(index=0, code="seed = 5\nreturn (seed,)")
     )
     assert patches[-1]["ops"][0]["code"] == "seed = 5"
+
+    # The plain append tool (propose_cell) and the multi-cell patch's edits/appends
+    # are cleaned the same way — every code-carrying propose path normalizes.
+    appended = []
+    tools = _edit_tools(ws, patches, proposals=appended)
+    tools["mooring_propose_cell"].handler(_invocation(code="total = 1\nreturn (total,)"))
+    assert appended[-1] == ("total = 1", "")
+
+    tools["mooring_propose_notebook_edit"].handler(
+        _invocation(
+            edits=[{"index": 1, "code": "x = seed + 9\nreturn (x,)"}],
+            appends=["@app.cell\ndef _():\n    extra = 2\n    return (extra,)"],
+        )
+    )
+    ops = patches[-1]["ops"]
+    assert ops[0]["code"] == "x = seed + 9"  # edit normalized
+    assert ops[1]["code"] == "extra = 2"  # append normalized AND wrapper unwrapped
