@@ -592,6 +592,126 @@ def test_chat_apply_unknown_sid_404(unconfigured_client, stub_chat):
     assert resp.status_code == 404
 
 
+def test_chat_apply_edit_op_rewrites_a_cell(unconfigured_client, stub_chat):
+    client, hub = unconfigured_client
+    sid = _open_chat(client, hub, source=_NB_SRC).json()["sid"]
+    resp = client.post(
+        "/api/ai/chat/apply",
+        json={"sid": sid, "ops": [{"op": "edit", "index": 0, "anchor": "seed = 1", "code": "seed = 42"}]},
+    )
+    assert resp.status_code == 200 and resp.json()["ok"] is True
+    nb = (hub.cfg.workspace() / "nb.py").read_text("utf-8")
+    assert "seed = 42" in nb and "seed = 1" not in nb
+
+
+def test_chat_apply_rewrite_with_returns_succeeds(unconfigured_client, stub_chat):
+    # End-to-end of the user's bug: a rewrite whose cell bodies still carry the
+    # auto-generated `return` lines now applies cleanly (normalized server-side).
+    client, hub = unconfigured_client
+    sid = _open_chat(client, hub, source=_NB_SRC).json()["sid"]
+    resp = client.post(
+        "/api/ai/chat/apply",
+        json={"sid": sid, "ops": [{"op": "replace_all", "cells": ["import marimo as mo\nreturn (mo,)"]}]},
+    )
+    assert resp.status_code == 200 and resp.json()["ok"] is True
+    nb = (hub.cfg.workspace() / "nb.py").read_text("utf-8")
+    assert "import marimo as mo" in nb
+
+
+def test_chat_apply_stale_anchor_is_409(unconfigured_client, stub_chat):
+    # The analyst changed the cell between propose and Apply -> a loud conflict, not
+    # a silent clobber.
+    client, hub = unconfigured_client
+    sid = _open_chat(client, hub, source=_NB_SRC).json()["sid"]
+    resp = client.post(
+        "/api/ai/chat/apply",
+        json={"sid": sid, "ops": [{"op": "edit", "index": 0, "anchor": "WRONG", "code": "seed = 9"}]},
+    )
+    assert resp.status_code == 409
+    assert "seed = 1" in (hub.cfg.workspace() / "nb.py").read_text("utf-8")  # untouched
+
+
+def test_chat_apply_then_rollback_restores_byte_for_byte(unconfigured_client, stub_chat):
+    client, hub = unconfigured_client
+    sid = _open_chat(client, hub, source=_NB_SRC).json()["sid"]
+    nb = hub.cfg.workspace() / "nb.py"
+    original = nb.read_text("utf-8")
+    applied = client.post("/api/ai/chat/apply", json={"sid": sid, "code": "added = 1"}).json()
+    assert applied["ok"] is True and applied["can_undo"] is True
+    assert "added = 1" in nb.read_text("utf-8")
+    roll = client.post("/api/ai/chat/rollback", json={"sid": sid})
+    assert roll.status_code == 200 and roll.json() == {"ok": True, "can_undo": False, "undo_depth": 0}
+    assert nb.read_text("utf-8") == original  # back to the original
+
+
+def test_chat_rollback_is_multi_level(unconfigured_client, stub_chat):
+    client, hub = unconfigured_client
+    sid = _open_chat(client, hub, source=_NB_SRC).json()["sid"]
+    nb = hub.cfg.workspace() / "nb.py"
+    original = nb.read_text("utf-8")
+    client.post("/api/ai/chat/apply", json={"sid": sid, "code": "a = 1"})
+    after_one = nb.read_text("utf-8")
+    client.post("/api/ai/chat/apply", json={"sid": sid, "code": "b = 2"})
+    assert client.post("/api/ai/chat/rollback", json={"sid": sid}).json()["undo_depth"] == 1
+    assert nb.read_text("utf-8") == after_one  # undid only the second Apply
+    assert client.post("/api/ai/chat/rollback", json={"sid": sid}).json()["undo_depth"] == 0
+    assert nb.read_text("utf-8") == original
+
+
+def test_chat_rollback_nothing_to_undo_is_400(unconfigured_client, stub_chat):
+    client, hub = unconfigured_client
+    sid = _open_chat(client, hub, source=_NB_SRC).json()["sid"]
+    resp = client.post("/api/ai/chat/rollback", json={"sid": sid})
+    assert resp.status_code == 400 and resp.json()["ok"] is False
+
+
+def test_chat_rollback_unknown_sid_404(unconfigured_client, stub_chat):
+    client, _ = unconfigured_client
+    assert client.post("/api/ai/chat/rollback", json={"sid": "nope"}).status_code == 404
+
+
+def test_chat_apply_anchorless_edit_is_409(unconfigured_client, stub_chat):
+    # A missing anchor must be a conflict, never a silent index-based clobber.
+    client, hub = unconfigured_client
+    sid = _open_chat(client, hub, source=_NB_SRC).json()["sid"]
+    resp = client.post(
+        "/api/ai/chat/apply", json={"sid": sid, "ops": [{"op": "edit", "index": 0, "code": "seed = 9"}]}
+    )
+    assert resp.status_code == 409
+    assert "seed = 1" in (hub.cfg.workspace() / "nb.py").read_text("utf-8")  # untouched
+
+
+def test_chat_open_rejects_dot_state_dir(unconfigured_client, stub_chat):
+    # The .mooring state dir (manifest + undo snapshots) must be unreachable via the
+    # notebook path, even though a snapshot is a real .py file.
+    client, hub = unconfigured_client
+    hub.cfg.workspace().mkdir(parents=True, exist_ok=True)
+    resp = client.post(
+        "/api/ai/chat/open", json={"notebook": ".mooring/undo/x/000000000001.py"}
+    )
+    assert resp.status_code == 400
+
+
+def test_chat_rollback_write_failure_keeps_snapshot(unconfigured_client, stub_chat, monkeypatch):
+    # A failed restore write returns 502 AND keeps the snapshot, so the undo is
+    # retryable (symmetric with apply's discard-on-failure).
+    from mooring import paths
+
+    client, hub = unconfigured_client
+    sid = _open_chat(client, hub, source=_NB_SRC).json()["sid"]
+    nb = hub.cfg.workspace() / "nb.py"
+    client.post("/api/ai/chat/apply", json={"sid": sid, "code": "added = 1"})
+
+    orig = paths.safe_write_bytes
+    monkeypatch.setattr(paths, "safe_write_bytes", lambda *a, **k: (_ for _ in ()).throw(OSError("busy")))
+    assert client.post("/api/ai/chat/rollback", json={"sid": sid}).status_code == 502
+
+    monkeypatch.setattr(paths, "safe_write_bytes", orig)  # transient failure cleared
+    roll = client.post("/api/ai/chat/rollback", json={"sid": sid})
+    assert roll.status_code == 200 and roll.json()["ok"] is True
+    assert "added = 1" not in nb.read_text("utf-8")  # the retry actually undid it
+
+
 def test_chat_stream_emits_sse_frames(unconfigured_client, monkeypatch):
     from mooring.ai.chat import ChatBroadcaster, ChatEvent
 

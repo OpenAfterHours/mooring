@@ -53,6 +53,10 @@ class Hub:
         self._chats: dict[str, object] = {}
         self._chat_targets: dict[str, tuple[str, str]] = {}  # sid -> (workspace, notebook rel)
         self._chat_lock = threading.Lock()
+        # Serializes the snapshot+write of an Apply and the restore of an Undo so two
+        # near-simultaneous clicks can't race the undo stack (single-user, rare clicks
+        # — a global lock is plenty and keeps the snapshot/restore atomic).
+        self._apply_lock = threading.Lock()
 
     # -- helpers -------------------------------------------------------------
 
@@ -436,6 +440,11 @@ class Hub:
 
     def _ws_file(self, workspace: Path, rel: str, *, suffix: str | None = None) -> Path:
         """Resolve a workspace-relative path, rejecting escapes/missing files."""
+        # Reject any dot-prefixed path component (mirrors sync.is_synced_path) so the
+        # internal state dir — .mooring/ (manifest + undo snapshots) — is structurally
+        # unreachable through this resolver regardless of caller. Defence in depth.
+        if any(part.startswith(".") for part in Path(str(rel).replace("\\", "/")).parts):
+            raise ValueError("Path is not allowed.")
         target = (workspace / rel).resolve()
         try:
             target.relative_to(workspace.resolve())
@@ -808,30 +817,107 @@ class Hub:
     async def api_chat_apply(self, request: Request) -> JSONResponse:
         data = await request.json()
         sid = str(data.get("sid", ""))
-        code = str(data.get("code", ""))
         with self._chat_lock:
             target = self._chat_targets.get(sid)
         if target is None:
             return JSONResponse({"error": "Unknown chat session."}, status_code=404)
-        if not code.strip():
-            return JSONResponse({"error": "Nothing to apply."}, status_code=400)
+        # The UI echoes the proposal's normalized ops; a bare ``code`` (the append
+        # proposal, and the legacy contract) is normalized to a one-op append. The
+        # write re-validates each edit/delete anchor against the file, so a stale
+        # proposal becomes a loud 409 rather than a silent clobber.
+        ops = data.get("ops")
+        if isinstance(ops, list) and ops:
+            op_dicts = ops
+        else:
+            code = str(data.get("code", ""))
+            if not code.strip():
+                return JSONResponse({"error": "Nothing to apply."}, status_code=400)
+            op_dicts = [{"op": "append", "code": code}]
         workspace_str, notebook_rel = target
-        from mooring.ai.cellwrite import CellWriteError, append_cell
+        workspace = Path(workspace_str)
+        from mooring.ai.cellwrite import CellApplyConflict, CellWriteError
 
         try:
-            nb_path = self._ws_file(Path(workspace_str), notebook_rel, suffix=".py")
+            nb_path = self._ws_file(workspace, notebook_rel, suffix=".py")
         except ValueError as exc:
             return JSONResponse({"error": str(exc)}, status_code=400)
         except FileNotFoundError:
             return JSONResponse({"error": f"No such notebook: {notebook_rel}"}, status_code=404)
-        # Write the cell into the .py; the editor's --watch picks it up and (with
-        # watcher_on_save=autorun) runs it, so it appears in the open notebook tab.
+        # Snapshot the pre-edit bytes (for Undo), then rewrite the .py; the editor's
+        # --watch picks it up and (with watcher_on_save=autorun) re-runs the changed
+        # cells, so the change appears in the open notebook tab.
         try:
-            await asyncio.to_thread(append_cell, nb_path, code)
+            undo_depth = await asyncio.to_thread(
+                self._apply_with_undo, nb_path, workspace, notebook_rel, op_dicts
+            )
+        except CellApplyConflict as exc:
+            return JSONResponse({"error": str(exc)}, status_code=409)
         except CellWriteError as exc:
             return JSONResponse({"error": str(exc)}, status_code=502)
         telemetry.log_event("ai_chat_apply")
-        return JSONResponse({"ok": True})
+        return JSONResponse({"ok": True, "can_undo": undo_depth > 0, "undo_depth": undo_depth})
+
+    def _apply_with_undo(self, nb_path: Path, workspace: Path, notebook_rel: str, op_dicts) -> int:
+        """Snapshot the notebook, apply the patch, and return the new undo depth.
+
+        Runs in a thread (file IO), serialized with Undo by ``_apply_lock``. If the
+        patch fails the just-taken snapshot is discarded, so a failed Apply never
+        leaves a phantom Undo step.
+        """
+        from mooring import notebook_undo
+        from mooring.ai import cellwrite
+
+        with self._apply_lock:
+            token = notebook_undo.snapshot(workspace, notebook_rel, nb_path.read_bytes())
+            try:
+                cellwrite.apply_wire_patch(nb_path, op_dicts)
+            except BaseException:
+                notebook_undo.discard(workspace, notebook_rel, token)
+                raise
+            return notebook_undo.depth(workspace, notebook_rel)
+
+    async def api_chat_rollback(self, request: Request) -> JSONResponse:
+        data = await request.json()
+        sid = str(data.get("sid", ""))
+        with self._chat_lock:
+            target = self._chat_targets.get(sid)
+        if target is None:
+            return JSONResponse({"error": "Unknown chat session."}, status_code=404)
+        workspace_str, notebook_rel = target
+        workspace = Path(workspace_str)
+        try:
+            nb_path = self._ws_file(workspace, notebook_rel, suffix=".py")
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        except FileNotFoundError:
+            return JSONResponse({"error": f"No such notebook: {notebook_rel}"}, status_code=404)
+        try:
+            remaining = await asyncio.to_thread(self._restore_undo, nb_path, workspace, notebook_rel)
+        except OSError as exc:  # e.g. the file is momentarily locked — the snapshot is kept
+            return JSONResponse({"error": f"Could not restore the notebook: {exc}"}, status_code=502)
+        if remaining is None:
+            return JSONResponse({"ok": False, "error": "Nothing to undo."}, status_code=400)
+        telemetry.log_event("ai_chat_rollback")
+        return JSONResponse({"ok": True, "can_undo": remaining > 0, "undo_depth": remaining})
+
+    def _restore_undo(self, nb_path: Path, workspace: Path, notebook_rel: str) -> int | None:
+        """Restore the most recent snapshot (the editor's --watch reloads it). Returns
+        the remaining undo depth, or ``None`` when there is nothing to undo.
+
+        Write-then-discard: the snapshot is only consumed AFTER it is safely written
+        back, so a failed restore leaves the undo step intact to retry (symmetric with
+        the discard-on-failure in :meth:`_apply_with_undo`)."""
+        from mooring import notebook_undo
+        from mooring.paths import safe_write_bytes
+
+        with self._apply_lock:
+            peeked = notebook_undo.peek_latest(workspace, notebook_rel)
+            if peeked is None:
+                return None
+            token, prior = peeked
+            safe_write_bytes(nb_path, prior)  # raises before the snapshot is consumed
+            notebook_undo.discard(workspace, notebook_rel, token)
+            return notebook_undo.depth(workspace, notebook_rel)
 
     async def api_chat_models(self, request: Request) -> JSONResponse:
         """The models the user can pick, plus the configured defaults (value-free)."""
@@ -885,6 +971,7 @@ def create_app(hub: Hub) -> Starlette:
             Route("/api/ai/chat/stream/{sid}", hub.api_chat_stream),
             Route("/api/ai/chat/send", hub.api_chat_send, methods=["POST"]),
             Route("/api/ai/chat/apply", hub.api_chat_apply, methods=["POST"]),
+            Route("/api/ai/chat/rollback", hub.api_chat_rollback, methods=["POST"]),
             Mount("/static", StaticFiles(directory=static)),
         ],
         lifespan=lifespan,
