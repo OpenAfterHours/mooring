@@ -35,7 +35,13 @@ const TOOL_LABELS = {
   mooring_describe_table: "describing a table",
   mooring_search_dictionary: "searching the dictionary",
 };
-const STATE_LABEL = { idle: "ready", thinking: "thinking…", streaming: "streaming…", error: "error" };
+const STATE_LABEL = {
+  idle: "ready",
+  connecting: "connecting…", // the copilot session is still starting (handshake)
+  thinking: "thinking…",
+  streaming: "streaming…",
+  error: "error",
+};
 
 let sid = null;
 let source = null; // EventSource
@@ -657,7 +663,9 @@ function isBusy() {
 
 function setTurnState(state) {
   turnState = state;
-  const busy = state === "thinking" || state === "streaming";
+  // "connecting" disables input too: the session isn't ready to take a turn until
+  // the provider handshake finishes (a "ready" event flips it to idle).
+  const busy = state === "thinking" || state === "streaming" || state === "connecting";
   $("chat-input").disabled = busy;
   setStatus(STATE_LABEL[state] || state);
   if (state === "idle" || state === "error") {
@@ -704,6 +712,11 @@ async function openChat() {
   source.addEventListener("tool_done", (e) => onToolDone(JSON.parse(e.data).success !== false));
   source.addEventListener("intent", (e) => onIntent(JSON.parse(e.data).text));
   source.addEventListener("idle", () => setTurnState("idle"));
+  // The (backgrounded) Copilot session finished starting — unblock the input. The
+  // hub also REPLAYS this on (re)connect, so we catch it even if it fired first.
+  source.addEventListener("ready", () => {
+    if (turnState === "connecting") setTurnState("idle");
+  });
   source.addEventListener("pii", (e) => {
     const d = JSON.parse(e.data);
     const findings = d.findings || [];
@@ -747,7 +760,10 @@ async function openChat() {
   currentGuard = data.guard || null;
   setPiiBadge(currentGuard);
   showPiiBanner(data.pii);
-  setTurnState("idle");
+  // If the session is still starting (backgrounded handshake), show "connecting…"
+  // and keep the input disabled until the "ready" event arrives; an already-ready
+  // session (data.ready) is usable immediately.
+  setTurnState(data.ready === false ? "connecting" : "idle");
 }
 
 // -- composer: send / commands / history ------------------------------------
@@ -770,6 +786,7 @@ function moveCaretEnd(input) {
 
 async function send() {
   if (isBusy()) return; // idle OR error may send (don't get stuck after a failure)
+  if (turnState === "connecting") return; // the session isn't ready to take a turn yet
   const input = $("chat-input");
   const raw = input.value;
   const trimmed = raw.trim();
@@ -1046,11 +1063,13 @@ async function loadModels() {
 }
 
 async function loadDatasets() {
-  // Value-free: /api/state returns dataset PATHS only (schema.list_datasets) — no
-  // values. Used solely to power @-mention autocomplete; the inserted token is
-  // plain text that still passes the outbound PII gate when sent.
+  // Value-free: /api/ai/datasets returns dataset PATHS only (schema.list_datasets) —
+  // no values. Used solely to power @-mention autocomplete; the inserted token is
+  // plain text that still passes the outbound PII gate when sent. This is the LIGHT
+  // endpoint, not /api/state — the latter makes GitHub sync round-trips this window
+  // doesn't need, which used to ride on every chat-open.
   try {
-    const { data } = await api("/api/state");
+    const { data } = await api("/api/ai/datasets");
     DATASETS = data.datasets || [];
     applyTheme(data.ui_theme); // follow the hub's appearance
   } catch (_e) {
@@ -1068,7 +1087,12 @@ async function init() {
   }
   setStatus("loading…");
   printBanner();
-  await Promise.all([loadModels(), loadDatasets()]);
+  // Only the model list is needed before opening (it decides the model sent to
+  // /chat/open). The dataset list just feeds @-mention autocomplete, so it loads
+  // fire-and-forget and hydrates after the chat is already usable — it no longer
+  // sits in front of the open.
+  loadDatasets();
+  await loadModels();
 
   $("chat-model").addEventListener("change", () => {
     localStorage.setItem(LS_MODEL, $("chat-model").value);

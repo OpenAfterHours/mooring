@@ -106,13 +106,31 @@ class CopilotChatSession(ChatBroadcaster):
         self._workdir: str | None = None
         self._ready = threading.Event()
         self._start_error: BaseException | None = None
+        # A real provider session is NOT ready until its loop thread has spawned the
+        # Copilot CLI, checked auth, and created the session (see _aopen). The base
+        # class defaults to "ready"; flip it so the hub can return the chat-open
+        # response immediately and surface readiness over the SSE stream instead.
+        self._mark_starting()
 
     # -- lifecycle ----------------------------------------------------------
 
-    def start(self) -> "CopilotChatSession":
+    def start(self, block: bool = True) -> "CopilotChatSession":
+        """Boot the session's loop thread (Copilot CLI + auth + create_session).
+
+        ``block`` (default) waits for readiness and RAISES on a startup/auth error
+        — the synchronous contract the CLI path and the unit tests rely on.
+        ``block=False`` returns immediately; the loop thread broadcasts a
+        ``ready``/``fail`` event (and ``start_status`` flips) when the handshake
+        finishes, so the hub can stream readiness without holding the open request.
+        """
         self._thread = threading.Thread(target=self._run_loop, name="copilot-chat", daemon=True)
         self._thread.start()
-        if not self._ready.wait(timeout=_START_TIMEOUT):
+        if not block:
+            return self
+        # The loop thread now bounds the handshake itself (wait_for in _run_loop), so
+        # _ready is always set within ~_START_TIMEOUT. Wait a touch longer here so that
+        # loop-side deadline (with its precise message) wins over a redundant race.
+        if not self._ready.wait(timeout=_START_TIMEOUT + 10):
             raise AIError("Copilot timed out starting up.")
         if self._start_error is not None:
             raise self._start_error
@@ -123,16 +141,30 @@ class CopilotChatSession(ChatBroadcaster):
         self._loop = loop
         asyncio.set_event_loop(loop)
         try:
-            loop.run_until_complete(self._aopen())
-        except BaseException as exc:  # noqa: BLE001 - surfaced via start()
+            # Bound the handshake so a HUNG (not merely failed) Copilot CLI / network
+            # can't leave a backgrounded session stuck "starting" forever — the
+            # non-blocking open path has already returned and has no caller-side
+            # timeout, so the deadline must live HERE. A timeout raises and is turned
+            # into a "fail" event below, which re-enables the UI just like an error.
+            loop.run_until_complete(asyncio.wait_for(self._aopen(), _START_TIMEOUT))
+        except BaseException as exc:  # noqa: BLE001 - surfaced via start()/the stream
             from mooring.ai.copilot import friendly_error
 
-            self._start_error = (
-                exc if isinstance(exc, AIError) else AIError(friendly_error(str(exc)))
-            )
+            if isinstance(exc, (asyncio.TimeoutError, TimeoutError)):
+                err: AIError = AIError("Copilot timed out starting up.")
+            elif isinstance(exc, AIError):
+                err = exc
+            else:
+                err = AIError(friendly_error(str(exc)))
+            self._start_error = err
+            # Surface the failure on the stream too (the non-blocking open path has
+            # already returned, so it can't raise); harmless in the blocking path
+            # (no subscriber has attached before start() returns).
+            self._mark_start_error(str(err))
             self._ready.set()
             self._teardown(loop)
             return
+        self._mark_ready()  # flips start_status -> "ready" and emits a "ready" event
         self._ready.set()
         try:
             loop.run_forever()

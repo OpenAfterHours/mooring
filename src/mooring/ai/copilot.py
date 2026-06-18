@@ -238,14 +238,20 @@ class CopilotProvider:
         reasoning_effort: str | None = None,
         dictionary=None,
         pii: PiiConfig | None = None,
+        background: bool = False,
     ):
         """Open a long-lived, streaming, value-blind chat session (the copilot).
 
         The session reuses :func:`hardened_session_kwargs` (the audited privacy
         config) and adds mooring's safe tools (plus the dictionary tools when
         ``dictionary`` is a non-empty index). ``model``/``reasoning_effort``
-        override the configured defaults when given. Raises :class:`AIError` on a
-        startup/auth/policy failure.
+        override the configured defaults when given.
+
+        ``background=False`` (default) blocks until the session is ready and raises
+        :class:`AIError` on a startup/auth/policy failure. ``background=True``
+        returns the still-starting session immediately so the hub can return the
+        chat-open response without waiting on the (CLI-spawning, networked)
+        handshake; readiness/failure then arrives over the session's event stream.
         """
         if not self.available():
             raise AIError(
@@ -255,11 +261,17 @@ class CopilotProvider:
         from mooring.ai.session import CopilotChatSession
 
         pii = pii or PiiConfig()
-        # Resolve "auto" -> a concrete backend ONCE here, then shape name_model for it
-        # (GLiNER: a pinned ModelRef; spaCy: a name/path string, "" = vendored model)
-        # and pass the concrete backend down, so the session never re-resolves.
-        backend = ner.resolve_backend(pii.name_backend)
-        name_model = ner.model_for(backend, pii.name_model, pii.name_revision, pii.name_variant)
+        # Resolve "auto" -> a concrete backend and shape name_model for it (GLiNER: a
+        # pinned ModelRef; spaCy: a name/path string, "" = vendored model) ONLY when
+        # the name pass will actually run (guard on AND names on) — so a default,
+        # guard-off install never imports spaCy, which resolve_backend("auto") would,
+        # just to open a chat. When names are off the raw config is passed through and
+        # never used; when on, the session re-resolves nothing.
+        backend = pii.name_backend
+        name_model = pii.name_model
+        if pii.enabled and pii.names:
+            backend = ner.resolve_backend(pii.name_backend)
+            name_model = ner.model_for(backend, pii.name_model, pii.name_revision, pii.name_variant)
         session = CopilotChatSession(
             model=(model or "").strip() or self.model,
             reasoning_effort=reasoning_effort,
@@ -277,7 +289,13 @@ class CopilotProvider:
             pii_name_model=name_model,
             pii_name_backend=backend,
         )
-        session.start()
+        # Default path blocks (and raises on failure); the hub passes background=True
+        # to return the open response immediately and stream readiness instead. The
+        # no-arg call keeps older session stubs (def start(self)) working.
+        if background:
+            session.start(block=False)
+        else:
+            session.start()
         return session
 
     # -- models -------------------------------------------------------------

@@ -104,6 +104,21 @@ function openChatWindow(path) {
   else window.open(url, "_blank"); // popup blocked → fall back to a tab
 }
 
+// Opening a notebook may need to start the marimo editor subprocess (cold the
+// first time per workspace). The hub pre-warms it in the background at startup, so
+// this is usually instant — but show a progress hint in case it isn't, since the
+// whole toolbar is disabled while the open POST is in flight.
+async function openAction(path) {
+  const summary = $("summary");
+  const prev = summary.textContent;
+  summary.textContent = "Starting the editor…";
+  try {
+    await action("/api/open", { path }, false);
+  } finally {
+    summary.textContent = prev;
+  }
+}
+
 // The contents API is throttled to ~1 file/s; tell the user a long push is alive.
 function pushAction(paths, count) {
   if (count > 3) $("summary").textContent = `Pushing ${count} file(s)… (~${Math.ceil(count * 0.8)}s)`;
@@ -140,7 +155,7 @@ function fileActions(file, opts) {
   // remote-deleted conflict have no local file, so Open/Delete must not appear.
   const openable = file.path.endsWith(".py") || file.path.endsWith(".pbip");
   if (openable && file.has_local) {
-    actions.push(["Open", () => action("/api/open", { path: file.path }, false)]);
+    actions.push(["Open", () => openAction(file.path)]);
   }
   // AI copilot pops out into its own window (not a tab) so it can sit beside the
   // notebook. One window per notebook; clicking again focuses the existing one.
