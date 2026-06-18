@@ -470,6 +470,61 @@ def test_chat_open_rejects_traversal(unconfigured_client):
     assert resp.status_code == 400
 
 
+def test_chat_open_reports_ready_for_stub_session(unconfigured_client, stub_chat):
+    # The stub session is ready the instant it's constructed, so the open response
+    # tells the UI it can enable the input immediately (no "connecting…" gate).
+    client, hub = unconfigured_client
+    assert _open_chat(client, hub).json()["ready"] is True
+
+
+def test_chat_open_defers_live_schema_probe(unconfigured_client, stub_chat, monkeypatch):
+    # The live-kernel probe must NOT run during chat-open (it's deferred to the first
+    # turn). If it did, this would blow up — proving it's off the open critical path.
+    from mooring.ai import introspect
+
+    client, hub = unconfigured_client
+
+    def _boom(*a, **k):
+        raise AssertionError("live_dataset_schemas must not be called during chat-open")
+
+    monkeypatch.setattr(introspect, "live_dataset_schemas", _boom)
+    assert _open_chat(client, hub).status_code == 200
+
+
+def test_chat_datasets_lists_value_free_paths(unconfigured_client):
+    import polars as pl
+
+    client, hub = unconfigured_client
+    ws = hub.cfg.workspace()
+    (ws / "data").mkdir(parents=True, exist_ok=True)
+    pl.DataFrame({"region": ["x"], "amount": [1]}).write_parquet(ws / "data" / "s.parquet")
+    resp = client.get("/api/ai/datasets")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "data/s.parquet" in data["datasets"]
+    assert data["ui_theme"] == "system"  # the chat follows the hub theme
+
+
+def test_chat_datasets_disabled_when_ai_off(tmp_path, monkeypatch):
+    monkeypatch.setattr(paths, "user_config_dir", lambda: tmp_path / "appdata")
+    spec = config.RepoSpec(alias="ws", owner="", repo="", workspace_path=str(tmp_path / "ws"))
+    hub = Hub(config.AppConfig(repos=(spec,), active_alias="ws", ai=config.AiConfig(enabled=False)))
+    with TestClient(create_app(hub)) as client:
+        assert client.get("/api/ai/datasets").status_code == 404
+
+
+def test_state_no_longer_walks_datasets(configured, monkeypatch):
+    # The recursive dataset walk moved off /api/state (it's only used by the chat,
+    # which fetches /api/ai/datasets) — so /api/state must not call list_datasets.
+    from mooring import schema
+
+    client, _, _, _ = configured
+    monkeypatch.setattr(
+        schema, "list_datasets", lambda *a, **k: (_ for _ in ()).throw(AssertionError("walked"))
+    )
+    assert client.get("/api/state").status_code == 200
+
+
 def test_chat_open_includes_guard_status(unconfigured_client, stub_chat):
     # The open response carries the outbound-PII guard status so the UI can show a
     # before-you-send badge. Default config: the guard is off.
@@ -786,6 +841,37 @@ def test_chat_models_lists_models(unconfigured_client, monkeypatch):
     assert [m["id"] for m in data["models"]] == ["auto", "claude-opus-4.8"]
     assert data["models"][1]["efforts"] == ["low", "high", "max"]
     assert "default_model" in data and "default_effort" in data
+
+
+def test_provider_is_built_once_and_reused(unconfigured_client, monkeypatch):
+    # The provider is cached on the Hub so its auth/model-list TTL caches actually
+    # survive across requests (the whole point of those caches) instead of being
+    # rebuilt and discarded every open/models call.
+    client, _ = unconfigured_client
+    built = []
+
+    def counting_get_provider(app_cfg):
+        built.append(1)
+        return _FakeModelProvider()
+
+    monkeypatch.setattr("mooring.ai.get_provider", counting_get_provider)
+    client.get("/api/ai/models")
+    client.get("/api/ai/models")
+    assert len(built) == 1  # built once, reused on the second call
+
+
+def test_provider_cache_drops_on_reload(configured, monkeypatch):
+    # A config reload (repo switch/setup) may change provider/model, so the cached
+    # provider must be dropped and rebuilt.
+    client, hub, _, _ = configured
+    built = []
+    monkeypatch.setattr(
+        "mooring.ai.get_provider", lambda app_cfg: built.append(1) or _FakeModelProvider()
+    )
+    client.get("/api/ai/models")
+    hub.reload()
+    client.get("/api/ai/models")
+    assert len(built) == 2  # rebuilt after reload
 
 
 def test_chat_models_disabled_when_ai_off(tmp_path, monkeypatch):

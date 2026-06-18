@@ -21,6 +21,7 @@ from pathlib import Path
 
 import uvicorn
 from starlette.applications import Starlette
+from starlette.concurrency import run_in_threadpool
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, StreamingResponse
 from starlette.routing import Mount, Route
@@ -57,6 +58,20 @@ class Hub:
         # near-simultaneous clicks can't race the undo stack (single-user, rare clicks
         # — a global lock is plenty and keeps the snapshot/restore atomic).
         self._apply_lock = threading.Lock()
+        # One AI provider reused across opens, so the provider's auth (45s TTL) and
+        # model-list (300s TTL) caches actually hit instead of being rebuilt — and
+        # thrown away — on every chat-open / models request. Keyed on the config that
+        # shapes it (provider+model); reset on a config reload. See _provider_for.
+        self._provider = None
+        self._provider_key: tuple | None = None
+        self._provider_lock = threading.Lock()
+        # Background pre-warm (editor subprocess + heavy imports) is enabled only by
+        # run_hub() for a real serving hub — never under TestClient/create_app, so the
+        # suite never spawns a marimo subprocess or imports the Copilot SDK. See warmup().
+        self._prewarm_enabled = False
+        # Serializes editor startup so the background pre-warm and a user's Open click
+        # can't both spawn a marimo subprocess for the same (cold) workspace at once.
+        self._editor_lock = threading.Lock()
 
     # -- helpers -------------------------------------------------------------
 
@@ -70,6 +85,13 @@ class Hub:
         # Chat context (schema + notebook source) is bound to the old config;
         # drop sessions so a new chat picks up the new repo/workspace.
         self._close_all_chats()
+        # The provider is shaped by [ai] provider/model — a reload may change them,
+        # so drop the cached one (rebuilt lazily on next use).
+        with self._provider_lock:
+            self._provider = None
+            self._provider_key = None
+        # Warm the editor for the now-active workspace off the user's first click.
+        self.prewarm_editor()
 
     def client(self) -> GitHubClient:
         cfg = self.cfg
@@ -88,11 +110,51 @@ class Hub:
         return self.ensure_editor_for(self.cfg.workspace())
 
     def ensure_editor_for(self, workspace: Path) -> EditorServer:
-        editor = self.editors.setdefault(
-            str(workspace), EditorServer(workspace, theme=self.app_cfg.ui_theme)
-        )
-        editor.ensure_started()
-        return editor
+        # Lock so a pre-warm thread and a concurrent Open don't both Popen marimo for
+        # the same cold workspace; the second caller then finds it already running.
+        with self._editor_lock:
+            editor = self.editors.setdefault(
+                str(workspace), EditorServer(workspace, theme=self.app_cfg.ui_theme)
+            )
+            editor.ensure_started()
+            return editor
+
+    def prewarm_editor(self) -> None:
+        """Start the active workspace's marimo subprocess in the background so the
+        first notebook click finds it already running (skipping the ~seconds-long
+        spawn + readiness wait, and on the uv path the cold venv build). Best-effort
+        and idempotent — ``ensure_started`` short-circuits when already running, and
+        any failure is swallowed so a warm attempt never breaks the hub."""
+        if not self._prewarm_enabled or not self.cfg.is_configured:
+            return
+        workspace = self.cfg.workspace()
+
+        def _warm() -> None:
+            with contextlib.suppress(Exception):
+                self.ensure_editor_for(workspace)
+
+        threading.Thread(target=_warm, name="editor-prewarm", daemon=True).start()
+
+    def warmup(self) -> None:
+        """Pre-import the heavy, one-time modules the first chat-open / live-probe
+        would otherwise pay inline (marimo's import tree; the Copilot SDK), on a
+        background thread at hub start. Best-effort; gated on the AI being enabled so
+        a non-AI user never pays the Copilot import. Never raises."""
+        self._prewarm_enabled = True
+        self.prewarm_editor()
+        if not self.app_cfg.ai_enabled:
+            return
+
+        def _warm() -> None:
+            with contextlib.suppress(Exception):
+                import marimo  # noqa: F401 - prime the import cache for the live probe
+            with contextlib.suppress(Exception):
+                import copilot  # noqa: F401 - prime the Copilot SDK import
+            with contextlib.suppress(Exception):
+                # Prime the provider's auth/model caches so the first open is warm too.
+                self._provider_for().list_models()
+
+        threading.Thread(target=_warm, name="hub-warmup", daemon=True).start()
 
     def _close_all_chats(self) -> None:
         with self._chat_lock:
@@ -140,10 +202,10 @@ class Hub:
             "files": [],
             "artifacts": [],
         }
-        if self.app_cfg.ai_enabled:
-            from mooring import schema
-
-            body["datasets"] = schema.list_datasets(cfg.workspace(), cfg.folders)
+        # Dataset paths (for the chat's @-mention autocomplete) used to be computed
+        # here — a recursive data-folder walk on every hub refresh. They are only
+        # consumed by the chat window, which now fetches them from the lighter
+        # /api/ai/datasets, so the walk no longer rides on /api/state.
         if not cfg.is_configured:
             return JSONResponse(body)
         if not auth.get_token(host=cfg.host):
@@ -374,7 +436,9 @@ class Hub:
 
     async def api_open(self, request: Request) -> JSONResponse:
         data = await request.json()
-        return self._open(data.get("path", ""))
+        # _open may spawn the marimo subprocess and block on its readiness poll;
+        # run it off the event loop so the first open doesn't freeze the whole hub.
+        return await run_in_threadpool(self._open, data.get("path", ""))
 
     async def api_delete(self, request: Request) -> JSONResponse:
         from mooring import deletion
@@ -479,16 +543,6 @@ class Hub:
         from mooring.ai.datadictionary import DictionaryIndex
 
         pii_banner: list[dict] = []
-        # Resolve "auto" -> concrete and shape the name model for it once, shared by
-        # the notebook-source warn scan below (and consistent with the chat session).
-        pii_backend = ner.resolve_backend(self.app_cfg.ai_pii_name_backend)
-        pii_name_model = ner.model_for(
-            pii_backend,
-            self.app_cfg.ai_pii_name_model,
-            self.app_cfg.ai_pii_name_revision,
-            self.app_cfg.ai_pii_name_variant,
-        )
-
         repo_ctx = ctxmod.discover_context(
             workspace,
             context_dir=self.app_cfg.ai_context_dir,
@@ -523,6 +577,16 @@ class Hub:
         if self.app_cfg.ai_pii and self.app_cfg.ai_pii_scan_source:
             # Warn-only: the notebook source is the analyst's own working file, so we
             # never mutate it — we surface a value-free banner and let them decide.
+            # Resolve "auto" -> concrete and shape the name model only HERE, under the
+            # ai_pii gate — so a default (guard-off) install never imports spaCy just
+            # to pick a backend it won't use. Consistent with the chat session.
+            pii_backend = ner.resolve_backend(self.app_cfg.ai_pii_name_backend)
+            pii_name_model = ner.model_for(
+                pii_backend,
+                self.app_cfg.ai_pii_name_model,
+                self.app_cfg.ai_pii_name_revision,
+                self.app_cfg.ai_pii_name_variant,
+            )
             pii_banner += [
                 {"where": f"{notebook_rel}:{f.line}", "kind": f.kind}
                 for f in pii.scan_prose(
@@ -535,13 +599,14 @@ class Hub:
                 )
             ]
 
-        # Schemas of dataframes LIVE in the running kernel — covers data loaded
-        # from OUTSIDE the workspace (network/warehouse/DB) and derived frames no
-        # file holds. Best-effort + value-free; the single pipeline (_live_schema_text)
-        # shared with the per-turn refresh. On any failure live_text is "" and we
-        # fall back to the file-based schema above.
-        live_text, live_banner = self._live_schema_text(workspace, notebook_rel)
-        pii_banner += live_banner
+        # Schemas of dataframes LIVE in the running kernel are DEFERRED off the open
+        # path (a freshly opened notebook's kernel is often still loading frames, so
+        # the probe's worst case is a multi-second poll). The very first turn picks
+        # them up via the per-turn refresh (api_chat_send -> _live_schema_for_sid),
+        # over the SAME value-free probe -> scrub -> format pipeline, so nothing about
+        # the privacy contract changes — only WHEN the probe runs. The system context
+        # opens on the file-based schema; the live schema joins on turn 1.
+        live_text = ""
 
         dictionary_text = ""
         if has_dict:
@@ -610,6 +675,22 @@ class Hub:
         workspace_str, notebook_rel = target
         return self._live_schema_text(Path(workspace_str), notebook_rel)
 
+    def _provider_for(self):
+        """The shared AI provider, built once and reused so its auth (45s) and
+        model-list (300s) TTL caches survive across opens instead of being rebuilt
+        and discarded per request. Rebuilt when the provider/model config changes.
+
+        Imports ``get_provider`` late (not at module load) so a test that
+        monkeypatches ``mooring.ai.get_provider`` still takes effect."""
+        from mooring.ai import get_provider
+
+        key = (self.app_cfg.ai_provider, self.app_cfg.ai_model)
+        with self._provider_lock:
+            if self._provider is None or self._provider_key != key:
+                self._provider = get_provider(self.app_cfg)
+                self._provider_key = key
+            return self._provider
+
     def _make_chat_session(
         self,
         system_context: str,
@@ -623,12 +704,11 @@ class Hub:
 
         ``model``/``reasoning_effort`` override the configured defaults;
         ``dictionary`` (a parsed index) enables the value-free dictionary tools.
-        Raises AIError (-> 502 with an install/connect hint) if Copilot isn't
-        available or signed in.
+        Raises AIError (-> 502) if Copilot isn't available/installed; a sign-in or
+        handshake failure surfaces over the SSE stream instead (the session starts
+        in the background — ``background=True`` — so the open response is immediate).
         """
-        from mooring.ai import get_provider
-
-        provider = get_provider(self.app_cfg)
+        provider = self._provider_for()
         return provider.open_chat(
             system_context=system_context,
             workspace=workspace,
@@ -641,6 +721,9 @@ class Hub:
             # silently dropped on the way to the session (the session downloads any
             # NER model in the background and the prompt path skips it until ready).
             pii=self.app_cfg.ai.pii,
+            # Don't block the open request on the (CLI-spawning, networked) Copilot
+            # handshake — stream readiness/failure over the SSE channel instead.
+            background=True,
         )
 
     def _reap_idle_chats(self) -> None:
@@ -688,8 +771,10 @@ class Hub:
             return JSONResponse({"error": "A notebook is required."}, status_code=400)
         workspace = self.cfg.workspace()
         try:
-            context, index, pii_banner, live_text = self._build_chat_context(
-                workspace, notebook, dataset
+            # File IO (notebook source, dataset schema, team context) — off the event
+            # loop so a slow read can't stall the hub's other requests.
+            context, index, pii_banner, live_text = await run_in_threadpool(
+                self._build_chat_context, workspace, notebook, dataset
             )
         except ValueError as exc:
             return JSONResponse({"error": str(exc)}, status_code=400)
@@ -707,8 +792,8 @@ class Hub:
             )
         except Exception as exc:  # noqa: BLE001 - AIError surfaces to the UI in Phase 1
             return JSONResponse({"error": str(exc)}, status_code=502)
-        # Seed the snapshot already in the system context so turn 1 doesn't redundantly
-        # re-inject it; later turns refresh from the kernel (see api_chat_send).
+        # The live-kernel schema is deferred off the open path (see _build_chat_context),
+        # so live_text is ""; the first turn picks it up. This seeds the (empty) snapshot.
         session.set_initial_live_schema(live_text)
         # Kick off the (one-time) NER model download in the background with progress,
         # so name detection doesn't hang the first chat turn silently.
@@ -721,7 +806,17 @@ class Hub:
         if pii_banner:  # count only — never a kind/value reaches the central sink
             telemetry.log_event("ai_pii", findings=len(pii_banner))
         return JSONResponse(
-            {"sid": sid, "notebook": notebook, "pii": pii_banner, "guard": self._pii_status()}
+            {
+                "sid": sid,
+                "notebook": notebook,
+                "pii": pii_banner,
+                "guard": self._pii_status(),
+                # Whether the chat is usable NOW. A backgrounded provider session is
+                # still starting (Copilot handshake) — the UI shows "connecting…" and
+                # waits for the "ready"/"fail" event on the stream. The stub/already-
+                # ready sessions report True and the UI enables the input immediately.
+                "ready": session.is_ready(),
+            }
         )
 
     def _pii_status(self) -> dict:
@@ -765,6 +860,16 @@ class Hub:
         q = session.subscribe()
         try:
             yield ": connected\n\n"
+            # Replay startup readiness so a subscriber that connects after the (async,
+            # backgrounded) provider handshake finished — or failed — still learns the
+            # outcome and unblocks the input, even though the live "ready"/"fail" event
+            # fired before this subscribe.
+            start_status = getattr(session, "start_status", None)
+            if isinstance(start_status, dict):
+                if start_status.get("state") == "ready":
+                    yield "event: ready\ndata: {}\n\n"
+                elif start_status.get("state") == "error":
+                    yield f"event: fail\ndata: {json.dumps({'text': start_status.get('text', '')})}\n\n"
             # Replay the current NER-model prepare status so a subscriber that connects
             # mid-download immediately sees progress (events emitted before this
             # subscribe would otherwise be missed).
@@ -919,13 +1024,24 @@ class Hub:
             notebook_undo.discard(workspace, notebook_rel, token)
             return notebook_undo.depth(workspace, notebook_rel)
 
+    def api_chat_datasets(self, request: Request) -> JSONResponse:
+        """The value-free dataset PATHS for the chat's @-mention autocomplete, plus
+        the current theme. A LIGHT alternative to /api/state, which (when logged in)
+        makes GitHub sync round-trips this window doesn't need. Sync def -> Starlette
+        runs it in a threadpool, so the directory walk never blocks the event loop."""
+        if not self.app_cfg.ai_enabled:
+            return JSONResponse({"enabled": False}, status_code=404)
+        from mooring import schema
+
+        cfg = self.cfg
+        datasets = schema.list_datasets(cfg.workspace(), cfg.folders)
+        return JSONResponse({"datasets": datasets, "ui_theme": self.app_cfg.ui_theme})
+
     async def api_chat_models(self, request: Request) -> JSONResponse:
         """The models the user can pick, plus the configured defaults (value-free)."""
         if not self.app_cfg.ai_enabled:
             return JSONResponse({"enabled": False}, status_code=404)
-        from mooring.ai import get_provider
-
-        provider = get_provider(self.app_cfg)
+        provider = self._provider_for()
         models = await asyncio.to_thread(provider.list_models)
         return JSONResponse(
             {
@@ -966,6 +1082,7 @@ def create_app(hub: Hub) -> Starlette:
             Route("/api/open", hub.api_open, methods=["POST"]),
             Route("/api/delete", hub.api_delete, methods=["POST"]),
             Route("/ai/chat", hub.chat_page),
+            Route("/api/ai/datasets", hub.api_chat_datasets),
             Route("/api/ai/models", hub.api_chat_models),
             Route("/api/ai/chat/open", hub.api_chat_open, methods=["POST"]),
             Route("/api/ai/chat/stream/{sid}", hub.api_chat_stream),
@@ -987,5 +1104,8 @@ def run_hub(app_cfg: config.AppConfig, open_browser: bool = True, port: int | No
     print(f"mooring hub running at {url} (Ctrl+C to quit)")
     if open_browser:
         threading.Timer(0.8, webbrowser.open, args=(url,)).start()
+    # Pre-warm the editor subprocess and prime heavy imports in the background so the
+    # first notebook open / chat open isn't paying that cold start on the user's click.
+    hub.warmup()
     uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning")
     return 0

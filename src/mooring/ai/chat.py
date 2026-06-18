@@ -53,6 +53,15 @@ class ChatBroadcaster:
         self._lock = threading.Lock()
         self._last_active = time.monotonic()
         self._closed = False
+        # Startup readiness, so the open response need not BLOCK on a provider's
+        # (CLI-spawning, network) session handshake. A plain broadcaster (the stub,
+        # the test QuickSession) is ready the instant it is constructed; a real
+        # provider session resets this to "starting" and flips it to "ready"/"error"
+        # from its loop thread, broadcasting a "ready"/"fail" event the SSE endpoint
+        # also REPLAYS on connect (so a subscriber that attaches mid-startup, or
+        # after it finished, still learns the outcome). See _mark_ready/_mark_start_error.
+        self._start_state = "ready"  # "ready" | "starting" | "error"
+        self._start_error_text = ""
         # Outbound-PII guard state (see _pii_gate). Off unless configure_pii says so.
         self._pii_enabled = False
         self._pii_block = True
@@ -106,6 +115,34 @@ class ChatBroadcaster:
         # Never retain a held (flagged) prompt's plaintext past the session's life.
         self._pending.clear()
         self._broadcast(ChatEvent("closed"))
+
+    # -- startup readiness (so chat-open need not block on the handshake) ----
+
+    @property
+    def start_status(self) -> dict | None:
+        """The current startup state for a late SSE subscriber to catch up on
+        (the hub replays it on connect). ``None`` means there is nothing to wait
+        for — but a session that has gone through a real startup reports ``ready``
+        too, so a subscriber attaching after the handshake still gets unblocked."""
+        if self._start_state == "error":
+            return {"state": "error", "text": self._start_error_text}
+        return {"state": self._start_state}  # "ready" | "starting"
+
+    def is_ready(self) -> bool:
+        """Whether a turn can be sent now (no provider handshake still pending)."""
+        return self._start_state == "ready"
+
+    def _mark_starting(self) -> None:
+        self._start_state = "starting"
+
+    def _mark_ready(self) -> None:
+        self._start_state = "ready"
+        self._broadcast(ChatEvent("ready"))
+
+    def _mark_start_error(self, text: str) -> None:
+        self._start_state = "error"
+        self._start_error_text = text
+        self._broadcast(ChatEvent("fail", {"text": text}))
 
     # -- outbound PII guard (Channel A) -------------------------------------
 

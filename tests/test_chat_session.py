@@ -221,6 +221,72 @@ def test_start_raises_on_not_authed(fake_sdk, tmp_path):
         _make(tmp_path).start()
 
 
+def test_background_start_returns_immediately_then_announces_ready(fake_sdk, tmp_path):
+    # block=False returns a still-starting session; readiness arrives over the stream
+    # (so the hub need not hold the open request on the Copilot handshake).
+    sess = _make(tmp_path)
+    assert sess.is_ready() is False  # marked "starting" at construction
+    q = sess.subscribe()  # subscribe before start so the live "ready" event is caught
+    sess.start(block=False)  # does not block, does not raise
+    try:
+        kinds = []
+        while True:
+            ev = q.get(timeout=3)
+            kinds.append(ev.kind)
+            if ev.kind == "ready":
+                break
+        assert "ready" in kinds
+        assert sess.is_ready() is True
+        assert sess.start_status == {"state": "ready"}
+    finally:
+        sess.close()
+
+
+def test_background_start_times_out_on_a_hung_handshake(fake_sdk, tmp_path, monkeypatch):
+    # A HUNG (not failed) handshake must not leave the session stuck "starting"
+    # forever: the loop-thread deadline turns it into a "fail" so the UI recovers.
+    import asyncio
+
+    from mooring.ai import session as session_mod
+
+    monkeypatch.setattr(session_mod, "_START_TIMEOUT", 0.3)
+
+    async def _hang(self):  # client.start() never returns within the deadline
+        await asyncio.sleep(30)
+
+    monkeypatch.setattr(FakeClient, "start", _hang)
+    sess = _make(tmp_path)
+    q = sess.subscribe()
+    sess.start(block=False)  # returns immediately
+    try:
+        ev = q.get(timeout=3)
+        while ev.kind != "fail":
+            ev = q.get(timeout=3)
+        assert "timed out" in ev.data["text"].lower()
+        assert sess.is_ready() is False
+        assert sess.start_status["state"] == "error"
+    finally:
+        sess.close()
+
+
+def test_background_start_emits_fail_event_on_not_authed(fake_sdk, tmp_path):
+    # A sign-in failure on the background path surfaces as a "fail" event (the open
+    # request already returned), NOT a raised exception — and start_status records it.
+    FakeClient.authed = False
+    sess = _make(tmp_path)
+    q = sess.subscribe()
+    sess.start(block=False)  # must not raise
+    try:
+        ev = q.get(timeout=3)
+        while ev.kind != "fail":
+            ev = q.get(timeout=3)
+        assert ev.data.get("text")
+        assert sess.is_ready() is False
+        assert sess.start_status["state"] == "error"
+    finally:
+        sess.close()
+
+
 def test_pii_prompt_is_held_until_confirmed(fake_sdk, tmp_path):
     # With the guard armed (block mode), a PII-shaped prompt must NOT reach the SDK
     # until the analyst confirms — proving the hold is strictly upstream of dispatch.
