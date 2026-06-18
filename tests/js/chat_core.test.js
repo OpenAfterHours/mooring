@@ -106,6 +106,57 @@ test("additiveBlockLines: one '+' entry per line, trailing newline trimmed", () 
   ]);
 });
 
+test("undo is a command and filters by prefix", () => {
+  assert.ok(C.COMMANDS.some((c) => c.name === "undo"));
+  assert.deepEqual(C.filterCommands("u").map((c) => c.name), ["undo"]);
+});
+
+test("diffLines: a one-line change keeps context, marks - then +", () => {
+  const d = C.diffLines("a = 1\nb = 2\nc = 3", "a = 1\nb = 99\nc = 3");
+  assert.deepEqual(d, [
+    { gutter: " ", text: "a = 1" },
+    { gutter: "-", text: "b = 2" },
+    { gutter: "+", text: "b = 99" },
+    { gutter: " ", text: "c = 3" },
+  ]);
+});
+
+test("diffLines: empty before -> all additions; empty after -> all removals", () => {
+  assert.deepEqual(C.diffLines("", "x = 1\ny = 2"), [
+    { gutter: "+", text: "x = 1" },
+    { gutter: "+", text: "y = 2" },
+  ]);
+  assert.deepEqual(C.diffLines("x = 1\ny = 2", ""), [
+    { gutter: "-", text: "x = 1" },
+    { gutter: "-", text: "y = 2" },
+  ]);
+});
+
+test("diffLines: identical source is all context (no +/-)", () => {
+  const d = C.diffLines("a = 1\nb = 2\n", "a = 1\nb = 2\n");
+  assert.deepEqual(d, [
+    { gutter: " ", text: "a = 1" },
+    { gutter: " ", text: "b = 2" },
+  ]);
+});
+
+test("diffLines: caps very large inputs with a coarse all-removed-then-added fallback", () => {
+  const big = Array.from({ length: 600 }, (_, i) => `l${i}`).join("\n");
+  const d = C.diffLines(big, big + "\nextra"); // 600 * 601 > the cap
+  assert.equal(d.length, 1201); // 600 removed + 601 added (no minimal-LCS table built)
+  assert.equal(d[0].gutter, "-");
+  assert.equal(d[d.length - 1].gutter, "+");
+});
+
+test("diffLines: a pure insertion in the middle is a single + line", () => {
+  const d = C.diffLines("a = 1\nc = 3", "a = 1\nb = 2\nc = 3");
+  assert.deepEqual(d, [
+    { gutter: " ", text: "a = 1" },
+    { gutter: "+", text: "b = 2" },
+    { gutter: " ", text: "c = 3" },
+  ]);
+});
+
 test("piiBadge: null status renders nothing", () => {
   assert.equal(C.piiBadge(null), null);
   assert.equal(C.piiBadge(undefined), null);

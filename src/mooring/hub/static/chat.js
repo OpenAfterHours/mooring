@@ -1,10 +1,11 @@
 "use strict";
 
 // The interactive AI copilot, rendered as a terminal-style REPL. Opens beside
-// the marimo notebook tab. The model streams over SSE; proposed cells are
-// Applied (appended + run) into the open notebook via the hub. mooring talks to
-// marimo over HTTP only, never a websocket — outputs/values never reach this
-// page or the model. Pure, DOM-free helpers live in chat_core.js (ChatCore).
+// the marimo notebook tab. The model streams over SSE; proposals (append a cell,
+// edit a cell, or rewrite the notebook) are reviewed and Applied into the open
+// notebook via the hub, and the last Apply can be Undone. mooring talks to marimo
+// over HTTP only, never a websocket — outputs/values never reach this page or the
+// model. Pure, DOM-free helpers live in chat_core.js (ChatCore).
 
 const $ = (id) => document.getElementById(id);
 const NOTEBOOK = new URLSearchParams(location.search).get("notebook") || "";
@@ -27,6 +28,9 @@ const TOOL_LABELS = {
   mooring_get_schema: "looking up the schema",
   mooring_read_notebook_source: "reading the notebook",
   mooring_propose_cell: "drafting a cell",
+  mooring_propose_cell_edit: "drafting an edit",
+  mooring_propose_notebook_edit: "drafting changes",
+  mooring_propose_notebook_rewrite: "rewriting the notebook",
   mooring_list_tables: "listing dictionary tables",
   mooring_describe_table: "describing a table",
   mooring_search_dictionary: "searching the dictionary",
@@ -47,7 +51,8 @@ let thinkRow = null; // the intent "thinking" line for this turn
 let pendingRow = null; // transient "· thinking▋" indicator until real content
 let toolStack = []; // open tool-call rows in this turn
 
-let latestProposal = null; // { card, code, applyBtn, note, applied, skipped }
+let latestProposal = null; // { card, kind, ops, copyText, applyBtn, note, applied, skipped }
+let lastUndoBtn = null; // the single visible "Undo" button (the last applied change)
 let lastUserText = ""; // for /retry
 let currentGuard = null; // outbound-PII guard status for this session (topbar badge)
 const history = new ChatCore.HistoryRing(); // in-memory ONLY (never persisted)
@@ -333,43 +338,90 @@ function makeExpandable(row) {
   });
 }
 
-// -- proposed cell (additive block + apply/skip) ----------------------------
+// -- proposed change (append = additive block; edit/rewrite = diff) ----------
 
-function addProposal(code, rationale) {
+// Static per-kind chrome. "append" keeps the original additive framing; the rest
+// render a real old→new diff (the model's edit/rewrite REPLACES existing source).
+const PROPOSAL_KIND = {
+  append: { head: "◆ proposed cell → ", hint: "appends a cell" },
+  edit: { head: "✎ proposed edit → ", hint: "edits a cell" },
+  patch: { head: "✎ proposed changes → ", hint: "edits the notebook" },
+  rewrite: { head: "↻ proposed rewrite → ", hint: "rewrites the notebook" },
+};
+
+// One source/diff line: escape-first, THEN highlight — highlightCode never emits
+// unescaped source. `lineClass` is add-line | del-line | ctx-line (styled in CSS).
+function addCodeLine(container, gutter, text, lineClass) {
+  const ln = document.createElement("div");
+  ln.className = lineClass;
+  const g = document.createElement("span");
+  g.className = "add-gutter";
+  g.textContent = gutter;
+  const c = document.createElement("span");
+  c.className = "add-code";
+  c.innerHTML = ChatCore.highlightCode(escapeHtml(text)) || "&nbsp;";
+  ln.append(g, c);
+  container.appendChild(ln);
+}
+
+const GUTTER_CLASS = { "+": "add-line", "-": "del-line", " ": "ctx-line" };
+
+// `d` is the proposal SSE payload: {kind, rationale, code?, ops?, diffs?}. A bare
+// {code, rationale} (the append proposal, and the stub) defaults to kind "append".
+function addProposal(d) {
   clearPending();
+  const kind = (d && d.kind) || "append";
+  const meta = PROPOSAL_KIND[kind] || PROPOSAL_KIND.append;
   const card = document.createElement("div");
-  card.className = "proposal-card";
+  card.className = "proposal-card" + (kind === "append" ? "" : " proposal-edit");
 
   const head = document.createElement("div");
   head.className = "proposal-head";
-  head.appendChild(document.createTextNode("◆ proposed cell → ")); // ◆ … →
+  head.appendChild(document.createTextNode(meta.head));
   const tn = document.createElement("span");
   tn.className = "target";
   tn.textContent = NOTEBOOK;
   head.appendChild(tn);
   card.appendChild(head);
 
-  if (rationale && rationale.trim()) {
+  if (d.rationale && d.rationale.trim()) {
     const r = document.createElement("div");
     r.className = "proposal-rationale";
-    r.textContent = rationale.trim();
+    r.textContent = d.rationale.trim();
     card.appendChild(r);
   }
 
   const body = document.createElement("div");
   body.className = "proposal-body";
-  for (const line of ChatCore.additiveBlockLines(code)) {
-    const ln = document.createElement("div");
-    ln.className = "add-line";
-    const g = document.createElement("span");
-    g.className = "add-gutter";
-    g.textContent = line.gutter;
-    const c = document.createElement("span");
-    c.className = "add-code";
-    // escape-first, THEN highlight — highlightCode never emits unescaped source.
-    c.innerHTML = ChatCore.highlightCode(escapeHtml(line.text)) || "&nbsp;";
-    ln.append(g, c);
-    body.appendChild(ln);
+  let ops;
+  let copyText;
+  if (kind === "append") {
+    const code = d.code || "";
+    ops = [{ op: "append", code }];
+    copyText = code;
+    for (const line of ChatCore.additiveBlockLines(code)) {
+      addCodeLine(body, line.gutter, line.text, "add-line");
+    }
+  } else {
+    ops = d.ops || [];
+    const diffs = d.diffs || [];
+    // Copy the new source; for a delete (after === "") copy the removed source so Copy
+    // is still meaningful instead of copying an empty string.
+    copyText = diffs.map((s) => s.after || s.before).filter(Boolean).join("\n\n");
+    diffs.forEach((sec) => {
+      const section = document.createElement("div");
+      section.className = "diff-section";
+      if (sec.label) {
+        const lab = document.createElement("div");
+        lab.className = "diff-label";
+        lab.textContent = sec.label;
+        section.appendChild(lab);
+      }
+      for (const line of ChatCore.diffLines(sec.before, sec.after)) {
+        addCodeLine(section, line.gutter, line.text, GUTTER_CLASS[line.gutter] || "ctx-line");
+      }
+      body.appendChild(section);
+    });
   }
   card.appendChild(body);
 
@@ -388,17 +440,22 @@ function addProposal(code, rationale) {
   note.className = "muted";
   const hint = document.createElement("span");
   hint.className = "muted";
-  hint.textContent = "appends a cell · keys: a apply, s skip";
+  hint.textContent = meta.hint + " · keys: a apply, s skip";
 
-  const prop = { card, code, applyBtn, skipBtn, note, applied: false, skipped: false };
+  const prop = { card, kind, ops, copyText, applyBtn, skipBtn, note, applied: false, skipped: false };
   applyBtn.addEventListener("click", () => applyProposal(prop));
   skipBtn.addEventListener("click", () => skipProposal(prop));
-  copyBtn.addEventListener("click", () => copyCode(code, note));
+  copyBtn.addEventListener("click", () => copyCode(copyText, note));
 
   actions.append(applyBtn, skipBtn, copyBtn, note, hint);
   card.appendChild(actions);
   $("messages").appendChild(card);
   maybeScroll();
+  // Dim the previous still-pending card so it's clear which proposal is current (it
+  // stays applicable; the apply path's anchor re-check is the real safety net).
+  if (latestProposal && !latestProposal.applied && !latestProposal.skipped) {
+    latestProposal.card.classList.add("superseded");
+  }
   latestProposal = prop;
 }
 
@@ -406,16 +463,89 @@ async function applyProposal(p) {
   if (!p || p.applied || p.skipped) return;
   p.applyBtn.disabled = true;
   p.note.textContent = " applying…";
-  const { data } = await api("/api/ai/chat/apply", { sid, code: p.code });
+  const { status, data } = await api("/api/ai/chat/apply", { sid, ops: p.ops });
   if (data.ok) {
     p.applied = true;
     p.applyBtn.textContent = "Applied";
     p.applyBtn.classList.add("applied");
     p.skipBtn.disabled = true;
-    p.note.textContent = " added ✓"; // ✓
+    p.note.textContent = " applied ✓"; // ✓
+    offerUndo(p);
+    return;
+  }
+  p.applyBtn.disabled = false;
+  const err = data.error || "the change could not be applied";
+  if (status === 409) {
+    // A staleness conflict (the cell changed since it was proposed) — re-reading,
+    // not a re-write, is what's needed, so don't auto-ask the AI to "fix" it.
+    p.note.textContent = " — that cell changed";
+    addSysRow(err + " Ask me to redo it against the current notebook.");
+  } else if (!p.triedFix) {
+    // A parse/write failure (e.g. the model malformed a cell) — hand the exact error
+    // back to the assistant once so it can re-propose a corrected version.
+    p.triedFix = true;
+    p.note.textContent = " — couldn't apply";
+    askAiToFix(err);
   } else {
-    p.note.textContent = " — " + (data.error || "failed");
-    p.applyBtn.disabled = false;
+    p.note.textContent = " — couldn't apply";
+    addSysRow(err);
+  }
+}
+
+// Feed an Apply failure back to the assistant for one corrective re-proposal, clearly
+// narrated so the analyst knows what's happening (no silent billed turn).
+function askAiToFix(error) {
+  if (isBusy()) {
+    addSysRow("Couldn't apply that change: " + error);
+    return;
+  }
+  addSysRow("That change didn't apply — asking the assistant to fix it.");
+  const msg =
+    "The change you proposed could not be applied: " + error +
+    " Please re-propose a corrected version. Remember each cell is the BODY only — " +
+    "no @app.cell, no def, and no return statements.";
+  lastUserText = msg;
+  startTurn();
+  api("/api/ai/chat/send", { sid, text: msg }).then(({ data }) => {
+    if (data.error) {
+      showError(data.error);
+      setTurnState("error");
+    }
+  });
+}
+
+// Show a single "Undo" button on the just-applied card (the change /undo reverts).
+// A new apply moves it; using it (or /undo) removes it. Deeper history stays
+// reachable via /undo.
+function offerUndo(p) {
+  if (lastUndoBtn) {
+    lastUndoBtn.remove();
+    lastUndoBtn = null;
+  }
+  const btn = document.createElement("button");
+  btn.className = "small";
+  btn.textContent = "Undo";
+  btn.addEventListener("click", () => undoLast(btn));
+  p.applyBtn.parentNode.insertBefore(btn, p.note);
+  lastUndoBtn = btn;
+}
+
+async function undoLast(srcBtn) {
+  if (srcBtn) srcBtn.disabled = true;
+  const { data } = await api("/api/ai/chat/rollback", { sid });
+  if (data.ok) {
+    if (lastUndoBtn) {
+      lastUndoBtn.remove();
+      lastUndoBtn = null;
+    }
+    const more = data.undo_depth || 0;
+    addSysRow(
+      "Reverted the last applied change." +
+        (more ? ` (${more} earlier change${more > 1 ? "s" : ""} still undoable with /undo)` : ""),
+    );
+  } else {
+    addSysRow(data.error || "Nothing to undo.");
+    if (srcBtn) srcBtn.disabled = false;
   }
 }
 
@@ -430,6 +560,10 @@ function skipProposal(p) {
 }
 
 function copyCode(code, note) {
+  if (!code) {
+    if (note) note.textContent = " nothing to copy";
+    return;
+  }
   const done = () => {
     if (note) note.textContent = " copied";
   };
@@ -565,10 +699,7 @@ async function openChat() {
     appendDelta(JSON.parse(e.data).text);
   });
   source.addEventListener("message", (e) => finalizeAssistant(JSON.parse(e.data).text));
-  source.addEventListener("proposal", (e) => {
-    const d = JSON.parse(e.data);
-    addProposal(d.code, d.rationale);
-  });
+  source.addEventListener("proposal", (e) => addProposal(JSON.parse(e.data)));
   source.addEventListener("tool", (e) => onTool(JSON.parse(e.data)));
   source.addEventListener("tool_done", (e) => onToolDone(JSON.parse(e.data).success !== false));
   source.addEventListener("intent", (e) => onIntent(JSON.parse(e.data).text));
@@ -678,6 +809,7 @@ function runCommand(cmd) {
     case "clear":
       $("messages").innerHTML = "";
       latestProposal = null;
+      lastUndoBtn = null; // the transcript (and its Undo button) is gone
       printBanner();
       break;
     case "model":
@@ -687,12 +819,15 @@ function runCommand(cmd) {
       if (latestProposal && !latestProposal.applied && !latestProposal.skipped) {
         applyProposal(latestProposal);
       } else {
-        addSysRow("No proposed cell to apply.");
+        addSysRow("No proposal to apply.");
       }
       break;
     case "diff":
       if (latestProposal) latestProposal.card.scrollIntoView({ block: "center", behavior: "smooth" });
-      else addSysRow("No proposed cell yet.");
+      else addSysRow("No proposal yet.");
+      break;
+    case "undo":
+      undoLast(null);
       break;
     case "retry":
       if (isBusy()) addSysRow("Wait for the current turn to finish.");
@@ -755,8 +890,9 @@ function printHelp() {
     ["/help", "show this help"],
     ["/clear", "clear the transcript (keeps the session)"],
     ["/model [name]", "list or switch the model"],
-    ["/apply", "apply the latest proposed cell"],
-    ["/diff", "jump to the latest proposed cell"],
+    ["/apply", "apply the latest proposal"],
+    ["/diff", "jump to the latest proposal"],
+    ["/undo", "undo the last applied change"],
     ["/retry", "resend your last message"],
   ];
   addRow("row-sys", (el) => {

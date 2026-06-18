@@ -43,6 +43,7 @@
   --term-surface: #161b22;
   --term-accent: #2f81f7;
   --term-add: #3fb950;
+  --term-del: #f85149;
   --tok-kw: #ff7b72;
   --tok-str: #a5d6ff;
   --tok-com: #8b949e;
@@ -70,6 +71,7 @@
     --term-surface: #161b22;
     --term-accent: #2f81f7;
     --term-add: #3fb950;
+    --term-del: #f85149;
     --tok-kw: #ff7b72;
     --tok-str: #a5d6ff;
     --tok-com: #8b949e;
@@ -245,6 +247,7 @@ footer {
   --term-surface: #f6f8fa;
   --term-accent: #0969da;
   --term-add: #1a7f37;
+  --term-del: #cf222e;
   --term-bar: #24292f;
   --term-bar-ink: #e6edf3;
   --term-bar-dim: #9aa4ad;
@@ -428,6 +431,15 @@ footer {
 .chat-body .add-line { display: flex; white-space: pre; }
 .chat-body .add-gutter { width: 1.4em; color: var(--term-add); user-select: none; flex: 0 0 auto; }
 .chat-body .add-code { white-space: pre; }
+/* diff lines for an edit/rewrite proposal: removed (-), added (+), context ( ). */
+.chat-body .del-line .add-gutter { color: var(--term-del); }
+.chat-body .del-line .add-code { color: var(--term-del); }
+.chat-body .ctx-line .add-gutter { color: var(--term-dim); }
+.chat-body .ctx-line .add-code { color: var(--term-dim); }
+/* an edit/rewrite proposal reads as a change, not an addition — tint its rail. */
+.chat-body .proposal-card.proposal-edit { border-left-color: var(--term-accent); }
+.chat-body .diff-section + .diff-section { border-top: 1px dashed var(--term-rule); margin-top: 0.3rem; padding-top: 0.3rem; }
+.chat-body .diff-label { color: var(--term-dim); font-size: 11px; margin-bottom: 0.15rem; }
 .chat-body .tok-kw { color: var(--tok-kw); }
 .chat-body .tok-str { color: var(--tok-str); }
 .chat-body .tok-com { color: var(--tok-com); font-style: italic; }
@@ -441,6 +453,8 @@ footer {
   font-size: 12px;
 }
 .chat-body .proposal-actions .applied { color: var(--term-add); }
+/* a still-pending proposal superseded by a newer one — dimmed, still applicable. */
+.chat-body .proposal-card.superseded { opacity: 0.55; }
 
 /* outbound-PII guard: held prompt (warn-and-confirm) and warn-only advisories */
 .chat-body .row-pii {

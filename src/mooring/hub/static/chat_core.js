@@ -15,8 +15,9 @@ var ChatCore = (function () {
     { name: "help", help: "show commands and key bindings" },
     { name: "clear", help: "clear the transcript (keeps the session)" },
     { name: "model", help: "switch model — /model [name]" },
-    { name: "apply", help: "apply the latest proposed cell" },
-    { name: "diff", help: "jump to the latest proposed cell" },
+    { name: "apply", help: "apply the latest proposal" },
+    { name: "diff", help: "jump to the latest proposal" },
+    { name: "undo", help: "undo the last applied change" },
     { name: "retry", help: "resend your last message" },
   ];
 
@@ -121,12 +122,62 @@ var ChatCore = (function () {
   }
 
   // -- additive proposal block ---------------------------------------------
-  // append_cell only ever APPENDS a cell (it regenerates the file via marimo
-  // codegen), so the honest rendering is an all-additions block, NOT a diff.
-  // Returns one entry per source line.
+  // An APPEND proposal adds a whole new cell, so the honest rendering is an
+  // all-additions block, NOT a diff. Returns one entry per source line.
   function additiveBlockLines(code) {
     const src = String(code || "").replace(/\n+$/, "");
     return src.split("\n").map((line) => ({ gutter: "+", text: line }));
+  }
+
+  // -- line diff (for an edit / rewrite proposal) --------------------------
+  // An edit/rewrite REPLACES existing source, so the honest rendering is a real
+  // old→new diff. Pure LCS line diff: returns {gutter, text} entries with gutter
+  // " " (context), "-" (removed) or "+" (added). An empty side yields all
+  // additions/removals (so an append-shaped op still reads correctly).
+  function _toLines(s) {
+    const t = String(s || "").replace(/\n+$/, "");
+    return t === "" ? [] : t.split("\n");
+  }
+  // Above this LCS table area, skip the O(n*m) minimal diff (a huge whole-notebook
+  // rewrite would build a multi-million-cell table on the UI thread) and fall back to
+  // a coarse "all removed, then all added" block — still readable, never janky.
+  const DIFF_MAX_AREA = 250000;
+  function diffLines(before, after) {
+    const a = _toLines(before);
+    const b = _toLines(after);
+    const n = a.length;
+    const m = b.length;
+    if (n * m > DIFF_MAX_AREA) {
+      return a
+        .map((t) => ({ gutter: "-", text: t }))
+        .concat(b.map((t) => ({ gutter: "+", text: t })));
+    }
+    // LCS length table (suffixes), then walk it to emit a minimal diff.
+    const dp = Array.from({ length: n + 1 }, () => new Array(m + 1).fill(0));
+    for (let i = n - 1; i >= 0; i--) {
+      for (let j = m - 1; j >= 0; j--) {
+        dp[i][j] = a[i] === b[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+      }
+    }
+    const out = [];
+    let i = 0;
+    let j = 0;
+    while (i < n && j < m) {
+      if (a[i] === b[j]) {
+        out.push({ gutter: " ", text: a[i] });
+        i++;
+        j++;
+      } else if (dp[i + 1][j] >= dp[i][j + 1]) {
+        out.push({ gutter: "-", text: a[i] });
+        i++;
+      } else {
+        out.push({ gutter: "+", text: b[j] });
+        j++;
+      }
+    }
+    while (i < n) out.push({ gutter: "-", text: a[i++] });
+    while (j < m) out.push({ gutter: "+", text: b[j++] });
+    return out;
   }
 
   // -- outbound-PII guard badge --------------------------------------------
@@ -223,6 +274,7 @@ var ChatCore = (function () {
     filterDatasets,
     applyMention,
     additiveBlockLines,
+    diffLines,
     piiBadge,
     scanErrorMessage,
     highlightCode,

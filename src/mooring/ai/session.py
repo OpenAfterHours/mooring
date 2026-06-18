@@ -33,10 +33,20 @@ _TOOL_GUIDE = (
     "\n\nYou have tools to inspect this workspace WITHOUT ever seeing data values:\n"
     "- mooring_list_datasets — list available datasets\n"
     "- mooring_get_schema(dataset) — a dataset's column names + dtypes\n"
-    "- mooring_read_notebook_source — the notebook's current code\n"
-    "- mooring_propose_cell(code, rationale) — propose a cell for the analyst to apply.\n"
-    "When you want to add code to the notebook, CALL mooring_propose_cell so the analyst can "
-    "review and apply it. You have no other tools and cannot read the data itself."
+    "- mooring_read_notebook_source — the notebook's current code, with each cell's index\n"
+    "- mooring_propose_cell(code, rationale) — propose a NEW cell appended at the end\n"
+    "- mooring_propose_cell_edit(index, code, rationale) — propose REPLACING an existing "
+    "cell's code (read the source first for the index)\n"
+    "- mooring_propose_notebook_edit(edits, appends, deletes, rationale) — propose several "
+    "cell changes at once as one patch\n"
+    "- mooring_propose_notebook_rewrite(cells, rationale) — propose replacing the WHOLE "
+    "notebook (use only for a wholesale rewrite; an edit is lighter).\n"
+    "To CHANGE the notebook, call the matching propose tool — prefer editing an existing "
+    "cell over appending a near-duplicate. Cell code is the BODY ONLY: top-level statements "
+    "with NO '@app.cell', NO 'def _():', and NO trailing 'return (...)' (the displayed file "
+    "source shows that wrapper, but mooring adds it for you — never copy it back). Every "
+    "proposal is reviewed and applied by the analyst; you never write the file yourself and "
+    "cannot read the data itself."
 )
 
 _DICT_TOOL_GUIDE = (
@@ -158,6 +168,7 @@ class CopilotChatSession(ChatBroadcaster):
             folders=self._folders,
             notebook_rel=self._notebook_rel,
             emit_proposal=self._emit_proposal,
+            emit_proposal_patch=self._emit_proposal_patch,
             dictionary=self._dictionary,
             pii_enabled=self._pii_enabled,
         )
@@ -189,6 +200,16 @@ class CopilotChatSession(ChatBroadcaster):
 
     def _emit_proposal(self, code: str, rationale: str = "") -> None:
         self._broadcast(ChatEvent("proposal", {"code": code, "rationale": rationale}))
+
+    def _emit_proposal_patch(self, payload: dict) -> None:
+        """Broadcast a structured proposal (edit / multi-cell patch / rewrite).
+
+        ``payload`` carries ``kind`` + the normalized ``ops`` the Apply endpoint runs,
+        plus value-free ``diffs`` for the local diff view. The cell ``anchor``s inside
+        were read from the analyst's own notebook and go only to their browser — never
+        to the model (which already saw the source) — so this opens no value channel.
+        """
+        self._broadcast(ChatEvent("proposal", payload))
 
     def _on_event(self, event) -> None:
         """SDK callback (runs on the loop thread). Non-blocking: queue and return."""

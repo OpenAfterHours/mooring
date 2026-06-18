@@ -16,7 +16,7 @@ from copilot import SessionEventType as ET
 
 from mooring.ai.base import AIError
 from mooring.ai.session import CopilotChatSession
-from mooring.ai.tools import TOOL_NAMES
+from mooring.ai.tools import EDIT_TOOL_NAMES, TOOL_NAMES
 
 
 def _event(etype, **data):
@@ -189,7 +189,8 @@ def test_create_session_is_value_blind(fake_sdk, tmp_path):
     sess = _make(tmp_path).start()
     try:
         kw = FakeClient.last.session.create_kwargs
-        assert kw["available_tools"] == TOOL_NAMES  # only mooring's safe tools
+        # only mooring's safe tools — the base set plus the propose-edit/rewrite tools
+        assert kw["available_tools"] == TOOL_NAMES + EDIT_TOOL_NAMES
         assert kw["streaming"] is True
         assert kw["enable_session_store"] is False
         assert kw["enable_config_discovery"] is False

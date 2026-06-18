@@ -20,12 +20,14 @@ enforces that boundary.
 
 from __future__ import annotations
 
+import ast
 import http.cookiejar
 import json
 import re
 import urllib.error
 import urllib.parse
 import urllib.request
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 # The single source of truth for the asserted runtime floor: the minimum marimo
@@ -52,6 +54,18 @@ class MarimoTooOld(RuntimeError):
 
 class MarimoTransportError(RuntimeError):
     """A marimo control-API / codegen call failed at runtime (the seam's error surface)."""
+
+
+class CellPatchConflict(ValueError):
+    """A targeted edit/delete no longer matches the notebook (it changed since it was read).
+
+    Raised by :func:`apply_cell_patch` when an op's ``index`` is out of range or its
+    captured ``anchor`` (the cell's source at propose time) no longer equals the cell
+    on disk — so the analyst edited or reran the notebook between proposal and Apply.
+    A ``ValueError`` subclass so the thin ``cellwrite`` wrapper still catches it, but a
+    distinct type so the hub can surface it as a 409 ("the cell changed") rather than a
+    generic failure.
+    """
 
 
 _floor_checked = False
@@ -86,36 +100,290 @@ def _require_marimo_floor() -> None:
     _floor_checked = True  # only after a successful check
 
 
-# --- private-codegen: append a cell to notebook source ---------------------
+# --- private-codegen: read + patch notebook cells --------------------------
+
+# A marimo `.py` persists NO stable per-cell id (a cell is identified positionally
+# / by its source — verified against marimo 0.23.9: CellDef carries only code/name/
+# options, and codegen emits `@app.cell def <name>` with no id or marker). So an
+# edit/delete targets a cell by its INDEX plus an ``anchor`` (its source captured at
+# propose time): on Apply we re-read the file and require the anchor still matches,
+# turning the "the analyst changed it meanwhile" race into a loud conflict instead of
+# a silent clobber. marimo's own --watch reload then reconciles BY cell similarity
+# (exact-code keeps the cell's identity + output; only changed cells re-run).
 
 
-def append_cell_source(source: str, code: str) -> str:
-    """Append a cell containing ``code`` to marimo notebook ``.py`` ``source``,
-    returning the new source. PURE — no file IO; the private marimo IR object
-    never escapes this function.
+@dataclass(frozen=True)
+class CellOp:
+    """One operation in a notebook patch (see :func:`apply_cell_patch`).
 
-    Raises :class:`MarimoTooOld` if marimo is too old, :class:`MarimoTransportError`
-    if the private codegen API is unavailable (a future marimo moved it), and
-    ``ValueError``/``SyntaxError`` if the source can't be parsed.
+    ``op`` is ``"append"`` | ``"edit"`` | ``"delete"`` | ``"replace_all"``. ``index``
+    and ``anchor`` locate an existing cell for edit/delete (``anchor`` is the cell's
+    source at propose time, checked to detect a meanwhile-edit). ``code`` is the new
+    source for append/edit. ``cells`` is the full new cell list for ``replace_all``
+    (the whole-notebook rewrite). Indices always refer to the ORIGINAL cell order.
     """
-    _require_marimo_floor()
+
+    op: str
+    index: int | None = None
+    anchor: str | None = None
+    code: str = ""
+    cells: tuple[str, ...] = ()
+
+
+def _codegen_api():
+    """The private marimo codegen entrypoints, or raise :class:`MarimoTransportError`."""
     try:
         from marimo._ast import codegen
         from marimo._convert.converters import MarimoConvert
     except ImportError as exc:  # marimo present + new enough, but the private API moved
         raise MarimoTransportError(f"marimo codegen API unavailable: {exc}") from exc
-    ir = MarimoConvert.from_py(source).to_ir()
-    ir.cells.append(_new_cell(ir, code))
-    return codegen.generate_filecontents_from_ir(ir)
+    return codegen, MarimoConvert
 
 
-def _new_cell(ir, code: str):
-    """A fresh CellDef for ``code`` (reuse the notebook's cell class, or import it)."""
+def _parse_ir(MarimoConvert, source: str):
+    """Parse ``.py`` source to the marimo IR, NORMALIZING marimo's own parse errors
+    (e.g. ``MarimoFileError`` on a non-notebook file) into a plain ``ValueError``.
+
+    The ``ai/`` layer may not import marimo (the import-linter seam), so it cannot
+    catch marimo-internal exception types — concentrating that translation here keeps
+    callers handling only the documented mooring/stdlib errors.
+    """
+    try:
+        return MarimoConvert.from_py(source).to_ir()
+    except (MarimoTooOld, MarimoTransportError):
+        raise
+    except Exception as exc:  # noqa: BLE001 - marimo parse failures surface as ValueError
+        raise ValueError(f"could not parse the notebook source: {exc}") from exc
+
+
+def _cell_class(ir):
+    """The notebook's CellDef class (reuse an existing cell's, or import it)."""
     if ir.cells:
-        cell_cls = type(ir.cells[0])
-    else:  # empty notebook — import the class directly
-        from marimo._schemas.serialization import CellDef as cell_cls
-    return cell_cls(code=code, name="_")
+        return type(ir.cells[0])
+    from marimo._schemas.serialization import CellDef
+
+    return CellDef
+
+
+def _with_code(cell, code: str):
+    """A copy of ``cell`` with new ``code`` — preserves its name + config (so marimo's
+    reload keeps the cell's identity and only re-runs it)."""
+    return replace(cell, code=code)
+
+
+def _check_parses(code: str) -> None:
+    """Raise ``ValueError`` if ``code`` is not parseable Python.
+
+    marimo's codegen does NOT reject a syntactically-broken cell — it wraps it in
+    ``app._unparsable_cell(...)`` and re-parses as "valid", so a bad edit would write
+    silently and then no-op in the editor. Compile-checking the cell body here catches
+    it precisely (a cross-cell name reference still compiles — that's a runtime, not a
+    syntax, concern).
+
+    ``PyCF_ALLOW_TOP_LEVEL_AWAIT`` is set because marimo cells MAY use top-level
+    ``await`` / ``async for`` / ``async with`` (a supported marimo feature) — without
+    it this would wrongly reject a legitimate async cell.
+    """
+    try:
+        compile(code, "<cell>", "exec", flags=ast.PyCF_ALLOW_TOP_LEVEL_AWAIT)
+    except SyntaxError as exc:
+        raise ValueError(f"the cell would not parse: {exc}") from exc
+
+
+def normalize_cell_code(code: str) -> str:
+    """Best-effort cleanup of a model-provided cell body so common format mistakes
+    don't fail the parse check.
+
+    A marimo cell body is top-level statements WITHOUT the trailing ``return`` (marimo
+    auto-generates each cell's return from the names it defines) and WITHOUT the
+    ``@app.cell`` / ``def _()`` wrapper. Models often copy those back from the FILE
+    source they see (which shows the wrapped, return-carrying form). This:
+      * unwraps a single ``@app.cell``-decorated ``def _()`` if the model included it, and
+      * strips a trailing top-level ``return ...`` (marimo regenerates it).
+    Anything it can't confidently clean is returned untouched, so a genuinely broken
+    cell still surfaces a clear error from :func:`_check_parses`.
+    """
+    text = code.strip("\n")
+    if not text.strip():
+        return code
+    unwrapped = _unwrap_app_cell(text)
+    if unwrapped is not None:
+        text = unwrapped
+    return _drop_trailing_return(text)
+
+
+def _is_app_cell_decorator(dec) -> bool:
+    target = dec.func if isinstance(dec, ast.Call) else dec
+    return isinstance(target, ast.Attribute) and target.attr == "cell"
+
+
+def _unwrap_app_cell(code: str) -> str | None:
+    """If ``code`` is exactly a ``@app.cell``-decorated ``def _(...)`` (the marimo
+    wrapper the model may have pasted), return its dedented body; else ``None``.
+
+    Strictly gated on the ``@app.cell`` decorator + the ``_`` name so a legitimate
+    single-function cell (``def load_data(): ...``) is never unwrapped.
+    """
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return None
+    if len(tree.body) != 1:
+        return None
+    node = tree.body[0]
+    if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) or node.name != "_":
+        return None
+    if not any(_is_app_cell_decorator(d) for d in node.decorator_list):
+        return None
+    segments = [ast.get_source_segment(code, stmt) for stmt in node.body]
+    if not segments or any(seg is None for seg in segments):
+        return None
+    return "\n".join(segments)
+
+
+def _drop_trailing_return(code: str) -> str:
+    """Strip a trailing top-level ``return ...`` (only when the result still parses).
+
+    Wraps the body in a synthetic ``async def`` so a top-level return/await is legal
+    to analyze, checks the LAST statement is a ``Return``, and cuts the original
+    source from that statement on (handles a multi-line parenthesized return). Nested
+    returns inside the cell's own ``def`` are untouched — only the cell's own trailing
+    return is removed.
+    """
+    body_lines = code.split("\n")
+    wrapped = "async def __mooring_cell__():\n" + "\n".join("    " + ln for ln in body_lines)
+    try:
+        tree = ast.parse(wrapped)
+    except SyntaxError:
+        return code  # can't analyze safely — leave it for _check_parses to report
+    func = tree.body[0]
+    if not func.body or not isinstance(func.body[-1], ast.Return):
+        return code
+    cut = func.body[-1].lineno - 2  # wrapped line N maps to body_lines index N-2
+    if cut < 0:
+        return code
+    return "\n".join(body_lines[:cut]).rstrip("\n")
+
+
+def read_cells(source: str) -> list[tuple[int, str]]:
+    """The notebook's cells as ``(index, code)`` pairs, in document order. PURE.
+
+    The indices are what an edit/delete op targets; the code strings are the exact
+    anchors to capture. Raises like :func:`apply_cell_patch` on a too-old/missing
+    marimo or an unparseable source.
+    """
+    _require_marimo_floor()
+    _, MarimoConvert = _codegen_api()
+    ir = _parse_ir(MarimoConvert, source)
+    return [(i, cell.code) for i, cell in enumerate(ir.cells)]
+
+
+def apply_cell_patch(source: str, ops) -> str:
+    """Apply a list of :class:`CellOp` to notebook ``.py`` ``source``, returning the
+    new source. PURE — no file IO; the private marimo IR object never escapes here.
+
+    append/edit/delete may be combined (indices refer to the original order);
+    ``replace_all`` is exclusive (a whole-notebook rewrite). The result is re-parsed
+    before returning, because marimo's --watch SILENTLY IGNORES a malformed write —
+    failing loud here beats writing something that no-ops in the editor.
+
+    Raises :class:`MarimoTooOld`, :class:`MarimoTransportError`, :class:`CellPatchConflict`
+    (a stale anchor / out-of-range index), or ``ValueError``/``SyntaxError`` (bad source,
+    empty/duplicate op, or a result that would not parse).
+    """
+    _require_marimo_floor()
+    codegen, MarimoConvert = _codegen_api()
+    ir = _parse_ir(MarimoConvert, source)
+    original = list(ir.cells)
+    ops = list(ops)
+
+    rewrites = [o for o in ops if o.op == "replace_all"]
+    if rewrites:
+        if len(ops) != 1:
+            raise ValueError("a whole-notebook rewrite cannot be combined with other edits")
+        cls = _cell_class(ir)
+        codes = [normalize_cell_code(str(c)) for c in rewrites[0].cells]
+        codes = [c for c in codes if c.strip()]
+        if not codes:
+            raise ValueError("a rewrite must contain at least one cell")
+        for code in codes:
+            _check_parses(code)
+        # Preserve a cell's NAME + config when its code is byte-identical to an existing
+        # cell, so a rewrite that leaves a cell unchanged doesn't silently rename a
+        # `def load_customers()` cell to `_`. New/changed cells get the default name.
+        by_code = {}
+        for cell in original:
+            by_code.setdefault(cell.code, cell)
+        ir.cells[:] = [
+            _with_code(by_code[c], c) if c in by_code else cls(code=c, name="_") for c in codes
+        ]
+        return _finish(codegen, MarimoConvert, ir)
+
+    edits: dict[int, str] = {}
+    deletes: set[int] = set()
+    appends: list[str] = []
+    for o in ops:
+        if o.op == "append":
+            code = normalize_cell_code(o.code)
+            if not code.strip():
+                raise ValueError("an appended cell has no code")
+            _check_parses(code)
+            appends.append(code)
+            continue
+        if o.op not in ("edit", "delete"):
+            raise ValueError(f"unknown cell operation: {o.op!r}")
+        idx = o.index
+        if not isinstance(idx, int) or not 0 <= idx < len(original):
+            raise CellPatchConflict(
+                f"cell {idx} no longer exists — the notebook changed since it was read"
+            )
+        if idx in edits or idx in deletes:
+            raise ValueError(f"cell {idx} is targeted by more than one operation")
+        # An edit/delete MUST carry the anchor it was proposed against — never clobber
+        # a bare index (a missing anchor would defeat the whole conflict-detection
+        # guarantee, e.g. on a stale re-send after the analyst reordered cells).
+        if o.anchor is None:
+            raise CellPatchConflict(f"cell {idx} {o.op} is missing its anchor — re-open the copilot")
+        if original[idx].code != o.anchor:
+            raise CellPatchConflict(
+                f"cell {idx} changed since it was read — re-open the copilot and try again"
+            )
+        if o.op == "edit":
+            code = normalize_cell_code(o.code)
+            if not code.strip():
+                raise ValueError("an edited cell has no code")
+            _check_parses(code)
+            edits[idx] = code
+        else:
+            deletes.add(idx)
+
+    new_cells = [
+        _with_code(cell, edits[i]) if i in edits else cell
+        for i, cell in enumerate(original)
+        if i not in deletes
+    ]
+    cls = _cell_class(ir)
+    new_cells.extend(cls(code=code, name="_") for code in appends)
+    if not new_cells:
+        raise ValueError("the patch would empty the notebook")
+    ir.cells[:] = new_cells
+    return _finish(codegen, MarimoConvert, ir)
+
+
+def _finish(codegen, MarimoConvert, ir) -> str:
+    """Generate the file source from ``ir`` and assert it round-trips (parses)."""
+    result = codegen.generate_filecontents_from_ir(ir)
+    try:
+        MarimoConvert.from_py(result).to_ir()
+    except Exception as exc:  # noqa: BLE001 - any parse failure means a bad write
+        raise ValueError(f"the edited notebook would not parse: {exc}") from exc
+    return result
+
+
+def append_cell_source(source: str, code: str) -> str:
+    """Append a cell containing ``code`` to notebook ``.py`` ``source`` (a one-op
+    :func:`apply_cell_patch`). Kept as the named seam ``cellwrite.append_cell`` uses."""
+    return apply_cell_patch(source, [CellOp(op="append", code=code)])
 
 
 # --- HTTP control API: read live-kernel schemas ----------------------------
