@@ -15,6 +15,7 @@ import queue
 import secrets
 import threading
 import time
+import tomllib
 import webbrowser
 from importlib import resources
 from pathlib import Path
@@ -27,7 +28,17 @@ from starlette.responses import HTMLResponse, JSONResponse, StreamingResponse
 from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
-from mooring import __version__, auth, config, config_store, pbip, pyproject_env, sync, telemetry
+from mooring import (
+    __version__,
+    auth,
+    config,
+    config_store,
+    pbip,
+    pyproject_env,
+    sync,
+    telemetry,
+    workspace_config,
+)
 from mooring.editor import EditorServer, free_port
 from mooring.github import AuthFailed, GitHubClient, GitHubError, compare_url
 from mooring.runtime import SELFTEST_PACKAGES, workspace_hint
@@ -165,6 +176,41 @@ class Hub:
             with contextlib.suppress(Exception):
                 session.close()  # type: ignore[attr-defined]
 
+    def _close_chat(self, sid: str) -> None:
+        """Tear down one chat session (drop its target, close the provider)."""
+        with self._chat_lock:
+            session = self._chats.pop(sid, None)
+            self._chat_targets.pop(sid, None)
+        if session is not None:
+            with contextlib.suppress(Exception):
+                session.close()  # type: ignore[attr-defined]
+
+    def _close_chats_for_notebook(self, workspace: Path, notebook_rel: str) -> int:
+        """Close every live chat bound to one notebook. Used when AI is disabled for
+        it, so a window opened before the toggle stops streaming. Returns the count."""
+        want = (str(workspace), workspace_config.normalize_notebook(notebook_rel))
+        with self._chat_lock:
+            sids = [
+                sid
+                for sid, (ws, nb) in self._chat_targets.items()
+                if (ws, workspace_config.normalize_notebook(nb)) == want
+            ]
+        for sid in sids:
+            self._close_chat(sid)
+        return len(sids)
+
+    def _disabled_block(self, sid: str) -> JSONResponse | None:
+        """The per-notebook opt-out gate shared by send/apply/rollback: if the
+        session's notebook is AI-disabled, tear the session down and return the 403
+        the chat UI locks on, else None. Re-checked at each egress (not just open)
+        because the notebook may be disabled mid-session from the hub or a sync."""
+        with self._chat_lock:
+            target = self._chat_targets.get(sid)
+        if target and workspace_config.is_ai_disabled(Path(target[0]), target[1]):
+            self._close_chat(sid)
+            return JSONResponse({"enabled": False, "reason": "notebook_disabled"}, status_code=403)
+        return None
+
     def shutdown(self) -> None:
         self._close_all_chats()
         for editor in self.editors.values():
@@ -216,12 +262,19 @@ class Hub:
             report = sync.status(self.client(), cfg)
             artifacts, _ = pbip.group(report.files)
             artifact_of = {m.path: a.key for a in artifacts for m in a.members}
+            # Notebooks the team has turned the copilot off for (synced mooring.toml).
+            ai_off = workspace_config.disabled_notebooks(cfg.workspace())
             body["files"] = [
                 {
                     "path": f.path,
                     "state": f.state.value,
                     "has_local": f.local_sha is not None,
                     **({"artifact": artifact_of[f.path]} if f.path in artifact_of else {}),
+                    **(
+                        {"ai_disabled": True}
+                        if f.path.endswith(".py") and f.path in ai_off
+                        else {}
+                    ),
                 }
                 for f in report.files
             ]
@@ -770,6 +823,12 @@ class Hub:
         if not notebook:
             return JSONResponse({"error": "A notebook is required."}, status_code=400)
         workspace = self.cfg.workspace()
+        # Per-notebook opt-out (synced mooring.toml). 403 + reason distinguishes
+        # this from the global-off 404 above, so the chat UI shows the right message.
+        if workspace_config.is_ai_disabled(workspace, notebook):
+            return JSONResponse(
+                {"enabled": False, "reason": "notebook_disabled"}, status_code=403
+            )
         try:
             # File IO (notebook source, dataset schema, team context) — off the event
             # loop so a slow read can't stall the hub's other requests.
@@ -900,6 +959,12 @@ class Hub:
         live_text, live_banner = await asyncio.to_thread(self._live_schema_for_sid, sid)
         if live_banner:  # a refreshed column NAME was itself PII (withheld) — count only
             telemetry.log_event("ai_pii", findings=len(live_banner))
+        # The notebook may have been disabled (from the hub, or a teammate's sync)
+        # since this window opened — re-check at the LATEST point before egress. The
+        # live-schema probe above can take real time (a kernel poll), a wide window;
+        # this _chat_targets re-check, not the hidden button, is the real guarantee.
+        if (blocked := self._disabled_block(sid)) is not None:
+            return blocked
         # "Send anyway" path: forward a prompt the PII guard held, verbatim, once.
         confirm = str(data.get("confirm_token", "")).strip()
         if confirm:
@@ -926,6 +991,11 @@ class Hub:
             target = self._chat_targets.get(sid)
         if target is None:
             return JSONResponse({"error": "Unknown chat session."}, status_code=404)
+        # Apply WRITES the notebook, so it is the highest-value gate. This early
+        # refusal covers the common case; _apply_with_undo re-checks under
+        # _apply_lock right before the write to close the toggle/write race.
+        if (blocked := self._disabled_block(sid)) is not None:
+            return blocked
         # The UI echoes the proposal's normalized ops; a bare ``code`` (the append
         # proposal, and the legacy contract) is normalized to a one-op append. The
         # write re-validates each edit/delete anchor against the file, so a stale
@@ -955,6 +1025,9 @@ class Hub:
             undo_depth = await asyncio.to_thread(
                 self._apply_with_undo, nb_path, workspace, notebook_rel, op_dicts
             )
+        except PermissionError:  # disabled between the gate above and the write
+            self._close_chat(sid)
+            return JSONResponse({"enabled": False, "reason": "notebook_disabled"}, status_code=403)
         except CellApplyConflict as exc:
             return JSONResponse({"error": str(exc)}, status_code=409)
         except CellWriteError as exc:
@@ -973,6 +1046,11 @@ class Hub:
         from mooring.ai import cellwrite
 
         with self._apply_lock:
+            # Final TOCTOU guard: a concurrent disable writes mooring.toml before it
+            # tears sessions down, so an in-flight Apply re-reads it here, under the
+            # same lock, and refuses to land on the now-protected notebook.
+            if workspace_config.is_ai_disabled(workspace, notebook_rel):
+                raise PermissionError("notebook_disabled")
             token = notebook_undo.snapshot(workspace, notebook_rel, nb_path.read_bytes())
             try:
                 cellwrite.apply_wire_patch(nb_path, op_dicts)
@@ -988,6 +1066,11 @@ class Hub:
             target = self._chat_targets.get(sid)
         if target is None:
             return JSONResponse({"error": "Unknown chat session."}, status_code=404)
+        # Rollback WRITES the notebook (restores a snapshot), so it is gated by the
+        # per-notebook opt-out exactly like apply — otherwise a disabled notebook
+        # could still be rewritten through the undo path.
+        if (blocked := self._disabled_block(sid)) is not None:
+            return blocked
         workspace_str, notebook_rel = target
         workspace = Path(workspace_str)
         try:
@@ -1051,6 +1134,49 @@ class Hub:
             }
         )
 
+    async def api_notebook_ai_toggle(self, request: Request) -> JSONResponse:
+        """Turn the copilot off (or back on) for ONE notebook. Writes the synced
+        mooring.toml opt-out so the decision travels to teammates, and tears down any
+        open chat window for that notebook when disabling. Backs both the hub-row
+        toggle and the chat window's off-switch."""
+        if not self.app_cfg.ai_enabled:
+            return JSONResponse({"enabled": False}, status_code=404)
+        data = await request.json()
+        notebook = str(data.get("notebook", "")).strip()
+        disabled = bool(data.get("disabled", True))
+        if not notebook:
+            return JSONResponse({"error": "A notebook is required."}, status_code=400)
+        workspace = self.cfg.workspace()
+        # Validate the path is safe and a notebook, but do NOT require it to exist:
+        # disabling should work for a notebook not pulled yet, and re-enabling must
+        # stay possible after the file was renamed/deleted (to clear a stale opt-out).
+        # _ws_file runs its traversal/.py checks before the is_file check, so a
+        # FileNotFoundError here means "safe path, just absent" — which is fine.
+        try:
+            self._ws_file(workspace, notebook, suffix=".py")
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        except FileNotFoundError:
+            pass
+        try:
+            await run_in_threadpool(
+                workspace_config.set_ai_disabled, workspace, notebook, disabled
+            )
+        except tomllib.TOMLDecodeError:
+            return JSONResponse(
+                {"error": "mooring.toml is malformed — fix it before changing AI settings."},
+                status_code=409,
+            )
+        closed = (
+            await run_in_threadpool(self._close_chats_for_notebook, workspace, notebook)
+            if disabled
+            else 0
+        )
+        telemetry.log_event("ai_notebook_toggle", disabled=int(disabled))
+        return JSONResponse(
+            {"ok": True, "notebook": notebook, "ai_disabled": disabled, "closed_sessions": closed}
+        )
+
 
 def create_app(hub: Hub) -> Starlette:
     static = _static_dir()
@@ -1089,6 +1215,7 @@ def create_app(hub: Hub) -> Starlette:
             Route("/api/ai/chat/send", hub.api_chat_send, methods=["POST"]),
             Route("/api/ai/chat/apply", hub.api_chat_apply, methods=["POST"]),
             Route("/api/ai/chat/rollback", hub.api_chat_rollback, methods=["POST"]),
+            Route("/api/ai/notebook/toggle", hub.api_notebook_ai_toggle, methods=["POST"]),
             Mount("/static", StaticFiles(directory=static)),
         ],
         lifespan=lifespan,

@@ -159,8 +159,14 @@ function fileActions(file, opts) {
   }
   // AI copilot pops out into its own window (not a tab) so it can sit beside the
   // notebook. One window per notebook; clicking again focuses the existing one.
+  // A notebook can be opted out of AI (synced mooring.toml) — when it is, the open
+  // button is hidden and the toggle offers to turn it back on. The toggle is the
+  // off switch for "this notebook now handles PII; don't let AI touch it by mistake".
   if (aiChatEnabled && file.path.endsWith(".py") && file.has_local) {
-    actions.push(["AI", () => openChatWindow(file.path)]);
+    if (!file.ai_disabled) actions.push(["AI", () => openChatWindow(file.path)]);
+    const label = file.ai_disabled ? "Enable AI" : "Disable AI";
+    actions.push([label, () =>
+      action("/api/ai/notebook/toggle", { notebook: file.path, disabled: !file.ai_disabled })]);
   }
   // Delete is suppressed on PBIP member rows (opts.member): a project is only
   // deleted whole, via its header, since removing one member would leave a

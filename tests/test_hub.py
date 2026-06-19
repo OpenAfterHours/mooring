@@ -815,6 +815,151 @@ def test_chat_disabled_when_ai_off(tmp_path, monkeypatch):
         assert client.get("/api/state").json()["ai_chat"] is False
 
 
+# -- per-notebook AI off-switch (synced mooring.toml) ----------------------------
+
+
+def test_state_reports_per_notebook_ai_disabled(configured):
+    from mooring import workspace_config
+
+    client, hub, _, tmp_path = configured
+    write_ws(tmp_path, "ws1", "notebooks/a.py", "a")
+    write_ws(tmp_path, "ws1", "notebooks/b.py", "b")
+    workspace_config.set_ai_disabled(hub.cfg.workspace(), "notebooks/a.py", True)
+    files = {f["path"]: f for f in client.get("/api/state").json()["files"]}
+    assert files["notebooks/a.py"].get("ai_disabled") is True
+    assert "ai_disabled" not in files["notebooks/b.py"]  # absence == enabled
+
+
+def test_notebook_ai_toggle_round_trip(unconfigured_client):
+    from mooring import workspace_config
+
+    client, hub = unconfigured_client
+    ws = hub.cfg.workspace()
+    ws.mkdir(parents=True, exist_ok=True)
+    (ws / "nb.py").write_text("import marimo\n", "utf-8")
+
+    resp = client.post("/api/ai/notebook/toggle", json={"notebook": "nb.py", "disabled": True})
+    assert resp.status_code == 200 and resp.json()["ai_disabled"] is True
+    assert workspace_config.is_ai_disabled(ws, "nb.py")
+
+    resp = client.post("/api/ai/notebook/toggle", json={"notebook": "nb.py", "disabled": False})
+    assert resp.json()["ai_disabled"] is False
+    assert not workspace_config.is_ai_disabled(ws, "nb.py")
+
+
+def test_notebook_ai_toggle_rejects_traversal(unconfigured_client):
+    client, hub = unconfigured_client
+    hub.cfg.workspace().mkdir(parents=True, exist_ok=True)
+    resp = client.post("/api/ai/notebook/toggle", json={"notebook": "../escape.py", "disabled": True})
+    assert resp.status_code == 400
+
+
+def test_notebook_ai_toggle_allows_absent_notebook(unconfigured_client):
+    # Disabling must work for a notebook not pulled yet, and re-enabling must stay
+    # possible after the file was renamed/deleted (to clear a stale opt-out).
+    from mooring import workspace_config
+
+    client, hub = unconfigured_client
+    hub.cfg.workspace().mkdir(parents=True, exist_ok=True)
+    resp = client.post("/api/ai/notebook/toggle", json={"notebook": "ghost.py", "disabled": True})
+    assert resp.status_code == 200 and resp.json()["ai_disabled"] is True
+    assert workspace_config.is_ai_disabled(hub.cfg.workspace(), "ghost.py")
+    resp = client.post("/api/ai/notebook/toggle", json={"notebook": "ghost.py", "disabled": False})
+    assert resp.status_code == 200
+    assert not workspace_config.is_ai_disabled(hub.cfg.workspace(), "ghost.py")
+
+
+def test_notebook_ai_toggle_corrupt_file_is_409(unconfigured_client):
+    client, hub = unconfigured_client
+    ws = hub.cfg.workspace()
+    ws.mkdir(parents=True, exist_ok=True)
+    (ws / "nb.py").write_text("import marimo\n", "utf-8")
+    (ws / "mooring.toml").write_text("bad = = toml", "utf-8")  # corrupt: don't clobber
+    resp = client.post("/api/ai/notebook/toggle", json={"notebook": "nb.py", "disabled": True})
+    assert resp.status_code == 409
+    assert (ws / "mooring.toml").read_text("utf-8") == "bad = = toml"  # left intact
+
+
+def test_notebook_ai_toggle_disabled_when_ai_off(tmp_path, monkeypatch):
+    monkeypatch.setattr(paths, "user_config_dir", lambda: tmp_path / "appdata")
+    spec = config.RepoSpec(alias="ws", owner="", repo="", workspace_path=str(tmp_path / "ws"))
+    hub = Hub(config.AppConfig(repos=(spec,), active_alias="ws", ai=config.AiConfig(enabled=False)))
+    with TestClient(create_app(hub)) as client:
+        resp = client.post("/api/ai/notebook/toggle", json={"notebook": "nb.py", "disabled": True})
+        assert resp.status_code == 404
+
+
+def test_chat_open_blocked_for_disabled_notebook(unconfigured_client, stub_chat):
+    from mooring import workspace_config
+
+    client, hub = unconfigured_client
+    ws = hub.cfg.workspace()
+    ws.mkdir(parents=True, exist_ok=True)
+    (ws / "nb.py").write_text("import marimo\n", "utf-8")
+    workspace_config.set_ai_disabled(ws, "nb.py", True)
+    resp = client.post("/api/ai/chat/open", json={"notebook": "nb.py"})
+    assert resp.status_code == 403 and resp.json()["reason"] == "notebook_disabled"
+
+
+def test_chat_send_blocked_after_disable_and_session_closed(unconfigured_client, stub_chat):
+    # A window opened while enabled must not reach the model once the notebook is
+    # turned off (from the hub, or a teammate's sync). The _chat_targets re-check.
+    from mooring import workspace_config
+
+    client, hub = unconfigured_client
+    sid = _open_chat(client, hub).json()["sid"]
+    workspace_config.set_ai_disabled(hub.cfg.workspace(), "nb.py", True)
+    resp = client.post("/api/ai/chat/send", json={"sid": sid, "text": "hi"})
+    assert resp.status_code == 403 and resp.json()["reason"] == "notebook_disabled"
+    assert sid not in hub._chats  # session torn down
+
+
+def test_chat_apply_blocked_after_disable_leaves_file_untouched(unconfigured_client, stub_chat):
+    from mooring import workspace_config
+
+    client, hub = unconfigured_client
+    sid = _open_chat(client, hub, source=_NB_SRC).json()["sid"]
+    nb = hub.cfg.workspace() / "nb.py"
+    original = nb.read_text("utf-8")
+    workspace_config.set_ai_disabled(hub.cfg.workspace(), "nb.py", True)
+    resp = client.post("/api/ai/chat/apply", json={"sid": sid, "code": "result = 1"})
+    assert resp.status_code == 403 and resp.json()["reason"] == "notebook_disabled"
+    assert nb.read_text("utf-8") == original  # apply gate protected the notebook
+    assert sid not in hub._chats
+
+
+def test_chat_rollback_blocked_after_disable(unconfigured_client, stub_chat):
+    # Rollback also writes the notebook, so it must be gated like apply — otherwise a
+    # disabled notebook could still be rewritten through the undo path.
+    from mooring import workspace_config
+
+    client, hub = unconfigured_client
+    sid = _open_chat(client, hub, source=_NB_SRC).json()["sid"]
+    client.post("/api/ai/chat/apply", json={"sid": sid, "code": "added = 1"})  # one undo step
+    workspace_config.set_ai_disabled(hub.cfg.workspace(), "nb.py", True)
+    resp = client.post("/api/ai/chat/rollback", json={"sid": sid})
+    assert resp.status_code == 403 and resp.json()["reason"] == "notebook_disabled"
+    assert sid not in hub._chats
+    assert "added = 1" in (hub.cfg.workspace() / "nb.py").read_text("utf-8")  # not reverted
+
+
+def test_toggle_closes_open_sessions_for_notebook(unconfigured_client, stub_chat):
+    client, hub = unconfigured_client
+    sid1 = _open_chat(client, hub).json()["sid"]
+    sid2 = _open_chat(client, hub).json()["sid"]  # second window, same notebook
+    assert sid1 in hub._chats and sid2 in hub._chats
+    # Spy on close() so we assert the provider teardown actually ran, not just that
+    # the dict entry was dropped (the whole point of closing on disable).
+    closed = []
+    for s in (hub._chats[sid1], hub._chats[sid2]):
+        orig = s.close
+        s.close = lambda _o=orig: (closed.append(1), _o())
+    resp = client.post("/api/ai/notebook/toggle", json={"notebook": "nb.py", "disabled": True})
+    assert resp.json()["closed_sessions"] == 2
+    assert sid1 not in hub._chats and sid2 not in hub._chats
+    assert len(closed) == 2  # close() invoked on both sessions
+
+
 # -- AI copilot model/effort controls --------------------------------------------
 
 

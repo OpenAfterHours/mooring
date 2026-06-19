@@ -37,6 +37,12 @@ from mooring.github import (
 # mooring.pyproject_env). They ride pull/push/propose like any tracked file.
 PROJECT_FILES = ("pyproject.toml", "uv.lock")
 
+# All root-level files that ride sync: the dependency project plus the synced
+# per-workspace settings file (mooring.workspace_config), which carries team
+# settings such as the per-notebook AI opt-out. Threaded through scan_local and
+# the get_tree calls so the two sync sides agree on it like any tracked file.
+SYNCED_ROOT_FILES = (*PROJECT_FILES, "mooring.toml")
+
 # Local files matching this marker are mooring-created scratch copies of
 # remote versions ("keep both" resolution) and are never synced.
 REMOTE_COPY_MARKER = ".remote-"
@@ -211,7 +217,7 @@ def scan_local(
             if not is_synced_path(rel, exclude):
                 continue
             out[rel] = gitsha.local_blob_sha(path, rel)
-    for name in PROJECT_FILES:
+    for name in SYNCED_ROOT_FILES:
         path = workspace / name
         if path.is_file() and is_synced_path(name, exclude):
             out[name] = gitsha.local_blob_sha(path, name)
@@ -227,7 +233,7 @@ def _remote_entries(
         return {p: s for p, s in mft.files.items() if is_synced_path(p, cfg.exclude)}
     return {
         e.path: e.sha
-        for e in client.get_tree(head, cfg.folders, PROJECT_FILES)
+        for e in client.get_tree(head, cfg.folders, SYNCED_ROOT_FILES)
         if is_synced_path(e.path, cfg.exclude)
     }
 
@@ -238,7 +244,7 @@ def _review_tree(client: GitHubClient, cfg: Config, branch: str) -> dict[str, st
     review_head = client.get_branch_head(branch)
     return {
         e.path: e.sha
-        for e in client.get_tree(review_head, cfg.folders, PROJECT_FILES)
+        for e in client.get_tree(review_head, cfg.folders, SYNCED_ROOT_FILES)
         if is_synced_path(e.path, cfg.exclude)
     }
 

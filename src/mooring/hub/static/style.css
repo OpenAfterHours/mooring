@@ -299,6 +299,29 @@ footer {
   border-color: #d29922;
   background: transparent;
 }
+/* off-switch: a subtle ghost button on the dark bar that reads as danger on hover */
+.chat-body #topbar #disable-ai-btn {
+  margin-left: 0.25rem;
+  color: var(--term-bar-dim);
+  background: transparent;
+  border: 1px solid var(--term-bar-dim);
+}
+.chat-body #topbar #disable-ai-btn:hover {
+  color: #f85149;
+  border-color: #f85149;
+  background: transparent;
+}
+/* disabled notice: a calm footer above the (frozen) composer with the Enable action */
+.chat-body #disabled-notice {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 0.8rem;
+  color: var(--term-dim);
+  border-top: 1px solid #1b1f24;
+  font-size: 12px;
+}
 .chat-body #statusbar .status-ctrl {
   margin: 0;
   display: inline-flex;

@@ -215,6 +215,12 @@ file); they do **not** reflect a one-run [environment-variable](#environment-var
 override. This works for any key, including the `[ai]` / `[ai.pii]` settings
 documented in [AI privacy](ai-privacy.md).
 
+!!! note "Per-notebook AI opt-out lives elsewhere"
+    Turning the copilot off for a single notebook is **not** a `mooring config`
+    setting — it is written to a synced `mooring.toml` at the workspace root so it
+    travels with the notebook. See
+    [Turning the copilot off for a notebook](ai-privacy.md#turning-the-copilot-off-for-a-notebook).
+
 ## The runtime setup form
 
 If a build ships **without** `client_id` / `owner` / `repo`, the hub shows a

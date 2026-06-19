@@ -78,6 +78,32 @@ sees whatever your team wrote into those files.
 Nothing about a conversation is persisted: the session store, telemetry, config
 discovery, skills, file hooks, and host-git access are all switched off.
 
+## Turning the copilot off for a notebook
+
+Beyond the global `[ai] enabled` switch, the copilot can be turned off for an
+**individual notebook** — the off switch for "this notebook now handles PII; don't
+let AI touch it by mistake." A user flips it from the hub row (**Disable AI**) or
+from the chat window's top bar; both call one endpoint that writes the notebook's
+workspace-relative path into a **synced** `mooring.toml` at the workspace root
+(`[ai] disabled_notebooks`).
+
+Two properties make this a real control rather than a hidden button:
+
+- **Enforced on every egress, not just the open.** Disablement is re-checked when a
+  chat is opened, on every message **send**, and on every **apply** (apply writes the
+  notebook, so it is the highest-value gate). A chat window opened before the toggle
+  — or disabled from the hub while it is open — is refused and torn down on its next
+  call. The check is keyed by the session's bound notebook, so a stale tab cannot slip
+  a turn through.
+- **It travels with the notebook.** `mooring.toml` rides pull/push/propose like any
+  tracked file, so once pushed, everyone who syncs the repo gets the copilot turned
+  off for that notebook too. It stores only notebook **paths** — never a value, so it
+  is value-free by construction like everything else that leaves the workspace. (It is
+  a single shared file: concurrent edits resolve through the normal conflict flow. A
+  malformed `mooring.toml` is ignored when *reading* the opt-out — it fails *open*,
+  re-enabling AI rather than wedging the hub — but *editing* it is refused so a bad
+  file is never silently overwritten; the apply-time gate remains the backstop.)
+
 ## Live dataframe schemas (data outside the workspace)
 
 `schema.py` can only inspect data files that sit *inside* the workspace. But real

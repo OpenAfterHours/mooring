@@ -79,6 +79,11 @@ live_schema = true          # read the schema of dataframes live in the running 
                             # names + dtypes only, never a value; set false to disable.
                             # See docs/admins/ai-privacy.md.
 
+# Per-notebook off switch: a user can turn the copilot off for ONE notebook (from
+# the hub row or the chat window) — e.g. before working with PII. That lives in a
+# SYNCED <workspace>/mooring.toml ([ai] disabled_notebooks = [...]) so the decision
+# travels to teammates, NOT in this per-machine config. Enforced at open/send/apply.
+
 # Team context for the copilot — OPT-IN, off by default. When `context = true`,
 # mooring reads `<workspace>/context/` and feeds the assistant:
 #   - instructions.md            free-text guidance (the copilot-instructions.md

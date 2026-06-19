@@ -91,6 +91,26 @@ def test_root_pyproject_and_lock_sync_like_any_file(cfg):
     assert read_local(cfg2, "uv.lock") == "version = 1\n"
 
 
+def test_root_mooring_toml_syncs_like_any_file(cfg):
+    # The synced per-workspace settings file (mooring.workspace_config) lives at
+    # the workspace ROOT, like pyproject.toml, and rides push/pull so the
+    # per-notebook AI opt-out travels to teammates (sync.SYNCED_ROOT_FILES).
+    from mooring import workspace_config
+
+    write_local(cfg, "mooring.toml", '[ai]\ndisabled_notebooks = ["notebooks/a.py"]\n')
+    write_local(cfg, "notebooks/a.py", "print(1)\n")
+    assert "mooring.toml" in sync.scan_local(cfg.workspace(), cfg.folders, cfg.exclude)
+
+    client = FakeClient()
+    result = sync.push(client, cfg)
+    assert result.pushed == 2
+    assert "mooring.toml" in client.tree
+
+    cfg2 = replace(cfg, workspace_path=str(cfg.workspace().parent / "ws2"))
+    sync.pull(client, cfg2)
+    assert workspace_config.is_ai_disabled(cfg2.workspace(), "notebooks/a.py")
+
+
 def test_pull_never_overwrites_local_edits_by_default(cfg):
     client = FakeClient({"notebooks/a.py": b"v1\n"})
     sync.pull(client, cfg)
