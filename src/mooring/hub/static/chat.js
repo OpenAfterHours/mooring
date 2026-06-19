@@ -470,6 +470,13 @@ async function applyProposal(p) {
   p.applyBtn.disabled = true;
   p.note.textContent = " applying…";
   const { status, data } = await api("/api/ai/chat/apply", { sid, ops: p.ops });
+  if (data.reason === "notebook_disabled") {
+    // AI was turned off for this notebook (here, the hub, or a teammate's sync)
+    // before the apply landed — lock the window instead of "asking the AI to fix".
+    p.note.textContent = " — AI is off for this notebook";
+    lockForDisabled();
+    return;
+  }
   if (data.ok) {
     p.applied = true;
     p.applyBtn.textContent = "Applied";
@@ -539,6 +546,10 @@ function offerUndo(p) {
 async function undoLast(srcBtn) {
   if (srcBtn) srcBtn.disabled = true;
   const { data } = await api("/api/ai/chat/rollback", { sid });
+  if (data.reason === "notebook_disabled") {
+    lockForDisabled(); // AI off for this notebook — the rollback write is refused too
+    return;
+  }
   if (data.ok) {
     if (lastUndoBtn) {
       lastUndoBtn.remove();
@@ -620,6 +631,10 @@ function addPiiHold(findings, token) {
     note.textContent = " sending…";
     startTurnState();
     const { data } = await api("/api/ai/chat/send", { sid, confirm_token: token });
+    if (data.reason === "notebook_disabled") {
+      lockForDisabled();
+      return;
+    }
     if (data.error) {
       showError(data.error);
       setTurnState("error");
@@ -695,6 +710,10 @@ async function openChat() {
   const { status, data } = await api("/api/ai/chat/open", {
     notebook: NOTEBOOK, model, reasoning_effort,
   });
+  if (data.reason === "notebook_disabled") {
+    lockForDisabled();
+    return;
+  }
   if (!data.sid) {
     showError(data.error || `Could not start the copilot (${status}).`);
     return;
@@ -766,6 +785,61 @@ async function openChat() {
   setTurnState(data.ready === false ? "connecting" : "idle");
 }
 
+// -- per-notebook AI off-switch ---------------------------------------------
+// This window can turn the copilot OFF for its notebook (the off switch for "this
+// notebook now handles PII — don't let AI touch it by mistake"). The decision is
+// written to the synced mooring.toml, so it travels to teammates. Disabling locks
+// this window; the backend also refuses any further open/send/apply for it.
+
+async function disableAiForNotebook() {
+  const { data } = await api("/api/ai/notebook/toggle", { notebook: NOTEBOOK, disabled: true });
+  if (data.error) {
+    showError(data.error);
+    return;
+  }
+  lockForDisabled();
+}
+
+async function enableAiForNotebook() {
+  const { data } = await api("/api/ai/notebook/toggle", { notebook: NOTEBOOK, disabled: false });
+  if (data.error) {
+    showError(data.error);
+    return;
+  }
+  const notice = $("disabled-notice");
+  notice.classList.add("hidden");
+  notice.innerHTML = "";
+  $("disable-ai-btn").classList.remove("hidden");
+  $("chat-input").disabled = false;
+  await openChat(); // reconnect a fresh session
+}
+
+// Lock the window: AI is off for this notebook (turned off here, from the hub, or
+// by a teammate's sync). Tear down the stream, freeze the composer, and offer to
+// turn it back on. Idempotent — safe to call from open/send/apply failures.
+function lockForDisabled() {
+  closeStream();
+  sid = null;
+  turnState = "idle";
+  clearPending();
+  const input = $("chat-input");
+  input.disabled = true;
+  input.blur();
+  $("disable-ai-btn").classList.add("hidden");
+  showError("");
+  setStatus("AI disabled");
+  const notice = $("disabled-notice");
+  notice.innerHTML = "";
+  const msg = document.createElement("span");
+  msg.textContent = "AI is turned off for this notebook. ";
+  const btn = document.createElement("button");
+  btn.className = "small";
+  btn.textContent = "Enable AI";
+  btn.addEventListener("click", enableAiForNotebook);
+  notice.append(msg, btn);
+  notice.classList.remove("hidden");
+}
+
 // -- composer: send / commands / history ------------------------------------
 
 function autosize(input) {
@@ -812,6 +886,11 @@ async function submitMessage(message) {
   addUserRow(message);
   startTurn();
   const { data } = await api("/api/ai/chat/send", { sid, text: message });
+  if (data.reason === "notebook_disabled") {
+    addSysRow("AI was turned off for this notebook — your message was not sent.");
+    lockForDisabled();
+    return;
+  }
   if (data.error) {
     showError(data.error);
     setTurnState("error");
@@ -1113,6 +1192,7 @@ async function init() {
     updateAutocomplete(input);
   });
   input.addEventListener("keydown", onInputKeydown);
+  $("disable-ai-btn").addEventListener("click", disableAiForNotebook);
   // a/s apply/skip the latest proposal — only when the prompt isn't focused, so
   // they never hijack typing.
   document.addEventListener("keydown", onGlobalKeydown);

@@ -27,9 +27,15 @@
       <span id="chat-target" class="muted"></span>
       <span class="badge synced" title="The assistant only ever sees column names &amp; types, never data values">schema-only</span>
       <span id="pii-badge" class="badge hidden"></span>
+      <button id="disable-ai-btn" class="small"
+        title="Turn the copilot off for this notebook (shared with your team) — e.g. before working with PII">Disable AI</button>
     </div>
 
     <section id="messages" aria-live="polite"></section>
+
+    <!-- Shown when AI is off for this notebook: the composer is locked and the
+         only action is to turn it back on. -->
+    <div id="disabled-notice" class="hidden"></div>
 
     <div id="prompt-area">
       <div id="autocomplete" class="hidden" role="listbox"></div>

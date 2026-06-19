@@ -62,6 +62,28 @@ Keep both tabs side by side: chat on one, the marimo notebook on the other.
     numbers, so the rule still stands. See
     [the privacy page](../admins/ai-privacy.md#structured-pii-pre-flight-scan-opt-in-best-effort).
 
+## Turn AI off for a notebook
+
+Sometimes you want the copilot's help setting a notebook up, but later need to
+work with **PII** in it (real values in filters, say) and want to be sure AI can't
+be opened on it by mistake. You can turn the copilot **off for that one notebook**
+from either place:
+
+- **In the hub** — on the notebook's row, click **Disable AI**. The **AI** button
+  disappears; the row now shows **Enable AI** to turn it back on.
+- **In the chat window** — click **Disable AI** in the top bar. The chat locks
+  immediately and offers an **Enable AI** button if you change your mind.
+
+Once a notebook is off, opening the chat for it is refused, and any chat window
+already open for it stops working — so a stale tab can't slip a message through.
+
+!!! info "It's shared with your team"
+    The decision is saved to a `mooring.toml` file at the top of your workspace and
+    **travels with the notebook**: once you **push** it, everyone who syncs the repo
+    gets the copilot turned off for that notebook too. `mooring.toml` shows up as a
+    normal file to push/pull, and it stores only notebook **paths** — never any data.
+    (If two people edit it at once it resolves like any other file conflict.)
+
 ## Team context (optional)
 
 If your admin enables it (`[ai] context = true`), the copilot also reads a
