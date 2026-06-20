@@ -225,6 +225,21 @@ footer {
   margin-top: 0.3rem;
 }
 
+/* The notebook-packages footer: the selected deps rendered like a pyproject list,
+   plus a neutral "how to add" tip below them. */
+.pkglist {
+  font-family: Consolas, monospace;
+  font-size: 0.85rem;
+  color: var(--ink);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.5rem 0.7rem;
+  margin: 0.4rem 0;
+  white-space: pre-wrap;
+}
+.env-add-hint { margin-top: 0.3rem; }
+
 /* NER name-detection model prepare/download status (Phase 2 PII guard) */
 .ner-status {
   color: var(--muted);

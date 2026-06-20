@@ -21,6 +21,7 @@
     <h1>&#9875; mooring</h1>
     <div id="repo-info"></div>
     <select id="repo-select" class="hidden" title="Switch repo"></select>
+    <button id="connect-repo" class="small hidden" title="Connect a team repo to sync &amp; share">&#9875; Connect a repo</button>
     <select id="theme-select" title="Appearance (hub, chat &amp; notebooks)">
       <option value="light">&#9728; Light</option>
       <option value="dark">&#9789; Dark</option>
@@ -32,9 +33,8 @@
   <main>
     <section id="setup-card" class="card hidden">
       <h2>Connect a team repo</h2>
-      <p id="setup-intro">You can create and edit notebooks right now — they're saved to your
-        local workspace below. To sync and share them with your team, connect a repo (ask your
-        admin for these values):</p>
+      <p id="setup-intro">Connect to a team repo to sync and share your notebooks. Ask your
+        admin for these values:</p>
       <label id="setup-client-id-label">OAuth client id <input id="setup-client-id" placeholder="Ov23li..."></label>
       <label id="setup-host-label">GitHub URL (only for GitHub Enterprise) <input id="setup-host" placeholder="github.com"></label>
       <label>Repo owner <input id="setup-owner" placeholder="your-org"></label>
@@ -89,8 +89,10 @@
   <footer>
     <div id="workspace-info" class="muted"></div>
     <div id="workspace-hint" class="hint hidden"></div>
-    <details><summary>Packages available in notebooks</summary>
-      <div id="packages" class="muted"></div>
+    <details><summary>Notebook packages</summary>
+      <div id="env-summary" class="muted"></div>
+      <pre id="packages" class="pkglist"></pre>
+      <div id="env-add-hint" class="muted env-add-hint"></div>
     </details>
   </footer>
 

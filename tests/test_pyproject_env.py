@@ -24,6 +24,55 @@ def test_scaffold_skips_lock_without_uv(tmp_path, monkeypatch):
     assert not pe.lock_path(tmp_path).is_file()
 
 
+class _FakeDist:
+    def __init__(self, name, version="1.0", requires=None):
+        self.name = name
+        self.version = version
+        self.requires = requires
+
+
+def test_top_level_from_keeps_roots_drops_transitive_and_mooring():
+    # Models `uvx --with polars mooring`: polars is a deliberate pick (nothing
+    # depends on it); marimo/requests/narwhals are transitive; mooring is the tool.
+    dists = [
+        _FakeDist("mooring", requires=["marimo>=0.23.9", "requests"]),
+        _FakeDist("marimo", requires=["narwhals"]),
+        _FakeDist("narwhals"),
+        _FakeDist("requests"),
+        _FakeDist("polars"),
+    ]
+    assert pe._top_level_from(dists) == ["polars"]
+
+
+def test_top_level_from_is_sorted_case_insensitively_and_ignores_nameless():
+    dists = [
+        _FakeDist("Seaborn"),
+        _FakeDist("altair"),
+        _FakeDist(None),  # a malformed dist with no Name is skipped, not a crash
+    ]
+    assert pe._top_level_from(dists) == ["altair", "Seaborn"]
+
+
+def test_top_level_from_tolerates_missing_requires():
+    # importlib.metadata returns None for a dist that declares no dependencies.
+    assert pe._top_level_from([_FakeDist("polars", requires=None)]) == ["polars"]
+
+
+def test_top_level_from_ignores_extra_gated_deps_and_normalizes_names():
+    # marimo lists polars only under an extra -> polars stays a deliberate root;
+    # requests requires charset_normalizer (underscore) -> the hyphenated dist must
+    # still be recognised as transitive and dropped (PEP 503 name normalization).
+    dists = [
+        _FakeDist("mooring", requires=["marimo>=0.23.9", "requests"]),
+        _FakeDist("marimo", requires=['polars; extra == "recommended"', "narwhals"]),
+        _FakeDist("narwhals"),
+        _FakeDist("polars"),
+        _FakeDist("requests", requires=["charset_normalizer>=2"]),
+        _FakeDist("charset-normalizer"),
+    ]
+    assert pe._top_level_from(dists) == ["polars"]
+
+
 @pytest.mark.parametrize(
     ("raw", "expected"),
     [

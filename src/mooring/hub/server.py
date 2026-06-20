@@ -41,7 +41,7 @@ from mooring import (
 )
 from mooring.editor import EditorServer, free_port
 from mooring.github import AuthFailed, GitHubClient, GitHubError, compare_url
-from mooring.runtime import SELFTEST_PACKAGES, workspace_hint
+from mooring.runtime import workspace_hint
 
 
 def _static_dir() -> Path:
@@ -83,6 +83,10 @@ class Hub:
         # Serializes editor startup so the background pre-warm and a user's Open click
         # can't both spawn a marimo subprocess for the same (cold) workspace at once.
         self._editor_lock = threading.Lock()
+        # Cache of the interpreter's top-level packages for the footer (bundle mode).
+        # The env can't change within a running process, so enumerate site-packages
+        # once instead of on every /api/state poll. See _notebook_env.
+        self._top_level_pkgs: list[str] | None = None
 
     # -- helpers -------------------------------------------------------------
 
@@ -266,6 +270,62 @@ class Hub:
         ]
         return files, arts
 
+    def _installed_top_level(self) -> list[str]:
+        if self._top_level_pkgs is None:
+            from mooring import pyproject_env
+
+            self._top_level_pkgs = pyproject_env.installed_top_level()
+        return self._top_level_pkgs
+
+    def _notebook_env(self, workspace: Path) -> dict:
+        """Where a notebook's packages come from, the actively-selected list (the
+        repo's ``pyproject.toml`` deps, or the env's top-level packages when there's
+        no project), and how to add one — for the hub footer. The mode + add guidance
+        depend on whether notebooks run in a locked uv project, mooring's bundled
+        env, or a frozen build that can't be changed at runtime.
+        """
+        from mooring import pyproject_env
+        from mooring.editor import uses_uv
+
+        uv_mode = uses_uv(workspace)
+        declared = pyproject_env.declared_deps(workspace)
+        if uv_mode or declared:
+            # A workspace pyproject.toml is the source of truth either way: uv runs it,
+            # and a frozen build was built from it. Show its dependency list verbatim.
+            packages, source = declared, "pyproject"
+        else:
+            # No notebook project: approximate the deliberately-chosen packages by the
+            # env's root distributions (e.g. what `uvx --with` added), since notebooks
+            # share this interpreter in bundle mode.
+            packages, source = self._installed_top_level(), "env"
+
+        if uv_mode:
+            summary = (
+                "Notebooks run in this project's locked environment (pyproject.toml + uv.lock)."
+            )
+            add_hint = (
+                "Add a package with `mooring deps add <name>`, then Push to share it with your team."
+            )
+        elif pyproject_env.uv_available():
+            summary = "Notebooks run in mooring's bundled Python environment."
+            add_hint = (
+                "Add a package by relaunching as `uvx --with <name> mooring`, or set up a locked, "
+                "shareable project with `mooring init` then `mooring deps add <name>`."
+            )
+        else:
+            summary = "Notebooks run in this frozen build's bundled environment."
+            add_hint = (
+                "Its packages were fixed when the build was made and can't be added here — ask your "
+                "admin to add the package to the repo's pyproject.toml and rebuild the bundle."
+            )
+        return {
+            "mode": "uv" if uv_mode else "bundle",
+            "source": source,
+            "packages": packages,
+            "summary": summary,
+            "add_hint": add_hint,
+        }
+
     # -- endpoints -------------------------------------------------------------
 
     def api_state(self, request: Request) -> JSONResponse:
@@ -290,7 +350,9 @@ class Hub:
             ],
             "active_repo": self.app_cfg.active_alias,
             "ui_theme": self.app_cfg.ui_theme,
-            "packages": sorted(SELFTEST_PACKAGES),
+            # What notebooks can import + how to add packages (mode-aware: locked uv
+            # project vs mooring's bundled env vs a frozen build). See _notebook_env.
+            "env": self._notebook_env(cfg.workspace()),
             "ai_chat": self.app_cfg.ai_enabled,
             # "local" = no repo configured: the UI shows the notebook surface
             # (list/new/open/edit/AI) backed by the local workspace, with sync hidden.

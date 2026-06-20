@@ -198,6 +198,60 @@ def test_local_mode_new_lists_and_opens_without_login(unconfigured_client, monke
     assert opened.json()["url"] == "http://editor/notebooks/scratch.py"
 
 
+def test_state_env_no_project_lists_top_level_env_packages(unconfigured_client, monkeypatch):
+    # No notebook pyproject (uvx/pip): the footer shows the env's top-level packages
+    # (e.g. what `uvx --with` added), so an added package actually appears.
+    from mooring import pyproject_env
+
+    client, _ = unconfigured_client
+    monkeypatch.setattr(pyproject_env, "uv_available", lambda: True)
+    monkeypatch.setattr(pyproject_env, "installed_top_level", lambda: ["polars", "seaborn"])
+    env = client.get("/api/state").json()["env"]
+    assert env["mode"] == "bundle"
+    assert env["source"] == "env"
+    assert env["packages"] == ["polars", "seaborn"]
+    assert "uvx --with" in env["add_hint"]
+
+
+def test_state_env_uv_project_shows_declared_deps_verbatim(unconfigured_client, monkeypatch):
+    # With a workspace pyproject + uv, the footer shows the declared dependency list
+    # verbatim (looks like the pyproject) and points at `mooring deps add`.
+    from mooring import pyproject_env
+
+    client, hub = unconfigured_client
+    ws = hub.cfg.workspace()
+    ws.mkdir(parents=True, exist_ok=True)
+    (ws / "pyproject.toml").write_text(
+        '[project]\nname = "nb"\nversion = "0"\ndependencies = ["marimo>=0.23.9", "polars"]\n',
+        "utf-8",
+    )
+    monkeypatch.setattr(pyproject_env, "uv_available", lambda: True)
+    env = client.get("/api/state").json()["env"]
+    assert env["mode"] == "uv"
+    assert env["source"] == "pyproject"
+    assert env["packages"] == ["marimo>=0.23.9", "polars"]  # verbatim, transitive-free
+    assert "mooring deps add" in env["add_hint"]
+
+
+def test_state_env_frozen_build_notes_rebuild(unconfigured_client, monkeypatch):
+    # A frozen build (no uv) can't add packages at runtime: show the declared deps but
+    # tell the user to ask their admin to add it to the repo and rebuild.
+    from mooring import pyproject_env
+
+    client, hub = unconfigured_client
+    ws = hub.cfg.workspace()
+    ws.mkdir(parents=True, exist_ok=True)
+    (ws / "pyproject.toml").write_text(
+        '[project]\nname = "nb"\nversion = "0"\ndependencies = ["polars"]\n', "utf-8"
+    )
+    monkeypatch.setattr(pyproject_env, "uv_available", lambda: False)
+    env = client.get("/api/state").json()["env"]
+    assert env["mode"] == "bundle"
+    assert env["source"] == "pyproject"
+    assert env["packages"] == ["polars"]
+    assert "rebuild" in env["add_hint"]
+
+
 def test_local_mode_ai_open_surfaces_provider_failure(unconfigured_client, monkeypatch):
     # AI is reachable in local mode (no repo/login); if Copilot isn't available the
     # open fails cleanly as a 502 the chat UI can show — not a crash.

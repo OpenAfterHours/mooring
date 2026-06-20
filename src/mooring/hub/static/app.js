@@ -329,15 +329,29 @@ async function refresh() {
   const hint = $("workspace-hint");
   hint.textContent = state.workspace_hint || "";
   hint.classList.toggle("hidden", !state.workspace_hint);
-  $("packages").textContent = (state.packages || []).join(", ");
+  // Notebook packages: the actively-selected deps (the repo's pyproject list, or the
+  // env's top-level packages when there's no project) + how to add more.
+  const env = state.env || {};
+  $("env-summary").textContent = env.summary || "";
+  const pkgs = env.packages || [];
+  $("packages").textContent = pkgs.length
+    ? pkgs.join("\n")
+    : "(no packages selected yet)";
+  $("env-add-hint").textContent = env.add_hint || "";
   aiChatEnabled = !!state.ai_chat;
 
   renderRepoSelect(state);
-  $("setup-card").classList.toggle("hidden", state.configured && !showAddRepo);
+  // The connect-repo form opens on demand — the header "Connect a repo" button in
+  // local mode, or the switcher's "+ Add repo…" when configured — so it's never
+  // forced on a local-only user who has no intention of connecting a repo.
+  $("setup-card").classList.toggle("hidden", !showAddRepo);
   $("setup-client-id-label").classList.toggle("hidden", state.configured);
   $("setup-host-label").classList.toggle("hidden", state.configured);
-  $("setup-cancel").classList.toggle("hidden", !state.configured);
+  $("setup-cancel").classList.toggle("hidden", !showAddRepo);
   $("setup-intro").classList.toggle("hidden", state.configured);
+  // The header button is the local-mode entry to the form; when a repo is configured
+  // the switcher's "+ Add repo…" handles it, and while the form is open it's redundant.
+  $("connect-repo").classList.toggle("hidden", state.configured || showAddRepo);
   $("login-card").classList.toggle("hidden", !state.configured || state.logged_in);
   $("files-card").classList.toggle("hidden", !showFiles);
 
@@ -425,26 +439,44 @@ $("btn-new").addEventListener("click", () => {
   const name = prompt("Notebook name (e.g. sales-analysis):");
   if (name) action("/api/new", { name });
 });
+$("connect-repo").addEventListener("click", () => {
+  showAddRepo = true;
+  refresh();  // reveals #setup-card (and Cancel) and hides the button
+});
 $("repo-select").addEventListener("change", (event) => {
   const alias = event.target.value;
   if (alias === "__add__") {
     showAddRepo = true;
-    $("setup-card").classList.remove("hidden");
     refresh();
     return;
   }
   action("/api/repo/switch", { alias });
 });
-$("setup-save").addEventListener("click", () => {
-  showAddRepo = false;
-  action("/api/setup", {
-    client_id: $("setup-client-id").value,
-    host: $("setup-host").value,
-    owner: $("setup-owner").value,
-    repo: $("setup-repo").value,
-    branch: $("setup-branch").value,
-    alias: $("setup-alias").value,
-  });
+$("setup-save").addEventListener("click", async () => {
+  // Close the form only on success: the card is now gated solely on showAddRepo, so
+  // resetting it before the request would hide the form (and the user's input) on a
+  // validation error (e.g. a bad host). Mirrors action()'s busy/refresh handling.
+  if (busy) return;
+  setBusy(true);
+  showError("");
+  try {
+    const data = await api("/api/setup", {
+      client_id: $("setup-client-id").value,
+      host: $("setup-host").value,
+      owner: $("setup-owner").value,
+      repo: $("setup-repo").value,
+      branch: $("setup-branch").value,
+      alias: $("setup-alias").value,
+    });
+    if (data.error) {
+      showError(data.error);  // leave the form open so the values can be corrected
+      return;
+    }
+    showAddRepo = false;
+    await refresh();
+  } finally {
+    setBusy(false);
+  }
 });
 $("setup-cancel").addEventListener("click", () => {
   showAddRepo = false;

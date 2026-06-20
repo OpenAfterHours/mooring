@@ -124,6 +124,54 @@ def _bare_name(requirement: str) -> str | None:
     return m.group(1) if m else None
 
 
+def _canonical(name: str) -> str:
+    """PEP 503 canonical form, so ``charset_normalizer`` and ``charset-normalizer``
+    (and ``Foo.Bar``) compare equal."""
+    return re.sub(r"[-_.]+", "-", name).strip("-").lower()
+
+
+def _top_level_from(distributions) -> list[str]:
+    """The 'roots' of a set of installed distributions: those no other installed
+    distribution depends on — the deliberately-selected packages, not their
+    transitive deps — excluding mooring itself. Mirrors what a pyproject
+    ``[dependencies]`` list captures. Pure (takes the distribution list) so it can
+    be tested without touching the real environment.
+    """
+    versions: dict[str, str] = {}
+    required: set[str] = set()
+    for dist in distributions:
+        name = dist.name
+        if not name:
+            continue
+        versions[name] = dist.version
+        for req in dist.requires or []:
+            # Skip extra-gated (optional) deps: a package being an OPTIONAL dependency
+            # of another doesn't make it transitive in THIS environment. Counting them
+            # would wrongly drop real top-level picks — e.g. marimo lists polars under
+            # an extra, which must not hide a deliberately-added polars.
+            marker = req.split(";", 1)[1] if ";" in req else ""
+            if re.search(r"\bextra\b", marker):
+                continue
+            bare = _bare_name(req)
+            if bare:
+                required.add(_canonical(bare))
+    return [
+        name
+        for name in sorted(versions, key=str.lower)
+        if _canonical(name) not in required and _canonical(name) != "mooring"
+    ]
+
+
+def installed_top_level() -> list[str]:
+    """Best-effort 'actively selected' packages of the CURRENT interpreter env — the
+    root packages no other installed package depends on (e.g. what a
+    ``uvx --with <pkg>`` run added), excluding mooring itself. Used for the hub
+    footer when there is no notebook ``pyproject.toml`` to read; the notebook
+    subprocess shares this interpreter in bundle mode, so these are importable.
+    """
+    return _top_level_from(importlib.metadata.distributions())
+
+
 def declares(workspace: Path, dist_name: str) -> bool:
     """Whether the repo pyproject lists a requirement for ``dist_name``."""
     target = dist_name.lower()
