@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import fnmatch
 import time
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -111,6 +111,11 @@ class FileState(Enum):
     DELETED_REMOTE = "deleted remotely"  # pull will remove locally
     CONFLICT = "conflict"
     IN_REVIEW = "in review"  # proposed on a review branch, awaiting merge
+    # The hub's local (no-repo) mode: a file present on disk that isn't tracked
+    # against any remote. `classify` never returns it and it is in no PUSH/PULL
+    # set, so it is inert in the three-way sync machinery — only `local_report`
+    # emits it, for display when there's no repo to diff against.
+    LOCAL = "local"
 
 
 PUSH_STATES = {FileState.MODIFIED, FileState.NEW_LOCAL, FileState.DELETED_LOCAL}
@@ -202,10 +207,13 @@ def classify(base: str | None, local: str | None, remote: str | None) -> FileSta
     return FileState.CONFLICT  # remote changed or deleted underneath us
 
 
-def scan_local(
+def synced_paths(
     workspace: Path, folders: tuple[str, ...], exclude: Iterable[str] = ()
-) -> dict[str, str]:
-    out: dict[str, str] = {}
+) -> Iterator[str]:
+    """Yield the workspace-relative POSIX path of every file that participates in
+    sync: the files under ``folders`` plus the synced root files (``SYNCED_ROOT_FILES``),
+    filtered by :func:`is_synced_path`. The shared enumeration behind
+    :func:`scan_local` (which hashes each) and :func:`local_report` (which doesn't)."""
     for folder in folders:
         root = workspace / folder
         if not root.is_dir():
@@ -214,14 +222,42 @@ def scan_local(
             if not path.is_file():
                 continue
             rel = path.relative_to(workspace).as_posix()
-            if not is_synced_path(rel, exclude):
-                continue
-            out[rel] = gitsha.local_blob_sha(path, rel)
+            if is_synced_path(rel, exclude):
+                yield rel
     for name in SYNCED_ROOT_FILES:
         path = workspace / name
         if path.is_file() and is_synced_path(name, exclude):
-            out[name] = gitsha.local_blob_sha(path, name)
-    return out
+            yield name
+
+
+def scan_local(
+    workspace: Path, folders: tuple[str, ...], exclude: Iterable[str] = ()
+) -> dict[str, str]:
+    return {
+        rel: gitsha.local_blob_sha(workspace / rel, rel)
+        for rel in synced_paths(workspace, folders, exclude)
+    }
+
+
+def local_report(
+    workspace: Path, folders: tuple[str, ...], exclude: Iterable[str] = ()
+) -> StatusReport:
+    """List the workspace's files for the hub's LOCAL mode (no configured repo, no
+    login). Every on-disk file under the synced folders/root is reported with state
+    ``LOCAL`` — present locally, tracked against no remote. There is no manifest, no
+    network call, and nothing to diff: sync (pull/push/propose) stays unavailable
+    until a repo is connected. Visibility mirrors :func:`scan_local`, so a workspace
+    shows the same files here as it would once a repo is attached.
+
+    The blob sha is deliberately NOT computed (``local_sha`` stays ``None``): a LOCAL
+    row is never diffed against a remote, so its presence is carried by the ``LOCAL``
+    state itself. This keeps the listing cheap even for a workspace with large data
+    files, which the hub re-lists on every refresh (each New/Open).
+    """
+    report = StatusReport(head_commit="")
+    for rel in sorted(synced_paths(workspace, folders, exclude)):
+        report.files.append(FileStatus(path=rel, state=FileState.LOCAL))
+    return report
 
 
 def _remote_entries(

@@ -130,6 +130,91 @@ def test_open_missing_file_404s(unconfigured_client):
     assert resp.status_code == 404
 
 
+# -- local (no-repo) mode: notebooks usable with no login ---------------------
+
+
+def test_state_local_mode_lists_notebooks_from_disk(unconfigured_client):
+    # With no repo and no token, /api/state reports mode "local" and lists the
+    # workspace's notebooks straight off disk (so they can be opened/edited).
+    client, hub = unconfigured_client
+    ws = hub.cfg.workspace()
+    (ws / "notebooks").mkdir(parents=True, exist_ok=True)
+    (ws / "notebooks" / "scratch.py").write_text("import marimo\n", "utf-8")
+    state = client.get("/api/state").json()
+    assert state["configured"] is False
+    assert state["logged_in"] is False
+    assert state["mode"] == "local"
+    files = {f["path"]: f for f in state["files"]}
+    assert files["notebooks/scratch.py"]["state"] == "local"
+    assert files["notebooks/scratch.py"]["has_local"] is True
+
+
+def test_state_local_mode_flags_ai_disabled(unconfigured_client):
+    # The per-notebook AI opt-out (synced mooring.toml) is honored in local mode too,
+    # so a notebook turned off keeps its AI button hidden with no repo.
+    from mooring import workspace_config
+
+    client, hub = unconfigured_client
+    ws = hub.cfg.workspace()
+    (ws / "notebooks").mkdir(parents=True, exist_ok=True)
+    (ws / "notebooks" / "a.py").write_text("import marimo\n", "utf-8")
+    workspace_config.set_ai_disabled(ws, "notebooks/a.py", True)
+    files = {f["path"]: f for f in client.get("/api/state").json()["files"]}
+    assert files["notebooks/a.py"].get("ai_disabled") is True
+
+
+def test_local_mode_new_lists_and_opens_without_login(unconfigured_client, monkeypatch):
+    # The headline: create a notebook, see it listed as "local", and open it — all
+    # with no repo and no GitHub token. The editor is faked so no marimo spawns.
+    client, hub = unconfigured_client
+
+    class FakeEditor:
+        def __init__(self, workspace, theme="system"):
+            self.workspace = workspace
+
+        def ensure_started(self):
+            pass
+
+        def use_uv(self):
+            return False
+
+        def url_for(self, rel_path):
+            return f"http://editor/{rel_path}"
+
+        def shutdown(self):
+            pass
+
+    monkeypatch.setattr(server, "EditorServer", FakeEditor)
+
+    created = client.post("/api/new", json={"name": "scratch"})
+    assert created.status_code == 200
+    assert created.json()["url"] == "http://editor/notebooks/scratch.py"
+
+    files = {f["path"]: f for f in client.get("/api/state").json()["files"]}
+    assert files["notebooks/scratch.py"]["state"] == "local"
+
+    opened = client.post("/api/open", json={"path": "notebooks/scratch.py"})
+    assert opened.status_code == 200
+    assert opened.json()["url"] == "http://editor/notebooks/scratch.py"
+
+
+def test_local_mode_ai_open_surfaces_provider_failure(unconfigured_client, monkeypatch):
+    # AI is reachable in local mode (no repo/login); if Copilot isn't available the
+    # open fails cleanly as a 502 the chat UI can show — not a crash.
+    client, hub = unconfigured_client
+    ws = hub.cfg.workspace()
+    ws.mkdir(parents=True, exist_ok=True)
+    (ws / "nb.py").write_text("import marimo\n", "utf-8")
+
+    def boom(self, *a, **k):
+        raise RuntimeError("Copilot isn't available. Install the extra: pip install mooring[copilot]")
+
+    monkeypatch.setattr(Hub, "_make_chat_session", boom)
+    resp = client.post("/api/ai/chat/open", json={"notebook": "nb.py"})
+    assert resp.status_code == 502
+    assert "Copilot" in resp.json()["error"]
+
+
 # -- configured hub: repo switching and PBIP artifacts ------------------------------
 
 
@@ -182,6 +267,11 @@ def write_ws(tmp_path, ws, rel_path, text=""):
     target = tmp_path / ws / rel_path
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(text, "utf-8")
+
+
+def test_state_mode_is_repo_when_configured(configured):
+    client, _, _, _ = configured
+    assert client.get("/api/state").json()["mode"] == "repo"
 
 
 def test_state_lists_repos_and_active(configured):

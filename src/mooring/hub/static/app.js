@@ -13,6 +13,7 @@ const STATE_BADGES = {
   "conflict": "conflict",
   "mixed": "mixed",
   "in review": "review",
+  "local": "local",
 };
 
 const PUSH_STATES = ["modified", "new local", "deleted locally"];
@@ -315,8 +316,15 @@ async function refresh() {
     applyTheme(state.ui_theme);
     $("theme-select").value = state.ui_theme;
   }
+  // Local mode (no repo configured): the notebook surface is usable without a
+  // login; only sync needs a repo. The server reports state.mode === "local".
+  const localMode = state.mode === "local";
+  const showFiles = state.logged_in || localMode;
+
   const hostSuffix = state.host && state.host !== "github.com" ? ` · ${state.host}` : "";
-  $("repo-info").textContent = state.repo ? `${state.repo} @ ${state.branch}${hostSuffix}` : "";
+  $("repo-info").textContent = state.repo
+    ? `${state.repo} @ ${state.branch}${hostSuffix}`
+    : (localMode ? "Local workspace — not connected to a repo" : "");
   $("workspace-info").textContent = `Workspace: ${state.workspace}`;
   const hint = $("workspace-hint");
   hint.textContent = state.workspace_hint || "";
@@ -331,7 +339,19 @@ async function refresh() {
   $("setup-cancel").classList.toggle("hidden", !state.configured);
   $("setup-intro").classList.toggle("hidden", state.configured);
   $("login-card").classList.toggle("hidden", !state.configured || state.logged_in);
-  $("files-card").classList.toggle("hidden", !state.logged_in);
+  $("files-card").classList.toggle("hidden", !showFiles);
+
+  // Pull / Push all / Propose only make sense against a connected, logged-in repo.
+  // In local mode the notebooks are usable but there's nothing to sync to, so hide
+  // those controls (the per-file rows already omit Push/Propose for "local" files).
+  for (const id of ["btn-pull", "btn-push", "btn-propose"]) {
+    $(id).classList.toggle("hidden", !state.logged_in);
+  }
+  // No team Pull in local mode, so don't dangle it in the empty-state hint.
+  $("empty-hint").innerHTML = localMode
+    ? "No notebooks yet &mdash; click <b>New notebook</b> to create one."
+    : "No notebooks yet &mdash; click <b>New notebook</b> to create one, or <b>Pull</b> to " +
+      "fetch your team's notebooks.";
 
   if (state.logged_in) {
     const userInfo = $("user-info");
@@ -347,10 +367,16 @@ async function refresh() {
     userInfo.appendChild(logoutBtn);
     $("summary").textContent = state.summary || "";
     renderReviewBanner(state.review);
+  } else {
+    $("user-info").textContent = "";
+    $("summary").textContent = "";
+    renderReviewBanner(null);
+  }
+  if (showFiles) {
     lastFiles = state.files || [];
     renderFiles(lastFiles, state.artifacts || []);
   } else {
-    $("user-info").textContent = "";
+    lastFiles = [];  // no file surface (login wall) — don't leave stale push/propose targets
   }
 }
 

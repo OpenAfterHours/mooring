@@ -135,8 +135,12 @@ class Hub:
         first notebook click finds it already running (skipping the ~seconds-long
         spawn + readiness wait, and on the uv path the cold venv build). Best-effort
         and idempotent — ``ensure_started`` short-circuits when already running, and
-        any failure is swallowed so a warm attempt never breaks the hub."""
-        if not self._prewarm_enabled or not self.cfg.is_configured:
+        any failure is swallowed so a warm attempt never breaks the hub.
+
+        Warms in local (no-repo) mode too: ``cfg.workspace()`` always resolves to a
+        real directory, and the no-repo flow's whole promise is "open a notebook now",
+        so it must not pay the cold start the configured flow avoids."""
+        if not self._prewarm_enabled:
             return
         workspace = self.cfg.workspace()
 
@@ -216,6 +220,52 @@ class Hub:
         for editor in self.editors.values():
             editor.shutdown()
 
+    def _files_artifacts(
+        self, report: sync.StatusReport, workspace: Path
+    ) -> tuple[list[dict], list[dict]]:
+        """Build the /api/state ``files`` + ``artifacts`` rows from a status report.
+
+        Shared by the logged-in (sync) branch and the local (no-repo) branch: the
+        report carries either real three-way sync states or ``LOCAL`` rows, and the
+        row shape is identical so the front-end renders both the same way. PBIP
+        members are grouped into artifacts; per-notebook AI opt-outs (the synced
+        ``mooring.toml``) are flagged so the row hides its AI-open button.
+        """
+        artifacts, _ = pbip.group(report.files)
+        artifact_of = {m.path: a.key for a in artifacts for m in a.members}
+        # Notebooks the team has turned the copilot off for (synced mooring.toml).
+        ai_off = workspace_config.disabled_notebooks(workspace)
+        files = [
+            {
+                "path": f.path,
+                "state": f.state.value,
+                # A LOCAL row is on disk by definition (local_report doesn't hash, so
+                # it carries no sha); a sync row reports presence via its local_sha.
+                "has_local": f.state is sync.FileState.LOCAL or f.local_sha is not None,
+                **({"artifact": artifact_of[f.path]} if f.path in artifact_of else {}),
+                **({"ai_disabled": True} if f.path.endswith(".py") and f.path in ai_off else {}),
+            }
+            for f in report.files
+        ]
+        arts = [
+            {
+                "key": a.key,
+                "name": a.name,
+                "pointer": a.pointer,
+                # An all-local artifact has nothing to sync, so its aggregate badge
+                # reads "local" rather than the sync default ("synced").
+                "state": "local"
+                if all(m.state is sync.FileState.LOCAL for m in a.members)
+                else pbip.aggregate_state(a.members),
+                "members": [m.path for m in a.members],
+                "to_push": sum(1 for m in a.members if m.state in sync.PUSH_STATES),
+                "to_pull": sum(1 for m in a.members if m.state in sync.PULL_STATES),
+                "conflicts": sum(1 for m in a.members if m.state is sync.FileState.CONFLICT),
+            }
+            for a in artifacts
+        ]
+        return files, arts
+
     # -- endpoints -------------------------------------------------------------
 
     def api_state(self, request: Request) -> JSONResponse:
@@ -242,6 +292,10 @@ class Hub:
             "ui_theme": self.app_cfg.ui_theme,
             "packages": sorted(SELFTEST_PACKAGES),
             "ai_chat": self.app_cfg.ai_enabled,
+            # "local" = no repo configured: the UI shows the notebook surface
+            # (list/new/open/edit/AI) backed by the local workspace, with sync hidden.
+            # "repo" = a team repo is configured (login then unlocks sync).
+            "mode": "repo" if cfg.is_configured else "local",
             "datasets": [],
             "logged_in": False,
             "user": "",
@@ -253,6 +307,11 @@ class Hub:
         # consumed by the chat window, which now fetches them from the lighter
         # /api/ai/datasets, so the walk no longer rides on /api/state.
         if not cfg.is_configured:
+            # Local mode: no repo, no login. List notebooks straight off disk so they
+            # can be created/opened/edited (and AI'd) right now; sync (pull/push/
+            # propose) needs a repo and stays unavailable until one is connected.
+            report = sync.local_report(cfg.workspace(), cfg.folders, cfg.exclude)
+            body["files"], body["artifacts"] = self._files_artifacts(report, cfg.workspace())
             return JSONResponse(body)
         if not auth.get_token(host=cfg.host):
             return JSONResponse(body)
@@ -260,37 +319,7 @@ class Hub:
             body["user"] = self.username()
             body["logged_in"] = True
             report = sync.status(self.client(), cfg)
-            artifacts, _ = pbip.group(report.files)
-            artifact_of = {m.path: a.key for a in artifacts for m in a.members}
-            # Notebooks the team has turned the copilot off for (synced mooring.toml).
-            ai_off = workspace_config.disabled_notebooks(cfg.workspace())
-            body["files"] = [
-                {
-                    "path": f.path,
-                    "state": f.state.value,
-                    "has_local": f.local_sha is not None,
-                    **({"artifact": artifact_of[f.path]} if f.path in artifact_of else {}),
-                    **(
-                        {"ai_disabled": True}
-                        if f.path.endswith(".py") and f.path in ai_off
-                        else {}
-                    ),
-                }
-                for f in report.files
-            ]
-            body["artifacts"] = [
-                {
-                    "key": a.key,
-                    "name": a.name,
-                    "pointer": a.pointer,
-                    "state": pbip.aggregate_state(a.members),
-                    "members": [m.path for m in a.members],
-                    "to_push": sum(1 for m in a.members if m.state in sync.PUSH_STATES),
-                    "to_pull": sum(1 for m in a.members if m.state in sync.PULL_STATES),
-                    "conflicts": sum(1 for m in a.members if m.state is sync.FileState.CONFLICT),
-                }
-                for a in artifacts
-            ]
+            body["files"], body["artifacts"] = self._files_artifacts(report, cfg.workspace())
             body["summary"] = report.summary()
             if report.review_branch:
                 body["review"] = {
