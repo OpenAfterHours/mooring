@@ -46,6 +46,18 @@ class EditorError(Exception):
     pass
 
 
+def uses_uv(workspace: Path) -> bool:
+    """Whether notebooks in ``workspace`` launch via the team's locked uv project
+    rather than the frozen bundle: uv on PATH, a workspace ``pyproject.toml``, and
+    not force-frozen. The single source of truth for the launch-backend decision —
+    shared by :class:`EditorServer` and the hub's notebook-packages footer."""
+    return (
+        not _force_frozen()
+        and pyproject_env.uv_available()
+        and pyproject_env.has_pyproject(workspace)
+    )
+
+
 def free_port() -> int:
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
@@ -70,11 +82,7 @@ class EditorServer:
     def use_uv(self) -> bool:
         """Whether to launch via the team's locked uv project rather than the
         frozen bundle."""
-        return (
-            not _force_frozen()
-            and pyproject_env.uv_available()
-            and pyproject_env.has_pyproject(self.workspace)
-        )
+        return uses_uv(self.workspace)
 
     def _invocation(self) -> tuple[list[str], dict[str, str] | None]:
         """The launch command and an optional env override (None = inherit)."""
