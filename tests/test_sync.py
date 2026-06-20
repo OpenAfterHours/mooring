@@ -38,6 +38,42 @@ def test_classify_matrix(base, local, remote, expected):
     assert classify(base, local, remote) is expected
 
 
+# -- local (no-repo) listing --------------------------------------------------
+
+
+def test_local_report_lists_disk_files_with_local_state(cfg):
+    write_local(cfg, "notebooks/a.py", "x")
+    write_local(cfg, "data/x.csv", "a,b\n1,2\n")
+    write_local(cfg, "notebooks/.hidden.py", "x")  # dotfiles excluded, like sync
+    write_local(cfg, "README.md", "no")  # outside the synced folders
+    report = sync.local_report(cfg.workspace(), cfg.folders, cfg.exclude)
+    assert report.head_commit == ""  # no remote: nothing to diff against
+    rows = {f.path: f for f in report.files}
+    assert set(rows) == {"notebooks/a.py", "data/x.csv"}  # same visibility as scan_local
+    assert all(f.state is FileState.LOCAL for f in report.files)
+    # Local rows are NOT hashed (presence is carried by the LOCAL state, never diffed).
+    assert rows["notebooks/a.py"].local_sha is None
+    assert rows["notebooks/a.py"].remote_sha is None
+
+
+def test_local_report_does_not_hash_files(cfg, monkeypatch):
+    # Listing must not read+hash every file: a local scratch workspace can hold large
+    # data files and the hub re-lists on every New/Open, so hashing there is pure waste.
+    from mooring import gitsha
+
+    write_local(cfg, "notebooks/a.py", "x")
+    write_local(cfg, "data/big.csv", "a,b\n1,2\n")
+    monkeypatch.setattr(
+        gitsha, "local_blob_sha", lambda *a, **k: pytest.fail("hashed a file in local mode")
+    )
+    report = sync.local_report(cfg.workspace(), cfg.folders, cfg.exclude)
+    assert [f.path for f in report.files] == ["data/big.csv", "notebooks/a.py"]  # sorted
+
+
+def test_local_report_empty_workspace(cfg):
+    assert sync.local_report(cfg.workspace(), cfg.folders, cfg.exclude).files == []
+
+
 # -- pull ---------------------------------------------------------------------
 
 
