@@ -212,3 +212,97 @@ def test_edit_tolerates_a_return_in_the_new_code():
         NB, [marimo_rt.CellOp(op="edit", index=0, anchor=cells[0][1], code="seed = 5\nreturn (seed,)")]
     )
     assert _codes(out)[0] == "seed = 5"
+
+
+# -- auto-hide markdown: a new mo.md(...) cell ships with hide_code=True so the
+#    analyst doesn't read the prose twice (source + render) in marimo's edit view ---
+
+
+@pytest.mark.parametrize(
+    ("code", "is_md"),
+    [
+        ('mo.md("hi")', True),
+        ('mo.md(r"""# Title\n\nBody.""")', True),
+        ('mo.md(f"value is {x}")', True),  # f-string markdown
+        ("seed = 1", False),
+        ("x = mo.md('hi')", False),  # an assignment, not a bare markdown cell
+        ('mo.md("a")\nmo.md("b")', False),  # two statements
+        ("mo.vstack([a, b])", False),  # a different mo.* call
+        ('mo.md("a").callout()', False),  # chained call — conservatively not markdown
+        ("seed = (1", False),  # unparseable — never raises, just False
+    ],
+)
+def test_is_markdown_cell(code, is_md):
+    assert marimo_rt.is_markdown_cell(code) is is_md
+
+
+def test_appended_markdown_cell_is_hidden():
+    out = marimo_rt.append_cell_source(NB, 'mo.md(r"""## Notes\n\nExplanation.""")')
+    assert "@app.cell(hide_code=True)" in out
+    assert out.count("@app.cell(hide_code=True)") == 1  # only the new markdown cell
+
+
+def test_appended_code_cell_is_not_hidden():
+    out = marimo_rt.append_cell_source(NB, "total = y + 1")
+    assert "hide_code" not in out
+
+
+def test_rewrite_hides_only_the_new_markdown_cells():
+    out = marimo_rt.apply_cell_patch(
+        NB, [CellOp(op="replace_all", cells=('mo.md("# Title")', "a = 1"))]
+    )
+    assert out.count("@app.cell(hide_code=True)") == 1  # only the markdown cell
+    codes = _codes(out)
+    # marimo's codegen reformats the markdown body, so match structurally, not byte-wise.
+    assert len(codes) == 2 and marimo_rt.is_markdown_cell(codes[0]) and codes[1] == "a = 1"
+
+
+def test_existing_hidden_markdown_survives_an_unrelated_edit():
+    # A cell the analyst (or a prior apply) already hid must NOT be re-emitted visible
+    # when a DIFFERENT cell is edited — and must not be double-counted/duplicated.
+    nb = (
+        "import marimo\n\n"
+        '__generated_with = "0.23.9"\n'
+        "app = marimo.App()\n\n\n"
+        "@app.cell(hide_code=True)\n"
+        "def _(mo):\n"
+        '    mo.md(r"""# Title""")\n'
+        "    return\n\n\n"
+        "@app.cell\n"
+        "def _():\n"
+        "    x = 1\n"
+        "    return (x,)\n\n\n"
+        'if __name__ == "__main__":\n'
+        "    app.run()\n"
+    )
+    cells = marimo_rt.read_cells(nb)
+    out = marimo_rt.apply_cell_patch(
+        nb, [CellOp(op="edit", index=1, anchor=cells[1][1], code="x = 99")]
+    )
+    assert out.count("@app.cell(hide_code=True)") == 1
+    assert "x = 99" in out
+
+
+def test_existing_visible_markdown_is_not_re_hidden_on_an_unrelated_edit():
+    # The inverse: a markdown cell the analyst chose to UN-hide stays visible across an
+    # unrelated edit — auto-hide only applies to brand-new cells, never existing ones.
+    nb = (
+        "import marimo\n\n"
+        '__generated_with = "0.23.9"\n'
+        "app = marimo.App()\n\n\n"
+        "@app.cell\n"
+        "def _(mo):\n"
+        '    mo.md(r"""# Title""")\n'
+        "    return\n\n\n"
+        "@app.cell\n"
+        "def _():\n"
+        "    x = 1\n"
+        "    return (x,)\n\n\n"
+        'if __name__ == "__main__":\n'
+        "    app.run()\n"
+    )
+    cells = marimo_rt.read_cells(nb)
+    out = marimo_rt.apply_cell_patch(
+        nb, [CellOp(op="edit", index=1, anchor=cells[1][1], code="x = 99")]
+    )
+    assert "hide_code" not in out

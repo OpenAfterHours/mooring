@@ -171,6 +171,50 @@ def _with_code(cell, code: str):
     return replace(cell, code=code)
 
 
+def is_markdown_cell(code: str) -> bool:
+    """True if ``code`` is a single bare ``mo.md(...)`` expression — marimo's own
+    markdown-cell shape.
+
+    Mirrors the core of ``marimo._ast.compiler._extract_markdown``: exactly one
+    statement, a bare expression (not an assignment), whose value is a call to the
+    attribute ``md`` on the name ``mo``. Deliberately conservative — an assignment,
+    a second statement, a chained ``mo.md(...).callout()``, or any other call all
+    return ``False``, so a normal code cell is never mistaken for markdown. Covers
+    ``mo.md(r"...")`` and ``mo.md(f"...")`` alike (both parse to a ``Call`` of ``mo.md``).
+    """
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return False
+    if len(tree.body) != 1:
+        return False
+    node = tree.body[0]
+    if not isinstance(node, ast.Expr) or not isinstance(node.value, ast.Call):
+        return False
+    func = node.value.func
+    return (
+        isinstance(func, ast.Attribute)
+        and func.attr == "md"
+        and isinstance(func.value, ast.Name)
+        and func.value.id == "mo"
+    )
+
+
+def _new_cell(cls, code: str):
+    """Build a fresh cell for ``code``, auto-HIDING the source for a markdown cell.
+
+    A ``mo.md(...)`` cell renders its output AND shows the ``mo.md`` source in
+    marimo's edit view (the view mooring launches with ``--watch``), so the analyst
+    reads the same prose twice. marimo only sets ``hide_code`` on Jupyter import,
+    never in native edit — so mooring sets it here for the markdown cells it (or the
+    copilot) appends/rewrites. Non-markdown cells get the default (visible) config.
+    Only brand-new cells flow through here; an existing cell keeps its own config via
+    :func:`_with_code`, so a markdown cell the analyst chose to un-hide stays un-hidden.
+    """
+    options = {"hide_code": True} if is_markdown_cell(code) else {}
+    return cls(code=code, name="_", options=options)
+
+
 def _check_parses(code: str) -> None:
     """Raise ``ValueError`` if ``code`` is not parseable Python.
 
@@ -315,7 +359,7 @@ def apply_cell_patch(source: str, ops) -> str:
         for cell in original:
             by_code.setdefault(cell.code, cell)
         ir.cells[:] = [
-            _with_code(by_code[c], c) if c in by_code else cls(code=c, name="_") for c in codes
+            _with_code(by_code[c], c) if c in by_code else _new_cell(cls, c) for c in codes
         ]
         return _finish(codegen, MarimoConvert, ir)
 
@@ -363,7 +407,7 @@ def apply_cell_patch(source: str, ops) -> str:
         if i not in deletes
     ]
     cls = _cell_class(ir)
-    new_cells.extend(cls(code=code, name="_") for code in appends)
+    new_cells.extend(_new_cell(cls, code) for code in appends)
     if not new_cells:
         raise ValueError("the patch would empty the notebook")
     ir.cells[:] = new_cells
