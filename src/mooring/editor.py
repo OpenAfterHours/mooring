@@ -123,7 +123,19 @@ class EditorServer:
         self._ensure_marimo_config()
         self.port = free_port()
         cmd, env = self._invocation()
-        self._proc = subprocess.Popen(cmd, cwd=str(self.workspace), env=env)
+        kwargs: dict = {}
+        if sys.platform == "win32":
+            # A console Ctrl+C is received by EVERY process attached to that console,
+            # so without this flag it hits mooring, marimo, AND marimo's kernel
+            # children at once — they fight over the console and the terminal is left
+            # wedged (the prompt never returns; you have to close the window).
+            # CREATE_NEW_PROCESS_GROUP puts marimo's whole subtree in a new group, for
+            # which Windows DISABLES Ctrl+C: marimo and its descendants ignore the
+            # keystroke, so only mooring handles it. mooring then tears the marimo tree
+            # down deliberately via taskkill /T in shutdown() (which walks the PID
+            # tree, so the new group membership doesn't affect the kill).
+            kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+        self._proc = subprocess.Popen(cmd, cwd=str(self.workspace), env=env, **kwargs)
         self._wait_ready()
 
     def _ensure_marimo_config(self) -> None:

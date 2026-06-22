@@ -222,7 +222,11 @@ class Hub:
     def shutdown(self) -> None:
         self._close_all_chats()
         for editor in self.editors.values():
-            editor.shutdown()
+            # Suppress per editor (mirrors _close_all_chats): one editor failing to
+            # die must not leak the others' marimo trees or skip the lifespan's
+            # telemetry.flush that runs right after this returns.
+            with contextlib.suppress(Exception):
+                editor.shutdown()
 
     def _files_artifacts(
         self, report: sync.StatusReport, workspace: Path
@@ -1277,6 +1281,12 @@ def create_app(hub: Hub) -> Starlette:
         try:
             yield
         finally:
+            # Teardown is fast: with marimo in its own process group (see
+            # editor.ensure_started) the first Ctrl+C reaches only mooring, and
+            # shutdown() force-kills the marimo tree (taskkill /F), so the blocking
+            # proc.wait returns near-instantly. (Running this off the loop wouldn't
+            # help a second Ctrl+C anyway — uvicorn checks force_exit once, before
+            # awaiting lifespan shutdown, and never re-checks it mid-teardown.)
             hub.shutdown()
             telemetry.flush(timeout=3.0)
 
