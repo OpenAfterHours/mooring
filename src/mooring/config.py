@@ -101,6 +101,24 @@ class AppConfig:
     def aliases(self) -> list[str]:
         return [spec.alias for spec in self.repos]
 
+    @property
+    def sync_folders(self) -> tuple[str, ...]:
+        """The folders that ride sync. The team-context folder (mooring.ai.context)
+        is folded in here when ``[ai] context`` is on, so ``instructions.md`` and the
+        data dictionary push AND pull like any other folder — without each teammate
+        having to add it to ``[sync] folders`` by hand (forgetting it on the pull
+        side is exactly what made pull skip the folder push had already uploaded).
+
+        Opt-in: with the feature off the result is exactly ``[sync] folders``, so
+        behaviour is byte-identical to before. This drives the whole sync surface —
+        scan_local, the remote tree fetch, pull/push/propose, and the hub's local
+        listing — through the single Config the layers below consume.
+        """
+        ctx = self.ai.context_dir.strip("/")
+        if self.ai.context and ctx and ctx not in self.folders:
+            return (*self.folders, ctx)
+        return self.folders
+
     def spec(self, alias: str) -> RepoSpec:
         for s in self.repos:
             if s.alias == alias:
@@ -118,7 +136,7 @@ class AppConfig:
                 return Config(
                     client_id=self.client_id,
                     host=self.host,
-                    folders=self.folders,
+                    folders=self.sync_folders,
                     exclude=self.exclude,
                     warn_file_mb=self.warn_file_mb,
                     max_file_mb=self.max_file_mb,
@@ -131,7 +149,7 @@ class AppConfig:
             repo=s.repo,
             branch=s.branch,
             host=self.host,
-            folders=self.folders,
+            folders=self.sync_folders,
             exclude=self.exclude,
             warn_file_mb=self.warn_file_mb,
             max_file_mb=self.max_file_mb,

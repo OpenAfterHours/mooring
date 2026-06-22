@@ -97,7 +97,11 @@ live_schema = true          # read the schema of dataframes live in the running 
 #                                to see how your files parse.
 # Unlike the dataset schema (which structurally cannot carry a value), this team
 # context carries whatever the author wrote — see docs/admins/ai-privacy.md.
-context = false             # set true to enable team instructions + data dictionary
+# Turning this on also makes `context_dir` a SYNCED folder, so the context you
+# author rides `mooring push`/`pull` to teammates like notebooks and data do — no
+# need to add it to [sync] folders by hand. (Off = the folder is neither read nor
+# synced.)
+context = false             # set true to enable + sync team instructions + data dictionary
 context_dir = "context"     # workspace-relative folder mooring reads context from
 context_max_kb = 256        # cap on the instructions text injected per chat
 
