@@ -260,12 +260,30 @@ def local_report(
     return report
 
 
+def _scope_matches(cfg: Config, mft: manifest_mod.Manifest) -> bool:
+    """Whether the manifest's recorded sync scope equals the current one.
+
+    The head-unchanged fast path below trusts ``mft.files`` as the remote tree,
+    but ``files`` only covers the folders/exclude in force when it was written.
+    A pre-scope manifest (``scope_folders is None``) is treated as a mismatch, so
+    widening ``[sync] folders`` (e.g. adding the context folder) forces a real
+    tree fetch instead of silently reusing a narrower snapshot — which is what made
+    an already-pushed folder un-pullable once the head had caught up.
+    """
+    if mft.scope_folders is None and mft.scope_exclude is None:
+        return False
+    return tuple(mft.scope_folders or ()) == tuple(cfg.folders) and tuple(
+        mft.scope_exclude or ()
+    ) == tuple(cfg.exclude)
+
+
 def _remote_entries(
     client: GitHubClient, cfg: Config, head: str, mft: manifest_mod.Manifest
 ) -> dict[str, str]:
-    # If the branch head hasn't moved since our last sync, the remote tree is
-    # exactly what the manifest recorded — no tree fetch needed.
-    if head and head == mft.head_commit:
+    # If the branch head hasn't moved since our last sync AND the sync scope is
+    # unchanged, the remote tree is exactly what the manifest recorded — no tree
+    # fetch needed. A changed scope falls through so newly-tracked folders are seen.
+    if head and head == mft.head_commit and _scope_matches(cfg, mft):
         return {p: s for p, s in mft.files.items() if is_synced_path(p, cfg.exclude)}
     return {
         e.path: e.sha
@@ -538,6 +556,11 @@ def pull(
 
     mft.branch = cfg.branch
     mft.head_commit = prep.head
+    # A completed pull has reconciled the manifest with the full remote tree under
+    # the current scope, so record that scope: the next same-head pull/status can
+    # trust the fast path again, and a later scope widening will be detected.
+    mft.scope_folders = tuple(cfg.folders)
+    mft.scope_exclude = tuple(cfg.exclude)
     manifest_mod.save(workspace, mft)
     return result
 

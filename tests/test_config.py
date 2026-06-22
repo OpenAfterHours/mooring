@@ -133,6 +133,47 @@ def test_user_config_overrides_defaults(tmp_path):
     assert cfg.folders == ("notebooks", "data", "reports")  # untouched sections keep defaults
 
 
+def test_context_folder_not_synced_when_feature_off(tmp_path):
+    # Opt-in: with [ai] context off (the default) the sync surface is exactly
+    # [sync] folders, so pull/push behaviour is unchanged.
+    app = load_app_config(user_config_path=tmp_path / "missing.toml", env={})
+    assert app.ai.context is False
+    assert app.sync_folders == ("notebooks", "data", "reports")
+    assert app.config_for(None).folders == ("notebooks", "data", "reports")
+
+
+def test_context_folder_synced_when_feature_on(tmp_path):
+    # Enabling the team-context feature folds context_dir into the synced folders,
+    # so the folder rides BOTH push and pull without a hand-edited [sync] folders.
+    user = tmp_path / "config.toml"
+    user.write_text("[ai]\ncontext = true\n", "utf-8")
+    app = load_app_config(user_config_path=user, env={})
+    assert app.sync_folders == ("notebooks", "data", "reports", "context")
+    assert app.config_for(None).folders == ("notebooks", "data", "reports", "context")
+
+
+def test_context_folder_custom_dir_and_no_duplicate(tmp_path):
+    # A custom context_dir is honoured, and a context_dir already listed in
+    # [sync] folders is not added twice.
+    user = tmp_path / "config.toml"
+    user.write_text(
+        '[sync]\nfolders = ["notebooks", "team-context"]\n'
+        '[ai]\ncontext = true\ncontext_dir = "team-context"\n',
+        "utf-8",
+    )
+    app = load_app_config(user_config_path=user, env={})
+    assert app.sync_folders == ("notebooks", "team-context")
+
+
+def test_context_folder_synced_with_configured_repo(tmp_path):
+    # The folder is folded in for an aliased repo's Config too, not just the
+    # no-repo path.
+    user = tmp_path / "config.toml"
+    user.write_text(REPOS_TOML + "\n[ai]\ncontext = true\n", "utf-8")
+    app = load_app_config(user_config_path=user, env={})
+    assert "context" in app.config_for("team").folders
+
+
 def test_host_defaults_and_normalizes_on_load(tmp_path):
     assert load_config(user_config_path=tmp_path / "missing.toml", env={}).host == "github.com"
     user = tmp_path / "config.toml"

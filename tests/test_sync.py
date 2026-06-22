@@ -108,6 +108,45 @@ def test_pull_applies_remote_update_and_delete(cfg):
     assert not (cfg.workspace() / "notebooks/b.py").exists()
 
 
+def test_widening_folders_pulls_already_present_folder(cfg):
+    # A folder added to [sync] folders AFTER the head already caught up must still
+    # be pulled. Previously the head-unchanged fast path returned the manifest's
+    # narrower file set, so a folder pushed by a teammate (e.g. the AI context
+    # folder) stayed invisible to pull forever. Regression for that.
+    client = FakeClient(
+        {"notebooks/a.py": b"print(1)\n", "context/instructions.md": b"# rules\n"}
+    )
+    narrow = replace(cfg, folders=("notebooks",))
+    sync.pull(client, narrow)
+    # The manifest head now equals the remote head, so the next pull would short-circuit.
+    assert manifest.load(narrow.workspace()).head_commit == client.head
+
+    wide = replace(cfg, folders=("notebooks", "context"))
+    result = sync.pull(client, wide)
+    assert result.pulled == 1
+    assert read_local(wide, "context/instructions.md") == "# rules\n"
+    # Scope is recorded, so a third pull short-circuits again (no spurious refetch).
+    assert sync.pull(client, wide).pulled == 0
+
+
+def test_pre_scope_manifest_refetches_then_records_scope(cfg):
+    # A manifest written before the scope field existed (scope_folders is None)
+    # must not be trusted by the fast path: force a refetch once, then record the
+    # scope so steady-state pulls short-circuit again.
+    client = FakeClient({"notebooks/a.py": b"v1\n"})
+    sync.pull(client, cfg)
+    mft = manifest.load(cfg.workspace())
+    mft.scope_folders = None  # simulate an old manifest
+    mft.scope_exclude = None
+    manifest.save(cfg.workspace(), mft)
+
+    # Head is unchanged, but the unknown scope forces a real tree fetch that still
+    # reconciles correctly, then stamps the scope.
+    assert sync.pull(client, cfg).pulled == 0
+    reloaded = manifest.load(cfg.workspace())
+    assert reloaded.scope_folders == cfg.folders
+
+
 def test_root_pyproject_and_lock_sync_like_any_file(cfg):
     # The repo's dependency project lives at the workspace ROOT, outside the
     # configured folders, but still rides push/pull (sync.PROJECT_FILES).
