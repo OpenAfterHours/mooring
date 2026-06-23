@@ -23,13 +23,27 @@ pip install "mooring[copilot]"       # …or with plain pip
 uvx "mooring[copilot]"               # …or a one-off run (doesn't stay installed)
 ```
 
-Then sign in — these assume `mooring` is on your `PATH` (installed via one of the
-first three forms, not a one-off `uvx` run):
+Then sign in to GitHub Copilot. You can do it **from the hub** or from the
+command line — either works:
 
-```
-mooring ai login                    # sign in to GitHub Copilot (opens a browser)
-mooring ai status                   # check you're connected
-```
+- **In the hub** — the **AI copilot sign-in** card shows whether Copilot is
+  connected (and as which account). Click **Sign in to Copilot** to authorise in a
+  browser; **Switch account** changes which account is used. If you open the chat
+  before signing in, it shows a **Sign in to Copilot** button right there too.
+- **From the command line** — these assume `mooring` is on your `PATH` (installed
+  via one of the first three forms, not a one-off `uvx` run):
+
+    ```
+    mooring ai login                # sign in to GitHub Copilot (opens a browser)
+    mooring ai status               # check you're connected (shows the account)
+    ```
+
+!!! info "Copilot is a separate sign-in from your GitHub login"
+    The **Log in with GitHub** button connects mooring to your team's notebook
+    **repo** (for sync). GitHub **Copilot** signs in separately and can even be a
+    **different account** — so signing into GitHub doesn't sign you into Copilot,
+    and vice versa. The hub's sign-in card shows which Copilot account is connected
+    so you can tell them apart.
 
 See [optional extras](../admins/build-and-distribute.md#optional-extras) for the
 full list (`pii`, `pii-spacy`) and how to combine them.

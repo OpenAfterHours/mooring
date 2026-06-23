@@ -161,11 +161,13 @@ class CopilotProvider:
 
     # -- sign-in ------------------------------------------------------------
 
-    def connect(self) -> ProviderStatus:
+    def connect(self, host: str | None = None) -> ProviderStatus:
         """Start ``copilot login`` (browser device flow) in the background.
 
         Returns immediately: the CLI opens a browser; the caller polls
         ``status``/``login_state`` and refreshes once the user has authorised.
+        ``host`` targets a GitHub Enterprise Copilot instance (data residency),
+        mirroring :meth:`login_interactive`.
         """
         if not self.available():
             raise AIError("The Copilot CLI is not available in this build.")
@@ -174,9 +176,12 @@ class CopilotProvider:
             if self._login_proc is not None and self._login_proc.poll() is None:
                 return self._connecting_status("Sign-in already in progress.")
             self._login_output = []
+            cmd = [cli, "login"]
+            if host:
+                cmd += ["--host", host]
             try:
                 proc = subprocess.Popen(
-                    [cli, "login"],
+                    cmd,
                     stdin=subprocess.DEVNULL,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,

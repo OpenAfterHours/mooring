@@ -704,6 +704,7 @@ function selectedEffort() {
 
 async function openChat() {
   closeStream();
+  clearSigninNotice();
   showError("");
   const model = $("chat-model").value;
   const reasoning_effort = selectedEffort();
@@ -771,7 +772,14 @@ async function openChat() {
     }
   });
   source.addEventListener("fail", (e) => {
-    showError(JSON.parse(e.data).text || "The assistant reported an error.");
+    const d = JSON.parse(e.data);
+    // Copilot isn't signed in — Copilot's sign-in is separate from the GitHub login,
+    // so offer an in-app sign-in button instead of a dead error string.
+    if (d.reason === "not_connected") {
+      showCopilotSignin(d.text);
+      return;
+    }
+    showError(d.text || "The assistant reported an error.");
     setTurnState("error");
   });
   source.addEventListener("closed", () => setStatus("closed"));
@@ -838,6 +846,83 @@ function lockForDisabled() {
   btn.addEventListener("click", enableAiForNotebook);
   notice.append(msg, btn);
   notice.classList.remove("hidden");
+}
+
+// -- Copilot sign-in (separate from the GitHub login) -----------------------
+// The copilot uses GitHub Copilot, which signs in independently of mooring's
+// GitHub login — it can even be a different account. When a session fails to
+// start because Copilot isn't connected, show an in-app sign-in panel here
+// instead of dumping a "run mooring ai login" CLI string at the user.
+
+function showCopilotSignin(detail) {
+  closeStream();
+  sid = null;
+  turnState = "idle";
+  clearPending();
+  const input = $("chat-input");
+  input.disabled = true;
+  input.blur();
+  showError("");
+  setStatus("not signed in");
+  const box = $("signin-notice");
+  box.innerHTML = "";
+  const msg = document.createElement("p");
+  msg.textContent =
+    (detail && detail.trim()) ||
+    "You're not signed in to GitHub Copilot.";
+  const sub = document.createElement("p");
+  sub.className = "muted";
+  sub.textContent =
+    "Copilot signs in separately from your GitHub login — it can even be a different account.";
+  const bar = document.createElement("div");
+  bar.className = "toolbar";
+  const btn = document.createElement("button");
+  btn.className = "primary small";
+  btn.textContent = "Sign in to Copilot";
+  const note = document.createElement("span");
+  note.className = "muted";
+  btn.addEventListener("click", () => startCopilotLogin(btn, note));
+  bar.append(btn, note);
+  box.append(msg, sub, bar);
+  box.classList.remove("hidden");
+}
+
+function clearSigninNotice() {
+  const box = $("signin-notice");
+  box.classList.add("hidden");
+  box.innerHTML = "";
+}
+
+async function startCopilotLogin(btn, note) {
+  btn.disabled = true;
+  note.textContent = " opening a browser to sign in…";
+  const { data } = await api("/api/ai/login/start", {});
+  if (data.error) {
+    btn.disabled = false;
+    note.textContent = "";
+    showError(data.error);
+    return;
+  }
+  note.textContent = " waiting for you to authorize in the browser…";
+  pollCopilotLogin(btn, note);
+}
+
+async function pollCopilotLogin(btn, note) {
+  const { data } = await api("/api/ai/login/poll");
+  if (data.status === "ok") {
+    clearSigninNotice();
+    showError("");
+    $("chat-input").disabled = false;
+    await openChat(); // reconnect a fresh session now that Copilot is signed in
+    return;
+  }
+  if (data.status === "error") {
+    btn.disabled = false;
+    note.textContent = "";
+    showError(data.detail || "Copilot sign-in didn't complete. Try again.");
+    return;
+  }
+  setTimeout(() => pollCopilotLogin(btn, note), 2500); // still pending — keep polling
 }
 
 // -- composer: send / commands / history ------------------------------------
