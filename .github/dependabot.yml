@@ -1,0 +1,10 @@
+version: 2
+
+# Keep GitHub Actions current. Dependabot bumps both SHA-pinned actions (it
+# rewrites the digest and the trailing version comment) and tag-pinned ones,
+# so SHA pins added for supply-chain hardening don't rot.
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

@@ -16,11 +16,8 @@ on:
       - ".github/workflows/docs.yml"
   workflow_dispatch:
 
-# Least-privilege permissions the Pages deployment needs.
-permissions:
-  contents: read
-  pages: write
-  id-token: write
+# Permissions are scoped per-job (least privilege): build only reads the repo;
+# deploy alone gets the Pages + OIDC write scopes.
 
 # Only one Pages deploy at a time; newer pushes supersede in-flight ones.
 concurrency:
@@ -30,11 +27,13 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
 
       - name: Install Python 3.13
         run: uv python install 3.13
@@ -53,6 +52,9 @@ jobs:
   deploy:
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
