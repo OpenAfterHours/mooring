@@ -144,6 +144,20 @@ def _build_parser() -> argparse.ArgumentParser:
         "-y", "--yes", action="store_true", help="skip the confirmation prompt"
     )
 
+    rollback_cmd = sub.add_parser(
+        "rollback",
+        help="discard local changes to a notebook and restore the last synced version (needs login)",
+    )
+    rollback_cmd.add_argument("path", help="workspace-relative notebook path to revert")
+    rollback_cmd.add_argument(
+        "-y", "--yes", action="store_true", help="skip the confirmation prompt"
+    )
+    rollback_cmd.add_argument(
+        "--conflicts",
+        action="store_true",
+        help="also discard your edit to a conflicted file (turns it into a clean pull)",
+    )
+
     init_cmd = sub.add_parser(
         "init",
         help="create the repo's pyproject.toml (its notebook dependencies) and lock it",
@@ -168,7 +182,9 @@ def _build_parser() -> argparse.ArgumentParser:
         "-o", "--output", default=None, help="write to this file (default: stdout)"
     )
 
-    for cmd in (status, pull, push, propose, open_cmd, new, delete_cmd, init_cmd, deps, build_reqs):
+    for cmd in (
+        status, pull, push, propose, open_cmd, new, delete_cmd, rollback_cmd, init_cmd, deps, build_reqs
+    ):
         cmd.add_argument(
             "--repo", default=None, metavar="ALIAS", help="act on this repo instead of the active one"
         )
@@ -587,6 +603,41 @@ def cmd_delete(cfg: config.Config, rel_path: str, assume_yes: bool) -> int:
         f"Deleted {rel_path} locally. Run `mooring push` (or `propose`) to remove it "
         "from the team repo."
     )
+    return 0
+
+
+def cmd_rollback(
+    cfg: config.Config, rel_path: str, assume_yes: bool, include_conflict: bool
+) -> int:
+    from mooring import notebook_undo, sync
+
+    client = _client(cfg)  # last-synced bytes come from GitHub — needs login
+    workspace = cfg.workspace()
+    if not assume_yes:
+        if not sys.stdin.isatty():
+            sys.exit(
+                f"Refusing to discard local changes to {rel_path} without confirmation. "
+                "Re-run with --yes."
+            )
+        prompt = f"Discard your changes to {rel_path} and restore the last synced version? [y/N] "
+        if input(prompt).strip().lower() not in ("y", "yes"):
+            print("Cancelled.")
+            return 0
+
+    # Snapshot the current notebook bytes before overwriting so the revert is itself
+    # undoable (the hub's Undo, or /api/ai/chat/rollback, can restore it). Only .py
+    # rides the notebook undo stack — that is the channel its restore reloads.
+    def snapshot_fn(rel: str, data: bytes) -> None:
+        if rel.endswith(".py"):
+            notebook_undo.snapshot(workspace, rel, data)
+
+    result = sync.revert(
+        client, cfg, rel_path, include_conflict=include_conflict, snapshot_fn=snapshot_fn
+    )
+    telemetry.log_event("rollback", reverted=result.reverted, lines=len(result.lines))
+    for line in result.lines:
+        print(f"  {line}")
+    print(result.summary())
     return 0
 
 
@@ -1093,6 +1144,8 @@ def _dispatch(
         return cmd_build_requirements(cfg, args.output)
     if command == "delete":
         return cmd_delete(cfg, args.path, args.yes)
+    if command == "rollback":
+        return cmd_rollback(cfg, args.path, args.yes, args.conflicts)
     parser.error(f"unknown command {command!r}")
     return 2
 

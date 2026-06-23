@@ -88,6 +88,7 @@ async function action(path, body, refreshAfter = true) {
     showLog(data);
     if (data.url) window.open(data.url, "_blank");
     if (refreshAfter) await refresh();
+    return data;
   } finally {
     setBusy(false);
   }
@@ -141,6 +142,51 @@ function deleteAction(path, kind) {
   if (ok) action("/api/delete", { path });
 }
 
+// Notebooks reverted this session, mapped to the undo-snapshot token /api/rollback
+// returned. The token lets /api/undo refuse if a later write (e.g. an AI Apply from
+// the chat window) has since landed on top of the shared undo stack, rather than
+// restoring the wrong version. A row's one-shot Undo button reads this map; kept
+// client-side so /api/state needn't carry per-row undo state.
+const recentlyReverted = new Map();
+
+function revertAction(path, state) {
+  const name = path.split("/").pop();
+  // Only a modified .py is snapshotted, hence undoable. A deleted-locally restore has
+  // no prior bytes to keep, and Revert isn't offered for non-.py rows at all.
+  const undoable = state === "modified" && path.endsWith(".py");
+  const ok = confirm(
+    `Discard your changes to ${name} and restore the last synced version?` +
+    (undoable
+      ? "\n\nYour current version is saved locally, so you can Undo this."
+      : "\n\nThis cannot be undone.")
+  );
+  if (!ok) return;
+  // Register the Undo affordance only once the revert succeeds AND the server returns
+  // a snapshot token — so a failed revert never leaves a dead Undo button. action()'s
+  // own refresh already ran by now, so re-render to surface the new button.
+  action("/api/rollback", { path }).then((data) => {
+    if (data && !data.error && data.undo_token) {
+      recentlyReverted.set(path, data.undo_token);
+      refresh();
+    }
+  });
+}
+
+function undoAction(path) {
+  const token = recentlyReverted.get(path);
+  action("/api/undo", { path, token }).then((data) => {
+    // Drop the affordance and re-render only on a RESOLVED outcome — restored (ok:true)
+    // or the token is dead (superseded / nothing-to-undo, both carry `ok:false`). A
+    // transient failure (502, e.g. a momentarily locked file) keeps the snapshot on
+    // disk for retry, so the response has no `ok` and we leave the button in place
+    // (with its still-valid token, so a retry never falls back to a blind restore).
+    if (data && "ok" in data) {
+      recentlyReverted.delete(path);
+      refresh();
+    }
+  });
+}
+
 function fileActions(file, opts) {
   opts = opts || {};
   const actions = [];
@@ -151,6 +197,17 @@ function fileActions(file, opts) {
   } else if (PUSH_STATES.includes(file.state)) {
     actions.push(["Push", () => action("/api/push", { paths: [file.path] })]);
     actions.push(["Propose", () => action("/api/propose", { paths: [file.path] })]);
+    // Revert restores the last synced version. Notebook-only: data files and Power BI
+    // members aren't snapshotted (so an Undo would be a dead promise) and a lone PBIP
+    // member can't be reverted without breaking the artifact — use the CLI for those.
+    // "new local" has no checkpoint to go back to (that's Delete).
+    if (file.path.endsWith(".py") && (file.state === "modified" || file.state === "deleted locally")) {
+      actions.push(["Revert", () => revertAction(file.path, file.state)]);
+    }
+  }
+  // A one-shot Undo for a file just reverted this session (snapshot kept server-side).
+  if (recentlyReverted.has(file.path)) {
+    actions.push(["Undo", () => undoAction(file.path)]);
   }
   // has_local is server truth (the file exists on disk); some states such as a
   // remote-deleted conflict have no local file, so Open/Delete must not appear.

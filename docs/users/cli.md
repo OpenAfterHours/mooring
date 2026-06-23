@@ -30,12 +30,19 @@ python mooring.pyz open notebooks/sales.py
 python mooring.pyz open reports/sales.pbip
 python mooring.pyz new sales-analysis
 python mooring.pyz delete notebooks/sales.py [-y]
+python mooring.pyz rollback notebooks/sales.py [-y] [--conflicts]
 python mooring.pyz init
 python mooring.pyz deps add polars "scipy>=1.11"
 python mooring.pyz deps remove polars
 python mooring.pyz deps list
 python mooring.pyz deps lock
 python mooring.pyz build-requirements [-o FILE]
+python mooring.pyz ai status
+python mooring.pyz ai login [--host HOST]
+python mooring.pyz ai dictionary check [--repo ALIAS]
+python mooring.pyz ai pii check [--repo ALIAS] [--notebook REL]
+python mooring.pyz ai pii model [--repo ALIAS]
+python mooring.pyz ai pii doctor
 python mooring.pyz config set <key> <value...> | config get <key>
 python mooring.pyz config unset <key> | config list | config path
 python mooring.pyz selftest
@@ -81,8 +88,9 @@ Manage the registered team repos (see
   delete it manually if you no longer want the files. Use `repo remove --all`
   to forget every registered repo at once.
 
-`status`, `pull`, `push`, `propose`, `open`, `new`, and `delete` accept
-`--repo ALIAS` to act on a registered repo **without** switching the active one.
+`status`, `pull`, `push`, `propose`, `open`, `new`, `delete`, and `rollback`
+accept `--repo ALIAS` to act on a registered repo **without** switching the
+active one.
 
 ### `status`
 
@@ -179,6 +187,48 @@ notebook then shows as *deleted locally* in `status`. Run `push` (or `propose`)
 afterwards to remove it from the team repo for everyone; a notebook you never
 shared just disappears. You are asked to confirm first — pass `-y`/`--yes` to
 skip the prompt (required when running non-interactively, e.g. from a script).
+
+### `rollback`
+
+Discard your local changes to a notebook and restore the last version you pulled
+or pushed — go back to the last synced checkpoint.
+
+```
+python mooring.pyz rollback notebooks/sales.py
+```
+
+- Works on a file that is *modified* or *deleted locally*. A never-synced file
+  has no earlier version, so use [`delete`](#delete) for that instead.
+- Unlike `delete`, the last-synced bytes come from the team repo, so rollback
+  needs you to be **logged in**. It only ever changes your local file — never the
+  team repo, and never a teammate's work.
+- Your current version is snapshotted first (recoverable from the hub's **Undo**),
+  so the rollback can be undone.
+- You are asked to confirm — pass `-y`/`--yes` to skip the prompt (required when
+  non-interactive). For a file in conflict, `pull` first, or pass `--conflicts`
+  to drop your side and turn it into a clean pull.
+
+### `ai`
+
+The copilot's command family. The copilot is **opt-in** and needs the `copilot`
+extra plus an in-app Copilot sign-in — see [AI copilot](ai-copilot.md) and
+[why the copilot can't see your data](../admins/ai-privacy.md).
+
+- `ai status` — show the AI provider's sign-in status.
+- `ai login [--host HOST]` — sign in to GitHub Copilot via OAuth device flow.
+  This is **separate from your mooring GitHub login** (it can be a different
+  account); `--host` targets a GitHub Enterprise instance for data residency.
+- `ai dictionary check [--repo ALIAS]` — parse the team data dictionary under
+  `context/` and report the tables, columns, and any keys dropped by the
+  five-slot allowlist or the secret/PII scan.
+- `ai pii check [--repo ALIAS] [--notebook REL]` — offline scan of
+  `instructions.md`, the dictionaries, and (with `--notebook`) a single notebook
+  for structured-PII shapes. Findings are value-free (a line and a kind).
+- `ai pii model [--repo ALIAS]` — download or verify the local NER
+  name-detection model (needs the `pii`, or `pii-spacy` for the offline backend,
+  extra).
+- `ai pii doctor` — check the PII guard end-to-end: which backend runs, what's
+  ready, and what to fix.
 
 ### `config`
 

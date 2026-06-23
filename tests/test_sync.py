@@ -716,6 +716,82 @@ def test_resolve_keep_both_remote_deleted_keeps_local(cfg):
     assert report.by_state(FileState.CONFLICT) == []
 
 
+# -- revert (roll back to the last synced checkpoint) ---------------------------
+
+
+def test_revert_modified_restores_base_bytes(cfg):
+    client = FakeClient({"notebooks/a.py": b"v1\n"})
+    sync.pull(client, cfg)
+    write_local(cfg, "notebooks/a.py", "mine\n")  # MODIFIED
+    result = sync.revert(client, cfg, "notebooks/a.py")
+    assert result.reverted == 1
+    assert read_local(cfg, "notebooks/a.py") == "v1\n"  # back to last sync
+    # restored bytes re-hash to base, so the file is in sync again with no save
+    assert sync.status(client, cfg).by_state(FileState.MODIFIED) == []
+
+
+def test_revert_recreates_locally_deleted_file(cfg):
+    client = FakeClient({"notebooks/a.py": b"v1\n"})
+    sync.pull(client, cfg)
+    (cfg.workspace() / "notebooks/a.py").unlink()  # DELETED_LOCAL
+    result = sync.revert(client, cfg, "notebooks/a.py")
+    assert result.reverted == 1
+    assert read_local(cfg, "notebooks/a.py") == "v1\n"
+    assert any("was deleted locally" in line for line in result.lines)
+
+
+def test_revert_takes_a_snapshot_before_overwriting(cfg):
+    client = FakeClient({"notebooks/a.py": b"v1\n"})
+    sync.pull(client, cfg)
+    write_local(cfg, "notebooks/a.py", "mine\n")
+    saved = []
+    sync.revert(client, cfg, "notebooks/a.py", snapshot_fn=lambda rel, data: saved.append((rel, data)))
+    assert saved == [("notebooks/a.py", b"mine\n")]  # current bytes captured pre-revert
+
+
+def test_revert_new_local_is_left_alone(cfg):
+    client = FakeClient({"notebooks/a.py": b"v1\n"})
+    sync.pull(client, cfg)
+    write_local(cfg, "notebooks/new.py", "fresh\n")  # NEW_LOCAL — no checkpoint
+    result = sync.revert(client, cfg, "notebooks/new.py")
+    assert result.reverted == 0
+    assert read_local(cfg, "notebooks/new.py") == "fresh\n"  # not deleted
+    assert any("never synced" in line for line in result.lines)
+
+
+def test_revert_skips_conflict_by_default_but_discards_with_flag(cfg):
+    client = FakeClient()
+    _make_conflict(cfg, client)  # local "mine\n" vs remote "theirs\n"
+    skipped = sync.revert(client, cfg, "notebooks/a.py")
+    assert skipped.reverted == 0
+    assert read_local(cfg, "notebooks/a.py") == "mine\n"  # untouched
+    done = sync.revert(client, cfg, "notebooks/a.py", include_conflict=True)
+    assert done.reverted == 1
+    assert read_local(cfg, "notebooks/a.py") == "v1\n"  # back to base
+    # only my side was dropped: the remote change is now a clean pull
+    report = sync.status(client, cfg)
+    assert report.by_state(FileState.CONFLICT) == []
+    assert [f.state for f in report.files if f.path == "notebooks/a.py"] == [
+        FileState.REMOTE_CHANGED
+    ]
+
+
+def test_revert_synced_file_is_a_noop(cfg):
+    client = FakeClient({"notebooks/a.py": b"v1\n"})
+    sync.pull(client, cfg)
+    result = sync.revert(client, cfg, "notebooks/a.py")
+    assert result.reverted == 0
+    assert any("already at the last synced version" in line for line in result.lines)
+
+
+def test_revert_unknown_path_is_reported(cfg):
+    client = FakeClient({"notebooks/a.py": b"v1\n"})
+    sync.pull(client, cfg)
+    result = sync.revert(client, cfg, "notebooks/nope.py")
+    assert result.reverted == 0
+    assert any("not a tracked file" in line for line in result.lines)
+
+
 # -- hygiene ----------------------------------------------------------------------
 
 

@@ -48,6 +48,11 @@ def _static_dir() -> Path:
     return Path(str(resources.files("mooring.hub").joinpath("static")))
 
 
+# Sentinel returned by Hub._restore_undo when a token-scoped undo can't run because a
+# newer snapshot is now on top of the (shared) per-notebook undo stack.
+_UNDO_SUPERSEDED = object()
+
+
 class Hub:
     def __init__(self, app_cfg: config.AppConfig) -> None:
         self.app_cfg = app_cfg
@@ -614,6 +619,81 @@ class Hub:
                 "remove it for the team.",
             }
         )
+
+    async def api_rollback(self, request: Request) -> JSONResponse:
+        """Restore one notebook to its last-synced version (the manifest base),
+        discarding local edits. The pre-revert bytes of a ``.py`` are snapshotted onto
+        the local undo stack first and the snapshot token returned (``undo_token``), so
+        :meth:`api_undo` can put them back — and refuse if a later write has since
+        landed on top. Held under ``_apply_lock`` so the snapshot+write can't race an
+        in-flight AI Apply on the same notebook (the same guard Apply/Undo take)."""
+        from mooring import notebook_undo
+
+        data = await request.json()
+        rel_path = str(data.get("path", ""))
+        include_conflict = bool(data.get("conflicts"))
+        workspace = self.cfg.workspace()
+        captured: dict[str, str] = {}
+
+        def snapshot_fn(rel: str, content: bytes) -> None:
+            if rel.endswith(".py"):
+                captured["token"] = notebook_undo.snapshot(workspace, rel, content)
+
+        try:
+            with self._apply_lock:
+                result = sync.revert(
+                    self.client(),
+                    self.cfg,
+                    rel_path,
+                    include_conflict=include_conflict,
+                    snapshot_fn=snapshot_fn,
+                )
+        except (GitHubError, OSError) as exc:
+            telemetry.log_error(exc=exc, op="rollback")
+            return JSONResponse({"error": str(exc)}, status_code=502)
+        telemetry.log_event("rollback", reverted=result.reverted, lines=len(result.lines))
+        body = {"lines": result.lines, "summary": result.summary()}
+        if "token" in captured:
+            body["undo_token"] = captured["token"]
+        return JSONResponse(body)
+
+    async def api_undo(self, request: Request) -> JSONResponse:
+        """Restore a notebook's most recent local snapshot — the pre-revert (or
+        pre-AI-edit) bytes. AI-independent: unlike :meth:`api_chat_rollback` this is
+        not bound to a chat session or gated on the AI being enabled, so a Revert done
+        from the file list is itself undoable. The snapshot stack is shared LIFO, so a
+        ``token`` (from /api/rollback) must still be the newest entry — otherwise a
+        later write (e.g. an AI Apply) is on top and we refuse (409) rather than
+        restore the wrong layer."""
+        data = await request.json()
+        rel_path = str(data.get("path", ""))
+        token = str(data.get("token", "")) or None
+        workspace = self.cfg.workspace()
+        try:
+            nb_path = self._ws_file(workspace, rel_path, suffix=".py")
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        except FileNotFoundError:
+            return JSONResponse({"error": f"No such notebook: {rel_path}"}, status_code=404)
+        try:
+            outcome = await asyncio.to_thread(
+                self._restore_undo, nb_path, workspace, rel_path, expect_token=token
+            )
+        except OSError as exc:  # momentarily locked — the snapshot is kept to retry
+            return JSONResponse({"error": f"Could not restore the notebook: {exc}"}, status_code=502)
+        if outcome is _UNDO_SUPERSEDED:
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "error": "A later change is on top of your revert, so Undo would "
+                    "restore the wrong version.",
+                },
+                status_code=409,
+            )
+        if outcome is None:
+            return JSONResponse({"ok": False, "error": "Nothing to undo."}, status_code=400)
+        telemetry.log_event("undo")
+        return JSONResponse({"ok": True, "can_undo": outcome > 0, "undo_depth": outcome})
 
     def _open(self, rel_path: str) -> JSONResponse:
         workspace = self.cfg.workspace()
@@ -1191,9 +1271,13 @@ class Hub:
         telemetry.log_event("ai_chat_rollback")
         return JSONResponse({"ok": True, "can_undo": remaining > 0, "undo_depth": remaining})
 
-    def _restore_undo(self, nb_path: Path, workspace: Path, notebook_rel: str) -> int | None:
+    def _restore_undo(
+        self, nb_path: Path, workspace: Path, notebook_rel: str, *, expect_token: str | None = None
+    ):
         """Restore the most recent snapshot (the editor's --watch reloads it). Returns
-        the remaining undo depth, or ``None`` when there is nothing to undo.
+        the remaining undo depth, ``None`` when there is nothing to undo, or
+        :data:`_UNDO_SUPERSEDED` when ``expect_token`` is given but no longer the newest
+        snapshot (a later write is on top — restoring it would revert the wrong layer).
 
         Write-then-discard: the snapshot is only consumed AFTER it is safely written
         back, so a failed restore leaves the undo step intact to retry (symmetric with
@@ -1206,6 +1290,8 @@ class Hub:
             if peeked is None:
                 return None
             token, prior = peeked
+            if expect_token is not None and token != expect_token:
+                return _UNDO_SUPERSEDED
             safe_write_bytes(nb_path, prior)  # raises before the snapshot is consumed
             notebook_undo.discard(workspace, notebook_rel, token)
             return notebook_undo.depth(workspace, notebook_rel)
@@ -1411,6 +1497,8 @@ def create_app(hub: Hub) -> Starlette:
             Route("/api/new", hub.api_new, methods=["POST"]),
             Route("/api/open", hub.api_open, methods=["POST"]),
             Route("/api/delete", hub.api_delete, methods=["POST"]),
+            Route("/api/rollback", hub.api_rollback, methods=["POST"]),
+            Route("/api/undo", hub.api_undo, methods=["POST"]),
             Route("/ai/chat", hub.chat_page),
             Route("/api/ai/datasets", hub.api_chat_datasets),
             Route("/api/ai/models", hub.api_chat_models),

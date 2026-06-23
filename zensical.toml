@@ -9,7 +9,7 @@
 [project]
 
 site_name = "Mooring"
-site_description = "Git-free marimo notebook sharing via GitHub — docs for analysts, admins, and contributors."
+site_description = "Git-free marimo notebook sharing via GitHub, plus a schema-only AI copilot that never sees your data — docs for analysts, admins, and contributors."
 site_author = "The mooring authors"
 
 # Canonical URL for the published site. Uncomment and set this to your GitHub
@@ -45,9 +45,9 @@ nav = [
     { "Resolving conflicts" = "users/conflicts.md" },
     { "Command-line reference" = "users/cli.md" },
   ] },
-  # Top-level (not nested under "For admins") so the privacy guarantee is always
+  # Top-level (not nested under "For admins") so the privacy story is always
   # visible in the nav — it's a trust doc for analysts and reviewers, not just admins.
-  { "AI copilot privacy" = "admins/ai-privacy.md" },
+  { "Secure AI copilot" = "admins/ai-privacy.md" },
   { "For admins" = [
     { "Overview & checklist" = "admins/index.md" },
     { "GitHub setup" = "admins/github-setup.md" },
