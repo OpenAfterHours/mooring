@@ -26,6 +26,15 @@ class AIError(Exception):
     """A provider-level failure, surfaced verbatim to the hub UI."""
 
 
+class AINotConnectedError(AIError):
+    """The provider is installed/available but the user is not signed in.
+
+    A *typed* sign-in failure (vs a generic AIError) so the session/UI can tell
+    "you need to sign in to Copilot" apart from any other startup error and offer
+    an in-app sign-in button instead of a dead error string. Copilot's sign-in is
+    independent of mooring's GitHub login — it can even be a different account."""
+
+
 @dataclass(frozen=True)
 class ProviderStatus:
     """What the UI shows about a provider."""

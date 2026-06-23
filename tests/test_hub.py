@@ -1189,3 +1189,126 @@ def test_chat_open_threads_model_and_effort(unconfigured_client, monkeypatch):
         json={"notebook": "nb.py", "model": "claude-opus-4.8", "reasoning_effort": "high"},
     )
     assert seen == {"model": "claude-opus-4.8", "effort": "high"}
+
+
+# -- Copilot sign-in endpoints (separate from the GitHub login) ----------------
+
+
+class _FakeAuthProvider:
+    """A controllable stand-in for CopilotProvider's auth surface."""
+
+    def __init__(self):
+        from mooring.ai.base import ProviderStatus  # noqa: F401 - referenced below
+
+        self.connected = False
+        self.running = False
+        self.probed = False
+        self.connect_host = "UNSET"
+        self.available_flag = True
+
+    def _status(self):
+        from mooring.ai.base import ProviderStatus
+
+        return ProviderStatus(
+            "copilot",
+            available=self.available_flag,
+            connected=self.connected,
+            account="phil" if self.connected else "",
+            detail="Connected as phil." if self.connected else "Not connected.",
+        )
+
+    def cached_status(self):
+        return self._status() if self.probed else None
+
+    def status(self, force=False):
+        self.probed = True
+        return self._status()
+
+    def connect(self, host=None):
+        from mooring.ai.base import ProviderStatus
+
+        self.running = True
+        self.connect_host = host
+        return ProviderStatus("copilot", available=True, connected=False, detail="Browser opening…")
+
+    def login_state(self):
+        return {"running": self.running, "output": ["visit https://github.com/login/device"]}
+
+
+def _use_auth_provider(monkeypatch):
+    fake = _FakeAuthProvider()
+    monkeypatch.setattr("mooring.ai.get_provider", lambda app_cfg: fake)
+    return fake
+
+
+def test_ai_status_cached_unknown_then_probe(unconfigured_client, monkeypatch):
+    # Cached status never spawns the CLI: until a probe runs, it's "unchecked".
+    client, _ = unconfigured_client
+    fake = _use_auth_provider(monkeypatch)
+    data = client.get("/api/ai/status").json()
+    assert data["checked"] is False and data["connected"] is False
+    # A forced probe returns the real status (here: connected as @phil).
+    fake.connected = True
+    data = client.get("/api/ai/status?probe=1").json()
+    assert data["checked"] is True
+    assert data["connected"] is True
+    assert data["account"] == "phil"
+
+
+def test_ai_status_404_when_ai_off(tmp_path, monkeypatch):
+    monkeypatch.setattr(paths, "user_config_dir", lambda: tmp_path / "appdata")
+    spec = config.RepoSpec(alias="ws", owner="", repo="", workspace_path=str(tmp_path / "ws"))
+    hub = Hub(config.AppConfig(repos=(spec,), active_alias="ws", ai=config.AiConfig(enabled=False)))
+    with TestClient(create_app(hub)) as client:
+        assert client.get("/api/ai/status").status_code == 404
+        assert client.post("/api/ai/login/start", json={}).status_code == 404
+        assert client.get("/api/ai/login/poll").status_code == 404
+
+
+def test_ai_login_start_invokes_connect_with_host(unconfigured_client, monkeypatch):
+    client, _ = unconfigured_client
+    fake = _use_auth_provider(monkeypatch)
+    resp = client.post("/api/ai/login/start", json={"host": "ghe.example.com"})
+    assert resp.status_code == 200 and resp.json()["ok"] is True
+    assert fake.connect_host == "ghe.example.com"
+
+
+def test_ai_login_start_no_host_passes_none(unconfigured_client, monkeypatch):
+    client, _ = unconfigured_client
+    fake = _use_auth_provider(monkeypatch)
+    assert client.post("/api/ai/login/start", json={}).status_code == 200
+    assert fake.connect_host is None
+
+
+def test_ai_login_poll_pending_then_ok(unconfigured_client, monkeypatch):
+    client, _ = unconfigured_client
+    fake = _use_auth_provider(monkeypatch)
+    client.post("/api/ai/login/start", json={})
+    assert client.get("/api/ai/login/poll").json()["status"] == "pending"  # browser still open
+    # The user authorised in the browser; the CLI exited and the account is connected.
+    fake.running = False
+    fake.connected = True
+    data = client.get("/api/ai/login/poll").json()
+    assert data["status"] == "ok" and data["account"] == "phil"
+
+
+def test_ai_login_poll_error_when_not_connected(unconfigured_client, monkeypatch):
+    # The login process exited without connecting -> a clear error outcome.
+    client, _ = unconfigured_client
+    _use_auth_provider(monkeypatch)
+    data = client.get("/api/ai/login/poll").json()
+    assert data["status"] == "error"
+
+
+def test_ai_login_start_surfaces_connect_failure_as_502(unconfigured_client, monkeypatch):
+    client, _ = unconfigured_client
+    from mooring.ai.base import AIError
+
+    class _Boom:
+        def connect(self, host=None):
+            raise AIError("The Copilot CLI is not available in this build.")
+
+    monkeypatch.setattr("mooring.ai.get_provider", lambda app_cfg: _Boom())
+    resp = client.post("/api/ai/login/start", json={})
+    assert resp.status_code == 502
+    assert "Copilot CLI" in resp.json()["error"]

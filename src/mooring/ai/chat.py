@@ -62,6 +62,10 @@ class ChatBroadcaster:
         # after it finished, still learns the outcome). See _mark_ready/_mark_start_error.
         self._start_state = "ready"  # "ready" | "starting" | "error"
         self._start_error_text = ""
+        # A machine-readable cause for a startup error (e.g. "not_connected"), so a
+        # late SSE subscriber and the chat UI can branch on it — offer a sign-in
+        # button instead of a dead error string. None for a plain/unknown error.
+        self._start_error_reason: str | None = None
         # Outbound-PII guard state (see _pii_gate). Off unless configure_pii says so.
         self._pii_enabled = False
         self._pii_block = True
@@ -125,7 +129,10 @@ class ChatBroadcaster:
         for — but a session that has gone through a real startup reports ``ready``
         too, so a subscriber attaching after the handshake still gets unblocked."""
         if self._start_state == "error":
-            return {"state": "error", "text": self._start_error_text}
+            data = {"state": "error", "text": self._start_error_text}
+            if self._start_error_reason:
+                data["reason"] = self._start_error_reason
+            return data
         return {"state": self._start_state}  # "ready" | "starting"
 
     def is_ready(self) -> bool:
@@ -139,10 +146,14 @@ class ChatBroadcaster:
         self._start_state = "ready"
         self._broadcast(ChatEvent("ready"))
 
-    def _mark_start_error(self, text: str) -> None:
+    def _mark_start_error(self, text: str, reason: str | None = None) -> None:
         self._start_state = "error"
         self._start_error_text = text
-        self._broadcast(ChatEvent("fail", {"text": text}))
+        self._start_error_reason = reason
+        data = {"text": text}
+        if reason:
+            data["reason"] = reason
+        self._broadcast(ChatEvent("fail", data))
 
     # -- outbound PII guard (Channel A) -------------------------------------
 

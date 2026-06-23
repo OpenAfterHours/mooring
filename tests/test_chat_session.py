@@ -14,7 +14,6 @@ import copilot
 import pytest
 from copilot import SessionEventType as ET
 
-from mooring.ai.base import AIError
 from mooring.ai.session import CopilotChatSession
 from mooring.ai.tools import EDIT_TOOL_NAMES, TOOL_NAMES
 
@@ -216,9 +215,36 @@ def test_proposal_event_is_broadcast(fake_sdk, tmp_path):
 
 
 def test_start_raises_on_not_authed(fake_sdk, tmp_path):
+    from mooring.ai.base import AINotConnectedError
+
     FakeClient.authed = False
-    with pytest.raises(AIError):
+    # Typed (AINotConnectedError, an AIError) so the hub can offer an in-app sign-in.
+    with pytest.raises(AINotConnectedError):
         _make(tmp_path).start()
+
+
+def test_background_start_not_authed_fails_with_reason(fake_sdk, tmp_path):
+    # The non-blocking open path can't raise, so the not-signed-in case must arrive
+    # on the stream as a "fail" event carrying reason="not_connected" — the signal the
+    # chat UI branches on to show a "Sign in to Copilot" button instead of dead text.
+    FakeClient.authed = False
+    sess = _make(tmp_path)
+    q = sess.subscribe()  # subscribe before start so the live "fail" event is caught
+    sess.start(block=False)
+    try:
+        fail = None
+        while True:
+            ev = q.get(timeout=3)
+            if ev.kind == "fail":
+                fail = ev
+                break
+        assert fail.data.get("reason") == "not_connected"
+        assert fail.data.get("text")  # a human-readable message rides along too
+        # A late subscriber catches up via the replayed start_status.
+        assert sess.start_status["state"] == "error"
+        assert sess.start_status["reason"] == "not_connected"
+    finally:
+        sess.close()
 
 
 def test_background_start_returns_immediately_then_announces_ready(fake_sdk, tmp_path):

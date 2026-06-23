@@ -23,7 +23,7 @@ import tempfile
 import threading
 from pathlib import Path
 
-from mooring.ai.base import AIError
+from mooring.ai.base import AIError, AINotConnectedError
 from mooring.ai.chat import ChatBroadcaster, ChatEvent
 
 _START_TIMEOUT = 60.0
@@ -150,8 +150,15 @@ class CopilotChatSession(ChatBroadcaster):
         except BaseException as exc:  # noqa: BLE001 - surfaced via start()/the stream
             from mooring.ai.copilot import friendly_error
 
-            if isinstance(exc, (asyncio.TimeoutError, TimeoutError)):
-                err: AIError = AIError("Copilot timed out starting up.")
+            # A machine-readable reason lets the chat UI branch on "not signed in"
+            # and render a sign-in button instead of a dead error string. Check the
+            # typed subclass FIRST (it is an AIError too).
+            reason: str | None = None
+            if isinstance(exc, AINotConnectedError):
+                err: AIError = exc
+                reason = "not_connected"
+            elif isinstance(exc, (asyncio.TimeoutError, TimeoutError)):
+                err = AIError("Copilot timed out starting up.")
             elif isinstance(exc, AIError):
                 err = exc
             else:
@@ -160,7 +167,7 @@ class CopilotChatSession(ChatBroadcaster):
             # Surface the failure on the stream too (the non-blocking open path has
             # already returned, so it can't raise); harmless in the blocking path
             # (no subscriber has attached before start() returns).
-            self._mark_start_error(str(err))
+            self._mark_start_error(str(err), reason=reason)
             self._ready.set()
             self._teardown(loop)
             return
@@ -194,7 +201,12 @@ class CopilotChatSession(ChatBroadcaster):
         self._client = client
         auth = await client.get_auth_status()
         if not is_authed(auth):
-            raise AIError("Copilot isn't connected. Run `mooring ai login` to sign in.")
+            # Typed so the hub can offer an in-app "Sign in to Copilot" button (the
+            # fail event carries reason="not_connected") rather than a dead error
+            # telling a non-technical analyst to run a CLI command.
+            raise AINotConnectedError(
+                "You're not signed in to GitHub Copilot. Sign in to use the copilot."
+            )
         tools = build_tools(
             workspace=self._workspace,
             folders=self._folders,

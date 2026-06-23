@@ -354,6 +354,12 @@ async function refresh() {
   $("connect-repo").classList.toggle("hidden", state.configured || showAddRepo);
   $("login-card").classList.toggle("hidden", !state.configured || state.logged_in);
   $("files-card").classList.toggle("hidden", !showFiles);
+  // Copilot sign-in card: shown wherever the notebook surface is usable (local mode
+  // or logged in) and AI is enabled. Copilot's sign-in is independent of the GitHub
+  // login above, so it gets its own card. Status is fetched cached (no CLI spawn).
+  const showCopilot = aiChatEnabled && showFiles;
+  $("copilot-card").classList.toggle("hidden", !showCopilot);
+  if (showCopilot) refreshCopilotStatus(false);
 
   // Pull / Push all / Propose only make sense against a connected, logged-in repo.
   // In local mode the notebooks are usable but there's nothing to sync to, so hide
@@ -423,6 +429,99 @@ async function pollLogin() {
   }
   setTimeout(pollLogin, 2500);
 }
+
+// -- Copilot sign-in (separate from the GitHub login) -----------------------
+// GitHub Copilot signs in independently of mooring's GitHub login (different
+// OAuth flow, different credential store, possibly a different account). This
+// card surfaces that sign-in + which account is connected, so the user never has
+// to drop to `mooring ai login` in a terminal.
+
+function renderCopilotStatus(s) {
+  const statusEl = $("copilot-status");
+  const connectBtn = $("copilot-connect");
+  const switchBtn = $("copilot-switch");
+  if (!s || s.available === false) {
+    statusEl.textContent =
+      (s && s.detail) ||
+      "GitHub Copilot isn't available in this build (install the mooring[copilot] extra).";
+    connectBtn.classList.add("hidden");
+    switchBtn.classList.add("hidden");
+    return;
+  }
+  if (!s.checked) {
+    statusEl.textContent = "Sign-in status not checked yet.";
+    connectBtn.textContent = "Sign in to Copilot";
+    connectBtn.classList.remove("hidden");
+    switchBtn.classList.add("hidden");
+    return;
+  }
+  if (s.connected) {
+    statusEl.textContent = s.account ? `Signed in as @${s.account}.` : "Signed in.";
+    connectBtn.classList.add("hidden");
+    switchBtn.classList.remove("hidden");
+  } else {
+    statusEl.textContent = "Not signed in to Copilot.";
+    connectBtn.textContent = "Sign in to Copilot";
+    connectBtn.classList.remove("hidden");
+    switchBtn.classList.add("hidden");
+  }
+}
+
+// probe=false uses the cached status (no CLI spawn — safe on every refresh);
+// probe=true forces a real check (spawns the Copilot CLI, ~tens of seconds).
+async function refreshCopilotStatus(probe) {
+  try {
+    const data = await api("/api/ai/status" + (probe ? "?probe=1" : ""));
+    if (data.enabled === false) return; // AI disabled — the card stays hidden
+    renderCopilotStatus(data);
+  } catch (e) {}
+}
+
+async function startCopilotLogin() {
+  const note = $("copilot-note");
+  $("copilot-connect").disabled = true;
+  $("copilot-switch").disabled = true;
+  note.textContent = "Opening a browser to sign in to Copilot…";
+  const data = await api("/api/ai/login/start", {});
+  if (data.error) {
+    $("copilot-connect").disabled = false;
+    $("copilot-switch").disabled = false;
+    note.textContent = "";
+    showError(data.error);
+    return;
+  }
+  note.textContent = "Waiting for you to authorize in the browser…";
+  pollCopilotLogin();
+}
+
+async function pollCopilotLogin() {
+  const note = $("copilot-note");
+  const data = await api("/api/ai/login/poll");
+  if (data.status === "ok") {
+    note.textContent = data.account ? `Signed in as @${data.account}.` : "Signed in to Copilot.";
+    $("copilot-connect").disabled = false;
+    $("copilot-switch").disabled = false;
+    await refreshCopilotStatus(false);
+    return;
+  }
+  if (data.status === "error") {
+    $("copilot-connect").disabled = false;
+    $("copilot-switch").disabled = false;
+    note.textContent = "";
+    showError(data.detail || "Copilot sign-in didn't complete.");
+    return;
+  }
+  setTimeout(pollCopilotLogin, 2500); // still pending — keep polling
+}
+
+$("copilot-connect").addEventListener("click", startCopilotLogin);
+$("copilot-switch").addEventListener("click", startCopilotLogin);
+$("copilot-check").addEventListener("click", () => {
+  $("copilot-note").textContent = "Checking…";
+  refreshCopilotStatus(true).then(() => {
+    $("copilot-note").textContent = "";
+  });
+});
 
 $("login-start").addEventListener("click", startLogin);
 $("btn-refresh").addEventListener("click", refresh);

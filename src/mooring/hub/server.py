@@ -170,8 +170,13 @@ class Hub:
             with contextlib.suppress(Exception):
                 import copilot  # noqa: F401 - prime the Copilot SDK import
             with contextlib.suppress(Exception):
-                # Prime the provider's auth/model caches so the first open is warm too.
-                self._provider_for().list_models()
+                # Prime the provider's auth/model caches so the first open is warm too —
+                # status() first so the hub's Copilot sign-in row can show "connected as
+                # @x" without the user clicking Check (and without /api/state ever
+                # spawning the CLI itself; this runs on the background warmup thread).
+                provider = self._provider_for()
+                provider.status()
+                provider.list_models()
 
         threading.Thread(target=_warm, name="hub-warmup", daemon=True).start()
 
@@ -1023,7 +1028,10 @@ class Hub:
                 if start_status.get("state") == "ready":
                     yield "event: ready\ndata: {}\n\n"
                 elif start_status.get("state") == "error":
-                    yield f"event: fail\ndata: {json.dumps({'text': start_status.get('text', '')})}\n\n"
+                    fail_data = {"text": start_status.get("text", "")}
+                    if start_status.get("reason"):  # e.g. "not_connected" -> sign-in button
+                        fail_data["reason"] = start_status["reason"]
+                    yield f"event: fail\ndata: {json.dumps(fail_data)}\n\n"
             # Replay the current NER-model prepare status so a subscriber that connects
             # mid-download immediately sees progress (events emitted before this
             # subscribe would otherwise be missed).
@@ -1229,6 +1237,101 @@ class Hub:
             }
         )
 
+    # -- AI copilot (Copilot sign-in) ------------------------------------------
+    # GitHub Copilot signs in SEPARATELY from mooring's GitHub login (auth.py): a
+    # different OAuth flow, a different credential store (~/.copilot), and possibly
+    # a different GitHub account. These endpoints expose that sign-in in the UI so a
+    # user never has to drop to `mooring ai login` in a terminal.
+
+    def _ai_status_dict(self, st) -> dict:
+        """Shape a ProviderStatus (or None = not probed yet) for the UI. Value-free:
+        only the connection booleans, the resolved provider name, and the signed-in
+        account login (so the user can see WHICH Copilot identity is connected)."""
+        if st is None:
+            return {
+                "enabled": True,
+                "checked": False,  # no probe has run yet — the UI offers a Check button
+                "available": True,
+                "connected": False,
+                "account": "",
+                "detail": "",
+                "provider": self.app_cfg.ai_provider,
+            }
+        return {
+            "enabled": True,
+            "checked": True,
+            "available": bool(st.available),
+            "connected": bool(st.connected),
+            "account": st.account or "",
+            "detail": st.detail or "",
+            "provider": self.app_cfg.ai_provider,
+        }
+
+    def api_ai_status(self, request: Request) -> JSONResponse:
+        """Copilot sign-in status for the hub/chat. Default returns the CACHED status
+        (never spawns the 150 MB CLI on a hub poll); ``?probe=1`` forces a real check.
+
+        Sync def => Starlette runs it in a threadpool, so the forced probe's CLI spawn
+        never blocks the event loop."""
+        if not self.app_cfg.ai_enabled:
+            return JSONResponse({"enabled": False}, status_code=404)
+        provider = self._provider_for()
+        probe = request.query_params.get("probe", "").lower() in ("1", "true", "yes")
+        if probe and hasattr(provider, "status"):
+            st = provider.status(force=True)
+        else:
+            st = provider.cached_status() if hasattr(provider, "cached_status") else None
+        return JSONResponse(self._ai_status_dict(st))
+
+    async def api_ai_login_start(self, request: Request) -> JSONResponse:
+        """Kick off the Copilot browser sign-in (device flow) in the background.
+
+        Returns immediately; the client polls ``/api/ai/login/poll`` until the user
+        has authorised in the browser. ``host`` (optional) targets a GHE Copilot."""
+        if not self.app_cfg.ai_enabled:
+            return JSONResponse({"enabled": False}, status_code=404)
+        data = await request.json() if await request.body() else {}
+        host = str(data.get("host", "")).strip() or None
+        provider = self._provider_for()
+        if not hasattr(provider, "connect"):
+            return JSONResponse(
+                {"error": "This AI provider has no interactive sign-in."}, status_code=400
+            )
+        try:
+            st = await run_in_threadpool(provider.connect, host)
+        except Exception as exc:  # noqa: BLE001 - AIError/OSError surface to the UI
+            return JSONResponse({"error": str(exc)}, status_code=502)
+        telemetry.log_event("ai_login_start")
+        return JSONResponse({"ok": True, "detail": st.detail})
+
+    def api_ai_login_poll(self, request: Request) -> JSONResponse:
+        """Poll the in-progress Copilot sign-in. ``pending`` while the CLI is still
+        running (browser open), then a real status probe confirms the outcome.
+
+        Sync def => threadpool, so the final probe's CLI spawn is off the loop."""
+        if not self.app_cfg.ai_enabled:
+            return JSONResponse({"enabled": False}, status_code=404)
+        provider = self._provider_for()
+        state = (
+            provider.login_state()
+            if hasattr(provider, "login_state")
+            else {"running": False, "output": []}
+        )
+        if state.get("running"):
+            return JSONResponse({"status": "pending", "output": state.get("output", [])})
+        # The login process has exited — confirm with a real (forced) probe.
+        st = provider.status(force=True) if hasattr(provider, "status") else None
+        if st is not None and st.connected:
+            telemetry.log_event("ai_login")
+            return JSONResponse({"status": "ok", "account": st.account or ""})
+        return JSONResponse(
+            {
+                "status": "error",
+                "detail": (st.detail if st is not None else "") or "Copilot sign-in didn't complete.",
+                "output": state.get("output", []),
+            }
+        )
+
     async def api_notebook_ai_toggle(self, request: Request) -> JSONResponse:
         """Turn the copilot off (or back on) for ONE notebook. Writes the synced
         mooring.toml opt-out so the decision travels to teammates, and tears down any
@@ -1311,6 +1414,9 @@ def create_app(hub: Hub) -> Starlette:
             Route("/ai/chat", hub.chat_page),
             Route("/api/ai/datasets", hub.api_chat_datasets),
             Route("/api/ai/models", hub.api_chat_models),
+            Route("/api/ai/status", hub.api_ai_status),
+            Route("/api/ai/login/start", hub.api_ai_login_start, methods=["POST"]),
+            Route("/api/ai/login/poll", hub.api_ai_login_poll),
             Route("/api/ai/chat/open", hub.api_chat_open, methods=["POST"]),
             Route("/api/ai/chat/stream/{sid}", hub.api_chat_stream),
             Route("/api/ai/chat/send", hub.api_chat_send, methods=["POST"]),
