@@ -41,12 +41,13 @@
   <div class="mr-stars" data-count="140" data-seed="7" aria-hidden="true"></div>
   <div class="mr-hero-grid">
     <div class="mr-hero-copy">
-      <p class="mr-eyebrow">Git-free · marimo notebook sharing</p>
+      <p class="mr-eyebrow">Git-free sharing · schema-only AI copilot</p>
       <h1 class="mr-h1">Share <span class="mr-accent">marimo</span> notebooks via GitHub — <span class="mr-accent">no git</span> required.</h1>
       <p class="mr-lede">
         Analysts with only Python 3.12+ pull, edit, and push a shared repo's
         notebooks over the GitHub REST API. No git, no pip, no setup — just run
-        the app and log in.
+        the app and log in. And an opt-in AI copilot helps them write the code —
+        sent only your column names and notebook source, never your data values.
       </p>
       <div class="mr-install" data-mr-install>
         <span class="mr-prompt">$</span>
@@ -92,6 +93,10 @@
       <span class="mr-feat-k">Frozen package stack</span>
       <p>polars, altair, plotly, openpyxl, fastexcel and requests are bundled in. No pip at runtime.</p>
     </article>
+    <article class="mr-feat">
+      <span class="mr-feat-k">AI that can't see your data</span>
+      <p>An opt-in copilot, sent only column names, dtypes and notebook source — never your data values. It proposes cells you review and Apply.</p>
+    </article>
   </div>
 </section>
 
@@ -110,6 +115,10 @@
       <a href="{{ 'developers/' | url }}">
         <strong>For developers →</strong>
         <span>Architecture, dev setup, and contributing.</span>
+      </a>
+      <a href="{{ 'admins/ai-privacy/' | url }}">
+        <strong>Evaluating for a sensitive-data team? →</strong>
+        <span>How the copilot is built so it can't see your data.</span>
       </a>
     </div>
   </div>

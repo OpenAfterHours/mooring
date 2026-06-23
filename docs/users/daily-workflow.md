@@ -8,7 +8,7 @@ Everything below happens in the **hub** (the browser page that opens when you
 run the app). The same actions are available from the
 [command line](cli.md) if you prefer a terminal.
 
-## The six actions
+## The seven actions
 
 | Action | What it does |
 |--------|--------------|
@@ -17,6 +17,7 @@ run the app). The same actions are available from the
 | **New notebook** | Create a fresh marimo notebook from a template and open it. |
 | **Push** | Upload your changed files to the team repo — **one commit per file**. Blocked for any file that's in conflict. |
 | **Propose** | Like Push, but uploads to a **review branch** instead of the shared branch, so a teammate can review the changes as a pull request before they land. See [Proposing changes](#proposing-changes-for-review). |
+| **Revert** | Appears on a *modified* or locally-deleted file. Discards your local changes and restores the last version you pulled or pushed. Your current version is snapshotted first, so a Revert can itself be undone. See [Reverting a file](#reverting-a-file). |
 | **Resolve** | Appears on conflicted files. See [Resolving conflicts](conflicts.md). |
 
 Power BI projects appear as a **single grouped row** (expand with the ▸ caret
@@ -38,6 +39,13 @@ to see individual files); everything else is one row per file.
     push silently overwrite a teammate's work — GitHub itself rejects a write
     whose base SHA is stale — so the worst case is a conflict you resolve, not
     lost work.
+
+!!! tip "Ask the copilot (optional)"
+
+    If your team has enabled it, open a notebook and click **AI** to chat with an
+    assistant that proposes marimo cells. It's sent your column names and notebook
+    source — never your data values — and you review every change before it lands.
+    See [AI copilot](ai-copilot.md).
 
 ## Proposing changes for review
 
@@ -67,6 +75,27 @@ instead of Push:
     differs from yours — the badge clears once the review branch is deleted
     (GitHub offers this right after merging), and the reviewer's version
     arrives with your next pull.
+
+## Reverting a file
+
+Changed a notebook and want to throw those edits away? **Revert** restores it to
+the last version you pulled or pushed — your personal "go back to the last
+checkpoint" button.
+
+- Revert appears on a file that is **modified** (you edited it) or **deleted
+  locally** (you removed it but it still exists in the team repo). It does *not*
+  appear on a brand-new file that was never synced — there's no earlier version
+  to go back to, so use **Delete** for that.
+- The last-synced bytes are fetched from the team repo, so Revert needs you to be
+  **logged in** (unlike Delete, which is purely local).
+- Before overwriting, mooring snapshots your current version, so an **Undo**
+  button appears on the row right after — click it to bring your edits back.
+- Revert only touches the file you pick and only *your* local changes. It never
+  changes the team repo and never undoes a teammate's pull. For a file in
+  conflict, Pull first (or, on the command line, `rollback --conflicts` to drop
+  your side and take the team's).
+
+On the command line this is [`rollback`](cli.md#rollback).
 
 ## Switching repos
 

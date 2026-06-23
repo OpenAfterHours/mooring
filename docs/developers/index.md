@@ -4,9 +4,10 @@ icon: lucide/network
 
 # Architecture
 
-Mooring is a small Python app with three moving parts: a **hub** (local web UI),
-a **sync engine** that talks to GitHub without git, and a **marimo editor**
-subprocess. This page maps them so you can find your way around the code.
+Mooring is a small Python app with four moving parts: a **hub** (local web UI),
+a **sync engine** that talks to GitHub without git, a **marimo editor**
+subprocess, and an opt-in, schema-only **AI copilot**. This page maps them so you
+can find your way around the code.
 
 ## How the pieces fit
 
@@ -18,11 +19,14 @@ graph TD
     HUB --> SYNC[sync.py — three-way sync engine]
     HUB --> AUTH[auth.py — device flow + keyring]
     HUB --> ED[editor.py — marimo subprocess]
+    HUB --> AI[ai/ — opt-in copilot]
     SYNC --> GS[gitsha.py — local blob SHAs]
     SYNC --> MAN[manifest.py — last-synced state]
     SYNC --> GH[github.py — REST client]
     AUTH -->|token| GH
     GH -->|Git Data + Contents API| API[(GitHub REST API)]
+    AI --> EG[ai/egress.py — single context assembler]
+    EG -->|schema + source only, never values| COP[(GitHub Copilot)]
     CFG[config.py + paths.py] -.-> HUB
     CFG -.-> CLI
 ```
@@ -46,6 +50,14 @@ graph TD
   fallback; `MOORING_TOKEN` overrides).
 - **`editor.py`** — starts and tears down the marimo editor subprocess that
   actually edits notebooks.
+- **`ai/`** — the opt-in copilot subpackage. Everything the model sees is
+  assembled in **one** place, `ai/egress.py` (`build_system_context`): a
+  dataset's schema (column names + dtypes) and the notebook source — never
+  values. `ai/tools.py` exposes value-free, propose-only agent tools and Apply
+  lands through `ai/cellwrite.py`; `ai/introspect.py` reads live-kernel schemas
+  with a fixed, fail-closed probe; `ai/pii.py`, `ai/ner.py` / `ai/ner_spacy.py`,
+  and `ai/secrets.py` are opt-in scanners; `ai/datadictionary/` parses team
+  context into a five-slot allowlist.
 
 ## Code layout
 
@@ -66,6 +78,15 @@ src/mooring/
   hub/
     server.py            Starlette app + endpoints
     static/              index.html, app.js, style.css
+  ai/                    opt-in copilot (schema-only)
+    egress.py            single context assembler — the one place context is built
+    copilot.py           GitHub Copilot provider + chat session
+    tools.py             value-free, propose-only agent tools
+    cellwrite.py         applies a reviewed cell patch via marimo codegen
+    introspect.py        fail-closed live-kernel schema probe
+    pii.py / secrets.py  opt-in outbound scanners (value-free findings)
+    ner.py / ner_spacy.py  optional local name detection (off by default)
+    datadictionary/      team data dictionary → five-slot allowlist
 ```
 
 ## Key design choices
@@ -78,5 +99,11 @@ src/mooring/
   its own `pyproject.toml` + `uv.lock` (synced via GitHub). With uv, `editor.py`
   runs notebooks in that locked env; a frozen `.pyz` carries a bundle the admin
   built from the same file (no pip at runtime). Mooring itself stays lean.
+- **One egress choke point.** Everything the copilot's model sees is assembled in
+  a single module — `ai/egress.build_system_context` — guarded by tests and an
+  import-linter contract. Adding a new path that sends context, or one that skips
+  scrubbing, is a review-visible change to that one file. This is the load-bearing
+  privacy invariant; don't bypass it. See
+  [why the copilot can't see your data](../admins/ai-privacy.md).
 
 Ready to make changes? See [Contributing](contributing.md).

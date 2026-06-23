@@ -275,7 +275,7 @@
   max-width: 1120px;
   margin: 0 auto;
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
   gap: 16px;
 }
 
@@ -329,7 +329,7 @@
 
 .mr-start-grid {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
   gap: 16px;
 }
 
@@ -378,7 +378,6 @@
   .mr-hero-grid { grid-template-columns: 1fr; gap: 36px; }
   .mr-hero-art { order: -1; }
   .mr-anchor-stage { width: min(70%, 300px); }
-  .mr-shelf, .mr-start-grid { grid-template-columns: 1fr; }
   .mr-brand-org { display: none; }
   .mr-topnav-links { gap: 14px; }
 }

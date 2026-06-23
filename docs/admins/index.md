@@ -19,6 +19,10 @@ Once you've done the setup below, an analyst's entire experience is:
 
 No git, no pip, no config — because you baked it in.
 
+If you enable it, analysts also get an opt-in, schema-only **AI copilot** in the
+editor — sent only column names, dtypes, and notebook source, never your data
+values. See [Secure AI copilot](ai-privacy.md).
+
 ## End-to-end checklist
 
 - [ ] **Create the shared repo** with empty `notebooks/` and `data/` folders —
@@ -33,6 +37,11 @@ No git, no pip, no config — because you baked it in.
       [Build & distribute](build-and-distribute.md)
 - [ ] **Distribute** the artifact to your team —
       [Build & distribute](build-and-distribute.md#distribute)
+- [ ] **(Optional) Decide on the AI copilot** — whether to enable it: install the
+      `copilot` extra, confirm your org's Copilot agent policy is on, and review
+      the team-context and PII-guard settings before turning it on for a
+      sensitive-data team —
+      [Secure AI copilot](ai-privacy.md) · [copilot guide](../users/ai-copilot.md)
 
 !!! tip "The four values you need from GitHub"
 
