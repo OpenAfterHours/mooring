@@ -93,7 +93,7 @@ checkpoint" button.
 - Revert only touches the file you pick and only *your* local changes. It never
   changes the team repo and never undoes a teammate's pull. For a file in
   conflict, Pull first (or, on the command line, `rollback --conflicts` to drop
-  your side and take the team's).
+  your side and turn it into a clean pull, then Pull to take the team's version).
 
 On the command line this is [`rollback`](cli.md#rollback).
 

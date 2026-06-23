@@ -542,6 +542,97 @@ def test_delete_endpoint_missing_404s(configured):
     assert resp.status_code == 404
 
 
+# -- rollback (revert to the last synced version) + AI-independent undo ----------
+
+
+def _seed_and_pull(hub, fake, rel, contents=b"v1\n"):
+    """Seed the remote and pull, so `rel` has a manifest base (last-synced) version."""
+    from mooring import sync
+
+    fake.seed(rel, contents)
+    sync.pull(fake, hub.cfg)
+
+
+def test_rollback_endpoint_restores_modified(configured):
+    client, hub, fake, tmp_path = configured
+    _seed_and_pull(hub, fake, "notebooks/a.py")
+    (tmp_path / "ws1" / "notebooks/a.py").write_text("mine\n", "utf-8", newline="\n")
+    resp = client.post("/api/rollback", json={"path": "notebooks/a.py"})
+    assert resp.status_code == 200
+    assert (tmp_path / "ws1" / "notebooks/a.py").read_text("utf-8") == "v1\n"
+    state = {f["path"]: f for f in client.get("/api/state").json()["files"]}
+    assert state["notebooks/a.py"]["state"] == "synced"
+
+
+def test_rollback_endpoint_recreates_deleted_local(configured):
+    client, hub, fake, tmp_path = configured
+    _seed_and_pull(hub, fake, "notebooks/a.py")
+    (tmp_path / "ws1" / "notebooks/a.py").unlink()
+    resp = client.post("/api/rollback", json={"path": "notebooks/a.py"})
+    assert resp.status_code == 200
+    assert (tmp_path / "ws1" / "notebooks/a.py").read_text("utf-8") == "v1\n"
+
+
+def test_rollback_returns_undo_token_and_undo_restores_pre_revert_bytes(configured):
+    client, hub, fake, tmp_path = configured
+    _seed_and_pull(hub, fake, "notebooks/a.py")
+    nb = tmp_path / "ws1" / "notebooks/a.py"
+    nb.write_text("mine\n", "utf-8", newline="\n")
+    resp = client.post("/api/rollback", json={"path": "notebooks/a.py"})
+    assert resp.status_code == 200
+    token = resp.json()["undo_token"]  # snapshot token for the AI-independent Undo
+    assert token
+    assert nb.read_text("utf-8") == "v1\n"
+    undo = client.post("/api/undo", json={"path": "notebooks/a.py", "token": token})
+    assert undo.status_code == 200 and undo.json()["ok"] is True
+    assert nb.read_text("utf-8") == "mine\n"
+
+
+def test_undo_superseded_when_a_later_snapshot_is_on_top(configured):
+    # A second revert (or an AI Apply) pushes a newer snapshot; undoing with the
+    # FIRST token must refuse (409) rather than restore the wrong layer.
+    client, hub, fake, tmp_path = configured
+    _seed_and_pull(hub, fake, "notebooks/a.py")
+    nb = tmp_path / "ws1" / "notebooks/a.py"
+    nb.write_text("mine1\n", "utf-8", newline="\n")
+    t1 = client.post("/api/rollback", json={"path": "notebooks/a.py"}).json()["undo_token"]
+    nb.write_text("mine2\n", "utf-8", newline="\n")
+    t2 = client.post("/api/rollback", json={"path": "notebooks/a.py"}).json()["undo_token"]
+    assert t1 != t2
+    stale = client.post("/api/undo", json={"path": "notebooks/a.py", "token": t1})
+    assert stale.status_code == 409  # superseded — left the file alone
+    assert nb.read_text("utf-8") == "v1\n"
+    fresh = client.post("/api/undo", json={"path": "notebooks/a.py", "token": t2})
+    assert fresh.status_code == 200
+    assert nb.read_text("utf-8") == "mine2\n"
+
+
+def test_undo_nothing_to_undo_400(configured):
+    client, hub, fake, tmp_path = configured
+    _seed_and_pull(hub, fake, "notebooks/a.py")
+    resp = client.post("/api/undo", json={"path": "notebooks/a.py"})
+    assert resp.status_code == 400
+
+
+def test_rollback_skips_conflict_unless_flagged(configured):
+    client, hub, fake, tmp_path = configured
+    _seed_and_pull(hub, fake, "notebooks/a.py")
+    nb = tmp_path / "ws1" / "notebooks/a.py"
+    nb.write_text("mine\n", "utf-8", newline="\n")
+    fake.seed("notebooks/a.py", b"theirs\n")  # remote moves underneath -> CONFLICT
+    client.post("/api/rollback", json={"path": "notebooks/a.py"})
+    assert nb.read_text("utf-8") == "mine\n"  # default: left alone
+    client.post("/api/rollback", json={"path": "notebooks/a.py", "conflicts": True})
+    assert nb.read_text("utf-8") == "v1\n"  # flagged: my edit discarded
+
+
+def test_undo_rejects_traversal(configured):
+    client, _, _, tmp_path = configured
+    (tmp_path / "evil.py").write_text("x", "utf-8")
+    resp = client.post("/api/undo", json={"path": "../evil.py"})
+    assert resp.status_code == 400
+
+
 def test_state_reports_has_local_flag(configured):
     client, _, fake, tmp_path = configured
     write_ws(tmp_path, "ws1", "notebooks/local.py", "a")

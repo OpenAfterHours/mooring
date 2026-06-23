@@ -167,6 +167,7 @@ class SyncResult:
     pulled: int = 0
     pushed: int = 0
     proposed: int = 0
+    reverted: int = 0
     review_branch: str = ""
     compare_url: str = ""
     skipped_conflicts: list[str] = field(default_factory=list)
@@ -180,6 +181,8 @@ class SyncResult:
             parts.append(f"pushed {self.pushed} file(s)")
         if self.proposed:
             parts.append(f"proposed {self.proposed} file(s) for review")
+        if self.reverted:
+            parts.append(f"reverted {self.reverted} file(s)")
         conflicted = self.skipped_conflicts or self.blocked_conflicts
         if conflicted:
             parts.append(f"{len(conflicted)} conflict(s) need attention")
@@ -562,6 +565,90 @@ def pull(
     mft.scope_folders = tuple(cfg.folders)
     mft.scope_exclude = tuple(cfg.exclude)
     manifest_mod.save(workspace, mft)
+    return result
+
+
+# States a single-file revert can act on: the file changed locally since the last
+# sync. NEW_LOCAL has no checkpoint to return to (delete it instead); IN_REVIEW and
+# the remote-only states are deliberately left for the proposal flow and pull.
+_REVERTABLE = {FileState.MODIFIED, FileState.DELETED_LOCAL}
+
+_REVERT_NOTES = {
+    FileState.SYNCED: "already at the last synced version",
+    FileState.NEW_LOCAL: "never synced — use delete to discard it",
+    FileState.CONFLICT: "in conflict — pull first, or revert with --conflicts to discard your edit",
+    FileState.IN_REVIEW: "in an open proposal — left as is",
+    FileState.NEW_REMOTE: "nothing of yours to revert (a teammate added it — pull)",
+    FileState.REMOTE_CHANGED: "nothing of yours to revert (a teammate changed it — pull)",
+    FileState.DELETED_REMOTE: "nothing of yours to revert (a teammate deleted it — pull)",
+}
+
+
+def revert(
+    client: GitHubClient,
+    cfg: Config,
+    rel_path: str,
+    *,
+    include_conflict: bool = False,
+    snapshot_fn=None,
+) -> SyncResult:
+    """Restore one tracked file to its last-synced checkpoint (the manifest base).
+
+    The inverse of :func:`pull` for a single path: where pull reconciles the working
+    file toward the REMOTE blob, revert reconciles it toward the BASE blob recorded in
+    the manifest — i.e. it discards local edits and goes back to the last pull/push.
+    The bytes are recovered git-free via ``client.get_blob(base_sha)``; a restored file
+    re-hashes to its base sha (gitsha LF-normalizes ``.py``; get_blob returns the bytes
+    that were pushed), so it classifies SYNCED with no manifest rewrite.
+
+    Acts only on MODIFIED (overwrite local with base) and DELETED_LOCAL (recreate from
+    base). With ``include_conflict`` a CONFLICT file is reset to base too, which drops
+    only the user's side and turns it into a clean pull. Every other state has nothing
+    of the user's to revert and is reported, not touched.
+
+    ``snapshot_fn(rel_path, current_bytes)`` (optional) is called with the file's
+    current bytes BEFORE it is overwritten so the revert is itself undoable; it is
+    passed in (rather than imported) to keep this module free of a notebook_undo
+    dependency, mirroring how the rest of sync.py stays at the GitHub/manifest layer.
+    """
+    rel_path = rel_path.replace("\\", "/")
+    prep = _prepare(client, cfg)
+    workspace = prep.workspace
+    result = SyncResult()
+
+    match = next((f for f in prep.report.files if f.path == rel_path), None)
+    if match is None:
+        result.lines.append(f"{rel_path}: not a tracked file")
+        return result
+
+    is_conflict = match.state is FileState.CONFLICT
+    if match.state not in _REVERTABLE and not (is_conflict and include_conflict):
+        result.lines.append(f"{rel_path}: {_REVERT_NOTES.get(match.state, 'nothing to revert')}")
+        return result
+
+    # base_sha == the last-synced blob. For MODIFIED/DELETED_LOCAL it equals the
+    # current remote sha (reachable from HEAD); for a conflict it is historical and
+    # could in rare cases be GC'd, so tolerate a missing blob per file.
+    if match.base_sha is None:
+        result.lines.append(f"{rel_path}: no checkpoint to restore")
+        return result
+    try:
+        data = client.get_blob(match.base_sha)
+    except NotFound:
+        result.lines.append(f"could not revert {rel_path} (checkpoint version unavailable)")
+        return result
+
+    target = workspace / rel_path
+    if snapshot_fn is not None and target.is_file():
+        snapshot_fn(rel_path, target.read_bytes())
+    _write_blob(workspace, rel_path, data)
+    result.reverted += 1
+    if match.state is FileState.DELETED_LOCAL:
+        result.lines.append(f"restored {rel_path} (was deleted locally)")
+    elif is_conflict:
+        result.lines.append(f"reverted {rel_path} (discarded your edit; pull to take the remote)")
+    else:
+        result.lines.append(f"reverted {rel_path}")
     return result
 
 
