@@ -57,6 +57,34 @@ throwaway repo; pushes create real commits.
   project pins plain `httpx` (behind a deprecation warning) as the conservative
   choice. Swap when comfortable.
 
+## Continuous integration
+
+`.github/workflows/ci.yml` runs on every push to `master` and every pull
+request: a single **test** job (Windows, matching the release target) running
+`ruff` → `lint-imports` → `pytest` → the Node JS tests. Run the same locally
+before pushing.
+
+Static code-quality analysis is handled **outside** Actions by
+[SonarQube Cloud](https://sonarcloud.io) **Automatic Analysis**: the SonarCloud
+GitHub App scans every push and PR for bugs, vulnerabilities, and code smells
+and posts a check on each PR. There is no scanner step in CI and no
+`SONAR_TOKEN` — matching the rest of the org (e.g. `rwa_calculator`). The
+analysis scope (sources, tests, Python version, exclusions) is set by
+`sonar-project.properties` at the repo root.
+
+!!! note "One-time SonarQube Cloud setup"
+
+    A SonarCloud org admin connects the project once:
+
+    1. At [sonarcloud.io](https://sonarcloud.io), sign in with GitHub and add
+       the **`OpenAfterHours/mooring`** repository to the **openafterhours**
+       organization (the SonarCloud project key is `OpenAfterHours_mooring`).
+    2. Ensure the **SonarCloud GitHub App** is installed with access to this
+       repository (GitHub → Org settings → GitHub Apps), so it can read the
+       code and post PR checks.
+    3. Leave **Automatic Analysis** enabled (project → Administration →
+       Analysis Method). No `SONAR_TOKEN` secret and no Actions job are needed.
+
 ## Working on the docs
 
 The documentation is a [zensical](https://zensical.org) site under `docs/`,
