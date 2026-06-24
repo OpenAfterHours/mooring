@@ -295,7 +295,7 @@ function onTool(d) {
   if ("name" in d) {
     const raw = d.name || "";
     const label = TOOL_LABELS[raw] ||
-      (raw ? raw.replace(/^mooring_/, "").replace(/_/g, " ") : "working");
+      (raw ? raw.replace(/^mooring_/, "").replaceAll("_", " ") : "working");
     const row = addRow("row-tool", (el) => {
       const g = document.createElement("span");
       g.className = "tool-glyph";
