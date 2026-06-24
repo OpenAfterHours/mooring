@@ -60,37 +60,30 @@ throwaway repo; pushes create real commits.
 ## Continuous integration
 
 `.github/workflows/ci.yml` runs on every push to `master` and every pull
-request. It has two jobs:
+request: a single **test** job (Windows, matching the release target) running
+`ruff` → `lint-imports` → `pytest` → the Node JS tests. Run the same locally
+before pushing.
 
-- **test** (Windows, matching the release target): `ruff` → `lint-imports` →
-  `pytest` → the Node JS tests. Run the same locally before pushing.
-- **SonarQube Cloud** (Linux): a static-analysis scan via
-  [SonarQube Cloud](https://sonarcloud.io) for bugs, vulnerabilities, code
-  smells, and duplication. Configured by `sonar-project.properties` at the repo
-  root. It runs in parallel with `test` and reports a check on each PR. (The
-  scanner is a Linux container action, which is why it can't share the Windows
-  job.)
+Static code-quality analysis is handled **outside** Actions by
+[SonarQube Cloud](https://sonarcloud.io) **Automatic Analysis**: the SonarCloud
+GitHub App scans every push and PR for bugs, vulnerabilities, and code smells
+and posts a check on each PR. There is no scanner step in CI and no
+`SONAR_TOKEN` — matching the rest of the org (e.g. `rwa_calculator`). The
+analysis scope (sources, tests, Python version, exclusions) is set by
+`sonar-project.properties` at the repo root.
 
 !!! note "One-time SonarQube Cloud setup"
 
-    The scan needs a project and a token that only a repo admin can create:
+    A SonarCloud org admin connects the project once:
 
-    1. At [sonarcloud.io](https://sonarcloud.io), sign in with GitHub and
-       **import the `OpenAfterHours/mooring` repository** (creating the
-       organization first if needed).
-    2. In the new project, open **Administration → Analysis Method** and
-       **turn off "Automatic Analysis"** — it conflicts with, and will reject,
-       the CI-based scan.
-    3. Confirm the `sonar.organization` and `sonar.projectKey` in
-       `sonar-project.properties` match the values SonarQube Cloud shows for the
-       project; update them if they differ.
-    4. Generate a token (**My Account → Security**) and add it to the repo as
-       an Actions secret named **`SONAR_TOKEN`**
-       (Settings → Secrets and variables → Actions). Do **not** set
-       `SONAR_HOST_URL` — that is for self-hosted SonarQube Server only.
-
-    Until this is done the `SonarQube Cloud` job fails for lack of a token;
-    fork PRs skip it automatically (forks can't read the secret).
+    1. At [sonarcloud.io](https://sonarcloud.io), sign in with GitHub and add
+       the **`OpenAfterHours/mooring`** repository to the **openafterhours**
+       organization (the SonarCloud project key is `OpenAfterHours_mooring`).
+    2. Ensure the **SonarCloud GitHub App** is installed with access to this
+       repository (GitHub → Org settings → GitHub Apps), so it can read the
+       code and post PR checks.
+    3. Leave **Automatic Analysis** enabled (project → Administration →
+       Analysis Method). No `SONAR_TOKEN` secret and no Actions job are needed.
 
 ## Working on the docs
 

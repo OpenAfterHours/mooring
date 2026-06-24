@@ -52,29 +52,3 @@ jobs:
         # The chat REPL's risky pure logic (slash parser, history ring, @-mentions,
         # XSS-safe highlighter). Zero deps: Node's built-in test runner.
         run: node --test tests/js/
-
-  sonarqube:
-    name: SonarQube Cloud
-    # The Sonar scanner ships as a Linux container action, so it can't ride the
-    # Windows `test` job above; it runs here on Linux in parallel. Static
-    # analysis only — no test run or coverage import — so it needs nothing from
-    # the test job. Config lives in sonar-project.properties at the repo root.
-    runs-on: ubuntu-latest
-    # SONAR_TOKEN is a repo secret and is NOT exposed to workflows triggered by
-    # forked PRs. Skip the scan there (it would otherwise fail with no token)
-    # while still running on pushes to master and on same-repo branch PRs.
-    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          # Sonar's new-code detection and SCM blame need full history, not the
-          # default shallow clone.
-          fetch-depth: 0
-
-      - name: SonarQube Cloud Scan
-        uses: SonarSource/sonarqube-scan-action@v8.2.0
-        env:
-          # Created in SonarQube Cloud (My Account -> Security, or the project's
-          # GitHub Actions tutorial) and added as a repo Actions secret. For
-          # SonarQube Cloud, SONAR_HOST_URL must NOT be set — that is Server-only.
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
