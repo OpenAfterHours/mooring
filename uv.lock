@@ -995,7 +995,7 @@ wheels = [
 
 [[package]]
 name = "mooring"
-version = "0.4.8"
+version = "0.4.9"
 source = { editable = "." }
 dependencies = [
     { name = "keyring" },
