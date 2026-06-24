@@ -133,7 +133,7 @@ def test_coerce_value_types():
     assert _coerce_config_value(["true"]) is True
     assert _coerce_config_value(["false"]) is False
     assert _coerce_config_value(["5"]) == 5
-    assert _coerce_config_value(["0.7"]) == 0.7
+    assert _coerce_config_value(["0.7"]) == pytest.approx(0.7)
     assert _coerce_config_value(["a", "b", "c"]) == ["a", "b", "c"]
     assert _coerce_config_value(['["a", "b"]']) == ["a", "b"]
     # a path/id is not a TOML literal -> it stays a bare string

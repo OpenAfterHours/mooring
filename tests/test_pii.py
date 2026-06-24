@@ -607,7 +607,7 @@ def test_config_name_detection_defaults_and_env(clean_config):
     assert c.ai_pii_name_revision == "f227d3cd637bd4e6757ae143935316d062393341"  # pinned
     assert c.ai_pii_name_variant == "bf16"
     assert c.ai_pii_name_labels == ("person", "name")
-    assert c.ai_pii_name_threshold == 0.7
+    assert c.ai_pii_name_threshold == pytest.approx(0.7)
     c2 = config.load_app_config(
         env={
             "MOORING_AI_PII_NAMES": "true",
@@ -615,7 +615,7 @@ def test_config_name_detection_defaults_and_env(clean_config):
             "MOORING_AI_PII_NAME_VARIANT": "",
         }
     )
-    assert c2.ai_pii_names is True and c2.ai_pii_name_threshold == 0.5
+    assert c2.ai_pii_names is True and c2.ai_pii_name_threshold == pytest.approx(0.5)
     assert c2.ai_pii_name_variant == ""  # override to load a repo's default weights file
 
 
