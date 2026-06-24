@@ -1084,7 +1084,9 @@ class Hub:
             "backend": backend,
         }
 
-    async def api_chat_stream(self, request: Request) -> StreamingResponse | JSONResponse:
+    def api_chat_stream(self, request: Request) -> StreamingResponse | JSONResponse:
+        # Sync: this handler only builds the StreamingResponse; the awaiting happens
+        # inside _sse_gen (the async generator it wraps), so there's nothing to await here.
         sid = request.path_params["sid"]
         session = self._chats.get(sid)
         if session is None:

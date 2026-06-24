@@ -20,9 +20,9 @@
   <header>
     <h1>&#9875; mooring</h1>
     <div id="repo-info"></div>
-    <select id="repo-select" class="hidden" title="Switch repo"></select>
+    <select id="repo-select" class="hidden" title="Switch repo" aria-label="Switch repo"></select>
     <button id="connect-repo" class="small hidden" title="Connect a team repo to sync &amp; share">&#9875; Connect a repo</button>
-    <select id="theme-select" title="Appearance (hub, chat &amp; notebooks)">
+    <select id="theme-select" title="Appearance (hub, chat &amp; notebooks)" aria-label="Appearance (hub, chat &amp; notebooks)">
       <option value="light">&#9728; Light</option>
       <option value="dark">&#9789; Dark</option>
       <option value="system">&#9881; System</option>
@@ -94,7 +94,7 @@
     <section id="log-card" class="card hidden">
       <h3>Last operation</h3>
       <pre id="log"></pre>
-      <div id="log-link" class="hidden"><a target="_blank" rel="noopener"></a></div>
+      <div id="log-link" class="hidden"><a target="_blank" rel="noopener" aria-label="Create or view the pull request on GitHub"></a></div>
     </section>
 
     <div id="error-banner" class="hidden"></div>
