@@ -237,3 +237,21 @@ test("highlightCode: keyword highlighting never corrupts its own span attributes
   assert.match(out, /<span class="tok-kw">class<\/span>/);
   assert.ok(!/class="tok-kw"[^>]*tok-kw/.test(out), "attribute not double-wrapped");
 });
+
+test("cleanJobs: trims fields, keeps internal newlines, drops briefless rows", () => {
+  const jobs = C.cleanJobs([
+    { name: " Sales ", brief: "  chart monthly sales\nbroken out by region  ", dataset: " data/s.parquet " },
+    { name: "empty", brief: "   ", dataset: "" }, // dropped: no brief
+    { brief: "model churn" }, // name/dataset default to "" (server names it)
+  ]);
+  assert.deepEqual(jobs, [
+    { name: "Sales", brief: "chart monthly sales\nbroken out by region", dataset: "data/s.parquet" },
+    { name: "", brief: "model churn", dataset: "" },
+  ]);
+});
+
+test("cleanJobs: tolerates empty / missing input", () => {
+  assert.deepEqual(C.cleanJobs([]), []);
+  assert.deepEqual(C.cleanJobs(null), []);
+  assert.deepEqual(C.cleanJobs([{}, { brief: "" }]), []);
+});

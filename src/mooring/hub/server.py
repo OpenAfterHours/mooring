@@ -74,6 +74,12 @@ class Hub:
         # near-simultaneous clicks can't race the undo stack (single-user, rare clicks
         # — a global lock is plenty and keeps the snapshot/restore atomic).
         self._apply_lock = threading.Lock()
+        # Batch notebook-generation runs, keyed by a hub-minted batch_id. Each holds a
+        # ChatBroadcaster for SSE progress, an abort Event, and (when finished) the
+        # value-free per-job results the review tray + per-notebook Apply read. The
+        # builder sessions live and die inside the planner thread, not here.
+        self._batches: dict[str, dict] = {}
+        self._batch_lock = threading.Lock()
         # One AI provider reused across opens, so the provider's auth (45s TTL) and
         # model-list (300s TTL) caches actually hit instead of being rebuilt — and
         # thrown away — on every chat-open / models request. Keyed on the config that
@@ -105,6 +111,9 @@ class Hub:
         # Chat context (schema + notebook source) is bound to the old config;
         # drop sessions so a new chat picks up the new repo/workspace.
         self._close_all_chats()
+        # In-flight batches are bound to the old workspace too — cancel them (their
+        # un-reviewed proposals are lost; the UI warns not to switch repos mid-batch).
+        self._abort_all_batches()
         # The provider is shaped by [ai] provider/model — a reload may change them,
         # so drop the cached one (rebuilt lazily on next use).
         with self._provider_lock:
@@ -231,6 +240,7 @@ class Hub:
 
     def shutdown(self) -> None:
         self._close_all_chats()
+        self._abort_all_batches()
         for editor in self.editors.values():
             # Suppress per editor (mirrors _close_all_chats): one editor failing to
             # die must not leak the others' marimo trees or skip the lifespan's
@@ -368,6 +378,9 @@ class Hub:
             # project vs mooring's bundled env vs a frozen build). See _notebook_env.
             "env": self._notebook_env(cfg.workspace()),
             "ai_chat": self.app_cfg.ai_enabled,
+            # Whether the workspace-level "Batch build" entry should show (AI on AND
+            # the opt-in batch orchestrator enabled). The page itself re-gates.
+            "ai_batch": self.app_cfg.ai_enabled and self.app_cfg.ai_batch_enabled,
             # "local" = no repo configured: the UI shows the notebook surface
             # (list/new/open/edit/AI) backed by the local workspace, with sync hidden.
             # "repo" = a team repo is configured (login then unlocks sync).
@@ -1463,6 +1476,403 @@ class Hub:
             {"ok": True, "notebook": notebook, "ai_disabled": disabled, "closed_sessions": closed}
         )
 
+    # -- AI batch (the orchestrator) ------------------------------------------
+
+    def _abort_all_batches(self) -> None:
+        with self._batch_lock:
+            runs = list(self._batches.values())
+            self._batches.clear()
+        for run in runs:
+            run["abort"].set()
+            with contextlib.suppress(Exception):
+                if run.get("planner") is not None:
+                    run["planner"].close(cancel=True)
+            with contextlib.suppress(Exception):
+                run["broadcaster"].close()
+
+    def _reap_idle_batches(self) -> None:
+        """Drop batch runs that are caught up (no build in flight) and have had no
+        activity for the idle timeout, freeing their worker pool. A still-building run
+        is never reaped (its job events keep the broadcaster fresh)."""
+        timeout = self.app_cfg.ai_chat_idle_timeout
+        with self._batch_lock:
+            dead = [
+                bid
+                for bid, run in self._batches.items()
+                if run["status"] != "closed"
+                and run["planner"].is_idle()
+                and run["broadcaster"].idle_seconds() > timeout
+            ]
+            runs = [self._batches.pop(bid) for bid in dead]
+        for run in runs:
+            run["status"] = "closed"
+            with contextlib.suppress(Exception):
+                run["planner"].close()
+            with contextlib.suppress(Exception):
+                run["broadcaster"].close()
+
+    def _discard_batch_notebook(self, workspace: Path, notebook_rel: str) -> None:
+        """Best-effort remove the empty skeleton a non-built batch job left behind
+        (pii-blocked / failed / empty), so a batch doesn't litter the workspace. Path-
+        guarded via _ws_file; only ever a .py the batch itself just created and the
+        builder only PROPOSED into (never wrote), so no analyst work is lost."""
+        try:
+            target = self._ws_file(workspace, notebook_rel, suffix=".py")
+        except (ValueError, FileNotFoundError):
+            return
+        with contextlib.suppress(OSError):
+            target.unlink()
+
+    def _make_batch_session(
+        self, system_context, notebook_rel, model="", reasoning_effort=None, dictionary=None
+    ):
+        """A builder session for one batch notebook: the SAME value-free, background
+        copilot as the interactive chat (allowlist + deny-all + empty workdir + the
+        single egress assembler), with the outbound PII guard forced to BLOCK mode — a
+        batch has no human to click "Send anyway", so a held brief must stop the job,
+        never slip through in warn mode. NOT registered in self._chats; the planner
+        owns its lifecycle and closes it the moment the build finishes."""
+        from dataclasses import replace
+
+        provider = self._provider_for()
+        return provider.open_chat(
+            system_context=system_context,
+            workspace=self.cfg.workspace(),
+            folders=self.cfg.folders,
+            notebook_rel=notebook_rel,
+            model=model,
+            reasoning_effort=reasoning_effort,
+            dictionary=dictionary,
+            pii=replace(self.app_cfg.ai.pii, block_prompt=True),
+            background=True,
+        )
+
+    def _new_batch_planner(self, workspace: Path, broadcaster, abort):
+        """Build + start an appendable batch planner bound to this workspace, streaming
+        each value-free per-job lifecycle event over the run's broadcaster. The planner
+        owns one bounded worker pool for the run's whole life; ``add`` may be called
+        repeatedly while earlier jobs build, so the user can keep writing the next."""
+        from mooring import notebook_template
+        from mooring.ai.batch import BatchPlanner
+        from mooring.ai.chat import ChatEvent
+
+        def progress(ev):
+            broadcaster.touch()  # job activity keeps the run from being idle-reaped
+            broadcaster._broadcast(ChatEvent("job", ev))
+
+        planner = BatchPlanner(
+            config=self.app_cfg.ai.batch,
+            pii=self.app_cfg.ai.pii,
+            make_notebook=lambda name: notebook_template.create_unique(workspace, name),
+            build_context=lambda nb, ds: self._build_chat_context(workspace, nb, ds)[:2],
+            open_session=lambda ctx, nb, model, effort, dic: self._make_batch_session(
+                ctx, nb, model=model, reasoning_effort=(effort or None), dictionary=dic
+            ),
+            is_disabled=lambda nb: workspace_config.is_ai_disabled(workspace, nb),
+            discard_notebook=lambda nb: self._discard_batch_notebook(workspace, nb),
+            on_progress=progress,
+            abort=abort,
+        )
+        return planner.start()
+
+    def _parse_batch_jobs(self, raw_jobs):
+        """Validate a jobs payload into ``list[BatchJob]`` (value-free: name + brief +
+        dataset PATH). Returns ``(jobs, None)`` or ``(None, error_response)``. Shared by
+        open and add."""
+        from mooring.ai.batch import BatchJob
+
+        if not isinstance(raw_jobs, list) or not raw_jobs:
+            return None, JSONResponse({"error": "Provide at least one job."}, status_code=400)
+        jobs = []
+        for j in raw_jobs:
+            if not isinstance(j, dict):
+                return None, JSONResponse({"error": "Each job must be an object."}, status_code=400)
+            brief = str(j.get("brief", "")).strip()
+            if not brief:
+                return None, JSONResponse({"error": "Each job needs a brief."}, status_code=400)
+            jobs.append(
+                BatchJob(
+                    name=str(j.get("name", "")).strip(),
+                    brief=brief,
+                    dataset_rel=str(j.get("dataset", "")).strip(),
+                    model=str(j.get("model", "")).strip(),
+                    reasoning_effort=str(j.get("reasoning_effort", "")).strip(),
+                )
+            )
+        return jobs, None
+
+    async def api_batch_state(self, request: Request) -> JSONResponse:
+        """What the batch page needs to render: whether batch is enabled, its caps,
+        the value-free dataset paths for per-job dataset selection, and the theme."""
+        if not self.app_cfg.ai_enabled:
+            return JSONResponse({"enabled": False}, status_code=404)
+        from mooring import schema
+
+        cfg = self.cfg
+        datasets = await run_in_threadpool(schema.list_datasets, cfg.workspace(), cfg.folders)
+        return JSONResponse(
+            {
+                "enabled": self.app_cfg.ai_batch_enabled,
+                "max_jobs": self.app_cfg.ai_batch_max_jobs,
+                "max_concurrency": self.app_cfg.ai_batch_max_concurrency,
+                "pii_policy": self.app_cfg.ai_batch_pii_policy,
+                "datasets": datasets,
+                "ui_theme": self.app_cfg.ui_theme,
+            }
+        )
+
+    async def api_batch_open(self, request: Request) -> JSONResponse:
+        """Open a NEW batch queue and submit the first job(s). The run stays open so the
+        analyst can keep adding more (api_batch_add) while these build."""
+        if not self.app_cfg.ai_enabled:
+            return JSONResponse({"enabled": False}, status_code=404)
+        if not self.app_cfg.ai_batch_enabled:
+            return JSONResponse({"enabled": False, "reason": "batch_disabled"}, status_code=403)
+        data = await request.json()
+        jobs, err = self._parse_batch_jobs(data.get("jobs"))
+        if err is not None:
+            return err
+        max_jobs = self.app_cfg.ai_batch_max_jobs
+        if max_jobs and len(jobs) > max_jobs:
+            return JSONResponse(
+                {"error": f"This batch has {len(jobs)} jobs but the limit is {max_jobs}."},
+                status_code=400,
+            )
+        from mooring.ai.batch import BatchError
+        from mooring.ai.chat import ChatBroadcaster
+
+        self._reap_idle_batches()
+        workspace = self.cfg.workspace()
+        broadcaster = ChatBroadcaster()
+        abort = threading.Event()
+        planner = self._new_batch_planner(workspace, broadcaster, abort)
+        batch_id = secrets.token_urlsafe(9)
+        run = {
+            "broadcaster": broadcaster,
+            "abort": abort,
+            "planner": planner,
+            "status": "open",
+            "applied": set(),
+            "workspace": str(workspace),
+        }
+        with self._batch_lock:
+            self._batches[batch_id] = run
+        broadcaster.touch()
+        try:
+            # add() runs the PII pre-flight + mints the notebooks then submits builders;
+            # it returns quickly (the builds run in the pool), off the event loop.
+            await asyncio.to_thread(planner.add, jobs)
+        except BatchError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        telemetry.log_event("ai_batch_open", jobs=len(jobs))
+        return JSONResponse({"batch_id": batch_id, "jobs": len(jobs)})
+
+    async def api_batch_add(self, request: Request) -> JSONResponse:
+        """Queue MORE jobs onto an already-open run — so a job can be kicked off while
+        the next is still being written. Respects the cumulative max_jobs cap."""
+        if not self.app_cfg.ai_enabled:
+            return JSONResponse({"enabled": False}, status_code=404)
+        if not self.app_cfg.ai_batch_enabled:
+            return JSONResponse({"enabled": False, "reason": "batch_disabled"}, status_code=403)
+        data = await request.json()
+        batch_id = str(data.get("batch_id", ""))
+        with self._batch_lock:
+            run = self._batches.get(batch_id)
+        if run is None:
+            return JSONResponse({"error": "Unknown batch."}, status_code=404)
+        if run["status"] == "closed":
+            return JSONResponse({"error": "This batch is finished."}, status_code=409)
+        jobs, err = self._parse_batch_jobs(data.get("jobs"))
+        if err is not None:
+            return err
+        from mooring.ai.batch import BatchError
+
+        run["broadcaster"].touch()
+        try:
+            indices = await asyncio.to_thread(run["planner"].add, jobs)
+        except BatchError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        telemetry.log_event("ai_batch_add", jobs=len(jobs))
+        return JSONResponse({"ok": True, "added": len(indices)})
+
+    async def api_batch_refine(self, request: Request) -> JSONResponse:
+        """Re-build ONE built notebook's proposal with the analyst's revision note, so a
+        proposal can be tweaked in the tray before it's Applied. The note runs the
+        non-interactive PII gate; the notebook file is never written; a poor revision
+        keeps the previous proposal."""
+        if not self.app_cfg.ai_enabled:
+            return JSONResponse({"enabled": False}, status_code=404)
+        if not self.app_cfg.ai_batch_enabled:
+            return JSONResponse({"enabled": False, "reason": "batch_disabled"}, status_code=403)
+        data = await request.json()
+        batch_id = str(data.get("batch_id", ""))
+        with self._batch_lock:
+            run = self._batches.get(batch_id)
+        if run is None:
+            return JSONResponse({"error": "Unknown batch."}, status_code=404)
+        if run["status"] == "closed":
+            return JSONResponse({"error": "This batch is finished."}, status_code=409)
+        try:
+            job_idx = int(data.get("job"))
+        except (TypeError, ValueError):
+            return JSONResponse({"error": "A job index is required."}, status_code=400)
+        feedback = str(data.get("feedback", ""))
+        run["broadcaster"].touch()
+        from mooring.ai.batch import BatchError
+
+        try:
+            await asyncio.to_thread(run["planner"].refine, job_idx, feedback)
+        except BatchError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        telemetry.log_event("ai_batch_refine")
+        return JSONResponse({"ok": True})
+
+    async def api_batch_stream(self, request: Request) -> StreamingResponse | JSONResponse:
+        batch_id = request.path_params["batch_id"]
+        with self._batch_lock:
+            run = self._batches.get(batch_id)
+        if run is None:
+            return JSONResponse({"error": "Unknown batch."}, status_code=404)
+        return StreamingResponse(
+            self._batch_sse_gen(run),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    async def _batch_sse_gen(self, run):
+        broadcaster = run["broadcaster"]
+        q = broadcaster.subscribe()
+        try:
+            yield ": connected\n\n"
+            # An appendable run streams 'job' events for its whole life (no single
+            # terminal 'done' — the user keeps adding). A late subscriber catches up via
+            # GET /tray; here we just stream live events. If the run was already closed
+            # (reaped / repo switch), say so instead of pinging forever.
+            if run["status"] == "closed":
+                yield "event: closed\ndata: {}\n\n"
+                return
+            while True:
+                try:
+                    event = await asyncio.to_thread(q.get, True, 15.0)
+                except queue.Empty:
+                    yield ": ping\n\n"
+                    continue
+                yield f"event: {event.kind}\ndata: {json.dumps(event.data)}\n\n"
+                if event.kind == "closed":
+                    break
+        finally:
+            broadcaster.unsubscribe(q)
+
+    async def api_batch_tray(self, request: Request) -> JSONResponse:
+        batch_id = request.path_params["batch_id"]
+        with self._batch_lock:
+            run = self._batches.get(batch_id)
+        if run is None:
+            return JSONResponse({"error": "Unknown batch."}, status_code=404)
+        snapshot = run["planner"].snapshot()
+        return JSONResponse(
+            {
+                "status": run["status"],
+                "pending": run["planner"].pending,
+                "jobs": self._batch_tray_jobs(run, snapshot),
+            }
+        )
+
+    def _batch_tray_jobs(self, run, results) -> list[dict]:
+        """Value-free per-job view for the live review tray: status, the user's own
+        brief, and each proposal's source/diff (never a data value). In-flight jobs show
+        as queued/building with no proposals yet; built jobs carry their proposals."""
+        applied = run["applied"]
+        refining = run["planner"].refining_indices()
+        out = []
+        for idx, res in enumerate(results):
+            proposals = [
+                {
+                    "proposal": j,
+                    "kind": str(p.get("kind", "append")),
+                    "rationale": str(p.get("rationale", "")),
+                    "code": str(p.get("code", "")),
+                    "diffs": p.get("diffs", []),
+                    "applied": (idx, j) in applied,
+                }
+                for j, p in enumerate(res.proposals)
+            ]
+            out.append(
+                {
+                    "index": idx, "name": res.job.name, "brief": res.job.brief,
+                    "notebook": res.notebook_rel, "status": res.status, "error": res.error,
+                    "pii": res.pii, "proposals": proposals, "refining": idx in refining,
+                }
+            )
+        return out
+
+    async def api_batch_apply(self, request: Request) -> JSONResponse:
+        """Apply ONE proposal from a finished batch into its notebook — the human's
+        per-notebook authorization. Reuses the SAME single-notebook write path as the
+        chat Apply (_apply_with_undo: snapshot + _apply_lock + per-notebook opt-out
+        re-check), so there is no autonomous-write path; only the review is batched."""
+        if not self.app_cfg.ai_enabled:
+            return JSONResponse({"enabled": False}, status_code=404)
+        data = await request.json()
+        batch_id = str(data.get("batch_id", ""))
+        with self._batch_lock:
+            run = self._batches.get(batch_id)
+        if run is None:
+            return JSONResponse({"error": "Unknown batch."}, status_code=404)
+        results = run["planner"].snapshot()
+        try:
+            job_idx = int(data.get("job"))
+            prop_idx = int(data.get("proposal", 0))
+        except (TypeError, ValueError):
+            return JSONResponse({"error": "A job and proposal index are required."}, status_code=400)
+        if not 0 <= job_idx < len(results):
+            return JSONResponse({"error": "No such job."}, status_code=404)
+        res = results[job_idx]
+        if res.notebook_rel is None or not 0 <= prop_idx < len(res.proposals):
+            return JSONResponse({"error": "No such proposal."}, status_code=404)
+        # Idempotent: a re-submit of an already-applied proposal (e.g. a tray re-render
+        # re-armed the button) is a no-op, so the same cell can never be appended twice.
+        with self._batch_lock:
+            if (job_idx, prop_idx) in run["applied"]:
+                return JSONResponse({"ok": True, "noop": True})
+        proposal = res.proposals[prop_idx]
+        ops = proposal.get("ops")
+        if isinstance(ops, list) and ops:
+            op_dicts = ops
+        elif str(proposal.get("code", "")).strip():
+            op_dicts = [{"op": "append", "code": proposal["code"]}]
+        else:
+            return JSONResponse({"error": "Nothing to apply."}, status_code=400)
+        workspace = Path(run["workspace"])
+        notebook_rel = res.notebook_rel
+        from mooring.ai.cellwrite import CellApplyConflict, CellWriteError
+
+        try:
+            nb_path = self._ws_file(workspace, notebook_rel, suffix=".py")
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        except FileNotFoundError:
+            return JSONResponse({"error": f"No such notebook: {notebook_rel}"}, status_code=404)
+        try:
+            undo_depth = await asyncio.to_thread(
+                self._apply_with_undo, nb_path, workspace, notebook_rel, op_dicts
+            )
+        except PermissionError:
+            return JSONResponse({"enabled": False, "reason": "notebook_disabled"}, status_code=403)
+        except CellApplyConflict as exc:
+            return JSONResponse({"error": str(exc)}, status_code=409)
+        except CellWriteError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=502)
+        with self._batch_lock:
+            run["applied"].add((job_idx, prop_idx))
+        telemetry.log_event("ai_batch_apply")
+        return JSONResponse({"ok": True, "can_undo": undo_depth > 0, "undo_depth": undo_depth})
+
+    def batch_page(self, request: Request) -> HTMLResponse | JSONResponse:
+        if not self.app_cfg.ai_enabled:
+            return JSONResponse({"error": "The AI copilot is disabled."}, status_code=404)
+        return self._themed_page("batch.html")
+
 
 def create_app(hub: Hub) -> Starlette:
     static = _static_dir()
@@ -1513,6 +1923,14 @@ def create_app(hub: Hub) -> Starlette:
             Route("/api/ai/chat/apply", hub.api_chat_apply, methods=["POST"]),
             Route("/api/ai/chat/rollback", hub.api_chat_rollback, methods=["POST"]),
             Route("/api/ai/notebook/toggle", hub.api_notebook_ai_toggle, methods=["POST"]),
+            Route("/ai/batch", hub.batch_page),
+            Route("/api/ai/batch/state", hub.api_batch_state),
+            Route("/api/ai/batch/open", hub.api_batch_open, methods=["POST"]),
+            Route("/api/ai/batch/add", hub.api_batch_add, methods=["POST"]),
+            Route("/api/ai/batch/stream/{batch_id}", hub.api_batch_stream),
+            Route("/api/ai/batch/tray/{batch_id}", hub.api_batch_tray),
+            Route("/api/ai/batch/apply", hub.api_batch_apply, methods=["POST"]),
+            Route("/api/ai/batch/refine", hub.api_batch_refine, methods=["POST"]),
             Mount("/static", StaticFiles(directory=static)),
         ],
         lifespan=lifespan,

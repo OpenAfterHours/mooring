@@ -4,7 +4,7 @@ import platformdirs
 import pytest
 
 from mooring import paths
-from mooring.ai_config import AiConfig, PiiConfig
+from mooring.ai_config import AiConfig, BatchConfig, PiiConfig
 from mooring.config import load_app_config, load_config
 
 
@@ -39,6 +39,34 @@ def test_ai_pii_toml_and_env_populate_the_nested_object(tmp_path):
     # env overrides the file, written straight onto the nested object
     app2 = load_app_config(user_config_path=user, env={"MOORING_AI_PII": "0"})
     assert app2.ai.pii.enabled is False
+
+
+def test_ai_batch_config_defaults_off_with_caps(tmp_path):
+    # The batch orchestrator is OFF by default, with conservative resource caps and a
+    # non-interactive PII policy that defaults to blocking just the offending job.
+    app = load_app_config(user_config_path=tmp_path / "missing.toml", env={})
+    assert isinstance(app.ai.batch, BatchConfig)
+    assert app.ai.batch.enabled is False
+    assert app.ai_batch_enabled is False  # flat shim agrees
+    assert app.ai_batch_max_jobs == 20
+    assert app.ai_batch_max_concurrency == 3
+    assert app.ai_batch_pii_policy == "block_job"
+
+
+def test_ai_batch_toml_and_env_populate_the_nested_object(tmp_path):
+    user = tmp_path / "config.toml"
+    user.write_text(
+        "[ai.batch]\nenabled = true\nmax_jobs = 5\nmax_concurrency = 2\n"
+        'pii_policy = "block_batch"\n',
+        "utf-8",
+    )
+    app = load_app_config(user_config_path=user, env={})
+    assert app.ai.batch.enabled is True
+    assert app.ai_batch_max_jobs == 5 and app.ai_batch_max_concurrency == 2
+    assert app.ai_batch_pii_policy == "block_batch"
+    # env overrides the file, written straight onto the nested object
+    app2 = load_app_config(user_config_path=user, env={"MOORING_AI_BATCH": "0"})
+    assert app2.ai.batch.enabled is False
 
 
 def test_ai_pii_name_backend_defaults_and_parses(tmp_path):

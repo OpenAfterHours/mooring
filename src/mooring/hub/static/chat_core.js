@@ -234,6 +234,31 @@ var ChatCore = (function () {
     return "PII pre-flight scan could not run — your message was sent unchecked.";
   }
 
+  // -- batch jobs -----------------------------------------------------------
+  // The batch composer is a list of per-notebook cards, each with its OWN free-form
+  // brief (multi-line, as detailed as the analyst likes — bullet points, columns,
+  // the charts they want), an optional name, and an optional dataset PATH. A textarea
+  // per job is what lets a brief be detailed: there is no line/blank-line/`---`
+  // delimiter to collide with the prose. cleanJobs takes the raw rows read off the
+  // form and returns the jobs to submit: trim each field, KEEP internal newlines, and
+  // drop any row with no brief. It deliberately does NOT derive a name — the server
+  // names an unnamed job from its brief. Value-free by construction: a brief is an
+  // instruction and a dataset is a path, and the brief still passes the outbound PII
+  // gate (the non-interactive batch policy) before it reaches the model.
+  function cleanJobs(rows) {
+    const out = [];
+    for (const r of rows || []) {
+      const brief = String((r && r.brief) || "").trim();
+      if (!brief) continue;
+      out.push({
+        name: String((r && r.name) || "").trim(),
+        brief: brief,
+        dataset: String((r && r.dataset) || "").trim(),
+      });
+    }
+    return out;
+  }
+
   // -- conservative Python highlight, XSS-safe by contract -----------------
   // MUST be called with text that is ALREADY HTML-escaped. It runs in a SINGLE
   // pass and only wraps <span>s around whole source tokens (comment / string /
@@ -278,6 +303,7 @@ var ChatCore = (function () {
     piiBadge,
     scanErrorMessage,
     highlightCode,
+    cleanJobs,
     PY_KW,
   };
 })();

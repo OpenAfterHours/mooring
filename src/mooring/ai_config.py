@@ -52,6 +52,29 @@ class PiiConfig:
 
 
 @dataclass(frozen=True)
+class BatchConfig:
+    """Unattended batch notebook generation (the orchestrator). Default OFF.
+
+    ``enabled`` is the master switch. ``max_jobs`` and ``max_concurrency`` are the
+    load-bearing safety caps: each builder is a full Copilot session (a ~150 MB CLI
+    subprocess + an event-loop thread) against ONE account's premium-request quota,
+    with no SDK throttle — so the planner runs at most ``max_concurrency`` builders
+    at once and refuses a batch larger than ``max_jobs``. ``pii_policy`` is the
+    NON-interactive PII decision (there is no human at the prompt to confirm): a
+    structured-PII hit in a brief either skips that job (``"block_job"``) or aborts
+    the whole batch (``"block_batch"``) — it is NEVER auto-confirmed. There is no
+    autonomous-write knob: builders only PROPOSE; a human still Applies each notebook.
+    """
+
+    enabled: bool = False
+    max_jobs: int = 20
+    max_concurrency: int = 3
+    job_timeout: int = 180  # wall-clock seconds to build one notebook
+    follow_up_turns: int = 0  # bounded extra "keep going" turns to fatten a thin build
+    pii_policy: str = "block_job"  # "block_job" | "block_batch"
+
+
+@dataclass(frozen=True)
 class AiConfig:
     enabled: bool = True
     provider: str = "copilot"
@@ -63,6 +86,7 @@ class AiConfig:
     context_max_kb: int = 256
     live_schema: bool = True
     pii: PiiConfig = field(default_factory=PiiConfig)
+    batch: BatchConfig = field(default_factory=BatchConfig)
 
 
 def _as_bool(value: object, default: bool) -> bool:
@@ -113,6 +137,21 @@ def load_ai_config(ai: Mapping, env: Mapping[str, str]) -> AiConfig:
         name_labels=_str_list(p.get("name_labels"), ("person", "name")),
         name_threshold=float(env.get("MOORING_AI_PII_NAME_THRESHOLD", p.get("name_threshold", 0.7))),
     )
+    b = ai.get("batch", {})
+    if not isinstance(b, Mapping):
+        b = {}
+    batch = BatchConfig(
+        enabled=_as_bool(env.get("MOORING_AI_BATCH"), _as_bool(b.get("enabled"), False)),
+        max_jobs=int(env.get("MOORING_AI_BATCH_MAX_JOBS", b.get("max_jobs", 20))),
+        max_concurrency=int(
+            env.get("MOORING_AI_BATCH_MAX_CONCURRENCY", b.get("max_concurrency", 3))
+        ),
+        job_timeout=int(env.get("MOORING_AI_BATCH_JOB_TIMEOUT_SEC", b.get("job_timeout_sec", 180))),
+        follow_up_turns=int(
+            env.get("MOORING_AI_BATCH_FOLLOW_UP_TURNS", b.get("follow_up_turns", 0))
+        ),
+        pii_policy=env.get("MOORING_AI_BATCH_PII_POLICY", str(b.get("pii_policy", "block_job"))),
+    )
     return AiConfig(
         enabled=_as_bool(env.get("MOORING_AI_ENABLED"), _as_bool(ai.get("enabled"), True)),
         provider=env.get("MOORING_AI_PROVIDER", str(ai.get("provider", "copilot"))),
@@ -126,4 +165,5 @@ def load_ai_config(ai: Mapping, env: Mapping[str, str]) -> AiConfig:
         context_max_kb=int(env.get("MOORING_AI_CONTEXT_MAX_KB", ai.get("context_max_kb", 256))),
         live_schema=_as_bool(env.get("MOORING_AI_LIVE_SCHEMA"), _as_bool(ai.get("live_schema"), True)),
         pii=pii,
+        batch=batch,
     )

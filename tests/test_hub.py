@@ -1403,3 +1403,234 @@ def test_ai_login_start_surfaces_connect_failure_as_502(unconfigured_client, mon
     resp = client.post("/api/ai/login/start", json={})
     assert resp.status_code == 502
     assert "Copilot CLI" in resp.json()["error"]
+
+
+# -- AI batch (orchestrator) ------------------------------------------------
+
+
+@pytest.fixture
+def batch_client(tmp_path, monkeypatch):
+    """A hub with batch ENABLED, whose builder is the no-LLM stub (each turn proposes
+    one cell), so the full open -> build -> tray -> apply loop runs without Copilot."""
+    from mooring.ai.chat import StubChatSession
+    from mooring.ai_config import AiConfig, BatchConfig
+
+    monkeypatch.setattr(paths, "user_config_dir", lambda: tmp_path / "appdata")
+    monkeypatch.delenv("MOORING_TOKEN", raising=False)
+    monkeypatch.delenv("MOORING_GITHUB_HOST", raising=False)
+    spec = config.RepoSpec(alias="ws", owner="", repo="", workspace_path=str(tmp_path / "ws"))
+    ai = AiConfig(batch=BatchConfig(enabled=True, max_jobs=5, max_concurrency=2, job_timeout=3))
+    hub = Hub(config.AppConfig(repos=(spec,), active_alias="ws", ai=ai))
+    hub.cfg.workspace().mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(
+        Hub,
+        "_make_batch_session",
+        lambda self, ctx, nb, model="", reasoning_effort=None, dictionary=None: StubChatSession(
+            system_context=ctx
+        ),
+    )
+    with TestClient(create_app(hub)) as client:
+        yield client, hub
+
+
+def _wait_caught_up(client, batch_id, timeout=15):
+    """Poll the live tray until the queue is caught up (no build pending)."""
+    import time
+
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        tray = client.get(f"/api/ai/batch/tray/{batch_id}").json()
+        if tray.get("pending", 1) == 0 and tray["jobs"]:
+            return tray
+        time.sleep(0.05)
+    raise AssertionError("batch did not finish in time")
+
+
+def _run_batch(client, jobs, timeout=15):
+    opened = client.post("/api/ai/batch/open", json={"jobs": jobs})
+    assert opened.status_code == 200, opened.text
+    batch_id = opened.json()["batch_id"]
+    return batch_id, _wait_caught_up(client, batch_id, timeout)
+
+
+def test_batch_open_disabled_by_default_403(unconfigured_client):
+    client, _ = unconfigured_client  # batch defaults OFF
+    resp = client.post("/api/ai/batch/open", json={"jobs": [{"brief": "x"}]})
+    assert resp.status_code == 403
+    assert resp.json()["reason"] == "batch_disabled"
+
+
+def test_batch_builds_notebooks_and_tray_lists_them(batch_client):
+    client, hub = batch_client
+    _bid, tray = _run_batch(
+        client, [{"name": "sales", "brief": "summarise sales"}, {"name": "churn", "brief": "model churn"}]
+    )
+    assert tray["status"] == "open"  # the queue stays open so the user can add more
+    by_name = {j["name"]: j for j in tray["jobs"]}
+    assert by_name["sales"]["status"] == "built" and by_name["churn"]["status"] == "built"
+    # Each job created a fresh notebook with at least one reviewable proposal.
+    assert by_name["sales"]["notebook"] == "notebooks/sales.py"
+    assert by_name["sales"]["proposals"] and by_name["sales"]["proposals"][0]["code"]
+    assert (hub.cfg.workspace() / "notebooks/sales.py").is_file()
+
+
+def test_batch_apply_writes_the_proposal_into_the_notebook(batch_client):
+    client, hub = batch_client
+    bid, tray = _run_batch(client, [{"name": "rev", "brief": "chart revenue"}])
+    job = tray["jobs"][0]
+    assert job["status"] == "built"
+    resp = client.post("/api/ai/batch/apply", json={"batch_id": bid, "job": 0, "proposal": 0})
+    assert resp.status_code == 200 and resp.json()["ok"] is True
+    nb = (hub.cfg.workspace() / "notebooks/rev.py").read_text("utf-8")
+    assert "df.describe()" in nb  # the stub's proposed cell landed
+    assert "﻿" not in nb  # no BOM
+
+
+def test_batch_apply_unknown_batch_404(batch_client):
+    client, _ = batch_client
+    resp = client.post("/api/ai/batch/apply", json={"batch_id": "nope", "job": 0, "proposal": 0})
+    assert resp.status_code == 404
+
+
+def test_batch_refine_folds_note_into_brief_and_rebuilds(batch_client):
+    # Iterate on a built notebook's proposal before applying: the note is folded into the
+    # brief and the notebook is re-built, all without writing the file.
+    client, hub = batch_client
+    bid, tray = _run_batch(client, [{"name": "rev", "brief": "chart revenue"}])
+    assert tray["jobs"][0]["status"] == "built"
+    resp = client.post(
+        "/api/ai/batch/refine", json={"batch_id": bid, "job": 0, "feedback": "use a bar chart"}
+    )
+    assert resp.status_code == 200 and resp.json()["ok"] is True
+    tray2 = _wait_caught_up(client, bid)
+    job = tray2["jobs"][0]
+    assert job["status"] == "built"
+    assert "use a bar chart" in job["brief"]  # the revision note was folded in
+    # The notebook on disk is still the skeleton — nothing applied yet.
+    nb = (hub.cfg.workspace() / "notebooks/rev.py").read_text("utf-8")
+    assert "df.describe()" not in nb
+
+
+def test_batch_refine_unknown_batch_404(batch_client):
+    client, _ = batch_client
+    resp = client.post("/api/ai/batch/refine", json={"batch_id": "nope", "job": 0, "feedback": "x"})
+    assert resp.status_code == 404
+
+
+def test_batch_threads_per_job_model_and_effort(batch_client, monkeypatch):
+    # The batch page lets the analyst pick a model/effort; it must reach the builder.
+    from mooring.ai.chat import StubChatSession
+
+    client, _ = batch_client
+    seen = []
+
+    def fake(self, ctx, nb, model="", reasoning_effort=None, dictionary=None):
+        seen.append((model, reasoning_effort))
+        return StubChatSession(system_context=ctx)
+
+    monkeypatch.setattr(Hub, "_make_batch_session", fake)
+    _run_batch(
+        client,
+        [{"name": "m", "brief": "x", "model": "claude-opus", "reasoning_effort": "high"}],
+    )
+    assert ("claude-opus", "high") in seen
+
+
+def test_batch_apply_is_idempotent(batch_client):
+    # A repeat apply (e.g. a tray re-render re-armed the button) is a no-op, so the same
+    # cell can never be appended twice.
+    client, hub = batch_client
+    bid, tray = _run_batch(client, [{"name": "rev", "brief": "chart revenue"}])
+    assert tray["jobs"][0]["status"] == "built"
+    first = client.post("/api/ai/batch/apply", json={"batch_id": bid, "job": 0, "proposal": 0})
+    assert first.status_code == 200 and first.json().get("noop") is not True
+    second = client.post("/api/ai/batch/apply", json={"batch_id": bid, "job": 0, "proposal": 0})
+    assert second.status_code == 200 and second.json().get("noop") is True
+    nb = (hub.cfg.workspace() / "notebooks/rev.py").read_text("utf-8")
+    assert nb.count("df.describe()") == 1  # applied exactly once
+
+
+def test_batch_open_rejects_more_than_max_jobs(batch_client):
+    client, _ = batch_client  # max_jobs = 5
+    jobs = [{"brief": f"job {i}"} for i in range(6)]
+    resp = client.post("/api/ai/batch/open", json={"jobs": jobs})
+    assert resp.status_code == 400 and "limit is 5" in resp.json()["error"]
+
+
+def test_batch_open_requires_a_brief_per_job(batch_client):
+    client, _ = batch_client
+    resp = client.post("/api/ai/batch/open", json={"jobs": [{"name": "x"}]})
+    assert resp.status_code == 400
+
+
+def test_batch_state_reports_caps_and_datasets(batch_client):
+    client, _ = batch_client
+    state = client.get("/api/ai/batch/state").json()
+    assert state["enabled"] is True
+    assert state["max_jobs"] == 5 and state["max_concurrency"] == 2
+    assert "datasets" in state
+
+
+def test_state_reports_ai_batch_flag(unconfigured_client, batch_client):
+    # The hub's "Batch build" button shows only when the opt-in orchestrator is on.
+    plain_client, _ = unconfigured_client  # batch defaults OFF
+    assert plain_client.get("/api/state").json()["ai_batch"] is False
+    on_client, _ = batch_client  # [ai.batch] enabled
+    assert on_client.get("/api/state").json()["ai_batch"] is True
+
+
+def test_batch_page_served_when_ai_enabled(unconfigured_client):
+    client, _ = unconfigured_client
+    resp = client.get("/ai/batch")
+    assert resp.status_code == 200 and "batch builder" in resp.text
+
+
+def test_batch_page_404_when_ai_off(tmp_path, monkeypatch):
+    monkeypatch.setattr(paths, "user_config_dir", lambda: tmp_path / "appdata")
+    spec = config.RepoSpec(alias="ws", owner="", repo="", workspace_path=str(tmp_path / "ws"))
+    hub = Hub(config.AppConfig(repos=(spec,), active_alias="ws", ai=config.AiConfig(enabled=False)))
+    with TestClient(create_app(hub)) as client:
+        assert client.get("/ai/batch").status_code == 404
+        assert client.post("/api/ai/batch/open", json={"jobs": [{"brief": "x"}]}).status_code == 404
+
+
+def test_batch_add_appends_more_jobs_to_an_open_run(batch_client):
+    # Kick off one job, then add another to the SAME run while it builds — the tray
+    # accumulates both. This is the "write the next while the first runs" workflow.
+    client, hub = batch_client
+    opened = client.post("/api/ai/batch/open", json={"jobs": [{"name": "first", "brief": "do a"}]})
+    bid = opened.json()["batch_id"]
+    added = client.post(
+        "/api/ai/batch/add", json={"batch_id": bid, "jobs": [{"name": "second", "brief": "do b"}]}
+    )
+    assert added.status_code == 200 and added.json()["added"] == 1
+    tray = _wait_caught_up(client, bid)
+    names = {j["name"] for j in tray["jobs"]}
+    assert names == {"first", "second"}
+    assert all(j["status"] == "built" for j in tray["jobs"])
+    assert (hub.cfg.workspace() / "notebooks/first.py").is_file()
+    assert (hub.cfg.workspace() / "notebooks/second.py").is_file()
+
+
+def test_batch_add_enforces_cumulative_cap(batch_client):
+    client, _ = batch_client  # max_jobs = 5
+    bid = client.post(
+        "/api/ai/batch/open", json={"jobs": [{"brief": f"j{i}"} for i in range(4)]}
+    ).json()["batch_id"]
+    _wait_caught_up(client, bid)
+    # 4 already + 2 more would be 6 > 5
+    resp = client.post(
+        "/api/ai/batch/add", json={"batch_id": bid, "jobs": [{"brief": "x"}, {"brief": "y"}]}
+    )
+    assert resp.status_code == 400 and "limit of 5" in resp.json()["error"]
+
+
+def test_batch_add_unknown_batch_404(batch_client):
+    client, _ = batch_client
+    resp = client.post("/api/ai/batch/add", json={"batch_id": "nope", "jobs": [{"brief": "x"}]})
+    assert resp.status_code == 404
+
+
+def test_batch_stream_unknown_batch_404(batch_client):
+    client, _ = batch_client
+    assert client.get("/api/ai/batch/stream/nope").status_code == 404
