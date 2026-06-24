@@ -235,6 +235,30 @@ class AppConfig:
     def ai_pii_name_threshold(self) -> float:
         return self.ai.pii.name_threshold
 
+    @property
+    def ai_batch_enabled(self) -> bool:
+        return self.ai.batch.enabled
+
+    @property
+    def ai_batch_max_jobs(self) -> int:
+        return self.ai.batch.max_jobs
+
+    @property
+    def ai_batch_max_concurrency(self) -> int:
+        return self.ai.batch.max_concurrency
+
+    @property
+    def ai_batch_job_timeout(self) -> int:
+        return self.ai.batch.job_timeout
+
+    @property
+    def ai_batch_follow_up_turns(self) -> int:
+        return self.ai.batch.follow_up_turns
+
+    @property
+    def ai_batch_pii_policy(self) -> str:
+        return self.ai.batch.pii_policy
+
 
 def _str_list(raw: object, key: str) -> tuple[str, ...]:
     """Coerce a ``[sync]`` array value to a tuple of strings.

@@ -424,6 +424,8 @@ async function refresh() {
   for (const id of ["btn-pull", "btn-push", "btn-propose"]) {
     $(id).classList.toggle("hidden", !state.logged_in);
   }
+  // Workspace-level "Batch build" — only when the opt-in orchestrator is enabled.
+  $("btn-batch").classList.toggle("hidden", !state.ai_batch);
   // No team Pull in local mode, so don't dangle it in the empty-state hint.
   $("empty-hint").innerHTML = localMode
     ? "No notebooks yet &mdash; click <b>New notebook</b> to create one."
@@ -594,6 +596,10 @@ $("btn-propose").addEventListener("click", () => {
 $("btn-new").addEventListener("click", () => {
   const name = prompt("Notebook name (e.g. sales-analysis):");
   if (name) action("/api/new", { name });
+});
+// Batch build opens the workspace-level page in its own (reused) tab, beside the hub.
+$("btn-batch").addEventListener("click", () => {
+  window.open("/ai/batch", "mooringBatch");
 });
 $("connect-repo").addEventListener("click", () => {
   showAddRepo = true;
