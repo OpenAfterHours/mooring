@@ -78,7 +78,9 @@ def _parse_file(path: Path, rel: str, domain: str, max_file_bytes: int, workspac
         return [], ParseReport(rel, domain, "error", error=str(exc))
     if len(raw) > max_file_bytes:
         return [], ParseReport(
-            rel, domain, "error",
+            rel,
+            domain,
+            "error",
             error=f"file is {len(raw) // 1024} KiB (cap {max_file_bytes // 1024} KiB) - split it",
         )
     try:
@@ -94,7 +96,7 @@ def _parse_file(path: Path, rel: str, domain: str, max_file_bytes: int, workspac
 
     mapping = _load_mapping(path, workspace_resolved)
     dropped: set[str] = set()
-    shape = mapping.get("format") if mapping else detect(data)
+    shape = (mapping.get("format") if mapping else None) or detect(data)
     parser = PARSERS.get(shape, PARSERS["generic"])
     # Honour the "never raises for a bad file" contract: any parser error on a
     # valid-but-oddly-typed YAML degrades to an error report, never a crash.

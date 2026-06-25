@@ -33,9 +33,7 @@ def test_get_branch_head():
 
 @responses.activate
 def test_get_tree_filters_to_configured_folders():
-    responses.add(
-        responses.GET, f"{REPO}/git/commits/c0ffee", json={"tree": {"sha": "tree1"}}
-    )
+    responses.add(responses.GET, f"{REPO}/git/commits/c0ffee", json={"tree": {"sha": "tree1"}})
     responses.add(
         responses.GET,
         f"{REPO}/git/trees/tree1",
@@ -55,12 +53,8 @@ def test_get_tree_filters_to_configured_folders():
 
 @responses.activate
 def test_get_tree_truncated_is_an_error():
-    responses.add(
-        responses.GET, f"{REPO}/git/commits/c0ffee", json={"tree": {"sha": "tree1"}}
-    )
-    responses.add(
-        responses.GET, f"{REPO}/git/trees/tree1", json={"truncated": True, "tree": []}
-    )
+    responses.add(responses.GET, f"{REPO}/git/commits/c0ffee", json={"tree": {"sha": "tree1"}})
+    responses.add(responses.GET, f"{REPO}/git/trees/tree1", json={"truncated": True, "tree": []})
     with pytest.raises(GitHubError, match="too large"):
         client().get_tree("c0ffee", ("notebooks",))
 
@@ -85,6 +79,7 @@ def test_put_file_sends_base_sha_and_returns_new_sha():
     result = client().put_file("notebooks/a.py", b"data", "msg", "main", base_sha="oldsha")
     assert result["content"]["sha"] == "newsha"
     body = responses.calls[0].request.body
+    assert isinstance(body, bytes)
     assert b'"sha": "oldsha"' in body
     assert base64.b64encode(b"data") in body
 
@@ -120,6 +115,7 @@ def test_create_ref_posts_branch_ref():
     )
     client().create_ref("mooring/phil/20260612-0900", "c0ffee")
     body = responses.calls[0].request.body
+    assert isinstance(body, bytes)
     assert b'"ref": "refs/heads/mooring/phil/20260612-0900"' in body
     assert b'"sha": "c0ffee"' in body
 

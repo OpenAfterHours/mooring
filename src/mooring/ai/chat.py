@@ -16,9 +16,13 @@ import secrets as _secrets
 import threading
 import time
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 from mooring.ai import egress
 from mooring.ai.base import AIError
+
+if TYPE_CHECKING:
+    from mooring.ai.ner import ModelRef
 
 # Re-exported for backward compatibility — the assembler itself now lives in
 # mooring.ai.egress, the single outbound-scrub choke point.
@@ -73,7 +77,7 @@ class ChatBroadcaster:
         self._pii_names = False
         self._pii_name_labels: tuple[str, ...] | None = None
         self._pii_name_threshold = 0.7
-        self._pii_name_model: str | None = None
+        self._pii_name_model: "ModelRef | str | None" = None
         self._pii_name_backend = "auto"  # resolved to "gliner"/"spacy" by configure_pii
         # NER model readiness, surfaced to the UI via "ner" events (prepare_pii_model):
         # the model downloads in the background on first use; until ready the name
@@ -165,7 +169,7 @@ class ChatBroadcaster:
         names: bool = False,
         labels: tuple[str, ...] | None = None,
         threshold: float = 0.7,
-        model: str | None = None,
+        model: "ModelRef | str | None" = None,
         backend: str = "auto",
     ) -> None:
         """Arm the prompt guard for this session (called at construction).
@@ -329,7 +333,9 @@ class ChatBroadcaster:
             if self._pii_name_backend == "spacy":
                 from mooring.ai import ner_spacy
 
-                ner_spacy.load(self._pii_name_model if isinstance(self._pii_name_model, str) else "")
+                ner_spacy.load(
+                    self._pii_name_model if isinstance(self._pii_name_model, str) else ""
+                )
             else:
                 from mooring.ai import ner
 

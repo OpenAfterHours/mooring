@@ -55,7 +55,7 @@ _LIVE_ERRORS = (marimo_rt.MarimoTransportError, marimo_rt.MarimoTooOld, OSError,
 # user already imported (polars/pandas). Names are `_`-prefixed so marimo treats
 # them as cell-local (no reactive-graph edges, no multiple-definition errors).
 
-_COLLECT_SRC = '''
+_COLLECT_SRC = """
 def _mooring_safe_dtype(_dt):
     _s = str(_dt)
     # polars Enum embeds author-defined category strings in its repr; keep the
@@ -94,9 +94,9 @@ def _mooring_collect_schemas(_ns):
             continue
         _frames.append({"name": str(_name), "columns": _cols, "n_rows": _n})
     return {"frames": _frames}
-'''
+"""
 
-_PROBE_WRAPPER = '''
+_PROBE_WRAPPER = """
 def _mooring_probe(_path):
     import json as _json, os as _os
     try:
@@ -110,7 +110,7 @@ def _mooring_probe(_path):
         _os.replace(_tmp, _path)
     except Exception:
         pass
-'''
+"""
 
 # The collection logic, exec'd here so the SAME source the kernel runs is also
 # importable + unit-testable (no drift between the tested and injected code).
@@ -195,7 +195,10 @@ def _parse_frames(data: object) -> list[DatasetSchema]:
         clean = tuple(
             (c[0], c[1])
             for c in cols
-            if isinstance(c, list) and len(c) == 2 and isinstance(c[0], str) and isinstance(c[1], str)
+            if isinstance(c, list)
+            and len(c) == 2
+            and isinstance(c[0], str)
+            and isinstance(c[1], str)
         )
         if not clean:
             continue

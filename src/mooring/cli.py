@@ -97,13 +97,13 @@ def _build_parser() -> argparse.ArgumentParser:
         help="GitHub host or URL for GitHub Enterprise (e.g. ghe.example.com); "
         "stored as the global host",
     )
-    repo_add.add_argument(
-        "--no-use", action="store_true", help="register without switching to it"
-    )
+    repo_add.add_argument("--no-use", action="store_true", help="register without switching to it")
     repo_use = repo_sub.add_parser("use", help="switch the active repo")
     repo_use.add_argument("alias")
     repo_rm = repo_sub.add_parser("remove", help="forget a repo (local files are kept)")
-    repo_rm.add_argument("alias", nargs="?", default=None, help="alias to remove (omit when using --all)")
+    repo_rm.add_argument(
+        "alias", nargs="?", default=None, help="alias to remove (omit when using --all)"
+    )
     repo_rm.add_argument(
         "--all", dest="all_repos", action="store_true", help="remove every registered repo"
     )
@@ -138,14 +138,13 @@ def _build_parser() -> argparse.ArgumentParser:
     new.add_argument("name", help="notebook name (e.g. sales-analysis)")
 
     delete_cmd = sub.add_parser(
-        "delete", help="delete a notebook from the workspace (push afterwards to remove it remotely)"
+        "delete",
+        help="delete a notebook from the workspace (push afterwards to remove it remotely)",
     )
     delete_cmd.add_argument(
         "path", help="workspace-relative notebook path (a .py file or a .pbip project)"
     )
-    delete_cmd.add_argument(
-        "-y", "--yes", action="store_true", help="skip the confirmation prompt"
-    )
+    delete_cmd.add_argument("-y", "--yes", action="store_true", help="skip the confirmation prompt")
 
     rollback_cmd = sub.add_parser(
         "rollback",
@@ -169,9 +168,7 @@ def _build_parser() -> argparse.ArgumentParser:
     deps = sub.add_parser("deps", help="manage the repo's notebook dependencies")
     deps_sub = deps.add_subparsers(dest="deps_command", required=True)
     deps_add = deps_sub.add_parser("add", help="add packages to the repo and re-lock")
-    deps_add.add_argument(
-        "packages", nargs="+", help="packages to add (e.g. polars 'scipy>=1.11')"
-    )
+    deps_add.add_argument("packages", nargs="+", help="packages to add (e.g. polars 'scipy>=1.11')")
     deps_rm = deps_sub.add_parser("remove", help="remove packages from the repo and re-lock")
     deps_rm.add_argument("packages", nargs="+", help="packages to remove")
     deps_sub.add_parser("list", help="list declared packages and whether each is available")
@@ -186,11 +183,19 @@ def _build_parser() -> argparse.ArgumentParser:
     )
 
     for cmd in (
-        status, pull, push, propose, open_cmd, new, delete_cmd, rollback_cmd, init_cmd, deps, build_reqs
+        status,
+        pull,
+        push,
+        propose,
+        open_cmd,
+        new,
+        delete_cmd,
+        rollback_cmd,
+        init_cmd,
+        deps,
+        build_reqs,
     ):
-        cmd.add_argument(
-            "--repo", default=None, metavar="ALIAS", help=_REPO_ARG_HELP
-        )
+        cmd.add_argument("--repo", default=None, metavar="ALIAS", help=_REPO_ARG_HELP)
 
     ai = sub.add_parser("ai", help="AI copilot: sign in to Copilot and check status")
     ai_sub = ai.add_subparsers(dest="ai_command", required=True)
@@ -206,9 +211,7 @@ def _build_parser() -> argparse.ArgumentParser:
     ai_dict_check = ai_dict_sub.add_parser(
         "check", help="parse context/ dictionaries and report tables, columns, and dropped keys"
     )
-    ai_dict_check.add_argument(
-        "--repo", default=None, metavar="ALIAS", help=_REPO_ARG_HELP
-    )
+    ai_dict_check.add_argument("--repo", default=None, metavar="ALIAS", help=_REPO_ARG_HELP)
     ai_pii = ai_sub.add_parser(
         "pii", help="scan context/ and notebook source for structured-PII risks (offline)"
     )
@@ -216,18 +219,17 @@ def _build_parser() -> argparse.ArgumentParser:
     ai_pii_check = ai_pii_sub.add_parser(
         "check", help="scan instructions, dictionaries, and notebooks for PII shapes"
     )
+    ai_pii_check.add_argument("--repo", default=None, metavar="ALIAS", help=_REPO_ARG_HELP)
     ai_pii_check.add_argument(
-        "--repo", default=None, metavar="ALIAS", help=_REPO_ARG_HELP
-    )
-    ai_pii_check.add_argument(
-        "--notebook", default=None, metavar="REL", help="also scan a single notebook (workspace-relative)"
+        "--notebook",
+        default=None,
+        metavar="REL",
+        help="also scan a single notebook (workspace-relative)",
     )
     ai_pii_model = ai_pii_sub.add_parser(
         "model", help="download/verify the local NER name-detection model (needs the pii extra)"
     )
-    ai_pii_model.add_argument(
-        "--repo", default=None, metavar="ALIAS", help=_REPO_ARG_HELP
-    )
+    ai_pii_model.add_argument("--repo", default=None, metavar="ALIAS", help=_REPO_ARG_HELP)
     ai_pii_sub.add_parser(
         "doctor",
         help="check the PII guard config end-to-end: which backend runs, what's ready, what to fix",
@@ -338,8 +340,7 @@ def cmd_login(cfg: config.Config, host: str | None = None) -> int:
         cfg = config.load_config()  # pick up the host just written
     if not cfg.client_id:
         sys.exit(
-            "No OAuth client_id configured. Set [github] client_id in "
-            f"{paths.user_config_file()}."
+            f"No OAuth client_id configured. Set [github] client_id in {paths.user_config_file()}."
         )
     print(f"Requesting device code from {cfg.host}…")
     try:
@@ -664,9 +665,13 @@ def cmd_repo(app_cfg: config.AppConfig, args: argparse.Namespace) -> int:
         alias = args.alias or repo
         try:
             config_store.add_repo(
-                alias, owner, repo,
-                branch=args.branch, workspace=args.workspace,
-                make_active=not args.no_use, host=args.host,
+                alias,
+                owner,
+                repo,
+                branch=args.branch,
+                workspace=args.workspace,
+                make_active=not args.no_use,
+                host=args.host,
             )
         except ValueError as exc:
             sys.exit(str(exc))
@@ -727,7 +732,9 @@ def cmd_ai_dictionary_check(app_cfg: config.AppConfig, cfg: config.Config) -> in
     if not app_cfg.ai_context:
         print("Note: [ai] context is OFF — set it true to actually use this in the chat.\n")
     if not index.reports:
-        print(f"No dictionary files under {ctx_dir}/dictionaries/*.yaml or {ctx_dir}/datadictionary.yaml.")
+        print(
+            f"No dictionary files under {ctx_dir}/dictionaries/*.yaml or {ctx_dir}/datadictionary.yaml."
+        )
         return 0
     for r in index.reports:
         if r.error:
@@ -759,7 +766,9 @@ _PII_FOOTER = (
 )
 
 
-def cmd_ai_pii_check(app_cfg: config.AppConfig, cfg: config.Config, args: argparse.Namespace) -> int:
+def cmd_ai_pii_check(
+    app_cfg: config.AppConfig, cfg: config.Config, args: argparse.Namespace
+) -> int:
     """Scan context/ and notebook sources for PII, offline.
 
     Mirrors ``ai dictionary check``: no Copilot, no network, value-free output —
@@ -774,7 +783,10 @@ def cmd_ai_pii_check(app_cfg: config.AppConfig, cfg: config.Config, args: argpar
     index = datadictionary.load_index(workspace, ctx_dir)
     backend = ner.resolve_backend(app_cfg.ai_pii_name_backend)
     model = ner.model_for(
-        backend, app_cfg.ai_pii_name_model, app_cfg.ai_pii_name_revision, app_cfg.ai_pii_name_variant
+        backend,
+        app_cfg.ai_pii_name_model,
+        app_cfg.ai_pii_name_revision,
+        app_cfg.ai_pii_name_variant,
     )
     # Only run NER when the model is already present — a lint must not trigger a
     # surprise download. Otherwise fall back to structured-only with a note.
@@ -816,7 +828,9 @@ def cmd_ai_pii_check(app_cfg: config.AppConfig, cfg: config.Config, args: argpar
     return 0
 
 
-def cmd_ai_pii_model(app_cfg: config.AppConfig, cfg: config.Config, args: argparse.Namespace) -> int:
+def cmd_ai_pii_model(
+    app_cfg: config.AppConfig, cfg: config.Config, args: argparse.Namespace
+) -> int:
     """Pre-fetch (GLiNER) or verify (spaCy) the local NER name-detection model.
 
     GLiNER downloads its weights from Hugging Face on first use; running this once
@@ -858,7 +872,9 @@ def cmd_ai_pii_model(app_cfg: config.AppConfig, cfg: config.Config, args: argpar
         return 1
     print("\nOK - model is cached and ready for offline name detection.")
     if not app_cfg.ai_pii_names:
-        print("Note: [ai.pii] detect_names is OFF - set it (and enabled) true to use it in the chat.")
+        print(
+            "Note: [ai.pii] detect_names is OFF - set it (and enabled) true to use it in the chat."
+        )
     return 0
 
 
@@ -902,10 +918,16 @@ def cmd_ai_pii_doctor(app_cfg: config.AppConfig) -> int:
 
     print("PII guard (ai.pii):\n")
     print(f"  guard enabled:     {'on' if enabled else 'OFF'}")
-    print(f"  prompt on a hit:   {'block + confirm' if app_cfg.ai_pii_block_prompt else 'warn-only'}")
+    print(
+        f"  prompt on a hit:   {'block + confirm' if app_cfg.ai_pii_block_prompt else 'warn-only'}"
+    )
     print("  structured scan:   always on  (cards, IBANs, NHS numbers, emails, UK NINOs)")
     print(f"  name detection:    {'on' if names else 'off'}")
-    print(f"  name backend:      {backend}  (pinned)" if pinned else f"  name backend:      {configured} -> {backend}")
+    print(
+        f"  name backend:      {backend}  (pinned)"
+        if pinned
+        else f"  name backend:      {configured} -> {backend}"
+    )
 
     # Backend/model readiness. `ready` only matters when name detection is on.
     ready = True
@@ -914,23 +936,34 @@ def cmd_ai_pii_doctor(app_cfg: config.AppConfig) -> int:
         if not ner_spacy.available():
             ready = False
             print("  spaCy model:       the 'pii-spacy' extra is not installed")
-            todo.append("pip install mooring[pii-spacy]   # spaCy + bundled model, offline from PyPI")
+            todo.append(
+                "pip install mooring[pii-spacy]   # spaCy + bundled model, offline from PyPI"
+            )
         else:
             mdl = ner.model_for("spacy", app_cfg.ai_pii_name_model)
             if ner_spacy.is_ready(mdl):
-                print(f"  spaCy model:       {mdl or 'bundled mooring-spacy-en-md'} present, loads OK (offline)")
+                print(
+                    f"  spaCy model:       {mdl or 'bundled mooring-spacy-en-md'} present, loads OK (offline)"
+                )
             else:
                 ready = False
                 print(f"  spaCy model:       not found ({mdl or 'bundled companion missing'})")
-                todo.append("pip install mooring[pii-spacy]   # or set ai.pii.name_model to a model you have")
+                todo.append(
+                    "pip install mooring[pii-spacy]   # or set ai.pii.name_model to a model you have"
+                )
     else:  # gliner
         if not ner.available("gliner"):
             ready = False
             print("  GLiNER model:      the 'pii' extra is not installed")
-            todo.append("pip install mooring[pii]   # GLiNER (downloads its model from Hugging Face)")
+            todo.append(
+                "pip install mooring[pii]   # GLiNER (downloads its model from Hugging Face)"
+            )
         else:
             ref = ner.model_for(
-                "gliner", app_cfg.ai_pii_name_model, app_cfg.ai_pii_name_revision, app_cfg.ai_pii_name_variant
+                "gliner",
+                app_cfg.ai_pii_name_model,
+                app_cfg.ai_pii_name_revision,
+                app_cfg.ai_pii_name_variant,
             )
             if ner.is_cached(ref):
                 print(f"  GLiNER model:      {app_cfg.ai_pii_name_model} cached, ready (offline)")
@@ -957,7 +990,9 @@ def cmd_ai_pii_doctor(app_cfg: config.AppConfig) -> int:
     if not enabled:
         flips.append("mooring config set ai.pii.enabled true       # turn the guard on")
     if not names:
-        flips.append("mooring config set ai.pii.detect_names true  # optional: also catch person/org names")
+        flips.append(
+            "mooring config set ai.pii.detect_names true  # optional: also catch person/org names"
+        )
     if flips:
         print("\nConfig:")
         for flip in flips:
@@ -1011,7 +1046,9 @@ def cmd_ai(app_cfg: config.AppConfig, cfg: config.Config, args: argparse.Namespa
     if args.ai_command == "status":
         st = provider.status(force=True)
         state = (
-            "connected" if st.connected else ("unavailable" if not st.available else "not connected")
+            "connected"
+            if st.connected
+            else ("unavailable" if not st.available else "not connected")
         )
         who = f" as {st.account}" if st.account else ""
         print(f"AI provider : {app_cfg.ai_provider}")

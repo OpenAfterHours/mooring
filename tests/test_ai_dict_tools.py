@@ -56,7 +56,9 @@ def test_dictionary_tools_added_when_index_present(tmp_path):
 def test_no_dictionary_tools_without_index(tmp_path):
     (tmp_path / "nb.py").write_text("import marimo\n", "utf-8")
     tools = build_tools(
-        workspace=tmp_path, folders=("data",), notebook_rel="nb.py",
+        workspace=tmp_path,
+        folders=("data",),
+        notebook_rel="nb.py",
         emit_proposal=lambda *a, **k: None,
     )
     assert sorted(t.name for t in tools) == sorted(TOOL_NAMES)
@@ -66,23 +68,23 @@ def test_list_and_describe_are_value_free(tmp_path):
     tools = _tools(tmp_path)
     listing = tools["mooring_list_tables"].handler(_invocation()).text_result_for_llm
     assert "fact_loans" in listing and SECRET not in listing
-    described = tools["mooring_describe_table"].handler(
-        _invocation(table="fact_loans")
-    ).text_result_for_llm
+    described = (
+        tools["mooring_describe_table"].handler(_invocation(table="fact_loans")).text_result_for_llm
+    )
     assert "status" in described and SECRET not in described  # accepted_values dropped
 
 
 def test_search_is_value_free(tmp_path):
-    out = _tools(tmp_path)["mooring_search_dictionary"].handler(
-        _invocation(query="status")
-    ).text_result_for_llm
+    out = (
+        _tools(tmp_path)["mooring_search_dictionary"]
+        .handler(_invocation(query="status"))
+        .text_result_for_llm
+    )
     assert "fact_loans" in out and SECRET not in out
 
 
 def test_describe_path_like_name_finds_nothing(tmp_path):
     # The tool looks up a NAME in the parsed index; a path argument matches nothing
     # and touches no filesystem.
-    res = _tools(tmp_path)["mooring_describe_table"].handler(
-        _invocation(table="../../etc/passwd")
-    )
+    res = _tools(tmp_path)["mooring_describe_table"].handler(_invocation(table="../../etc/passwd"))
     assert "No table" in res.text_result_for_llm

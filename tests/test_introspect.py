@@ -96,12 +96,20 @@ def test_parse_frames_is_fail_closed():
     # Junk keys, wrong types, and a sneaky value-bearing field are all dropped.
     data = {
         "frames": [
-            {"name": "df", "columns": [["a", "Int64"], ["b", "String"]], "n_rows": 3,
-             "preview": [[SECRET]], "sample": SECRET},  # extra fields ignored
-            {"name": "bad", "columns": "not-a-list"},     # dropped: columns wrong type
-            {"columns": [["a", "Int64"]]},                # dropped: no name
-            "not-a-dict",                                  # dropped
-            {"name": "empty", "columns": [["a", 123]]},   # dtype not str -> col dropped -> frame dropped
+            {
+                "name": "df",
+                "columns": [["a", "Int64"], ["b", "String"]],
+                "n_rows": 3,
+                "preview": [[SECRET]],
+                "sample": SECRET,
+            },  # extra fields ignored
+            {"name": "bad", "columns": "not-a-list"},  # dropped: columns wrong type
+            {"columns": [["a", "Int64"]]},  # dropped: no name
+            "not-a-dict",  # dropped
+            {
+                "name": "empty",
+                "columns": [["a", 123]],
+            },  # dtype not str -> col dropped -> frame dropped
         ]
     }
     frames = introspect._parse_frames(data)

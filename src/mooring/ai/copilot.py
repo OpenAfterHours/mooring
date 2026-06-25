@@ -173,6 +173,7 @@ class CopilotProvider:
         if not self.available():
             raise AIError(_COPILOT_UNAVAILABLE)
         cli = self._cli_path()
+        assert cli is not None  # available() above guarantees the CLI path
         with self._login_lock:
             if self._login_proc is not None and self._login_proc.poll() is None:
                 return self._connecting_status("Sign-in already in progress.")
@@ -226,7 +227,9 @@ class CopilotProvider:
         """Run ``copilot login`` attached to the terminal (the CLI command path)."""
         if not self.available():
             raise AIError(_COPILOT_UNAVAILABLE)
-        cmd = [self._cli_path(), "login"]
+        cli = self._cli_path()
+        assert cli is not None  # available() above guarantees the CLI path
+        cmd = [cli, "login"]
         if host:
             cmd += ["--host", host]
         result = subprocess.run(cmd)  # noqa: S603  # bundled trusted binary, inherits stdio

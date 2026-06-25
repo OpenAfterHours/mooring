@@ -282,7 +282,7 @@ def _unwrap_app_cell(code: str) -> str | None:
     segments = [ast.get_source_segment(code, stmt) for stmt in node.body]
     if not segments or any(seg is None for seg in segments):
         return None
-    return "\n".join(segments)
+    return "\n".join(s for s in segments if s is not None)
 
 
 def _drop_trailing_return(code: str) -> str:
@@ -301,6 +301,7 @@ def _drop_trailing_return(code: str) -> str:
     except SyntaxError:
         return code  # can't analyze safely — leave it for _check_parses to report
     func = tree.body[0]
+    assert isinstance(func, ast.AsyncFunctionDef)  # we wrapped the body in an async def
     if not func.body or not isinstance(func.body[-1], ast.Return):
         return code
     cut = func.body[-1].lineno - 2  # wrapped line N maps to body_lines index N-2
@@ -413,7 +414,9 @@ def _collect_ops(ops, original) -> tuple[dict[int, str], set[int], list[str]]:
         # a bare index (a missing anchor would defeat the whole conflict-detection
         # guarantee, e.g. on a stale re-send after the analyst reordered cells).
         if o.anchor is None:
-            raise CellPatchConflict(f"cell {idx} {o.op} is missing its anchor — re-open the copilot")
+            raise CellPatchConflict(
+                f"cell {idx} {o.op} is missing its anchor — re-open the copilot"
+            )
         if original[idx].code != o.anchor:
             raise CellPatchConflict(
                 f"cell {idx} changed since it was read — re-open the copilot and try again"
@@ -452,9 +455,7 @@ def append_cell_source(source: str, code: str) -> str:
 # (verified against marimo 0.23.9). This is authoritative — an empty token means
 # skew protection is off, so use it as-is. The JS-blob patterns are fallbacks for
 # other marimo builds.
-_MARIMO_TOKEN_RE = re.compile(
-    r"<marimo-server-token[^>]*\bdata-token=\"([^\"]*)\"", re.IGNORECASE
-)
+_MARIMO_TOKEN_RE = re.compile(r"<marimo-server-token[^>]*\bdata-token=\"([^\"]*)\"", re.IGNORECASE)
 _SERVER_TOKEN_RES = (
     re.compile(r"serverToken[\"']?\s*[:=]\s*[\"']([^\"']+)[\"']", re.IGNORECASE),
     re.compile(r"serverToken[\"']?\s*[:=]\s*([A-Za-z0-9_\-]+)", re.IGNORECASE),

@@ -62,6 +62,10 @@ class AIProvider(Protocol):
         """Best-effort: drive/await sign-in. Raises :class:`AIError` on failure."""
         ...
 
+    def login_interactive(self, host: str | None = None) -> int:
+        """Drive an interactive sign-in to completion; return the CLI exit code."""
+        ...
+
     def open_chat(
         self,
         *,

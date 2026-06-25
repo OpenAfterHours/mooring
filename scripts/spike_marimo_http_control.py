@@ -20,6 +20,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -155,7 +156,7 @@ async def main() -> int:
                         except Exception:
                             op, msg = "<non-json>", None
                         seen_ops.append(op)
-                        if needle in raw:
+                        if needle in raw:  # ty: ignore[unsupported-operator]  # spike: ws.recv() is str|bytes
                             print(f"    {label}: tab received op={op!r} carrying {needle!r}")
                             return True, msg, seen_ops
                     print(f"    {label}: ops seen = {seen_ops}")
@@ -212,9 +213,7 @@ async def main() -> int:
                 )
                 print(f"\n[3] POST /api/kernel/run -> {run.status_code}  body={run.text!r}")
                 results["run_http_ok"] = run.status_code == 200
-                run_reached, _, _ = await observe(
-                    "spike-cell-run-01", "run", tries=14, timeout=5.0
-                )
+                run_reached, _, _ = await observe("spike-cell-run-01", "run", tries=14, timeout=5.0)
                 results["run_reaches_tab"] = run_reached
                 print(
                     f"    => run reached the tab: {run_reached}  (expected True: kernel broadcast)"

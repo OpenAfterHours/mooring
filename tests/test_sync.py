@@ -113,9 +113,7 @@ def test_widening_folders_pulls_already_present_folder(cfg):
     # be pulled. Previously the head-unchanged fast path returned the manifest's
     # narrower file set, so a folder pushed by a teammate (e.g. the AI context
     # folder) stayed invisible to pull forever. Regression for that.
-    client = FakeClient(
-        {"notebooks/a.py": b"print(1)\n", "context/instructions.md": b"# rules\n"}
-    )
+    client = FakeClient({"notebooks/a.py": b"print(1)\n", "context/instructions.md": b"# rules\n"})
     narrow = replace(cfg, folders=("notebooks",))
     sync.pull(client, narrow)
     # The manifest head now equals the remote head, so the next pull would short-circuit.
@@ -324,8 +322,11 @@ def test_push_refuses_oversized_files(cfg):
     write_local(cfg, "data/big.bin", "")
     (cfg.workspace() / "data/big.bin").write_bytes(big)
     small_cfg = Config(
-        client_id="cid", owner="acme", repo="nbs",
-        workspace_path=cfg.workspace_path, max_file_mb=1,
+        client_id="cid",
+        owner="acme",
+        repo="nbs",
+        workspace_path=cfg.workspace_path,
+        max_file_mb=1,
     )
     result = sync.push(client, small_cfg, sleep=lambda s: None)
     assert result.pushed == 0
@@ -340,8 +341,11 @@ def test_propose_refuses_oversized_files(cfg):
     write_local(cfg, "data/big.bin", "")
     (cfg.workspace() / "data/big.bin").write_bytes(b"x" * (2 * 1024 * 1024))
     small_cfg = Config(
-        client_id="cid", owner="acme", repo="nbs",
-        workspace_path=cfg.workspace_path, max_file_mb=1,
+        client_id="cid",
+        owner="acme",
+        repo="nbs",
+        workspace_path=cfg.workspace_path,
+        max_file_mb=1,
     )
     result = sync.propose(client, small_cfg, sleep=lambda s: None)
     assert result.proposed == 0
@@ -378,9 +382,7 @@ def test_propose_happy_path(cfg):
     result = sync.propose(client, cfg, sleep=lambda s: None, now=NOW1)
     assert result.proposed == 1
     assert result.review_branch == BRANCH1
-    assert result.compare_url == (
-        f"https://github.com/acme/nbs/compare/main...{BRANCH1}?expand=1"
-    )
+    assert result.compare_url == (f"https://github.com/acme/nbs/compare/main...{BRANCH1}?expand=1")
     assert any(result.compare_url in line for line in result.lines)
     # main untouched, review branch carries the edit
     assert client.blobs[client.tree["notebooks/a.py"]] == b"v1\n"
@@ -404,9 +406,7 @@ def test_propose_compare_url_uses_enterprise_host(cfg):
     sync.pull(client, ghes_cfg)
     write_local(ghes_cfg, "notebooks/a.py", "v2\n")
     result = sync.propose(client, ghes_cfg, sleep=lambda s: None, now=NOW1)
-    assert result.compare_url == (
-        f"https://ghe.example/acme/nbs/compare/main...{BRANCH1}?expand=1"
-    )
+    assert result.compare_url == (f"https://ghe.example/acme/nbs/compare/main...{BRANCH1}?expand=1")
 
 
 def test_repeat_propose_reuses_branch(cfg):
@@ -745,7 +745,9 @@ def test_revert_takes_a_snapshot_before_overwriting(cfg):
     sync.pull(client, cfg)
     write_local(cfg, "notebooks/a.py", "mine\n")
     saved = []
-    sync.revert(client, cfg, "notebooks/a.py", snapshot_fn=lambda rel, data: saved.append((rel, data)))
+    sync.revert(
+        client, cfg, "notebooks/a.py", snapshot_fn=lambda rel, data: saved.append((rel, data))
+    )
     assert saved == [("notebooks/a.py", b"mine\n")]  # current bytes captured pre-revert
 
 

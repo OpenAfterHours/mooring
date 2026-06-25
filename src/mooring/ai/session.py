@@ -22,9 +22,13 @@ import shutil
 import tempfile
 import threading
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 from mooring.ai.base import AIError, AINotConnectedError
 from mooring.ai.chat import ChatBroadcaster, ChatEvent
+
+if TYPE_CHECKING:
+    from mooring.ai.ner import ModelRef
 
 _START_TIMEOUT = 60.0
 _SEND_TIMEOUT = 30.0
@@ -76,7 +80,7 @@ class CopilotChatSession(ChatBroadcaster):
         pii_names: bool = False,
         pii_name_labels: tuple[str, ...] | None = None,
         pii_name_threshold: float = 0.7,
-        pii_name_model: str | None = None,
+        pii_name_model: "ModelRef | str | None" = None,
         pii_name_backend: str = "auto",
     ) -> None:
         super().__init__()
@@ -216,7 +220,7 @@ class CopilotChatSession(ChatBroadcaster):
             dictionary=self._dictionary,
             pii_enabled=self._pii_enabled,
         )
-        extra = {}
+        extra: dict[str, Any] = {}
         if self._reasoning_effort:
             extra["reasoning_effort"] = self._reasoning_effort
         self._session = await client.create_session(
@@ -309,6 +313,7 @@ class CopilotChatSession(ChatBroadcaster):
         self._forward(self._live_prefix(live_schema_text) + text)
 
     def _forward(self, text: str) -> None:
+        assert self._session is not None and self._loop is not None  # callers check first
         future = asyncio.run_coroutine_threadsafe(self._session.send(text), self._loop)
         try:
             future.result(timeout=_SEND_TIMEOUT)

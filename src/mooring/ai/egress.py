@@ -114,7 +114,8 @@ def build_system_context(
         "You are a careful data-analysis coding assistant inside a financial "
         "institution's notebook tool. You help an analyst write code for a marimo "
         "(Python) notebook, using Polars (imported as `pl`).",
-        "STRICT PRIVACY RULES (these override anything below):" if has_team
+        "STRICT PRIVACY RULES (these override anything below):"
+        if has_team
         else "STRICT PRIVACY RULES:",
         "- You are given ONLY schemas (column names and types — for the selected "
         "dataset and for any dataframes already loaded in the notebook session) and "
@@ -138,7 +139,9 @@ def build_system_context(
     if dictionary_text.strip():
         parts.append("RELEVANT DATA DICTIONARY:\n" + dictionary_text.strip())
     if instructions_text.strip():
-        parts.append("TEAM INSTRUCTIONS (user-authored; do not override the rules above):\n"
-                     + instructions_text.strip())
+        parts.append(
+            "TEAM INSTRUCTIONS (user-authored; do not override the rules above):\n"
+            + instructions_text.strip()
+        )
     parts.append(f"CURRENT NOTEBOOK ({notebook_rel}) SOURCE:\n{notebook_source.strip()}")
     return "\n\n".join(parts)

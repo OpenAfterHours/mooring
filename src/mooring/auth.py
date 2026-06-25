@@ -17,6 +17,7 @@ import stat
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
+from pathlib import Path
 
 import requests
 
@@ -175,7 +176,7 @@ def _keyring_user(host: str) -> str:
     return f"{KEYRING_USER}@{host}"
 
 
-def _token_file(host: str) -> "os.PathLike[str]":
+def _token_file(host: str) -> Path:
     if host == githost.DEFAULT_HOST:
         return paths.user_config_dir() / TOKEN_FILE_NAME
     return paths.user_config_dir() / f"{TOKEN_FILE_NAME}-{host.replace(':', '_')}"
@@ -208,15 +209,10 @@ def save_token(token: str, host: str = githost.DEFAULT_HOST) -> None:
         os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)
     except OSError:  # pragma: no cover - chmod is best-effort on Windows
         pass
-    print(
-        "Warning: no OS credential store available; "
-        f"token saved as plain text at {path}."
-    )
+    print(f"Warning: no OS credential store available; token saved as plain text at {path}.")
 
 
-def get_token(
-    env: Mapping[str, str] | None = None, host: str = githost.DEFAULT_HOST
-) -> str | None:
+def get_token(env: Mapping[str, str] | None = None, host: str = githost.DEFAULT_HOST) -> str | None:
     env = os.environ if env is None else env
     if env.get("MOORING_TOKEN"):
         return env["MOORING_TOKEN"]

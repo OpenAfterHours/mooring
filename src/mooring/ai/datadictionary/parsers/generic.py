@@ -59,8 +59,14 @@ def parse_generic(data: dict, domain: str, dropped: set[str], mapping: dict) -> 
         if not isinstance(node, dict):
             # A scalar leaf: in a map (`id: bigint`) it's the type; in a list
             # (`- id`) it's the column name.
-            return Column(name=name, type=_scalar_str(node)) if name else Column(name=_scalar_str(node))
-        used = set(col_name_keys) | set(type_keys) | set(cdesc_keys) | set(rel_keys) | set(null_keys)
+            return (
+                Column(name=name, type=_scalar_str(node))
+                if name
+                else Column(name=_scalar_str(node))
+            )
+        used = (
+            set(col_name_keys) | set(type_keys) | set(cdesc_keys) | set(rel_keys) | set(null_keys)
+        )
         _record_dropped(node, used, dropped)
         nullable = None
         for k in null_keys:

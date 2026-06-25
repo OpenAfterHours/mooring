@@ -27,12 +27,25 @@ _SPACY_KIND = {"PERSON": NAME, "ORG": ORG}
 # mooring's configurable label vocab -> the spaCy entity type to keep. (spaCy is
 # not zero-shot: it emits its fixed types and we FILTER, rather than querying.)
 _LABEL_TO_SPACY = {
-    "person": "PERSON", "people": "PERSON", "name": "PERSON", "person name": "PERSON",
-    "full name": "PERSON", "first name": "PERSON", "last name": "PERSON",
-    "given name": "PERSON", "surname": "PERSON",
-    "organization": "ORG", "organisation": "ORG", "company": "ORG", "business": "ORG",
-    "employer": "ORG", "org": "ORG", "organization name": "ORG", "organisation name": "ORG",
-    "company name": "ORG", "business name": "ORG",
+    "person": "PERSON",
+    "people": "PERSON",
+    "name": "PERSON",
+    "person name": "PERSON",
+    "full name": "PERSON",
+    "first name": "PERSON",
+    "last name": "PERSON",
+    "given name": "PERSON",
+    "surname": "PERSON",
+    "organization": "ORG",
+    "organisation": "ORG",
+    "company": "ORG",
+    "business": "ORG",
+    "employer": "ORG",
+    "org": "ORG",
+    "organization name": "ORG",
+    "organisation name": "ORG",
+    "company name": "ORG",
+    "business name": "ORG",
 }
 
 _models: dict[str, object] = {}
@@ -124,7 +137,9 @@ def predict(nlp, chunk: str, labels) -> list[tuple[str, int]]:
     ``labels`` is mooring's configured vocab; map it to spaCy entity types and keep
     only those (defaulting to person + organisation). The matched text is never read.
     """
-    want = {_LABEL_TO_SPACY[lab.lower()] for lab in (labels or ()) if lab.lower() in _LABEL_TO_SPACY}
+    want = {
+        _LABEL_TO_SPACY[lab.lower()] for lab in (labels or ()) if lab.lower() in _LABEL_TO_SPACY
+    }
     if not want:
         want = {"PERSON", "ORG"}
     out: list[tuple[str, int]] = []

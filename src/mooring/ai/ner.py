@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import threading
 from dataclasses import dataclass
+from typing import Literal, overload
 
 from mooring.ai.pii import SUPPRESS_MARKER, Finding
 
@@ -81,6 +82,7 @@ def _allow_patterns(variant: str) -> list[str] | None:
         "*.spm",
     ]
 
+
 # value-free kind labels (mirrors pii.py's CARD/EMAIL/... style).
 NAME = "person name"
 ORG = "organization"
@@ -89,12 +91,30 @@ ORG = "organization"
 # org-ish vocab variants map to NAME / ORG; anything else surfaces under its own
 # (lowercased) label — all of these are config strings, never a data value.
 _PERSON_LABELS = frozenset(
-    {"person", "people", "name", "person name", "full name", "first name",
-     "last name", "given name", "surname"}
+    {
+        "person",
+        "people",
+        "name",
+        "person name",
+        "full name",
+        "first name",
+        "last name",
+        "given name",
+        "surname",
+    }
 )
 _ORG_LABELS = frozenset(
-    {"organization", "organisation", "company", "business", "employer",
-     "organization name", "organisation name", "company name", "business name"}
+    {
+        "organization",
+        "organisation",
+        "company",
+        "business",
+        "employer",
+        "organization name",
+        "organisation name",
+        "company name",
+        "business name",
+    }
 )
 
 # Batch lines up to this many characters per forward pass (bounds inference cost
@@ -132,6 +152,18 @@ def resolve_backend(backend: "str | None") -> str:
     if ner_spacy.available() and ner_spacy.is_ready(""):
         return "spacy"
     return "gliner"
+
+
+@overload
+def model_for(
+    backend: Literal["spacy"], name_model: str, revision: str = "", variant: str = ""
+) -> str: ...
+
+
+@overload
+def model_for(
+    backend: str, name_model: str, revision: str = "", variant: str = ""
+) -> "ModelRef | str": ...
 
 
 def model_for(

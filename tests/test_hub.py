@@ -261,7 +261,9 @@ def test_local_mode_ai_open_surfaces_provider_failure(unconfigured_client, monke
     (ws / "nb.py").write_text("import marimo\n", "utf-8")
 
     def boom(self, *a, **k):
-        raise RuntimeError("Copilot isn't available. Install the extra: pip install mooring[copilot]")
+        raise RuntimeError(
+            "Copilot isn't available. Install the extra: pip install mooring[copilot]"
+        )
 
     monkeypatch.setattr(Hub, "_make_chat_session", boom)
     resp = client.post("/api/ai/chat/open", json={"notebook": "nb.py"})
@@ -784,7 +786,11 @@ def test_pii_status_reflects_config(tmp_path, monkeypatch):
 
     off = Hub(config.load_app_config(env={}))._pii_status()
     assert off == {
-        "enabled": False, "block": True, "names": False, "names_active": False, "backend": "",
+        "enabled": False,
+        "block": True,
+        "names": False,
+        "names_active": False,
+        "backend": "",
     }
 
     on = Hub(
@@ -887,7 +893,10 @@ def test_chat_apply_edit_op_rewrites_a_cell(unconfigured_client, stub_chat):
     sid = _open_chat(client, hub, source=_NB_SRC).json()["sid"]
     resp = client.post(
         "/api/ai/chat/apply",
-        json={"sid": sid, "ops": [{"op": "edit", "index": 0, "anchor": "seed = 1", "code": "seed = 42"}]},
+        json={
+            "sid": sid,
+            "ops": [{"op": "edit", "index": 0, "anchor": "seed = 1", "code": "seed = 42"}],
+        },
     )
     assert resp.status_code == 200 and resp.json()["ok"] is True
     nb = (hub.cfg.workspace() / "nb.py").read_text("utf-8")
@@ -901,7 +910,10 @@ def test_chat_apply_rewrite_with_returns_succeeds(unconfigured_client, stub_chat
     sid = _open_chat(client, hub, source=_NB_SRC).json()["sid"]
     resp = client.post(
         "/api/ai/chat/apply",
-        json={"sid": sid, "ops": [{"op": "replace_all", "cells": ["import marimo as mo\nreturn (mo,)"]}]},
+        json={
+            "sid": sid,
+            "ops": [{"op": "replace_all", "cells": ["import marimo as mo\nreturn (mo,)"]}],
+        },
     )
     assert resp.status_code == 200 and resp.json()["ok"] is True
     nb = (hub.cfg.workspace() / "nb.py").read_text("utf-8")
@@ -915,7 +927,10 @@ def test_chat_apply_stale_anchor_is_409(unconfigured_client, stub_chat):
     sid = _open_chat(client, hub, source=_NB_SRC).json()["sid"]
     resp = client.post(
         "/api/ai/chat/apply",
-        json={"sid": sid, "ops": [{"op": "edit", "index": 0, "anchor": "WRONG", "code": "seed = 9"}]},
+        json={
+            "sid": sid,
+            "ops": [{"op": "edit", "index": 0, "anchor": "WRONG", "code": "seed = 9"}],
+        },
     )
     assert resp.status_code == 409
     assert "seed = 1" in (hub.cfg.workspace() / "nb.py").read_text("utf-8")  # untouched
@@ -930,7 +945,11 @@ def test_chat_apply_then_rollback_restores_byte_for_byte(unconfigured_client, st
     assert applied["ok"] is True and applied["can_undo"] is True
     assert "added = 1" in nb.read_text("utf-8")
     roll = client.post("/api/ai/chat/rollback", json={"sid": sid})
-    assert roll.status_code == 200 and roll.json() == {"ok": True, "can_undo": False, "undo_depth": 0}
+    assert roll.status_code == 200 and roll.json() == {
+        "ok": True,
+        "can_undo": False,
+        "undo_depth": 0,
+    }
     assert nb.read_text("utf-8") == original  # back to the original
 
 
@@ -965,7 +984,8 @@ def test_chat_apply_anchorless_edit_is_409(unconfigured_client, stub_chat):
     client, hub = unconfigured_client
     sid = _open_chat(client, hub, source=_NB_SRC).json()["sid"]
     resp = client.post(
-        "/api/ai/chat/apply", json={"sid": sid, "ops": [{"op": "edit", "index": 0, "code": "seed = 9"}]}
+        "/api/ai/chat/apply",
+        json={"sid": sid, "ops": [{"op": "edit", "index": 0, "code": "seed = 9"}]},
     )
     assert resp.status_code == 409
     assert "seed = 1" in (hub.cfg.workspace() / "nb.py").read_text("utf-8")  # untouched
@@ -976,9 +996,7 @@ def test_chat_open_rejects_dot_state_dir(unconfigured_client, stub_chat):
     # notebook path, even though a snapshot is a real .py file.
     client, hub = unconfigured_client
     hub.cfg.workspace().mkdir(parents=True, exist_ok=True)
-    resp = client.post(
-        "/api/ai/chat/open", json={"notebook": ".mooring/undo/x/000000000001.py"}
-    )
+    resp = client.post("/api/ai/chat/open", json={"notebook": ".mooring/undo/x/000000000001.py"})
     assert resp.status_code == 400
 
 
@@ -993,7 +1011,9 @@ def test_chat_rollback_write_failure_keeps_snapshot(unconfigured_client, stub_ch
     client.post("/api/ai/chat/apply", json={"sid": sid, "code": "added = 1"})
 
     orig = paths.safe_write_bytes
-    monkeypatch.setattr(paths, "safe_write_bytes", lambda *a, **k: (_ for _ in ()).throw(OSError("busy")))
+    monkeypatch.setattr(
+        paths, "safe_write_bytes", lambda *a, **k: (_ for _ in ()).throw(OSError("busy"))
+    )
     assert client.post("/api/ai/chat/rollback", json={"sid": sid}).status_code == 502
 
     monkeypatch.setattr(paths, "safe_write_bytes", orig)  # transient failure cleared
@@ -1085,7 +1105,9 @@ def test_notebook_ai_toggle_round_trip(unconfigured_client):
 def test_notebook_ai_toggle_rejects_traversal(unconfigured_client):
     client, hub = unconfigured_client
     hub.cfg.workspace().mkdir(parents=True, exist_ok=True)
-    resp = client.post("/api/ai/notebook/toggle", json={"notebook": "../escape.py", "disabled": True})
+    resp = client.post(
+        "/api/ai/notebook/toggle", json={"notebook": "../escape.py", "disabled": True}
+    )
     assert resp.status_code == 400
 
 
@@ -1463,7 +1485,8 @@ def test_batch_open_disabled_by_default_403(unconfigured_client):
 def test_batch_builds_notebooks_and_tray_lists_them(batch_client):
     client, hub = batch_client
     _bid, tray = _run_batch(
-        client, [{"name": "sales", "brief": "summarise sales"}, {"name": "churn", "brief": "model churn"}]
+        client,
+        [{"name": "sales", "brief": "summarise sales"}, {"name": "churn", "brief": "model churn"}],
     )
     assert tray["status"] == "open"  # the queue stays open so the user can add more
     by_name = {j["name"]: j for j in tray["jobs"]}

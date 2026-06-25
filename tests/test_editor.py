@@ -91,9 +91,7 @@ def _capture_spawn(monkeypatch):
     return captured
 
 
-@pytest.mark.skipif(
-    not hasattr(subprocess, "CREATE_NEW_PROCESS_GROUP"), reason="Windows-only flag"
-)
+@pytest.mark.skipif(not hasattr(subprocess, "CREATE_NEW_PROCESS_GROUP"), reason="Windows-only flag")
 def test_windows_spawns_marimo_in_new_process_group(tmp_path, monkeypatch):
     # The Ctrl+C fix: marimo must launch in its own process group so a console Ctrl+C
     # isn't broadcast to it (and its kernel children) alongside mooring.
@@ -101,7 +99,8 @@ def test_windows_spawns_marimo_in_new_process_group(tmp_path, monkeypatch):
     monkeypatch.setattr(editor_mod.sys, "platform", "win32")
     EditorServer(tmp_path).ensure_started()
     flags = captured["kwargs"].get("creationflags", 0)
-    assert flags & subprocess.CREATE_NEW_PROCESS_GROUP
+    flag = subprocess.CREATE_NEW_PROCESS_GROUP  # ty: ignore[unresolved-attribute]  # Windows-only
+    assert flags & flag
 
 
 def test_posix_spawns_marimo_without_creationflags(tmp_path, monkeypatch):

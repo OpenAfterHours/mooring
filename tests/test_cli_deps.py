@@ -15,7 +15,12 @@ def workspace(tmp_path, monkeypatch):
     monkeypatch.setenv("MOORING_REPO", "nbs")
     monkeypatch.setenv("MOORING_WORKSPACE", str(ws))
     monkeypatch.setenv("MOORING_TRUSTSTORE", "0")
-    for var in ("MOORING_BRANCH", "MOORING_ACTIVE_REPO", "MOORING_GITHUB_HOST", "MOORING_FORCE_FROZEN"):
+    for var in (
+        "MOORING_BRANCH",
+        "MOORING_ACTIVE_REPO",
+        "MOORING_GITHUB_HOST",
+        "MOORING_FORCE_FROZEN",
+    ):
         monkeypatch.delenv(var, raising=False)
     return ws
 

@@ -45,7 +45,9 @@ def _proposal(code="result = df.head()"):
     return ("proposal", {"code": code, "rationale": "summary"})
 
 
-def _make_planner(tmp_path, open_session, *, config=None, pii=None, is_disabled=None, on_progress=None):
+def _make_planner(
+    tmp_path, open_session, *, config=None, pii=None, is_disabled=None, on_progress=None
+):
     return BatchPlanner(
         config=config or BatchConfig(enabled=True, job_timeout=2),
         pii=pii or PiiConfig(),
@@ -355,14 +357,18 @@ def test_refine_rejects_a_still_building_job(tmp_path):
     planner = _planner_with_sessions(tmp_path, [])
     planner.start()
     [idx] = planner._reserve_all([BatchJob("x", "do x")])
-    planner._results[idx] = planner._make_result(BatchJob("x", "do x"), "notebooks/x.py", "building")
+    planner._results[idx] = planner._make_result(
+        BatchJob("x", "do x"), "notebooks/x.py", "building"
+    )
     with pytest.raises(BatchError):
         planner.refine(idx, "tweak it")
     planner.close()
 
 
 def test_refine_blocks_a_pii_note_and_rejects_bad_targets(tmp_path):
-    planner = _planner_with_sessions(tmp_path, [[_proposal(), ("idle", {})]], pii=PiiConfig(enabled=True))
+    planner = _planner_with_sessions(
+        tmp_path, [[_proposal(), ("idle", {})]], pii=PiiConfig(enabled=True)
+    )
     planner.start()
     planner.add([BatchJob("x", "do x")])
     planner.wait_idle()

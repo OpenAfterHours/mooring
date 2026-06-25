@@ -36,7 +36,7 @@ import websockets
 from mooring.ai import introspect
 
 SECRET = "SECRET_VALUE_DO_NOT_LEAK"
-NB = "import marimo\n\n__generated_with = \"0.23.9\"\napp = marimo.App()\n\n\nif __name__ == \"__main__\":\n    app.run()\n"
+NB = 'import marimo\n\n__generated_with = "0.23.9"\napp = marimo.App()\n\n\nif __name__ == "__main__":\n    app.run()\n'
 
 
 def free_port() -> int:
@@ -76,9 +76,20 @@ async def main() -> int:
     sid = "spike-introspect-001"
 
     cmd = [
-        sys.executable, "-m", "marimo", "edit", str(ws),
-        "--headless", "--host", "127.0.0.1", "--port", str(port),
-        "--token-password", token, "--skip-update-check", "--watch",
+        sys.executable,
+        "-m",
+        "marimo",
+        "edit",
+        str(ws),
+        "--headless",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        str(port),
+        "--token-password",
+        token,
+        "--skip-update-check",
+        "--watch",
     ]
     print(f"[*] launching marimo on :{port}")
     proc = subprocess.Popen(cmd, cwd=str(ws))
@@ -95,7 +106,7 @@ async def main() -> int:
                 if "kernel-ready" in str(raw):
                     break
 
-            kc = introspect.KernelControl(port, token, timeout=8.0)
+            kc = introspect.KernelControl(port, token, timeout=8.0)  # ty: ignore[unresolved-attribute]  # stale spike
 
             # 3. session discovery via the production client
             discovered = kc.session_for("nb.py")
@@ -113,7 +124,9 @@ async def main() -> int:
             # 5. run the real probe until the sidecar reports the frames (kernel is async)
             data: dict = {}
             for _ in range(40):
-                out = Path(tempfile.gettempdir()) / f"mooring-introspect-{secrets.token_hex(6)}.json"
+                out = (
+                    Path(tempfile.gettempdir()) / f"mooring-introspect-{secrets.token_hex(6)}.json"
+                )
                 kc.run(sid, introspect.probe_source(out), cell_id="mooring-introspect")
                 data = introspect._poll_read(out, 1.0)
                 if any(f.get("name") == "df" for f in data.get("frames", [])):
@@ -128,9 +141,9 @@ async def main() -> int:
 
             results["found_loaded_df"] = "df" in by_name
             results["found_derived_frame"] = "eu" in by_name
-            results["df_cols_correct"] = (
-                "df" in by_name and [c[0] for c in by_name["df"].columns] == ["region", "amount", "note"]
-            )
+            results["df_cols_correct"] = "df" in by_name and [
+                c[0] for c in by_name["df"].columns
+            ] == ["region", "amount", "note"]
             results["df_rowcount"] = "df" in by_name and by_name["df"].n_rows == 2
             blob = json.dumps(data)
             results["no_secret_in_readback"] = SECRET not in blob

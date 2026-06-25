@@ -82,7 +82,9 @@ def test_safe_write_retries_transient_permission_error(tmp_path, monkeypatch):
 
 
 def test_safe_write_reraises_persistent_permission_error(tmp_path, monkeypatch):
-    monkeypatch.setattr(paths.os, "replace", lambda s, d: (_ for _ in ()).throw(PermissionError("x")))
+    monkeypatch.setattr(
+        paths.os, "replace", lambda s, d: (_ for _ in ()).throw(PermissionError("x"))
+    )
     with pytest.raises(PermissionError):
         paths.safe_write_bytes(tmp_path / "f.bin", b"data")
     assert list(tmp_path.iterdir()) == []  # the temp sibling was cleaned up
