@@ -41,9 +41,7 @@ def group(files: list[FileStatus]) -> tuple[list[Artifact], set[str]]:
     under its `.SemanticModel/` or `.Report/` folders is a member. Artifact
     folders without a pointer stay ungrouped plain files.
     """
-    keys = sorted(
-        f.path[: -len(POINTER_SUFFIX)] for f in files if f.path.endswith(POINTER_SUFFIX)
-    )
+    keys = sorted(f.path[: -len(POINTER_SUFFIX)] for f in files if f.path.endswith(POINTER_SUFFIX))
     artifacts = []
     member_paths: set[str] = set()
     for key in keys:
@@ -80,10 +78,8 @@ def aggregate_state(members: list[FileStatus]) -> str:
 def launch(path: Path) -> None:
     """Open a .pbip file in Power BI Desktop via the Windows file association."""
     if not hasattr(os, "startfile"):
-        raise PbipLaunchError(
-            "Opening .pbip files needs Windows with Power BI Desktop installed."
-        )
+        raise PbipLaunchError("Opening .pbip files needs Windows with Power BI Desktop installed.")
     try:
-        os.startfile(path)  # noqa: S606 - user-initiated from the localhost hub
+        os.startfile(path)  # noqa: S606  # user-initiated from the localhost hub
     except OSError as exc:
         raise PbipLaunchError(f"Could not open {path.name}: {exc}") from exc

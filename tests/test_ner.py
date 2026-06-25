@@ -32,7 +32,13 @@ class FakeModel:
             idx = text.find(name)
             if idx >= 0:
                 out.append(
-                    {"text": name, "label": "person", "start": idx, "end": idx + len(name), "score": 0.95}
+                    {
+                        "text": name,
+                        "label": "person",
+                        "start": idx,
+                        "end": idx + len(name),
+                        "score": 0.95,
+                    }
                 )
         return out
 
@@ -95,6 +101,7 @@ def test_resolve_model_ref_defaults():
 def test_allow_patterns_fetch_only_safetensors_variant():
     # a variant restricts the download to that safetensors file (never pytorch_model.bin)
     pats = ner._allow_patterns("bf16")
+    assert pats is not None
     assert "model.bf16.safetensors" in pats
     assert not any("pytorch_model.bin" in p for p in pats)
     # no variant -> no restriction (download the repo's default weights file)

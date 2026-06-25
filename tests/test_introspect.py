@@ -25,7 +25,7 @@ def _run_probe(namespace: dict, tmp_path) -> dict:
     back what it wrote — faithfully simulating /api/kernel/run."""
     out = tmp_path / "schema.json"
     src = introspect.probe_source(out)
-    exec(src, namespace)  # noqa: S102 - the frozen probe, our own source
+    exec(src, namespace)  # noqa: S102  # the frozen probe, our own source
     assert out.exists(), "probe did not write the sidecar file"
     return json.loads(out.read_text("utf-8"))
 
@@ -96,12 +96,20 @@ def test_parse_frames_is_fail_closed():
     # Junk keys, wrong types, and a sneaky value-bearing field are all dropped.
     data = {
         "frames": [
-            {"name": "df", "columns": [["a", "Int64"], ["b", "String"]], "n_rows": 3,
-             "preview": [[SECRET]], "sample": SECRET},  # extra fields ignored
-            {"name": "bad", "columns": "not-a-list"},     # dropped: columns wrong type
-            {"columns": [["a", "Int64"]]},                # dropped: no name
-            "not-a-dict",                                  # dropped
-            {"name": "empty", "columns": [["a", 123]]},   # dtype not str -> col dropped -> frame dropped
+            {
+                "name": "df",
+                "columns": [["a", "Int64"], ["b", "String"]],
+                "n_rows": 3,
+                "preview": [[SECRET]],
+                "sample": SECRET,
+            },  # extra fields ignored
+            {"name": "bad", "columns": "not-a-list"},  # dropped: columns wrong type
+            {"columns": [["a", "Int64"]]},  # dropped: no name
+            "not-a-dict",  # dropped
+            {
+                "name": "empty",
+                "columns": [["a", 123]],
+            },  # dtype not str -> col dropped -> frame dropped
         ]
     }
     frames = introspect._parse_frames(data)

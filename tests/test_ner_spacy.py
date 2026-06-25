@@ -56,7 +56,8 @@ def test_scan_names_spacy_dispatch_builds_value_free_findings(monkeypatch):
     # (char-offset -> line, dedupe, value-free Finding).
     monkeypatch.setattr(ner_spacy, "load", lambda model=None: object())
     monkeypatch.setattr(
-        ner_spacy, "predict",
+        ner_spacy,
+        "predict",
         lambda nlp, chunk, labels: [(ner.NAME, chunk.find("Bob"))] if "Bob" in chunk else [],
     )
     findings = ner.scan_names("line one\nhello Bob here", backend="spacy", labels=("person",))

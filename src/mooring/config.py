@@ -275,7 +275,7 @@ def _str_list(raw: object, key: str) -> tuple[str, ...]:
         raise ValueError(f"[sync] {key} must be an array of strings, got {type(raw).__name__}")
     if not all(isinstance(p, str) for p in raw):
         raise ValueError(f"[sync] {key} entries must all be strings")
-    return tuple(raw)
+    return tuple(s for s in raw if isinstance(s, str))
 
 
 def _as_bool(value: object, default: bool) -> bool:
@@ -318,7 +318,7 @@ def repo_specs_from_data(data: dict) -> tuple[tuple[RepoSpec, ...], str]:
     if isinstance(repos_data, dict):
         specs = tuple(
             RepoSpec(
-                alias=alias,
+                alias=str(alias),
                 owner=str(tbl.get("owner", "")),
                 repo=str(tbl.get("repo", "")),
                 branch=str(tbl.get("branch", "main") or "main"),

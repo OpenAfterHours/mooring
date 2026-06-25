@@ -89,12 +89,16 @@ def test_replace_all_rebuilds_every_cell():
 
 def test_replace_all_cannot_be_combined():
     with pytest.raises(ValueError, match="rewrite cannot be combined"):
-        marimo_rt.apply_cell_patch(NB, [CellOp(op="replace_all", cells=("a = 1",)), CellOp(op="append", code="b = 2")])
+        marimo_rt.apply_cell_patch(
+            NB, [CellOp(op="replace_all", cells=("a = 1",)), CellOp(op="append", code="b = 2")]
+        )
 
 
 def test_stale_anchor_raises_conflict():
     with pytest.raises(marimo_rt.CellPatchConflict):
-        marimo_rt.apply_cell_patch(NB, [CellOp(op="edit", index=1, anchor="not the cell", code="x = 0")])
+        marimo_rt.apply_cell_patch(
+            NB, [CellOp(op="edit", index=1, anchor="not the cell", code="x = 0")]
+        )
 
 
 def test_out_of_range_index_raises_conflict():
@@ -125,7 +129,9 @@ def test_a_result_that_would_not_parse_is_rejected():
     # loud here rather than write something --watch silently ignores.
     cells = marimo_rt.read_cells(NB)
     with pytest.raises(ValueError, match="would not parse"):
-        marimo_rt.apply_cell_patch(NB, [CellOp(op="edit", index=0, anchor=cells[0][1], code="seed = (1")])
+        marimo_rt.apply_cell_patch(
+            NB, [CellOp(op="edit", index=0, anchor=cells[0][1], code="seed = (1")]
+        )
 
 
 def test_read_cells_normalizes_marimo_parse_error_to_valueerror():
@@ -188,7 +194,7 @@ def test_append_cell_source_still_appends():
         ("x = await f()\nreturn (x,)", "x = await f()"),  # top-level await + return
         ("@app.cell\ndef _():\n    z = 9\n    return (z,)", "z = 9"),  # unwrap the wrapper
         ("seed = 1", "seed = 1"),  # already clean — unchanged
-        ("mo.md(\"hi\")", 'mo.md("hi")'),
+        ('mo.md("hi")', 'mo.md("hi")'),
         ("def load():\n    return 1", "def load():\n    return 1"),  # nested return kept
     ],
 )
@@ -201,7 +207,11 @@ def test_rewrite_tolerates_returns_in_cell_bodies():
     # lines into the rewrite cells. Normalization makes it apply cleanly.
     out = marimo_rt.apply_cell_patch(
         NB,
-        [marimo_rt.CellOp(op="replace_all", cells=("import marimo as mo\nreturn (mo,)", "z = 1\nreturn (z,)"))],
+        [
+            marimo_rt.CellOp(
+                op="replace_all", cells=("import marimo as mo\nreturn (mo,)", "z = 1\nreturn (z,)")
+            )
+        ],
     )
     assert _codes(out) == ["import marimo as mo", "z = 1"]
 
@@ -209,7 +219,8 @@ def test_rewrite_tolerates_returns_in_cell_bodies():
 def test_edit_tolerates_a_return_in_the_new_code():
     cells = marimo_rt.read_cells(NB)
     out = marimo_rt.apply_cell_patch(
-        NB, [marimo_rt.CellOp(op="edit", index=0, anchor=cells[0][1], code="seed = 5\nreturn (seed,)")]
+        NB,
+        [marimo_rt.CellOp(op="edit", index=0, anchor=cells[0][1], code="seed = 5\nreturn (seed,)")],
     )
     assert _codes(out)[0] == "seed = 5"
 

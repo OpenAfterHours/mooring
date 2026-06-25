@@ -22,9 +22,13 @@ import shutil
 import tempfile
 import threading
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 from mooring.ai.base import AIError, AINotConnectedError
 from mooring.ai.chat import ChatBroadcaster, ChatEvent
+
+if TYPE_CHECKING:
+    from mooring.ai.ner import ModelRef
 
 _START_TIMEOUT = 60.0
 _SEND_TIMEOUT = 30.0
@@ -76,7 +80,7 @@ class CopilotChatSession(ChatBroadcaster):
         pii_names: bool = False,
         pii_name_labels: tuple[str, ...] | None = None,
         pii_name_threshold: float = 0.7,
-        pii_name_model: str | None = None,
+        pii_name_model: "ModelRef | str | None" = None,
         pii_name_backend: str = "auto",
     ) -> None:
         super().__init__()
@@ -147,7 +151,7 @@ class CopilotChatSession(ChatBroadcaster):
             # timeout, so the deadline must live HERE. A timeout raises and is turned
             # into a "fail" event below, which re-enables the UI just like an error.
             loop.run_until_complete(asyncio.wait_for(self._aopen(), _START_TIMEOUT))
-        except BaseException as exc:  # noqa: BLE001 - surfaced via start()/the stream
+        except BaseException as exc:  # noqa: BLE001  # surfaced via start()/the stream
             from mooring.ai.copilot import friendly_error
 
             # A machine-readable reason lets the chat UI branch on "not signed in"
@@ -216,7 +220,7 @@ class CopilotChatSession(ChatBroadcaster):
             dictionary=self._dictionary,
             pii_enabled=self._pii_enabled,
         )
-        extra = {}
+        extra: dict[str, Any] = {}
         if self._reasoning_effort:
             extra["reasoning_effort"] = self._reasoning_effort
         self._session = await client.create_session(
@@ -309,10 +313,11 @@ class CopilotChatSession(ChatBroadcaster):
         self._forward(self._live_prefix(live_schema_text) + text)
 
     def _forward(self, text: str) -> None:
+        assert self._session is not None and self._loop is not None  # callers check first
         future = asyncio.run_coroutine_threadsafe(self._session.send(text), self._loop)
         try:
             future.result(timeout=_SEND_TIMEOUT)
-        except Exception as exc:  # noqa: BLE001 - surface to the chat, don't crash the hub
+        except Exception as exc:  # noqa: BLE001  # surface to the chat, don't crash the hub
             from mooring.ai.copilot import friendly_error
 
             self._broadcast(ChatEvent("fail", {"text": friendly_error(str(exc))}))
@@ -327,7 +332,7 @@ class CopilotChatSession(ChatBroadcaster):
         # futures after shutdown".
         try:
             asyncio.run_coroutine_threadsafe(self._aclose(), loop).result(timeout=10)
-        except Exception:  # noqa: BLE001 - best-effort teardown
+        except Exception:  # noqa: BLE001  # best-effort teardown
             pass
         loop.call_soon_threadsafe(loop.stop)
 

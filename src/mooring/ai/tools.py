@@ -39,6 +39,8 @@ EDIT_TOOL_NAMES = [
 # Cell-source format reminder for every propose tool. The displayed file source shows
 # marimo's wrapper (`@app.cell` / `def _()` / a trailing `return (...)`); a cell's
 # source is the BODY ONLY — mooring regenerates the wrapper and the return.
+_RATIONALE_DESC = "a one-line reason (optional)"
+
 _CELL_FORMAT = (
     " Each cell is the BODY ONLY (top-level statements) — do NOT include '@app.cell', "
     "'def _():', or a trailing 'return (...)'; those are added automatically."
@@ -105,6 +107,15 @@ def build_tools(
     from mooring import marimo_rt, schema
     from mooring.ai import egress
 
+    def _err(msg: str):
+        return ToolResult(
+            text_result_for_llm="",
+            # "error" is mooring's own result_type; the SDK's ToolResultType Literal
+            # omits it, but the dataclass stores the string as-is at runtime.
+            result_type="error",  # ty: ignore[invalid-argument-type]
+            error=msg,
+        )
+
     def list_datasets(_invocation):
         found = schema.list_datasets(workspace, folders)
         return ToolResult(text_result_for_llm="\n".join(found) or "(no datasets found)")
@@ -112,7 +123,7 @@ def build_tools(
     def get_schema(invocation):
         rel = str(_args(invocation).get("dataset", "")).strip()
         if not rel:
-            return ToolResult(text_result_for_llm="", result_type="error", error="dataset required")
+            return _err("dataset required")
         try:
             target = _safe(workspace, rel)
             ds = schema.extract_schema(target)
@@ -122,13 +133,8 @@ def build_tools(
                     ds = replace(ds, columns=kept)
             text = schema.format_for_ai(ds, source=rel)
         except (ValueError, OSError) as exc:
-            return ToolResult(
-                text_result_for_llm="", result_type="error", error=f"cannot read schema: {exc}"
-            )
+            return _err(f"cannot read schema: {exc}")
         return ToolResult(text_result_for_llm=text)
-
-    def _err(msg: str):
-        return ToolResult(text_result_for_llm="", result_type="error", error=msg)
 
     _NB_READ_ERRORS = (
         ValueError,
@@ -160,8 +166,8 @@ def build_tools(
         if cells:
             body = "\n\n".join(f"# === cell {i} ===\n{code}" for i, code in cells)
             rendered = (
-                    f"The notebook has {len(cells)} cell(s); each is shown with its index "
-                    "(use mooring_propose_cell_edit to change one):\n\n" + body
+                f"The notebook has {len(cells)} cell(s); each is shown with its index "
+                "(use mooring_propose_cell_edit to change one):\n\n" + body
             )
         else:  # not a parseable marimo notebook — show the raw source instead
             rendered = raw
@@ -201,6 +207,7 @@ def build_tools(
         if not 0 <= idx < len(cells):
             return _err(f"index must be 0..{len(cells) - 1} (the notebook has {len(cells)} cells)")
         anchor = cells[idx][1]
+        assert emit_proposal_patch is not None  # tool only registered when the callback exists
         emit_proposal_patch(
             {
                 "kind": "edit",
@@ -254,13 +261,16 @@ def build_tools(
             ops.append({"op": "delete", "index": idx, "anchor": anchor})
             diffs.append({"label": f"cell {idx} (deleted)", "before": anchor, "after": ""})
         for raw in args.get("appends") or []:
-            code = marimo_rt.normalize_cell_code(str(raw.get("code", "") if isinstance(raw, dict) else raw))
+            code = marimo_rt.normalize_cell_code(
+                str(raw.get("code", "") if isinstance(raw, dict) else raw)
+            )
             if not code.strip():
                 return _err("an appended cell has no code")
             ops.append({"op": "append", "code": code})
             diffs.append({"label": "new cell", "before": "", "after": code})
         if not ops:
             return _err("provide at least one of edits, appends, or deletes")
+        assert emit_proposal_patch is not None  # tool only registered when the callback exists
         emit_proposal_patch({"kind": "patch", "rationale": rationale, "ops": ops, "diffs": diffs})
         return ToolResult(
             text_result_for_llm=(
@@ -282,6 +292,7 @@ def build_tools(
             before = "\n\n".join(code for _, code in _current_cells())
         except _NB_READ_ERRORS:
             before = ""  # still allow the rewrite; the diff just reads as all-additions
+        assert emit_proposal_patch is not None  # tool only registered when the callback exists
         emit_proposal_patch(
             {
                 "kind": "rewrite",
@@ -301,6 +312,7 @@ def build_tools(
     def list_tables(_invocation):
         from mooring.ai.datadictionary import render_listing
 
+        assert dictionary is not None  # dictionary tools only registered when it is present
         return ToolResult(
             text_result_for_llm=render_listing(dictionary) or "(the data dictionary is empty)"
         )
@@ -310,10 +322,13 @@ def build_tools(
 
         name = str(_args(invocation).get("table", "")).strip()
         if not name:
-            return ToolResult(text_result_for_llm="", result_type="error", error="table required")
+            return _err("table required")
+        assert dictionary is not None  # dictionary tools only registered when it is present
         table = dictionary.get(name)
         if table is None:
-            return ToolResult(text_result_for_llm=f"No table named {name!r} in the data dictionary.")
+            return ToolResult(
+                text_result_for_llm=f"No table named {name!r} in the data dictionary."
+            )
         return ToolResult(text_result_for_llm=render_table(table))
 
     def search_dictionary(invocation):
@@ -321,11 +336,14 @@ def build_tools(
 
         query = str(_args(invocation).get("query", "")).strip()
         if not query:
-            return ToolResult(text_result_for_llm="", result_type="error", error="query required")
+            return _err("query required")
+        assert dictionary is not None  # dictionary tools only registered when it is present
         hits = dictionary.search(query, limit=8)
         if not hits:
             return ToolResult(text_result_for_llm=f"No dictionary tables match {query!r}.")
-        return ToolResult(text_result_for_llm="\n\n".join(render_table(t, max_cols=12) for t in hits))
+        return ToolResult(
+            text_result_for_llm="\n\n".join(render_table(t, max_cols=12) for t in hits)
+        )
 
     tools = [
         Tool(
@@ -367,8 +385,11 @@ def build_tools(
             parameters={
                 "type": "object",
                 "properties": {
-                    "code": {"type": "string", "description": "the cell BODY (no @app.cell/def/return)"},
-                    "rationale": {"type": "string", "description": "a one-line reason (optional)"},
+                    "code": {
+                        "type": "string",
+                        "description": "the cell BODY (no @app.cell/def/return)",
+                    },
+                    "rationale": {"type": "string", "description": _RATIONALE_DESC},
                 },
                 "required": ["code"],
             },
@@ -387,9 +408,15 @@ def build_tools(
                 parameters={
                     "type": "object",
                     "properties": {
-                        "index": {"type": "integer", "description": "the cell number to edit (0-based)"},
-                        "code": {"type": "string", "description": "the new cell BODY (no @app.cell/def/return)"},
-                        "rationale": {"type": "string", "description": "a one-line reason (optional)"},
+                        "index": {
+                            "type": "integer",
+                            "description": "the cell number to edit (0-based)",
+                        },
+                        "code": {
+                            "type": "string",
+                            "description": "the new cell BODY (no @app.cell/def/return)",
+                        },
+                        "rationale": {"type": "string", "description": _RATIONALE_DESC},
                     },
                     "required": ["index", "code"],
                 },
@@ -427,7 +454,7 @@ def build_tools(
                             "description": "indices of cells to remove",
                             "items": {"type": "integer"},
                         },
-                        "rationale": {"type": "string", "description": "a one-line reason (optional)"},
+                        "rationale": {"type": "string", "description": _RATIONALE_DESC},
                     },
                 },
                 skip_permission=True,  # surfaces a proposal only; the analyst applies it
@@ -447,7 +474,7 @@ def build_tools(
                             "description": "the full ordered list of cell BODIES (each: no @app.cell/def/return)",
                             "items": {"type": "string"},
                         },
-                        "rationale": {"type": "string", "description": "a one-line reason (optional)"},
+                        "rationale": {"type": "string", "description": _RATIONALE_DESC},
                     },
                     "required": ["cells"],
                 },
@@ -490,7 +517,10 @@ def build_tools(
                 parameters={
                     "type": "object",
                     "properties": {
-                        "query": {"type": "string", "description": "a table/column term to search for"}
+                        "query": {
+                            "type": "string",
+                            "description": "a table/column term to search for",
+                        }
                     },
                     "required": ["query"],
                 },

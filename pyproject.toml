@@ -107,3 +107,16 @@ testpaths = ["tests"]
 [tool.ruff]
 line-length = 100
 src = ["src", "tests"]
+
+[[tool.ty.overrides]]
+# The NER/PII backends import heavy ML libraries (gliner, spacy, huggingface_hub,
+# tqdm) that ship only with the optional `pii` / `pii-spacy` extras, so a base
+# install can't resolve them. Every such import is already guarded by try/except.
+include = [
+    "src/mooring/ai/ner.py",
+    "src/mooring/ai/ner_spacy.py",
+    "scripts/vendor_spacy_model.py",
+]
+
+[tool.ty.overrides.rules]
+unresolved-import = "ignore"

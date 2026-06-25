@@ -43,6 +43,7 @@ def test_dictionary_description_secret_is_scrubbed(tmp_path):
     )
     rc = ctxmod.discover_context(tmp_path, enabled=True)
     table = rc.index.get("t")
+    assert table is not None
     assert table.description == ""  # dropped
     assert any(f.source == "credit.t" for f in rc.findings)
 

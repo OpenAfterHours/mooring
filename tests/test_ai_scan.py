@@ -19,13 +19,18 @@ def _index(*report_paths: str):
 def test_scan_pii_targets_walks_context_dict_and_notebooks(tmp_path):
     (tmp_path / "context" / "dictionaries").mkdir(parents=True)
     (tmp_path / "context" / "instructions.md").write_text(f"contact card {VALID_CARD}\n", "utf-8")
-    (tmp_path / "context" / "dictionaries" / "credit.yaml").write_text(f"note: nhs {VALID_NHS}\n", "utf-8")
+    (tmp_path / "context" / "dictionaries" / "credit.yaml").write_text(
+        f"note: nhs {VALID_NHS}\n", "utf-8"
+    )
     (tmp_path / "notebooks").mkdir()
     (tmp_path / "notebooks" / "a.py").write_text(f"# iban {VALID_IBAN}\n", "utf-8")
 
     findings = scan.scan_pii_targets(
-        tmp_path, "context", ("notebooks",),
-        _index("context/dictionaries/credit.yaml"), None,
+        tmp_path,
+        "context",
+        ("notebooks",),
+        _index("context/dictionaries/credit.yaml"),
+        None,
     )
 
     assert {k for _, _, k in findings} == {pii.CARD, pii.NHS, pii.IBAN}
@@ -57,9 +62,7 @@ def test_scan_context_secrets_finds_secrets_in_context_only(tmp_path):
     (tmp_path / "context" / "instructions.md").write_text(f"deploy token {token}\n", "utf-8")
     (tmp_path / "context" / "dictionaries" / "d.yaml").write_text("desc: clean\n", "utf-8")
 
-    findings = scan.scan_context_secrets(
-        tmp_path, "context", _index("context/dictionaries/d.yaml")
-    )
+    findings = scan.scan_context_secrets(tmp_path, "context", _index("context/dictionaries/d.yaml"))
     assert [(p, k) for p, _, k in findings] == [("context/instructions.md", "GitHub token")]
     assert token not in repr(findings)  # value-free
     # sanity: the kind label is what the underlying scanner emits

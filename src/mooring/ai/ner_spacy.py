@@ -27,12 +27,25 @@ _SPACY_KIND = {"PERSON": NAME, "ORG": ORG}
 # mooring's configurable label vocab -> the spaCy entity type to keep. (spaCy is
 # not zero-shot: it emits its fixed types and we FILTER, rather than querying.)
 _LABEL_TO_SPACY = {
-    "person": "PERSON", "people": "PERSON", "name": "PERSON", "person name": "PERSON",
-    "full name": "PERSON", "first name": "PERSON", "last name": "PERSON",
-    "given name": "PERSON", "surname": "PERSON",
-    "organization": "ORG", "organisation": "ORG", "company": "ORG", "business": "ORG",
-    "employer": "ORG", "org": "ORG", "organization name": "ORG", "organisation name": "ORG",
-    "company name": "ORG", "business name": "ORG",
+    "person": "PERSON",
+    "people": "PERSON",
+    "name": "PERSON",
+    "person name": "PERSON",
+    "full name": "PERSON",
+    "first name": "PERSON",
+    "last name": "PERSON",
+    "given name": "PERSON",
+    "surname": "PERSON",
+    "organization": "ORG",
+    "organisation": "ORG",
+    "company": "ORG",
+    "business": "ORG",
+    "employer": "ORG",
+    "org": "ORG",
+    "organization name": "ORG",
+    "organisation name": "ORG",
+    "company name": "ORG",
+    "business name": "ORG",
 }
 
 _models: dict[str, object] = {}
@@ -43,7 +56,7 @@ def available() -> bool:
     """True if the spaCy library imports (the ``pii-spacy`` extra is installed)."""
     try:
         import spacy  # noqa: F401
-    except Exception:  # noqa: BLE001 - any import failure means "not available"
+    except Exception:  # noqa: BLE001  # any import failure means "not available"
         return False
     return True
 
@@ -75,7 +88,7 @@ def is_ready(model: "str | None" = None) -> bool:
         return False
     try:
         target = _resolve(model)
-    except Exception:  # noqa: BLE001 - companion not installed / not vendored
+    except Exception:  # noqa: BLE001  # companion not installed / not vendored
         return False
     if target in _models:
         return True
@@ -96,7 +109,7 @@ def load(model: "str | None" = None):
         ) from exc
     try:
         target = _resolve(model)
-    except Exception as exc:  # noqa: BLE001 - companion missing / model not vendored
+    except Exception as exc:  # noqa: BLE001  # companion missing / model not vendored
         raise NerUnavailable(f"spaCy model unavailable: {exc}") from exc
     cached = _models.get(target)
     if cached is not None:
@@ -107,7 +120,7 @@ def load(model: "str | None" = None):
             return cached
         try:
             nlp = spacy.load(target)
-        except Exception as exc:  # noqa: BLE001 - not installed / bad path / version skew
+        except Exception as exc:  # noqa: BLE001  # not installed / bad path / version skew
             raise NerUnavailable(f"could not load spaCy model {target!r}: {exc}") from exc
         # Names + orgs only need the entity recogniser; disable the rest for speed.
         for pipe in list(getattr(nlp, "pipe_names", [])):
@@ -124,7 +137,9 @@ def predict(nlp, chunk: str, labels) -> list[tuple[str, int]]:
     ``labels`` is mooring's configured vocab; map it to spaCy entity types and keep
     only those (defaulting to person + organisation). The matched text is never read.
     """
-    want = {_LABEL_TO_SPACY[lab.lower()] for lab in (labels or ()) if lab.lower() in _LABEL_TO_SPACY}
+    want = {
+        _LABEL_TO_SPACY[lab.lower()] for lab in (labels or ()) if lab.lower() in _LABEL_TO_SPACY
+    }
     if not want:
         want = {"PERSON", "ORG"}
     out: list[tuple[str, int]] = []

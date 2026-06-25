@@ -39,6 +39,7 @@ _PROBE_TIMEOUT = 30.0  # seconds to check sign-in status
 _STATUS_TTL = 45.0  # cache the (CLI-spawning) auth probe this long
 _MODELS_TTL = 300.0  # cache the model list this long (it changes rarely)
 _MAX_LOGIN_LINES = 50
+_COPILOT_UNAVAILABLE = "The Copilot CLI is not available in this build."
 
 
 class CopilotProvider:
@@ -69,7 +70,7 @@ class CopilotProvider:
             candidate = Path(copilot_sdk.__file__).parent / "bin" / bin_name
             if candidate.exists():
                 return str(candidate)
-        except Exception:  # noqa: BLE001 - SDK not importable -> not available
+        except Exception:  # noqa: BLE001  # SDK not importable -> not available
             pass
         return shutil.which("copilot")
 
@@ -88,7 +89,7 @@ class CopilotProvider:
                 self.name,
                 available=False,
                 connected=False,
-                detail="The Copilot CLI is not available in this build.",
+                detail=_COPILOT_UNAVAILABLE,
             )
         with self._cache_lock:
             fresh = (
@@ -114,7 +115,7 @@ class CopilotProvider:
                 self.name,
                 available=False,
                 connected=False,
-                detail="The Copilot CLI is not available in this build.",
+                detail=_COPILOT_UNAVAILABLE,
             )
         with self._cache_lock:
             if (
@@ -127,7 +128,7 @@ class CopilotProvider:
     def _probe(self) -> ProviderStatus:
         try:
             authed, login = self._run(self._aauth(), _PROBE_TIMEOUT)
-        except Exception as exc:  # noqa: BLE001 - report, never raise into a probe
+        except Exception as exc:  # noqa: BLE001  # report, never raise into a probe
             return ProviderStatus(
                 self.name,
                 available=True,
@@ -170,8 +171,9 @@ class CopilotProvider:
         mirroring :meth:`login_interactive`.
         """
         if not self.available():
-            raise AIError("The Copilot CLI is not available in this build.")
+            raise AIError(_COPILOT_UNAVAILABLE)
         cli = self._cli_path()
+        assert cli is not None  # available() above guarantees the CLI path
         with self._login_lock:
             if self._login_proc is not None and self._login_proc.poll() is None:
                 return self._connecting_status("Sign-in already in progress.")
@@ -211,7 +213,7 @@ class CopilotProvider:
                             self._login_output.append(line)
                             del self._login_output[:-_MAX_LOGIN_LINES]
             proc.wait()
-        except Exception:  # noqa: BLE001 - draining is best-effort
+        except Exception:  # noqa: BLE001  # draining is best-effort
             pass
         finally:
             self._invalidate_cache()
@@ -224,11 +226,13 @@ class CopilotProvider:
     def login_interactive(self, host: str | None = None) -> int:
         """Run ``copilot login`` attached to the terminal (the CLI command path)."""
         if not self.available():
-            raise AIError("The Copilot CLI is not available in this build.")
-        cmd = [self._cli_path(), "login"]
+            raise AIError(_COPILOT_UNAVAILABLE)
+        cli = self._cli_path()
+        assert cli is not None  # available() above guarantees the CLI path
+        cmd = [cli, "login"]
         if host:
             cmd += ["--host", host]
-        result = subprocess.run(cmd)  # noqa: S603 - bundled trusted binary, inherits stdio
+        result = subprocess.run(cmd)  # noqa: S603  # bundled trusted binary, inherits stdio
         self._invalidate_cache()
         return result.returncode
 
@@ -324,7 +328,7 @@ class CopilotProvider:
                 return self._cached_models
         try:
             models = self._run(self._alist_models(), _PROBE_TIMEOUT)
-        except Exception:  # noqa: BLE001 - never raise into the hub; report none
+        except Exception:  # noqa: BLE001  # never raise into the hub; report none
             models = []
         with self._models_lock:
             self._cached_models = models
@@ -371,7 +375,7 @@ def _model_dict(m: object) -> dict:
     }
 
 
-def _deny_all(request, invocation):  # noqa: ANN001 - SDK permission callback
+def _deny_all(request, invocation):  # noqa: ANN001  # SDK permission callback
     """Reject every permission request: a fail-closed backstop behind the
     available_tools allowlist (so a built-in that asks permission can't run)."""
     from copilot.rpc import PermissionDecisionReject

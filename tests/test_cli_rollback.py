@@ -68,7 +68,9 @@ def test_rollback_snapshots_so_it_is_undoable(workspace, monkeypatch):
     (workspace / "notebooks/a.py").write_text("mine\n", "utf-8", newline="\n")
     assert cli.main(["rollback", "notebooks/a.py", "--yes"]) == 0
     # the pre-revert bytes are on the local undo stack (the hub's Undo can restore them)
-    assert notebook_undo.peek_latest(workspace, "notebooks/a.py")[1] == b"mine\n"
+    latest = notebook_undo.peek_latest(workspace, "notebooks/a.py")
+    assert latest is not None
+    assert latest[1] == b"mine\n"
 
 
 def test_rollback_needs_login(workspace, monkeypatch, capsys):

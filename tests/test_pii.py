@@ -235,7 +235,9 @@ def test_structured_hold_survives_name_pass_failure(monkeypatch):
         raise ner.NerUnavailable("no extra")
 
     monkeypatch.setattr(ner, "available", lambda backend="gliner": True)
-    monkeypatch.setattr(ner, "is_cached", lambda mid=None: True)  # ready -> name pass runs (and fails)
+    monkeypatch.setattr(
+        ner, "is_cached", lambda mid=None: True
+    )  # ready -> name pass runs (and fails)
     monkeypatch.setattr(ner, "scan_names", boom)
     sess = StubChatSession(pii_enabled=True, pii_block=True, pii_names=True)
     q = sess.subscribe()
@@ -255,7 +257,9 @@ def test_scan_error_alone_forwards_loud(monkeypatch):
         raise ner.NerUnavailable("no extra")
 
     monkeypatch.setattr(ner, "available", lambda backend="gliner": True)
-    monkeypatch.setattr(ner, "is_cached", lambda mid=None: True)  # ready -> name pass runs (and fails)
+    monkeypatch.setattr(
+        ner, "is_cached", lambda mid=None: True
+    )  # ready -> name pass runs (and fails)
     monkeypatch.setattr(ner, "scan_names", boom)
     sess = StubChatSession(pii_enabled=True, pii_block=True, pii_names=True)
     q = sess.subscribe()
@@ -291,6 +295,7 @@ def test_prepare_pii_model_streams_progress_then_ready(monkeypatch):
     monkeypatch.setattr(ner, "resolve_backend", lambda b=None: "gliner")
 
     def fake_download(mid=None, on_progress=None):
+        assert on_progress is not None
         on_progress(50, 100)
         on_progress(100, 100)
 
@@ -586,7 +591,9 @@ def test_dictionary_description_pii_is_scrubbed(tmp_path):
         "    columns:\n      - name: id\n        data_type: int\n",
     )
     rc = ctxmod.discover_context(tmp_path, enabled=True)
-    assert rc.index.get("t").description == ""  # dropped
+    table = rc.index.get("t")
+    assert table is not None
+    assert table.description == ""  # dropped
     assert any(f.source == "credit.t" and f.kind == pii.CARD for f in rc.findings)
 
 
@@ -596,7 +603,9 @@ def test_dictionary_description_pii_is_scrubbed(tmp_path):
 def test_config_defaults_and_env_override(clean_config):
     c = config.load_app_config(env={})
     assert c.ai_pii is False and c.ai_pii_block_prompt is True and c.ai_pii_scan_source is True
-    c2 = config.load_app_config(env={"MOORING_AI_PII": "true", "MOORING_AI_PII_BLOCK_PROMPT": "false"})
+    c2 = config.load_app_config(
+        env={"MOORING_AI_PII": "true", "MOORING_AI_PII_BLOCK_PROMPT": "false"}
+    )
     assert c2.ai_pii is True and c2.ai_pii_block_prompt is False
 
 

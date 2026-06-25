@@ -38,7 +38,10 @@ STARTUP_TIMEOUT = 30.0
 
 def _force_frozen() -> bool:
     return os.environ.get("MOORING_FORCE_FROZEN", "").strip().lower() in (
-        "1", "true", "yes", "on",
+        "1",
+        "true",
+        "yes",
+        "on",
     )
 
 
@@ -216,11 +219,9 @@ class EditorServer:
         url = f"http://127.0.0.1:{self.port}/"
         while time.monotonic() < deadline:
             if self._proc is not None and self._proc.poll() is not None:
-                raise EditorError(
-                    f"marimo exited during startup (code {self._proc.returncode})."
-                )
+                raise EditorError(f"marimo exited during startup (code {self._proc.returncode}).")
             try:
-                urllib.request.urlopen(url, timeout=1)  # noqa: S310 - localhost only
+                urllib.request.urlopen(url, timeout=1)  # noqa: S310  # localhost only
                 return
             except urllib.error.HTTPError:
                 return  # any HTTP response (401 included) means the server is up
@@ -244,6 +245,7 @@ class EditorServer:
         if not self.running:
             return
         proc = self._proc
+        assert proc is not None  # self.running guarantees a live process
         if sys.platform == "win32":
             # TerminateProcess would orphan marimo's kernel children; kill the tree.
             subprocess.run(

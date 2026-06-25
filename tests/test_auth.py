@@ -31,7 +31,9 @@ def test_start_device_flow():
     device = auth.start_device_flow("client123")
     assert device.user_code == "ABCD-1234"
     assert device.host == "github.com"
-    assert "client123" in responses.calls[0].request.body
+    body = responses.calls[0].request.body
+    assert isinstance(body, str)  # form-encoded body
+    assert "client123" in body
 
 
 @responses.activate
@@ -64,8 +66,8 @@ class _Resp:
 
 
 def test_device_flow_hint_default_host_suggests_enterprise():
-    exc = Exception("boom")
-    exc.response = _Resp(404)
+    exc = RuntimeError("boom")
+    exc.response = _Resp(404)  # ty: ignore[unresolved-attribute]  # stub attaches .response
     msg = auth.device_flow_hint("github.com", exc)
     assert "github.com" in msg
     assert "404" in msg
@@ -74,8 +76,8 @@ def test_device_flow_hint_default_host_suggests_enterprise():
 
 
 def test_device_flow_hint_enterprise_host_no_suggestion():
-    exc = Exception("boom")
-    exc.response = _Resp(404)
+    exc = RuntimeError("boom")
+    exc.response = _Resp(404)  # ty: ignore[unresolved-attribute]  # stub attaches .response
     msg = auth.device_flow_hint("ghe.example", exc)
     assert "ghe.example" in msg
     assert "404" in msg
@@ -83,22 +85,18 @@ def test_device_flow_hint_enterprise_host_no_suggestion():
 
 
 def test_device_flow_hint_without_status_uses_message():
-    msg = auth.device_flow_hint("ghe.example", Exception("connection refused"))
+    msg = auth.device_flow_hint("ghe.example", RuntimeError("connection refused"))
     assert "connection refused" in msg
 
 
 @responses.activate
 def test_poll_until_token_with_slow_down():
     responses.add(responses.POST, auth.token_url(), json={"error": "authorization_pending"})
-    responses.add(
-        responses.POST, auth.token_url(), json={"error": "slow_down", "interval": 10}
-    )
+    responses.add(responses.POST, auth.token_url(), json={"error": "slow_down", "interval": 10})
     responses.add(responses.POST, auth.token_url(), json={"access_token": "gho_token"})
 
     sleeps = []
-    token = auth.poll_for_token(
-        "client123", _device(), sleep=sleeps.append, clock=lambda: 0.0
-    )
+    token = auth.poll_for_token("client123", _device(), sleep=sleeps.append, clock=lambda: 0.0)
     assert token == "gho_token"
     assert sleeps == [5, 10]  # slow_down raised the interval
 

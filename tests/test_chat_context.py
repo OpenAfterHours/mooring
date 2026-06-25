@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from mooring.ai.chat import build_system_context
 
-BASE = dict(schema_text="DATASET", notebook_source="import marimo", notebook_rel="nb.py")
+BASE = {"schema_text": "DATASET", "notebook_source": "import marimo", "notebook_rel": "nb.py"}
 _INSTR_HEADER = "TEAM INSTRUCTIONS (user-authored"
 
 

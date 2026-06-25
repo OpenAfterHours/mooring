@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -74,9 +75,20 @@ async def main() -> int:
     token = secrets.token_urlsafe(16)
     sid = "fw-session-001"
     cmd = [
-        sys.executable, "-m", "marimo", "edit", str(ws_dir), "--headless",
-        "--host", "127.0.0.1", "--port", str(port), "--token-password", token,
-        "--skip-update-check", "--watch",
+        sys.executable,
+        "-m",
+        "marimo",
+        "edit",
+        str(ws_dir),
+        "--headless",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        str(port),
+        "--token-password",
+        token,
+        "--skip-update-check",
+        "--watch",
     ]
     print(f"[*] launching marimo edit --watch on {ws_dir.name}")
     proc = subprocess.Popen(cmd, cwd=str(ws_dir))
@@ -110,7 +122,7 @@ async def main() -> int:
                 except Exception:
                     op = "<non-json>"
                 ops.append(op)
-                if MARKER in raw:
+                if MARKER in raw:  # ty: ignore[unsupported-operator]  # spike: ws.recv() is str|bytes
                     print(f"    tab received op={op!r} carrying the new cell")
                     reached = True
                     break

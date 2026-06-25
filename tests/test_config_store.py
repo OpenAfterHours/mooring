@@ -11,9 +11,15 @@ from mooring.cli import _coerce_config_value, main
 @pytest.fixture(autouse=True)
 def isolated_config(tmp_path, monkeypatch):
     monkeypatch.setattr(paths, "user_config_dir", lambda: tmp_path / "appdata")
-    for var in ("MOORING_CLIENT_ID", "MOORING_OWNER", "MOORING_REPO",
-                "MOORING_BRANCH", "MOORING_WORKSPACE", "MOORING_ACTIVE_REPO",
-                "MOORING_GITHUB_HOST"):
+    for var in (
+        "MOORING_CLIENT_ID",
+        "MOORING_OWNER",
+        "MOORING_REPO",
+        "MOORING_BRANCH",
+        "MOORING_WORKSPACE",
+        "MOORING_ACTIVE_REPO",
+        "MOORING_GITHUB_HOST",
+    ):
         monkeypatch.delenv(var, raising=False)
     return tmp_path
 

@@ -50,6 +50,7 @@ def _static_dir() -> Path:
 
 # Sentinel returned by Hub._restore_undo when a token-scoped undo can't run because a
 # newer snapshot is now on top of the (shared) per-notebook undo stack.
+_UNKNOWN_CHAT_SESSION = "Unknown chat session."
 _UNDO_SUPERSEDED = object()
 
 
@@ -180,9 +181,9 @@ class Hub:
 
         def _warm() -> None:
             with contextlib.suppress(Exception):
-                import marimo  # noqa: F401 - prime the import cache for the live probe
+                import marimo  # noqa: F401  # prime the import cache for the live probe
             with contextlib.suppress(Exception):
-                import copilot  # noqa: F401 - prime the Copilot SDK import
+                import copilot  # noqa: F401  # prime the Copilot SDK import
             with contextlib.suppress(Exception):
                 # Prime the provider's auth/model caches so the first open is warm too —
                 # status() first so the hub's Copilot sign-in row can show "connected as
@@ -201,7 +202,7 @@ class Hub:
             self._chat_targets.clear()
         for session in sessions:
             with contextlib.suppress(Exception):
-                session.close()  # type: ignore[attr-defined]
+                session.close()  # ty: ignore[unresolved-attribute]
 
     def _close_chat(self, sid: str) -> None:
         """Tear down one chat session (drop its target, close the provider)."""
@@ -210,7 +211,7 @@ class Hub:
             self._chat_targets.pop(sid, None)
         if session is not None:
             with contextlib.suppress(Exception):
-                session.close()  # type: ignore[attr-defined]
+                session.close()  # ty: ignore[unresolved-attribute]
 
     def _close_chats_for_notebook(self, workspace: Path, notebook_rel: str) -> int:
         """Close every live chat bound to one notebook. Used when AI is disabled for
@@ -327,9 +328,7 @@ class Hub:
             summary = (
                 "Notebooks run in this project's locked environment (pyproject.toml + uv.lock)."
             )
-            add_hint = (
-                "Add a package with `mooring deps add <name>`, then Push to share it with your team."
-            )
+            add_hint = "Add a package with `mooring deps add <name>`, then Push to share it with your team."
         elif pyproject_env.uv_available():
             summary = "Notebooks run in mooring's bundled Python environment."
             add_hint = (
@@ -352,7 +351,7 @@ class Hub:
 
     # -- endpoints -------------------------------------------------------------
 
-    def api_state(self, request: Request) -> JSONResponse:
+    def api_state(self, _request: Request) -> JSONResponse:
         cfg = self.cfg
         body: dict = {
             "version": __version__,
@@ -500,10 +499,10 @@ class Hub:
         telemetry.log_event("ui_theme", theme=theme)
         return JSONResponse({"ok": True, "theme": theme})
 
-    def api_login_start(self, request: Request) -> JSONResponse:
+    def api_login_start(self, _request: Request) -> JSONResponse:
         try:
             device = auth.start_device_flow(self.cfg.client_id, host=self.cfg.host)
-        except Exception as exc:  # noqa: BLE001 - shown in the UI
+        except Exception as exc:  # noqa: BLE001  # shown in the UI
             return JSONResponse(
                 {"error": auth.device_flow_hint(self.cfg.host, exc)}, status_code=502
             )
@@ -515,7 +514,7 @@ class Hub:
             {"user_code": device.user_code, "verification_uri": device.verification_uri}
         )
 
-    def api_login_poll(self, request: Request) -> JSONResponse:
+    def api_login_poll(self, _request: Request) -> JSONResponse:
         with self._lock:
             device = self._device
             if device is None:
@@ -542,7 +541,7 @@ class Hub:
             self._next_poll = time.monotonic() + result.interval
         return JSONResponse({"status": "pending"})
 
-    def api_logout(self, request: Request) -> JSONResponse:
+    def api_logout(self, _request: Request) -> JSONResponse:
         auth.delete_token(host=self.cfg.host)
         self._user_login = ""
         telemetry.log_event("logout")
@@ -693,7 +692,9 @@ class Hub:
                 self._restore_undo, nb_path, workspace, rel_path, expect_token=token
             )
         except OSError as exc:  # momentarily locked — the snapshot is kept to retry
-            return JSONResponse({"error": f"Could not restore the notebook: {exc}"}, status_code=502)
+            return JSONResponse(
+                {"error": f"Could not restore the notebook: {exc}"}, status_code=502
+            )
         if outcome is _UNDO_SUPERSEDED:
             return JSONResponse(
                 {
@@ -732,7 +733,7 @@ class Hub:
             )
         try:
             editor = self.ensure_editor()
-        except Exception as exc:  # noqa: BLE001 - shown in the UI
+        except Exception as exc:  # noqa: BLE001  # shown in the UI
             return JSONResponse({"error": f"Could not start the editor: {exc}"}, status_code=502)
         telemetry.log_event("open", kind="notebook", uv=editor.use_uv())
         payload = {"path": rel_path, "url": editor.url_for(rel_path)}
@@ -909,7 +910,7 @@ class Hub:
                     scrubbed.append(fr)
                 frames = scrubbed
             return introspect.format_live_schemas(frames), banner
-        except Exception:  # noqa: BLE001 - never block chat on introspection
+        except Exception:  # noqa: BLE001  # never block chat on introspection
             return "", []
 
     def _live_schema_for_sid(self, sid: str) -> tuple[str, list[dict]]:
@@ -975,13 +976,13 @@ class Hub:
     def _reap_idle_chats(self) -> None:
         timeout = self.app_cfg.ai_chat_idle_timeout
         with self._chat_lock:
-            dead = [sid for sid, s in self._chats.items() if s.idle_seconds() > timeout]  # type: ignore[attr-defined]
+            dead = [sid for sid, s in self._chats.items() if s.idle_seconds() > timeout]  # ty: ignore[unresolved-attribute]
             sessions = [self._chats.pop(sid) for sid in dead]
             for sid in dead:
                 self._chat_targets.pop(sid, None)
         for session in sessions:
             with contextlib.suppress(Exception):
-                session.close()  # type: ignore[attr-defined]
+                session.close()  # ty: ignore[unresolved-attribute]
 
     def _themed_page(self, filename: str) -> HTMLResponse:
         """Serve a hub HTML page with the configured default theme inlined.
@@ -995,10 +996,10 @@ class Hub:
         html = (_static_dir() / filename).read_text("utf-8")
         return HTMLResponse(html.replace("__MOORING_DEFAULT_THEME__", self.app_cfg.ui_theme))
 
-    def index_page(self, request: Request) -> HTMLResponse:
+    def index_page(self, _request: Request) -> HTMLResponse:
         return self._themed_page("index.html")
 
-    def chat_page(self, request: Request) -> HTMLResponse | JSONResponse:
+    def chat_page(self, _request: Request) -> HTMLResponse | JSONResponse:
         if not self.app_cfg.ai_enabled:
             return JSONResponse({"error": "The AI copilot is disabled."}, status_code=404)
         return self._themed_page("chat.html")
@@ -1019,9 +1020,7 @@ class Hub:
         # Per-notebook opt-out (synced mooring.toml). 403 + reason distinguishes
         # this from the global-off 404 above, so the chat UI shows the right message.
         if workspace_config.is_ai_disabled(workspace, notebook):
-            return JSONResponse(
-                {"enabled": False, "reason": "notebook_disabled"}, status_code=403
-            )
+            return JSONResponse({"enabled": False, "reason": "notebook_disabled"}, status_code=403)
         try:
             # File IO (notebook source, dataset schema, team context) — off the event
             # loop so a slow read can't stall the hub's other requests.
@@ -1042,7 +1041,7 @@ class Hub:
                 reasoning_effort=reasoning_effort,
                 dictionary=index,
             )
-        except Exception as exc:  # noqa: BLE001 - AIError surfaces to the UI in Phase 1
+        except Exception as exc:  # noqa: BLE001  # AIError surfaces to the UI in Phase 1
             return JSONResponse({"error": str(exc)}, status_code=502)
         # The live-kernel schema is deferred off the open path (see _build_chat_context),
         # so live_text is ""; the first turn picks it up. This seeds the (empty) snapshot.
@@ -1103,7 +1102,7 @@ class Hub:
         sid = request.path_params["sid"]
         session = self._chats.get(sid)
         if session is None:
-            return JSONResponse({"error": "Unknown chat session."}, status_code=404)
+            return JSONResponse({"error": _UNKNOWN_CHAT_SESSION}, status_code=404)
         return StreamingResponse(
             self._sse_gen(session),
             media_type="text/event-stream",
@@ -1150,7 +1149,7 @@ class Hub:
         sid = str(data.get("sid", ""))
         session = self._chats.get(sid)
         if session is None:
-            return JSONResponse({"error": "Unknown chat session."}, status_code=404)
+            return JSONResponse({"error": _UNKNOWN_CHAT_SESSION}, status_code=404)
         # Refresh the live-kernel schema so dataframes added since chat-open (or the
         # last turn) are visible without reopening. Value-free + best-effort; the
         # session re-injects it only when it changed. Off-thread — it does kernel I/O.
@@ -1167,8 +1166,8 @@ class Hub:
         confirm = str(data.get("confirm_token", "")).strip()
         if confirm:
             try:
-                await asyncio.to_thread(session.send_confirmed, confirm, live_text)
-            except Exception as exc:  # noqa: BLE001 - AIError surfaces to the UI
+                await asyncio.to_thread(session.send_confirmed, confirm, live_text)  # ty: ignore[unresolved-attribute]
+            except Exception as exc:  # noqa: BLE001  # AIError surfaces to the UI
                 return JSONResponse({"error": str(exc)}, status_code=502)
             telemetry.log_event("ai_chat_send", confirmed=1)
             return JSONResponse({"ok": True, "pii": live_banner})
@@ -1176,8 +1175,8 @@ class Hub:
         if not text:
             return JSONResponse({"error": "Type a message."}, status_code=400)
         try:
-            await asyncio.to_thread(session.send, text, live_text)
-        except Exception as exc:  # noqa: BLE001 - AIError surfaces to the UI in Phase 1
+            await asyncio.to_thread(session.send, text, live_text)  # ty: ignore[unresolved-attribute]
+        except Exception as exc:  # noqa: BLE001  # AIError surfaces to the UI in Phase 1
             return JSONResponse({"error": str(exc)}, status_code=502)
         telemetry.log_event("ai_chat_send")
         return JSONResponse({"ok": True, "pii": live_banner})
@@ -1188,7 +1187,7 @@ class Hub:
         with self._chat_lock:
             target = self._chat_targets.get(sid)
         if target is None:
-            return JSONResponse({"error": "Unknown chat session."}, status_code=404)
+            return JSONResponse({"error": _UNKNOWN_CHAT_SESSION}, status_code=404)
         # Apply WRITES the notebook, so it is the highest-value gate. This early
         # refusal covers the common case; _apply_with_undo re-checks under
         # _apply_lock right before the write to close the toggle/write race.
@@ -1263,7 +1262,7 @@ class Hub:
         with self._chat_lock:
             target = self._chat_targets.get(sid)
         if target is None:
-            return JSONResponse({"error": "Unknown chat session."}, status_code=404)
+            return JSONResponse({"error": _UNKNOWN_CHAT_SESSION}, status_code=404)
         # Rollback WRITES the notebook (restores a snapshot), so it is gated by the
         # per-notebook opt-out exactly like apply — otherwise a disabled notebook
         # could still be rewritten through the undo path.
@@ -1278,9 +1277,13 @@ class Hub:
         except FileNotFoundError:
             return JSONResponse({"error": f"No such notebook: {notebook_rel}"}, status_code=404)
         try:
-            remaining = await asyncio.to_thread(self._restore_undo, nb_path, workspace, notebook_rel)
+            remaining = await asyncio.to_thread(
+                self._restore_undo, nb_path, workspace, notebook_rel
+            )
         except OSError as exc:  # e.g. the file is momentarily locked — the snapshot is kept
-            return JSONResponse({"error": f"Could not restore the notebook: {exc}"}, status_code=502)
+            return JSONResponse(
+                {"error": f"Could not restore the notebook: {exc}"}, status_code=502
+            )
         if remaining is None:
             return JSONResponse({"ok": False, "error": "Nothing to undo."}, status_code=400)
         telemetry.log_event("ai_chat_rollback")
@@ -1311,7 +1314,7 @@ class Hub:
             notebook_undo.discard(workspace, notebook_rel, token)
             return notebook_undo.depth(workspace, notebook_rel)
 
-    def api_chat_datasets(self, request: Request) -> JSONResponse:
+    def api_chat_datasets(self, _request: Request) -> JSONResponse:
         """The value-free dataset PATHS for the chat's @-mention autocomplete, plus
         the current theme. A LIGHT alternative to /api/state, which (when logged in)
         makes GitHub sync round-trips this window doesn't need. Sync def -> Starlette
@@ -1324,7 +1327,7 @@ class Hub:
         datasets = schema.list_datasets(cfg.workspace(), cfg.folders)
         return JSONResponse({"datasets": datasets, "ui_theme": self.app_cfg.ui_theme})
 
-    async def api_chat_models(self, request: Request) -> JSONResponse:
+    async def api_chat_models(self, _request: Request) -> JSONResponse:
         """The models the user can pick, plus the configured defaults (value-free)."""
         if not self.app_cfg.ai_enabled:
             return JSONResponse({"enabled": False}, status_code=404)
@@ -1400,12 +1403,12 @@ class Hub:
             )
         try:
             st = await run_in_threadpool(provider.connect, host)
-        except Exception as exc:  # noqa: BLE001 - AIError/OSError surface to the UI
+        except Exception as exc:  # noqa: BLE001  # AIError/OSError surface to the UI
             return JSONResponse({"error": str(exc)}, status_code=502)
         telemetry.log_event("ai_login_start")
         return JSONResponse({"ok": True, "detail": st.detail})
 
-    def api_ai_login_poll(self, request: Request) -> JSONResponse:
+    def api_ai_login_poll(self, _request: Request) -> JSONResponse:
         """Poll the in-progress Copilot sign-in. ``pending`` while the CLI is still
         running (browser open), then a real status probe confirms the outcome.
 
@@ -1428,7 +1431,8 @@ class Hub:
         return JSONResponse(
             {
                 "status": "error",
-                "detail": (st.detail if st is not None else "") or "Copilot sign-in didn't complete.",
+                "detail": (st.detail if st is not None else "")
+                or "Copilot sign-in didn't complete.",
                 "output": state.get("output", []),
             }
         )
@@ -1458,9 +1462,7 @@ class Hub:
         except FileNotFoundError:
             pass
         try:
-            await run_in_threadpool(
-                workspace_config.set_ai_disabled, workspace, notebook, disabled
-            )
+            await run_in_threadpool(workspace_config.set_ai_disabled, workspace, notebook, disabled)
         except tomllib.TOMLDecodeError:
             return JSONResponse(
                 {"error": "mooring.toml is malformed — fix it before changing AI settings."},
@@ -1601,7 +1603,7 @@ class Hub:
             )
         return jobs, None
 
-    async def api_batch_state(self, request: Request) -> JSONResponse:
+    async def api_batch_state(self, _request: Request) -> JSONResponse:
         """What the batch page needs to render: whether batch is enabled, its caps,
         the value-free dataset paths for per-job dataset selection, and the theme."""
         if not self.app_cfg.ai_enabled:
@@ -1799,9 +1801,15 @@ class Hub:
             ]
             out.append(
                 {
-                    "index": idx, "name": res.job.name, "brief": res.job.brief,
-                    "notebook": res.notebook_rel, "status": res.status, "error": res.error,
-                    "pii": res.pii, "proposals": proposals, "refining": idx in refining,
+                    "index": idx,
+                    "name": res.job.name,
+                    "brief": res.job.brief,
+                    "notebook": res.notebook_rel,
+                    "status": res.status,
+                    "error": res.error,
+                    "pii": res.pii,
+                    "proposals": proposals,
+                    "refining": idx in refining,
                 }
             )
         return out
@@ -1824,7 +1832,9 @@ class Hub:
             job_idx = int(data.get("job"))
             prop_idx = int(data.get("proposal", 0))
         except (TypeError, ValueError):
-            return JSONResponse({"error": "A job and proposal index are required."}, status_code=400)
+            return JSONResponse(
+                {"error": "A job and proposal index are required."}, status_code=400
+            )
         if not 0 <= job_idx < len(results):
             return JSONResponse({"error": "No such job."}, status_code=404)
         res = results[job_idx]
@@ -1868,7 +1878,7 @@ class Hub:
         telemetry.log_event("ai_batch_apply")
         return JSONResponse({"ok": True, "can_undo": undo_depth > 0, "undo_depth": undo_depth})
 
-    def batch_page(self, request: Request) -> HTMLResponse | JSONResponse:
+    def batch_page(self, _request: Request) -> HTMLResponse | JSONResponse:
         if not self.app_cfg.ai_enabled:
             return JSONResponse({"error": "The AI copilot is disabled."}, status_code=404)
         return self._themed_page("batch.html")

@@ -65,9 +65,9 @@ def _edit_tools(ws, patches, proposals=None):
             workspace=ws,
             folders=("data",),
             notebook_rel="nb.py",
-            emit_proposal=lambda code, rationale="": (proposals if proposals is not None else []).append(
-                (code, rationale)
-            ),
+            emit_proposal=lambda code, rationale="": (
+                proposals if proposals is not None else []
+            ).append((code, rationale)),
             emit_proposal_patch=patches.append,
         )
     }
@@ -124,7 +124,11 @@ def test_get_schema_withholds_pii_column_name_when_enabled(tmp_path):
             pii_enabled=True,
         )
     }
-    out = tools["mooring_get_schema"].handler(_invocation(dataset="data/wide.parquet")).text_result_for_llm
+    out = (
+        tools["mooring_get_schema"]
+        .handler(_invocation(dataset="data/wide.parquet"))
+        .text_result_for_llm
+    )
     assert "id" in out and "amount" in out  # clean columns kept
     assert card not in out  # the PII-valued column NAME is withheld
 
@@ -156,9 +160,7 @@ def test_read_notebook_source_scrubs_checksum_pii(ws):
 def test_propose_cell_emits_and_does_not_inject(ws):
     proposals = []
     tools = _tools(ws, proposals)
-    res = tools["mooring_propose_cell"].handler(
-        _invocation(code="x = 1 + 1", rationale="demo")
-    )
+    res = tools["mooring_propose_cell"].handler(_invocation(code="x = 1 + 1", rationale="demo"))
     assert proposals == [("x = 1 + 1", "demo")]  # surfaced to the analyst
     assert "apply" in res.text_result_for_llm.lower()  # the agent did not inject
 
@@ -183,7 +185,10 @@ def test_propose_cell_edit_captures_anchor_and_does_not_write(ws):
     [payload] = patches
     assert payload["kind"] == "edit"
     assert payload["ops"][0] == {
-        "op": "edit", "index": 1, "anchor": "x = seed + 1", "code": "x = seed + 99",
+        "op": "edit",
+        "index": 1,
+        "anchor": "x = seed + 1",
+        "code": "x = seed + 99",
     }
     assert payload["diffs"][0]["before"] == "x = seed + 1"  # diff view gets the old code
     assert (ws / "nb.py").read_text("utf-8") == before  # propose-only; the analyst applies
@@ -191,7 +196,9 @@ def test_propose_cell_edit_captures_anchor_and_does_not_write(ws):
 
 def test_propose_cell_edit_out_of_range_errors(ws):
     (ws / "nb.py").write_text(_REAL_NB, "utf-8")
-    res = _edit_tools(ws, [])["mooring_propose_cell_edit"].handler(_invocation(index=9, code="z = 0"))
+    res = _edit_tools(ws, [])["mooring_propose_cell_edit"].handler(
+        _invocation(index=9, code="z = 0")
+    )
     assert res.result_type == "error"
 
 

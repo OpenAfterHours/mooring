@@ -37,6 +37,10 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from mooring.ai.ner import ModelRef
 
 # A reviewed false positive can be retired by putting this marker on the line
 # (in the spirit of a lint-suppression comment); the scanner then skips it.
@@ -74,9 +78,7 @@ _CARD = re.compile(r"(?<![\w-])\d(?:[ -]?\d){12,18}(?![\w-])")
 _IBAN = re.compile(r"(?<![\w-])[A-Za-z]{2}\d{2}[A-Za-z0-9]{11,30}(?![\w-])")
 # 10 digits in the canonical 3-3-4 grouping (or contiguous).
 _NHS = re.compile(r"(?<![\w-])\d{3}[ -]?\d{3}[ -]?\d{4}(?![\w-])")
-_EMAIL = re.compile(
-    r"(?<![\w.%+\-])[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,24}(?![\w\-])"
-)
+_EMAIL = re.compile(r"(?<![\w.%+\-])[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,24}(?![\w\-])")
 # UK NINO: 2 prefix letters (1st not D F I Q U V; 2nd not D F I O Q U V),
 # 6 digits, suffix A-D. Shape only — no checksum exists.
 _NINO = re.compile(r"(?<![\w])[A-CEGHJ-PR-TW-Z][A-CEGHJ-NPR-TW-Z]\d{6}[A-D](?![\w])", re.IGNORECASE)
@@ -89,21 +91,82 @@ _NON_EMAIL_TLDS = frozenset(
 _NINO_BAD_PREFIX = frozenset({"BG", "GB", "NK", "KN", "NT", "TN", "ZZ"})
 
 _IBAN_LENGTHS = {
-    "AD": 24, "AE": 23, "AL": 28, "AT": 20, "AZ": 28, "BA": 20, "BE": 16, "BG": 22,
-    "BH": 22, "BR": 29, "CH": 21, "CR": 22, "CY": 28, "CZ": 24, "DE": 22, "DK": 18,
-    "DO": 28, "EE": 20, "ES": 24, "FI": 18, "FO": 18, "FR": 27, "GB": 22, "GE": 22,
-    "GI": 23, "GL": 18, "GR": 27, "HR": 21, "HU": 28, "IE": 22, "IL": 23, "IS": 26,
-    "IT": 27, "KW": 30, "KZ": 20, "LB": 28, "LI": 21, "LT": 20, "LU": 20, "LV": 21,
-    "MC": 27, "MD": 24, "ME": 22, "MK": 19, "MT": 31, "MU": 30, "NL": 18, "NO": 15,
-    "PL": 28, "PT": 25, "QA": 29, "RO": 24, "RS": 22, "SA": 24, "SE": 24, "SI": 19,
-    "SK": 24, "SM": 27, "TN": 24, "TR": 26, "UA": 29, "VG": 24,
+    "AD": 24,
+    "AE": 23,
+    "AL": 28,
+    "AT": 20,
+    "AZ": 28,
+    "BA": 20,
+    "BE": 16,
+    "BG": 22,
+    "BH": 22,
+    "BR": 29,
+    "CH": 21,
+    "CR": 22,
+    "CY": 28,
+    "CZ": 24,
+    "DE": 22,
+    "DK": 18,
+    "DO": 28,
+    "EE": 20,
+    "ES": 24,
+    "FI": 18,
+    "FO": 18,
+    "FR": 27,
+    "GB": 22,
+    "GE": 22,
+    "GI": 23,
+    "GL": 18,
+    "GR": 27,
+    "HR": 21,
+    "HU": 28,
+    "IE": 22,
+    "IL": 23,
+    "IS": 26,
+    "IT": 27,
+    "KW": 30,
+    "KZ": 20,
+    "LB": 28,
+    "LI": 21,
+    "LT": 20,
+    "LU": 20,
+    "LV": 21,
+    "MC": 27,
+    "MD": 24,
+    "ME": 22,
+    "MK": 19,
+    "MT": 31,
+    "MU": 30,
+    "NL": 18,
+    "NO": 15,
+    "PL": 28,
+    "PT": 25,
+    "QA": 29,
+    "RO": 24,
+    "RS": 22,
+    "SA": 24,
+    "SE": 24,
+    "SI": 19,
+    "SK": 24,
+    "SM": 27,
+    "TN": 24,
+    "TR": 26,
+    "UA": 29,
+    "VG": 24,
 }
 
 # Canonical industry TEST PANs — deliberate non-PII placeholders analysts paste
 # precisely to AVOID real data. Flagging them is the most corrosive false positive.
 _TEST_PANS = frozenset(
-    {"4111111111111111", "4242424242424242", "5555555555554444", "378282246310005",
-     "371449635398431", "6011111111111117", "5105105105105100"}
+    {
+        "4111111111111111",
+        "4242424242424242",
+        "5555555555554444",
+        "378282246310005",
+        "371449635398431",
+        "6011111111111117",
+        "5105105105105100",
+    }
 )
 
 
@@ -255,7 +318,7 @@ def scan_prose(
     names: bool = False,
     labels: tuple[str, ...] | None = None,
     threshold: float = 0.7,
-    model: str | None = None,
+    model: "ModelRef | str | None" = None,
     backend: str = "gliner",
 ) -> list[Finding]:
     """Structured-PII findings, plus NER names when ``names`` and the extra is ready.
@@ -274,7 +337,7 @@ def scan_prose(
             findings = findings + ner.scan_names(
                 text, labels=labels, threshold=threshold, model=model, backend=backend
             )
-        except Exception:  # noqa: BLE001 - advisory path: never fail the caller
+        except Exception:  # noqa: BLE001  # advisory path: never fail the caller
             pass
     return findings
 
@@ -287,7 +350,7 @@ def guard_prompt(
     names: bool = False,
     labels: tuple[str, ...] | None = None,
     threshold: float = 0.7,
-    model: str | None = None,
+    model: "ModelRef | str | None" = None,
     backend: str = "gliner",
 ) -> tuple[bool, list[Finding], str]:
     """Evaluate an outbound chat prompt. Returns ``(hold, findings, scan_error)``.
@@ -313,7 +376,7 @@ def guard_prompt(
     names_failed = False
     try:
         findings += scan(text)
-    except Exception:  # noqa: BLE001 - fail open on the live path, but report it
+    except Exception:  # noqa: BLE001  # fail open on the live path, but report it
         structured_failed = True
     if names:
         try:
@@ -322,12 +385,14 @@ def guard_prompt(
             findings += ner.scan_names(
                 text, labels=labels, threshold=threshold, model=model, backend=backend
             )
-        except Exception:  # noqa: BLE001 - extra missing / model load / inference error
+        except Exception:  # noqa: BLE001  # extra missing / model load / inference error
             names_failed = True
-    scan_error = (
-        "both" if structured_failed and names_failed
-        else "structured" if structured_failed
-        else "names" if names_failed
-        else ""
-    )
+    if structured_failed and names_failed:
+        scan_error = "both"
+    elif structured_failed:
+        scan_error = "structured"
+    elif names_failed:
+        scan_error = "names"
+    else:
+        scan_error = ""
     return (bool(findings) and block), findings, scan_error

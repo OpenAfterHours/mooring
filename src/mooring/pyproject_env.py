@@ -240,7 +240,5 @@ def export_requirements(workspace: Path) -> str:
     """The repo's declared top-level packages, one per line, for feeding a frozen
     build (``uv add -r``). marimo is omitted — mooring's own bundle always carries
     it. Reads the pyproject directly, so it works without uv."""
-    lines = [
-        req for req in declared_deps(workspace) if (_bare_name(req) or "").lower() != "marimo"
-    ]
+    lines = [req for req in declared_deps(workspace) if (_bare_name(req) or "").lower() != "marimo"]
     return "".join(f"{line}\n" for line in lines)

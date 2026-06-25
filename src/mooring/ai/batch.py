@@ -32,7 +32,10 @@ import threading
 import time
 from concurrent.futures import CancelledError, ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
+
+if TYPE_CHECKING:
+    from mooring.ai.chat import ChatBroadcaster
 
 # Statuses a job can finish in (all value-free; surfaced to the tray + SSE).
 #   built            — the builder proposed >=1 change; queued for human review
@@ -124,7 +127,7 @@ class BatchPlanner:
         pii,
         make_notebook: Callable[[str], str],
         build_context: Callable[[str, str], tuple[str, object]],
-        open_session: Callable[..., object],
+        open_session: Callable[..., ChatBroadcaster],
         is_disabled: Callable[[str], bool] | None = None,
         discard_notebook: Callable[[str], None] | None = None,
         on_progress: Callable[[dict], None] | None = None,
@@ -201,7 +204,10 @@ class BatchPlanner:
                     self._record(index, job, None, "pii_blocked", pii=blocked[offset])
                 else:
                     self._record(
-                        index, job, None, "not_run",
+                        index,
+                        job,
+                        None,
+                        "not_run",
                         error="Batch aborted: a checksum-validated PII value was found in "
                         "another job's brief.",
                     )
@@ -215,12 +221,16 @@ class BatchPlanner:
             try:
                 notebook_rel = self._make_notebook(job.name.strip() or _name_from_brief(job.brief))
             except (ValueError, OSError) as exc:
-                self._record(index, job, None, "failed", error=f"Could not create the notebook: {exc}")
+                self._record(
+                    index, job, None, "failed", error=f"Could not create the notebook: {exc}"
+                )
                 continue
             if self._is_disabled(notebook_rel):
                 self._record(index, job, notebook_rel, "skipped_disabled")
                 continue
-            self._emit(index=index, name=job.name, status="queued", notebook=notebook_rel, n_proposals=0)
+            self._emit(
+                index=index, name=job.name, status="queued", notebook=notebook_rel, n_proposals=0
+            )
             self._submit(index, job, notebook_rel)
         return indices
 
@@ -302,6 +312,7 @@ class BatchPlanner:
             with self._cond:
                 if self._closed:
                     raise RuntimeError("batch queue closed")
+                assert self._executor is not None  # a live (non-closed) queue has a pool
                 future = self._executor.submit(self._run_job, index, job, notebook_rel)
                 self._pending += 1
         except RuntimeError:
@@ -321,7 +332,7 @@ class BatchPlanner:
                 future.result()
         except CancelledError:
             self._record(index, job, notebook_rel, "not_run", error="Batch cancelled.")
-        except Exception as exc:  # noqa: BLE001 - defensive; _run_job is meant to catch
+        except Exception as exc:  # noqa: BLE001  # defensive; _run_job is meant to catch
             self._record(index, job, notebook_rel, "failed", error=f"The build failed: {exc}")
         with self._cond:
             self._pending -= 1
@@ -335,7 +346,9 @@ class BatchPlanner:
         with self._results_lock:
             if 0 <= index < len(self._results):
                 self._results[index] = self._make_result(job, notebook_rel, "building")
-        self._emit(index=index, name=job.name, status="building", notebook=notebook_rel, n_proposals=0)
+        self._emit(
+            index=index, name=job.name, status="building", notebook=notebook_rel, n_proposals=0
+        )
         return self._commit(index, self._build(index, job, notebook_rel))
 
     def _build(self, index: int, job: BatchJob, notebook_rel: str) -> BatchResult:
@@ -346,7 +359,7 @@ class BatchPlanner:
             return self._make_result(job, notebook_rel, "not_run", error="Batch cancelled.")
         try:
             system_context, dictionary = self._build_context(notebook_rel, job.dataset_rel)
-        except Exception as exc:  # noqa: BLE001 - one job's failure must not abort the batch
+        except Exception as exc:  # noqa: BLE001  # one job's failure must not abort the batch
             return self._make_result(
                 job, notebook_rel, "failed", error=f"Could not read the notebook context: {exc}"
             )
@@ -413,8 +426,11 @@ class BatchPlanner:
             raise BatchError("This batch queue is closed.")
         future.add_done_callback(lambda f, i=index: self._on_refine_done(f, i))
         self._emit(
-            index=index, name=refined_job.name, status="refining",
-            notebook=notebook_rel, n_proposals=len(prev.proposals),
+            index=index,
+            name=refined_job.name,
+            status="refining",
+            notebook=notebook_rel,
+            n_proposals=len(prev.proposals),
         )
 
     def _run_refine(self, index: int, job: BatchJob, notebook_rel: str) -> BatchResult:
@@ -428,7 +444,7 @@ class BatchPlanner:
             prev = self._refining_prev.pop(index, None)
         try:
             result = None if future.cancelled() else future.result()
-        except Exception:  # noqa: BLE001 - defensive; _build is meant to catch
+        except Exception:  # noqa: BLE001  # defensive; _build is meant to catch
             result = None
         if result is not None and result.status == "built":
             self._commit(index, result)  # adopt the revised proposal
@@ -442,8 +458,12 @@ class BatchPlanner:
                 if note and 0 <= index < len(self._results) and self._results[index] is prev:
                     prev.error = note
             self._emit(
-                index=index, name=prev.job.name, status=prev.status, notebook=prev.notebook_rel,
-                n_proposals=len(prev.proposals), error=prev.error,
+                index=index,
+                name=prev.job.name,
+                status=prev.status,
+                notebook=prev.notebook_rel,
+                n_proposals=len(prev.proposals),
+                error=prev.error,
             )
         with self._cond:
             self._pending -= 1
@@ -474,14 +494,20 @@ class BatchPlanner:
             if self._abort.is_set():
                 status = "built" if proposals else "not_run"
                 return self._make_result(
-                    job, notebook_rel, status, proposals=proposals,
+                    job,
+                    notebook_rel,
+                    status,
+                    proposals=proposals,
                     error="" if proposals else "Batch cancelled.",
                 )
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 status = "built" if proposals else "failed"
                 return self._make_result(
-                    job, notebook_rel, status, proposals=proposals,
+                    job,
+                    notebook_rel,
+                    status,
+                    proposals=proposals,
                     error="" if proposals else "Timed out before the assistant proposed anything.",
                 )
             try:
@@ -493,8 +519,11 @@ class BatchPlanner:
             if kind == "proposal":
                 proposals.append(data)
                 self._emit(
-                    index=index, name=job.name, status="building",
-                    notebook=notebook_rel, n_proposals=len(proposals),
+                    index=index,
+                    name=job.name,
+                    status="building",
+                    notebook=notebook_rel,
+                    n_proposals=len(proposals),
                 )
             elif kind == "pii":
                 # The session's guard HELD the brief (block mode) — there is no human
@@ -507,7 +536,10 @@ class BatchPlanner:
             elif kind == "fail":
                 status = "built" if proposals else "failed"
                 return self._make_result(
-                    job, notebook_rel, status, proposals=proposals,
+                    job,
+                    notebook_rel,
+                    status,
+                    proposals=proposals,
                     error=str(data.get("text", "") or "The assistant reported an error."),
                 )
             elif kind == "idle":
@@ -515,9 +547,12 @@ class BatchPlanner:
                     follow_ups -= 1
                     try:
                         session.send(_FOLLOW_UP_PROMPT, "")
-                    except Exception:  # noqa: BLE001 - finish with whatever we have
+                    except Exception:  # noqa: BLE001  # finish with whatever we have
                         return self._make_result(
-                            job, notebook_rel, "built" if proposals else "empty", proposals=proposals
+                            job,
+                            notebook_rel,
+                            "built" if proposals else "empty",
+                            proposals=proposals,
                         )
                     continue
                 return self._make_result(
@@ -525,7 +560,9 @@ class BatchPlanner:
                 )
             elif kind == "closed":
                 return self._make_result(
-                    job, notebook_rel, "built" if proposals else "failed",
+                    job,
+                    notebook_rel,
+                    "built" if proposals else "failed",
                     proposals=proposals,
                     error="" if proposals else "The session closed before proposing anything.",
                 )
@@ -607,8 +644,12 @@ class BatchPlanner:
         """Build a BatchResult WITHOUT storing/emitting/discarding — pure, so the caller
         decides whether to adopt it (an initial build always; a revision only if built)."""
         return BatchResult(
-            job=job, notebook_rel=notebook_rel, status=status,
-            proposals=list(proposals or []), error=error, pii=list(pii or []),
+            job=job,
+            notebook_rel=notebook_rel,
+            status=status,
+            proposals=list(proposals or []),
+            error=error,
+            pii=list(pii or []),
         )
 
     def _commit(self, index: int, result: BatchResult) -> BatchResult:
@@ -623,8 +664,12 @@ class BatchPlanner:
             if 0 <= index < len(self._results):
                 self._results[index] = result
         self._emit(
-            index=index, name=result.job.name, status=result.status, notebook=result.notebook_rel,
-            n_proposals=len(result.proposals), error=result.error,
+            index=index,
+            name=result.job.name,
+            status=result.status,
+            notebook=result.notebook_rel,
+            n_proposals=len(result.proposals),
+            error=result.error,
         )
         return result
 

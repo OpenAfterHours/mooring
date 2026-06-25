@@ -11,9 +11,15 @@ from mooring import cli, paths, telemetry
 @pytest.fixture(autouse=True)
 def isolated_config(tmp_path, monkeypatch):
     monkeypatch.setattr(paths, "user_config_dir", lambda: tmp_path / "appdata")
-    for var in ("MOORING_CLIENT_ID", "MOORING_OWNER", "MOORING_REPO",
-                "MOORING_BRANCH", "MOORING_WORKSPACE", "MOORING_ACTIVE_REPO",
-                "MOORING_GITHUB_HOST"):
+    for var in (
+        "MOORING_CLIENT_ID",
+        "MOORING_OWNER",
+        "MOORING_REPO",
+        "MOORING_BRANCH",
+        "MOORING_WORKSPACE",
+        "MOORING_ACTIVE_REPO",
+        "MOORING_GITHUB_HOST",
+    ):
         monkeypatch.delenv(var, raising=False)
     # main() injects truststore into global ssl; keep the test process hermetic.
     monkeypatch.setenv("MOORING_TRUSTSTORE", "0")
@@ -119,7 +125,7 @@ def test_login_with_host_persists_and_uses_it(capsys, monkeypatch):
 
     class FakeClient:
         def __init__(self, *a, **k):
-            pass
+            pass  # no-op: stub double, accepts and ignores constructor args
 
         def get_user(self):
             return {"login": "octo"}
@@ -147,7 +153,7 @@ def test_login_failure_shows_enterprise_hint(monkeypatch):
 
     def boom(*a, **k):
         err = requests.HTTPError("404 ...")
-        err.response = Resp()
+        err.response = Resp()  # ty: ignore[invalid-assignment]  # test stub Response
         raise err
 
     monkeypatch.setattr(auth, "start_device_flow", boom)

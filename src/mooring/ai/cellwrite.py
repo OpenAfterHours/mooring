@@ -58,7 +58,13 @@ def apply_patch(notebook_path: str | Path, ops) -> None:
         safe_write_text(path, result)
     except marimo_rt.CellPatchConflict as exc:
         raise CellApplyConflict(str(exc)) from exc
-    except (OSError, ValueError, SyntaxError, marimo_rt.MarimoTooOld, marimo_rt.MarimoTransportError) as exc:
+    except (
+        OSError,
+        ValueError,
+        SyntaxError,
+        marimo_rt.MarimoTooOld,
+        marimo_rt.MarimoTransportError,
+    ) as exc:
         raise CellWriteError(f"could not apply the change to {path.name}: {exc}") from exc
 
 

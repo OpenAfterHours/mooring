@@ -10,9 +10,11 @@
        server (config.toml) remains the source of truth — /api/state reconciles. -->
   <script>
     try {
-      document.documentElement.setAttribute(
-        "data-theme", localStorage.getItem("mooring.ui.theme") || "__MOORING_DEFAULT_THEME__");
-    } catch (e) {}
+      document.documentElement.dataset.theme =
+        localStorage.getItem("mooring.ui.theme") || "__MOORING_DEFAULT_THEME__";
+    } catch {
+      // localStorage may be unavailable (private mode); the CSS default applies.
+    }
   </script>
   <link rel="stylesheet" href="/static/style.css">
 </head>
@@ -95,7 +97,7 @@
     <section id="log-card" class="card hidden">
       <h3>Last operation</h3>
       <pre id="log"></pre>
-      <div id="log-link" class="hidden"><a target="_blank" rel="noopener" aria-label="Create or view the pull request on GitHub"></a></div>
+      <div id="log-link" class="hidden"><a target="_blank" rel="noopener" aria-label="Create or view the pull request on GitHub">Create / view the pull request on GitHub</a></div>
     </section>
 
     <div id="error-banner" class="hidden"></div>

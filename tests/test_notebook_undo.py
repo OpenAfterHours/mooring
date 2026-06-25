@@ -60,7 +60,9 @@ def test_slug_colliding_rel_paths_do_not_share_a_stack(tmp_path):
 
 def test_peek_latest_does_not_consume(tmp_path):
     notebook_undo.snapshot(tmp_path, "a.py", b"v1")
-    token, data = notebook_undo.peek_latest(tmp_path, "a.py")
+    latest = notebook_undo.peek_latest(tmp_path, "a.py")
+    assert latest is not None
+    token, data = latest
     assert data == b"v1" and notebook_undo.depth(tmp_path, "a.py") == 1  # still there
     notebook_undo.discard(tmp_path, "a.py", token)
     assert notebook_undo.depth(tmp_path, "a.py") == 0

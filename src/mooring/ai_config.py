@@ -105,7 +105,7 @@ def _str_list(raw: object, default: tuple[str, ...]) -> tuple[str, ...]:
     if isinstance(raw, str):
         return (raw,)
     if isinstance(raw, (list, tuple)) and all(isinstance(p, str) for p in raw):
-        return tuple(raw)
+        return tuple(p for p in raw if isinstance(p, str))
     raise ValueError("[ai.pii] name_labels must be an array of strings")
 
 
@@ -129,13 +129,20 @@ def load_ai_config(ai: Mapping, env: Mapping[str, str]) -> AiConfig:
         ),
         names=_as_bool(env.get("MOORING_AI_PII_NAMES"), _as_bool(p.get("detect_names"), False)),
         name_backend=env.get("MOORING_AI_PII_NAME_BACKEND", str(p.get("name_backend", "auto"))),
-        name_model=env.get("MOORING_AI_PII_NAME_MODEL", str(p.get("name_model", _DEFAULT_NAME_MODEL))),
-        name_revision=env.get(
-            "MOORING_AI_PII_NAME_REVISION", str(p.get("name_model_revision", _DEFAULT_NAME_REVISION))
+        name_model=env.get(
+            "MOORING_AI_PII_NAME_MODEL", str(p.get("name_model", _DEFAULT_NAME_MODEL))
         ),
-        name_variant=env.get("MOORING_AI_PII_NAME_VARIANT", str(p.get("name_model_variant", "bf16"))),
+        name_revision=env.get(
+            "MOORING_AI_PII_NAME_REVISION",
+            str(p.get("name_model_revision", _DEFAULT_NAME_REVISION)),
+        ),
+        name_variant=env.get(
+            "MOORING_AI_PII_NAME_VARIANT", str(p.get("name_model_variant", "bf16"))
+        ),
         name_labels=_str_list(p.get("name_labels"), ("person", "name")),
-        name_threshold=float(env.get("MOORING_AI_PII_NAME_THRESHOLD", p.get("name_threshold", 0.7))),
+        name_threshold=float(
+            env.get("MOORING_AI_PII_NAME_THRESHOLD", p.get("name_threshold", 0.7))
+        ),
     )
     b = ai.get("batch", {})
     if not isinstance(b, Mapping):
@@ -156,14 +163,18 @@ def load_ai_config(ai: Mapping, env: Mapping[str, str]) -> AiConfig:
         enabled=_as_bool(env.get("MOORING_AI_ENABLED"), _as_bool(ai.get("enabled"), True)),
         provider=env.get("MOORING_AI_PROVIDER", str(ai.get("provider", "copilot"))),
         model=env.get("MOORING_AI_MODEL", str(ai.get("model", ""))),
-        reasoning_effort=env.get("MOORING_AI_REASONING_EFFORT", str(ai.get("reasoning_effort", ""))),
+        reasoning_effort=env.get(
+            "MOORING_AI_REASONING_EFFORT", str(ai.get("reasoning_effort", ""))
+        ),
         chat_idle_timeout=int(
             env.get("MOORING_AI_CHAT_IDLE_SEC", ai.get("chat_idle_timeout_sec", 900))
         ),
         context=_as_bool(env.get("MOORING_AI_CONTEXT"), _as_bool(ai.get("context"), False)),
         context_dir=env.get("MOORING_AI_CONTEXT_DIR", str(ai.get("context_dir", "context"))),
         context_max_kb=int(env.get("MOORING_AI_CONTEXT_MAX_KB", ai.get("context_max_kb", 256))),
-        live_schema=_as_bool(env.get("MOORING_AI_LIVE_SCHEMA"), _as_bool(ai.get("live_schema"), True)),
+        live_schema=_as_bool(
+            env.get("MOORING_AI_LIVE_SCHEMA"), _as_bool(ai.get("live_schema"), True)
+        ),
         pii=pii,
         batch=batch,
     )

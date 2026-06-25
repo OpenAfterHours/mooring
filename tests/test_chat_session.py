@@ -9,6 +9,7 @@ create_session config, without the Copilot CLI or a GitHub login.
 from __future__ import annotations
 
 import types
+from collections.abc import Callable
 
 import copilot
 import pytest
@@ -23,7 +24,7 @@ def _event(etype, **data):
 
 
 # A scripted turn: (SessionEventType, data kwargs). Tests can override.
-BASIC_TURN = [
+BASIC_TURN: list[tuple[ET, dict[str, object]]] = [
     (ET.ASSISTANT_MESSAGE_DELTA, {"delta_content": "Hel"}),
     (ET.ASSISTANT_MESSAGE_DELTA, {"delta_content": "lo"}),
     (ET.ASSISTANT_MESSAGE, {"content": "Hello"}),
@@ -32,11 +33,11 @@ BASIC_TURN = [
 
 
 class FakeSession:
-    SCRIPT = BASIC_TURN
+    SCRIPT: list[tuple[ET, dict[str, object]]] = BASIC_TURN
 
     def __init__(self, create_kwargs):
         self.create_kwargs = create_kwargs
-        self._handler = None
+        self._handler: Callable[..., object] | None = None
         self.disconnected = False
         self.sent = []  # prompts actually forwarded to the SDK
 
@@ -47,6 +48,7 @@ class FakeSession:
     async def send(self, prompt, **kw):
         self.sent.append(prompt)
         # Drive the streaming handler exactly like the real SDK would.
+        assert self._handler is not None
         for etype, data in type(self).SCRIPT:
             self._handler(_event(etype, **data))
         return "turn-1"
@@ -56,13 +58,13 @@ class FakeSession:
 
 
 class FakeClient:
-    last = None
+    last: FakeClient | None = None
     authed = True
 
     def __init__(self, **kwargs):
         self.kwargs = kwargs
         self.started = self.stopped = False
-        self.session = None
+        self.session: FakeSession | None = None
         FakeClient.last = self
 
     async def start(self):
@@ -126,7 +128,9 @@ def test_live_schema_refresh_prepended_only_on_change(fake_sdk, tmp_path):
     try:
         snapshot = "`orders` (10 rows):\n- id: Int64"
         sess.set_initial_live_schema(snapshot)  # already folded into the system context
-        sent = FakeClient.last.session.sent
+        client = FakeClient.last
+        assert client is not None and client.session is not None
+        sent = client.session.sent
 
         # Same as the open-time snapshot -> no prefix, just the analyst's turn.
         sess.send("hi", live_schema_text=snapshot)
@@ -171,7 +175,9 @@ def test_tool_and_intent_events(fake_sdk, tmp_path):
 def test_reasoning_effort_passed_through(fake_sdk, tmp_path):
     sess = _make(tmp_path, reasoning_effort="high").start()
     try:
-        assert FakeClient.last.session.create_kwargs["reasoning_effort"] == "high"
+        client = FakeClient.last
+        assert client is not None and client.session is not None
+        assert client.session.create_kwargs["reasoning_effort"] == "high"
     finally:
         sess.close()
 
@@ -179,7 +185,9 @@ def test_reasoning_effort_passed_through(fake_sdk, tmp_path):
 def test_no_reasoning_effort_by_default(fake_sdk, tmp_path):
     sess = _make(tmp_path).start()
     try:
-        assert "reasoning_effort" not in FakeClient.last.session.create_kwargs
+        client = FakeClient.last
+        assert client is not None and client.session is not None
+        assert "reasoning_effort" not in client.session.create_kwargs
     finally:
         sess.close()
 
@@ -187,7 +195,9 @@ def test_no_reasoning_effort_by_default(fake_sdk, tmp_path):
 def test_create_session_is_value_blind(fake_sdk, tmp_path):
     sess = _make(tmp_path).start()
     try:
-        kw = FakeClient.last.session.create_kwargs
+        client = FakeClient.last
+        assert client is not None and client.session is not None
+        kw = client.session.create_kwargs
         # only mooring's safe tools — the base set plus the propose-edit/rewrite tools
         assert kw["available_tools"] == TOOL_NAMES + EDIT_TOOL_NAMES
         assert kw["streaming"] is True
@@ -197,7 +207,7 @@ def test_create_session_is_value_blind(fake_sdk, tmp_path):
         assert kw["enable_file_hooks"] is False
         assert callable(kw["on_permission_request"])  # deny-all backstop
         assert kw["working_directory"]  # isolated dir, no data files
-        assert FakeClient.last.kwargs["use_logged_in_user"] is True
+        assert client.kwargs["use_logged_in_user"] is True
     finally:
         sess.close()
 
@@ -319,10 +329,13 @@ def test_pii_prompt_is_held_until_confirmed(fake_sdk, tmp_path):
     sess = _make(tmp_path, pii_enabled=True, pii_block=True).start()
     try:
         q = sess.subscribe()
+        client = FakeClient.last
+        assert client is not None and client.session is not None
+        session = client.session
         sess.send("why does 4012888888881881 fail validation?")
         held = q.get(timeout=2)
         assert held.kind == "pii" and held.data["token"]
-        assert FakeClient.last.session.sent == []  # the SDK was sent nothing
+        assert session.sent == []  # the SDK was sent nothing
 
         sess.send_confirmed(held.data["token"])
         kinds = []
@@ -332,7 +345,7 @@ def test_pii_prompt_is_held_until_confirmed(fake_sdk, tmp_path):
             if ev.kind == "idle":
                 break
         assert "message" in kinds and "idle" in kinds
-        assert FakeClient.last.session.sent  # forwarded verbatim, exactly now
+        assert session.sent  # forwarded verbatim, exactly now
     finally:
         sess.close()
 
@@ -340,8 +353,10 @@ def test_pii_prompt_is_held_until_confirmed(fake_sdk, tmp_path):
 def test_close_tears_down(fake_sdk, tmp_path):
     sess = _make(tmp_path).start()
     fake = FakeClient.last
+    assert fake is not None and fake.session is not None
+    session = fake.session
     sess.close()
     sess._thread.join(timeout=3)
     assert not sess._thread.is_alive()
-    assert fake.session.disconnected is True
+    assert session.disconnected is True
     assert fake.stopped is True

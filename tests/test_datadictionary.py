@@ -44,6 +44,7 @@ models:
     assert report.n_tables == 1 and report.n_columns == 3
     assert "meta" in report.dropped_keys
     table = index.get("fact_loans")
+    assert table is not None
     assert table.domain == "credit"
     cols = {c.name: c for c in table.columns}
     assert cols["loan_id"].nullable is False
@@ -94,6 +95,7 @@ resources:
     (report,) = index.reports
     assert report.shape == "frictionless"
     table = index.get("people")
+    assert table is not None
     cols = {c.name: c for c in table.columns}
     assert cols["id"].type == "integer" and cols["id"].description == "row id"
     assert cols["country"].relationship.startswith("FK -> countries")
@@ -117,6 +119,7 @@ expectations:
     (report,) = index.reports
     assert report.shape == "great_expectations"
     table = index.get("orders.warning")
+    assert table is not None
     cols = {c.name: c for c in table.columns}
     assert set(cols) == {"status", "amount"}
     assert cols["amount"].type == "float"
@@ -137,6 +140,7 @@ tables:
     )
     index = dd.load_index(tmp_path, "context")
     table = index.get("users")
+    assert table is not None
     cols = {c.name: c for c in table.columns}
     assert cols["email"].nullable is False and cols["email"].description == "addr"
     assert SECRET not in dd.render_table(table)  # 'default' dropped
@@ -215,6 +219,7 @@ tables:
     )
     index = dd.load_index(tmp_path, "context")
     table = index.get("t")
+    assert table is not None
     assert table.description == ""  # nested dict dropped, not stringified
     assert table.columns[0].type == ""  # nested list dropped
     assert SECRET not in dd.render_table(table)
@@ -222,10 +227,17 @@ tables:
 
 def test_oddly_typed_yaml_never_raises(tmp_path):
     # All of these are valid YAML but the "wrong" shape; load_index must not crash.
-    _write(tmp_path, "dictionaries/a.yaml", "models:\n  - name: m\n    columns:\n"
-           "      - name: c\n        data_type: int\n        tests: {not_null: {}}\n")
-    _write(tmp_path, "dictionaries/b.yaml",
-           "expectation_suite_name: s\nexpectations:\n  - kwargs: [not, a, dict]\n")
+    _write(
+        tmp_path,
+        "dictionaries/a.yaml",
+        "models:\n  - name: m\n    columns:\n"
+        "      - name: c\n        data_type: int\n        tests: {not_null: {}}\n",
+    )
+    _write(
+        tmp_path,
+        "dictionaries/b.yaml",
+        "expectation_suite_name: s\nexpectations:\n  - kwargs: [not, a, dict]\n",
+    )
     _write(tmp_path, "dictionaries/c.yaml", "resources:\n  - name: r\n    schema: [oops]\n")
     index = dd.load_index(tmp_path, "context")  # must not raise
     assert len(index.reports) == 3
@@ -250,13 +262,18 @@ resources:
 """,
     )
     index = dd.load_index(tmp_path, "context")
-    (col,) = index.get("people").columns
+    table = index.get("people")
+    assert table is not None
+    (col,) = table.columns
     assert col.relationship == "FK -> countries.code"  # not iterated char-by-char
 
 
 def test_generic_map_scalar_value_is_treated_as_type(tmp_path):
-    _write(tmp_path, "dictionaries/app.yaml", "tables:\n  orders:\n    columns:\n      id: bigint\n")
+    _write(
+        tmp_path, "dictionaries/app.yaml", "tables:\n  orders:\n    columns:\n      id: bigint\n"
+    )
     table = dd.load_index(tmp_path, "context").get("orders")
+    assert table is not None
     (col,) = table.columns
     assert col.name == "id" and col.type == "bigint"
 

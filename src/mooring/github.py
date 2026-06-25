@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import base64
 from dataclasses import dataclass
+from typing import Protocol
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -57,6 +58,41 @@ class TreeEntry:
     path: str
     sha: str
     size: int
+
+
+class GitHubClientProtocol(Protocol):
+    """The GitHub client surface the sync engine depends on.
+
+    The sync core types against this structural protocol rather than the
+    concrete ``GitHubClient`` so the in-memory test fake can stand in without
+    nominal subclassing. ``GitHubClient`` satisfies it structurally.
+    """
+
+    def get_user(self) -> dict: ...
+
+    def get_branch_head(self, branch: str) -> str: ...
+
+    def get_tree(
+        self,
+        commit_sha: str,
+        folders: tuple[str, ...],
+        extra_paths: tuple[str, ...] = (),
+    ) -> list[TreeEntry]: ...
+
+    def get_blob(self, sha: str) -> bytes: ...
+
+    def create_ref(self, branch: str, sha: str) -> dict: ...
+
+    def put_file(
+        self,
+        path: str,
+        content: bytes,
+        message: str,
+        branch: str,
+        base_sha: str | None = None,
+    ) -> dict: ...
+
+    def delete_file(self, path: str, message: str, branch: str, base_sha: str) -> dict: ...
 
 
 class GitHubClient:
@@ -126,9 +162,7 @@ class GitHubClient:
         return self._check(self._session.get(f"{self.api_root}/user", timeout=30))
 
     def get_branch_head(self, branch: str) -> str:
-        data = self._check(
-            self._session.get(self._repo_url(f"git/ref/heads/{branch}"), timeout=30)
-        )
+        data = self._check(self._session.get(self._repo_url(f"git/ref/heads/{branch}"), timeout=30))
         return data["object"]["sha"]
 
     def get_tree(

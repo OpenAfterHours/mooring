@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import threading
 from dataclasses import dataclass
+from typing import Literal, overload
 
 from mooring.ai.pii import SUPPRESS_MARKER, Finding
 
@@ -81,6 +82,7 @@ def _allow_patterns(variant: str) -> list[str] | None:
         "*.spm",
     ]
 
+
 # value-free kind labels (mirrors pii.py's CARD/EMAIL/... style).
 NAME = "person name"
 ORG = "organization"
@@ -89,12 +91,30 @@ ORG = "organization"
 # org-ish vocab variants map to NAME / ORG; anything else surfaces under its own
 # (lowercased) label — all of these are config strings, never a data value.
 _PERSON_LABELS = frozenset(
-    {"person", "people", "name", "person name", "full name", "first name",
-     "last name", "given name", "surname"}
+    {
+        "person",
+        "people",
+        "name",
+        "person name",
+        "full name",
+        "first name",
+        "last name",
+        "given name",
+        "surname",
+    }
 )
 _ORG_LABELS = frozenset(
-    {"organization", "organisation", "company", "business", "employer",
-     "organization name", "organisation name", "company name", "business name"}
+    {
+        "organization",
+        "organisation",
+        "company",
+        "business",
+        "employer",
+        "organization name",
+        "organisation name",
+        "company name",
+        "business name",
+    }
 )
 
 # Batch lines up to this many characters per forward pass (bounds inference cost
@@ -134,6 +154,18 @@ def resolve_backend(backend: "str | None") -> str:
     return "gliner"
 
 
+@overload
+def model_for(
+    backend: Literal["spacy"], name_model: str, revision: str = "", variant: str = ""
+) -> str: ...
+
+
+@overload
+def model_for(
+    backend: str, name_model: str, revision: str = "", variant: str = ""
+) -> "ModelRef | str": ...
+
+
 def model_for(
     backend: str, name_model: str, revision: str = "", variant: str = ""
 ) -> "ModelRef | str":
@@ -164,7 +196,7 @@ def available(backend: str = "gliner") -> bool:
         return ner_spacy.available()
     try:
         import gliner  # noqa: F401
-    except Exception:  # noqa: BLE001 - any import failure means "not available"
+    except Exception:  # noqa: BLE001  # any import failure means "not available"
         return False
     return True
 
@@ -198,7 +230,7 @@ def load_model(model: "ModelRef | str | None" = None):
             kwargs["variant"] = ref.variant
         try:
             obj = GLiNER.from_pretrained(ref.id, **kwargs)
-        except Exception as exc:  # noqa: BLE001 - network / disk / bad model id
+        except Exception as exc:  # noqa: BLE001  # network / disk / bad model id
             raise NerUnavailable(f"could not load NER model {ref.id!r}: {exc}") from exc
         _models[key] = obj
         return obj
@@ -234,7 +266,7 @@ def is_cached(model: "ModelRef | str | None" = None) -> bool:
             kwargs["allow_patterns"] = allow
         snapshot_download(ref.id, **kwargs)
         return True
-    except Exception:  # noqa: BLE001 - not cached, or hub not installed
+    except Exception:  # noqa: BLE001  # not cached, or hub not installed
         return False
 
 
@@ -269,7 +301,7 @@ def download_model(model: "ModelRef | str | None" = None, on_progress=None) -> N
             except TypeError:  # older hub without tqdm_class — fall back, no % then
                 pass
         snapshot_download(ref.id, **kwargs)
-    except Exception as exc:  # noqa: BLE001 - network / disk / bad model id
+    except Exception as exc:  # noqa: BLE001  # network / disk / bad model id
         raise NerUnavailable(f"could not download NER model {ref.id!r}: {exc}") from exc
 
 
@@ -302,7 +334,7 @@ def _progress_tqdm(on_progress):
                 total = sum(v[1] for v in bars.values())
             try:
                 on_progress(done, total)
-            except Exception:  # noqa: BLE001 - never let reporting break the download
+            except Exception:  # noqa: BLE001  # never let reporting break the download
                 pass
 
     return _ProgressTqdm
@@ -372,7 +404,7 @@ def scan_names(
             continue
         try:
             ents = predict(chunk)
-        except Exception:  # noqa: BLE001 - a bad chunk must not abort the scan
+        except Exception:  # noqa: BLE001  # a bad chunk must not abort the scan
             continue
         for kind, start in ents:
             if not isinstance(start, int):
