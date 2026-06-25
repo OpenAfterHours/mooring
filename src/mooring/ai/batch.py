@@ -14,10 +14,14 @@ every privacy invariant by construction:
   collects proposals for a human to Apply;
 * all model egress goes through the session's own value-free context + prompt guard
   (invariant 3); the planner adds ONE new outbound decision — the brief — and runs
-  it through the same :func:`mooring.ai.egress.guard_prompt` BEFORE dispatch. There
-  is no human to click "Send anyway", so a structured-PII hit BLOCKS (per
-  ``pii_policy``) rather than leaking; the session's own guard (forced to block mode
-  by the caller) is the backstop for anything the pre-flight does not catch.
+  it through the same :func:`mooring.ai.egress.guard_prompt` BEFORE dispatch. By
+  default a structured-PII hit BLOCKS the job (per ``pii_policy``) rather than
+  leaking, and the session's own guard (forced to block mode by the caller) is the
+  backstop for anything the pre-flight misses. The one human-gated escape hatch is
+  :meth:`BatchPlanner.force` ("Build anyway"): the analyst reviewing the tray may
+  override a block per job, which re-runs it auto-confirming the held brief — the
+  batch analogue of the chat's "Send anyway", and the only path that forwards a
+  flagged brief.
 
 Nothing here imports the hub or the Copilot SDK: the four operations that touch the
 workspace / provider are injected, so the engine is a pure coordinator.
@@ -28,6 +32,7 @@ from __future__ import annotations
 import contextlib
 import queue
 import re
+import secrets
 import threading
 import time
 from concurrent.futures import CancelledError, ThreadPoolExecutor
@@ -157,6 +162,11 @@ class BatchPlanner:
         # than wiping a good proposal — the notebook file is never touched either way.
         self._refining: set[int] = set()
         self._refining_prev: dict[int, BatchResult] = {}
+        # Jobs being force-rebuilt after the analyst chose "Build anyway" on a PII block.
+        # Same stash/restore discipline as a revision: a forced build that produces nothing
+        # restores the blocked state so the tray's button comes back.
+        self._forcing: set[int] = set()
+        self._forcing_prev: dict[int, BatchResult] = {}
 
     # -- lifecycle (an appendable queue) ------------------------------------
 
@@ -351,11 +361,25 @@ class BatchPlanner:
         )
         return self._commit(index, self._build(index, job, notebook_rel))
 
-    def _build(self, index: int, job: BatchJob, notebook_rel: str) -> BatchResult:
+    def _build(
+        self,
+        index: int,
+        job: BatchJob,
+        notebook_rel: str,
+        *,
+        force_pii: bool = False,
+        abort: threading.Event | None = None,
+    ) -> BatchResult:
         """Build one notebook and RETURN its result (UNSTORED) — the shared core of an
-        initial build and a revision. build_context -> open one value-free copilot ->
-        drive it to a proposal; the session is always closed."""
-        if self._abort.is_set():
+        initial build, a revision, and a forced ("Build anyway") rebuild. build_context ->
+        open one value-free copilot -> drive it to a proposal; the session is always closed.
+
+        ``abort`` defaults to the batch-wide cancel event; a forced build passes its OWN
+        (never-set) event so it can run even after a ``block_batch`` aborted the run.
+        ``force_pii`` makes the drive auto-confirm a held brief (forward it verbatim,
+        recording the overridden findings) instead of blocking the job."""
+        abort = abort if abort is not None else self._abort
+        if abort.is_set():
             return self._make_result(job, notebook_rel, "not_run", error="Batch cancelled.")
         try:
             system_context, dictionary = self._build_context(notebook_rel, job.dataset_rel)
@@ -370,7 +394,7 @@ class BatchPlanner:
         except Exception as exc:  # noqa: BLE001
             return self._make_result(job, notebook_rel, "failed", error=str(exc))
         try:
-            return self._drive(index, job, notebook_rel, session)
+            return self._drive(index, job, notebook_rel, session, force_pii=force_pii, abort=abort)
         finally:
             with contextlib.suppress(Exception):
                 session.close()
@@ -382,7 +406,13 @@ class BatchPlanner:
         its brief — so a proposal can be tweaked in the review tray BEFORE it is Applied.
         The notebook file is never written; only the in-memory proposal changes, and a
         revision that produces nothing keeps the previous proposal. Respects the pool
-        (one builder, the concurrency cap) and the non-interactive PII gate on the note."""
+        (one builder, the concurrency cap) and the non-interactive PII gate on the note.
+
+        A job that was force-built ("Build anyway") stays overridden: its revisions run in
+        force mode too, so iterating on it doesn't re-hit the PII wall on the same flagged
+        brief. The revision NOTE is still scanned for high-confidence (checksum) PII the
+        analyst may have pasted afresh — the override is scoped to the reviewed brief, not
+        a blanket licence to type a new card into the note."""
         feedback = (feedback or "").strip()
         if not feedback:
             raise BatchError("Add a note describing the change you want.")
@@ -406,6 +436,10 @@ class BatchPlanner:
                 raise BatchError("This notebook isn't ready to revise yet.")
             if index in self._refining:
                 raise BatchError("This notebook is already being revised.")
+            # A built job carries findings only when it was force-built (see _drive); a
+            # revision of such a job inherits the override so the flagged brief still goes,
+            # instead of the session re-holding it and the revision silently no-op'ing.
+            force = bool(prev.pii)
             self._refining.add(index)
             self._refining_prev[index] = prev
         refined_job = replace(
@@ -415,7 +449,9 @@ class BatchPlanner:
         with self._cond:
             self._pending += 1
         try:
-            future = self._executor.submit(self._run_refine, index, refined_job, notebook_rel)
+            future = self._executor.submit(
+                self._run_refine, index, refined_job, notebook_rel, force
+            )
         except RuntimeError:  # pool shut down by a concurrent close
             with self._results_lock:
                 self._refining.discard(index)
@@ -433,10 +469,13 @@ class BatchPlanner:
             n_proposals=len(prev.proposals),
         )
 
-    def _run_refine(self, index: int, job: BatchJob, notebook_rel: str) -> BatchResult:
+    def _run_refine(
+        self, index: int, job: BatchJob, notebook_rel: str, force_pii: bool = False
+    ) -> BatchResult:
         # Build WITHOUT storing — _on_refine_done adopts the result only if it actually
         # built, so a poor revision never wipes the existing proposal or its notebook.
-        return self._build(index, job, notebook_rel)
+        # force_pii carries a force-built job's override into its revisions.
+        return self._build(index, job, notebook_rel, force_pii=force_pii)
 
     def _on_refine_done(self, future, index: int) -> None:
         with self._results_lock:
@@ -452,7 +491,17 @@ class BatchPlanner:
             # The revision produced nothing usable — keep the previous proposal, but
             # ANNOTATE it: the tray is pull-based, so a transient emit alone is invisible.
             # _run_refine never stored over the slot, so results[index] is still prev.
-            why = "" if result is None else (result.error or "the revision proposed nothing")
+            if result is not None and result.status == "pii_blocked":
+                # A non-overridden job whose note tripped the guard (e.g. a name the note
+                # introduced): keep the proposal and say why, so the analyst can edit the
+                # note rather than wonder why nothing changed.
+                kinds = ", ".join(sorted({str(f.get("kind", "")) for f in result.pii}))
+                why = (
+                    f"the revision looks like it contains {kinds or 'sensitive data'} — "
+                    "edit the note or remove the flagged data"
+                )
+            else:
+                why = "" if result is None else (result.error or "the revision proposed nothing")
             note = f"Revision didn't change anything: {why}" if why else ""
             with self._results_lock:
                 if note and 0 <= index < len(self._results) and self._results[index] is prev:
@@ -474,12 +523,124 @@ class BatchPlanner:
         with self._results_lock:
             return set(self._refining)
 
-    def _drive(self, index: int, job: BatchJob, notebook_rel: str, session) -> BatchResult:
+    # -- force (build anyway, overriding the PII block) ---------------------
+
+    def force(self, index: int) -> None:
+        """Re-build ONE pii-blocked job, overriding the outbound-PII guard — the tray's
+        "Build anyway", the batch analogue of the chat's "Send anyway".
+
+        A blocked job created no notebook (pre-flight) or had its skeleton discarded
+        (session-held), so a fresh one is minted, and the build auto-confirms the held
+        brief — forwarding it verbatim regardless of the PII kind. It runs even after a
+        ``block_batch`` aborted the run (its own never-set cancel event), while a repo
+        switch / shutdown still stops it via the closed-queue guard. A forced build that
+        produces nothing restores the blocked state so the button is offered again."""
+        if self._closed or self._executor is None:
+            raise BatchError("This batch queue is closed.")
+        with self._results_lock:
+            if not 0 <= index < len(self._results):
+                raise BatchError("No such job.")
+            prev = self._results[index]
+            if prev.status != "pii_blocked":
+                raise BatchError("This job isn't blocked.")
+            if index in self._forcing:
+                raise BatchError("This job is already building.")
+            self._forcing.add(index)
+            self._forcing_prev[index] = prev
+        try:
+            notebook_rel = self._make_notebook(
+                prev.job.name.strip() or _name_from_brief(prev.job.brief)
+            )
+        except (ValueError, OSError) as exc:
+            with self._results_lock:
+                self._forcing.discard(index)
+                self._forcing_prev.pop(index, None)
+            raise BatchError(f"Could not create the notebook: {exc}") from exc
+        with self._cond:
+            self._pending += 1
+        try:
+            future = self._executor.submit(self._run_force, index, prev.job, notebook_rel)
+        except RuntimeError:  # pool shut down by a concurrent close
+            self._discard(notebook_rel)
+            with self._results_lock:
+                self._forcing.discard(index)
+                self._forcing_prev.pop(index, None)
+            with self._cond:
+                self._pending -= 1
+                self._cond.notify_all()
+            raise BatchError("This batch queue is closed.")
+        future.add_done_callback(lambda f, i=index, nb=notebook_rel: self._on_force_done(f, i, nb))
+        self._emit(
+            index=index, name=prev.job.name, status="building", notebook=notebook_rel, n_proposals=0
+        )
+
+    def _run_force(self, index: int, job: BatchJob, notebook_rel: str) -> BatchResult:
+        # Build WITHOUT storing — _on_force_done adopts only a built result, and uses its
+        # OWN never-set abort so a block_batch-aborted run can still honour the override.
+        return self._build(index, job, notebook_rel, force_pii=True, abort=threading.Event())
+
+    def _on_force_done(self, future, index: int, notebook_rel: str) -> None:
+        with self._results_lock:
+            self._forcing.discard(index)
+            prev = self._forcing_prev.pop(index, None)
+        try:
+            result = None if future.cancelled() else future.result()
+        except Exception:  # noqa: BLE001  # defensive; _build is meant to catch
+            result = None
+        if result is not None and result.status == "built":
+            self._commit(index, result)  # adopt the forced proposal (keeps its notebook)
+        else:
+            # Nothing usable — bin the skeleton this build created and restore the blocked
+            # state (annotated) so the tray's "Build anyway" is offered again.
+            self._discard(notebook_rel)
+            if prev is not None:
+                why = "" if result is None else (result.error or "nothing was proposed")
+                note = f"Build anyway didn't produce a notebook: {why}" if why else ""
+                with self._results_lock:
+                    if note and 0 <= index < len(self._results) and self._results[index] is prev:
+                        prev.error = note
+                self._emit(
+                    index=index,
+                    name=prev.job.name,
+                    status=prev.status,
+                    notebook=prev.notebook_rel,
+                    n_proposals=len(prev.proposals),
+                    error=prev.error,
+                )
+        with self._cond:
+            self._pending -= 1
+            self._cond.notify_all()
+
+    def forcing_indices(self) -> set[int]:
+        """Job indices being force-rebuilt right now (for a 'building…' badge in the tray)."""
+        with self._results_lock:
+            return set(self._forcing)
+
+    def _discard(self, notebook_rel: str | None) -> None:
+        """Best-effort remove a skeleton (the discard hook is optional)."""
+        if notebook_rel and self._discard_notebook is not None:
+            with contextlib.suppress(Exception):
+                self._discard_notebook(notebook_rel)
+
+    def _drive(
+        self,
+        index: int,
+        job: BatchJob,
+        notebook_rel: str,
+        session,
+        *,
+        force_pii: bool = False,
+        abort: threading.Event,
+    ) -> BatchResult:
         # Drives one session to a terminal result and RETURNS it (does NOT store) — the
-        # caller (_run_job commits it; _run_refine stages it). Progress is emitted live.
+        # caller (_run_job commits it; _run_refine / _run_force stage it). Progress is
+        # emitted live. ``abort`` is this build's cancel event (the batch-wide one, or a
+        # forced build's private never-set one). ``force_pii`` means the analyst chose
+        # "Build anyway": a held brief is auto-confirmed (forwarded verbatim) rather than
+        # blocking the job, exactly like the chat's "Send anyway".
         q = session.subscribe()
         deadline = time.monotonic() + max(1, self._cfg.job_timeout)
-        if not self._await_ready(session, q, deadline):
+        if not self._await_ready(session, q, deadline, abort):
             return self._make_result(
                 job, notebook_rel, "failed", error="The assistant did not become ready in time."
             )
@@ -489,9 +650,10 @@ class BatchPlanner:
             return self._make_result(job, notebook_rel, "failed", error=str(exc))
 
         proposals: list[dict] = []
+        forced_pii: list[dict] = []  # findings the analyst overrode, carried onto the result
         follow_ups = max(0, self._cfg.follow_up_turns)
         while True:
-            if self._abort.is_set():
+            if abort.is_set():
                 status = "built" if proposals else "not_run"
                 return self._make_result(
                     job,
@@ -499,6 +661,7 @@ class BatchPlanner:
                     status,
                     proposals=proposals,
                     error="" if proposals else "Batch cancelled.",
+                    pii=forced_pii,
                 )
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -509,6 +672,7 @@ class BatchPlanner:
                     status,
                     proposals=proposals,
                     error="" if proposals else "Timed out before the assistant proposed anything.",
+                    pii=forced_pii,
                 )
             try:
                 event = q.get(timeout=min(remaining, _POLL))
@@ -526,10 +690,22 @@ class BatchPlanner:
                     n_proposals=len(proposals),
                 )
             elif kind == "pii":
-                # The session's guard HELD the brief (block mode) — there is no human
-                # to confirm, so this job is blocked. A pii event WITHOUT a token is
-                # warn-only (the brief already went); keep collecting.
-                if data.get("token"):
+                # A tokened "pii" event means the session's block-mode guard HELD the
+                # brief. Normally there is no human mid-build, so the job is blocked; but
+                # if the analyst already chose "Build anyway" (force_pii), confirm the hold
+                # so the brief is forwarded verbatim — recording the overridden findings
+                # (value-free) so the tray can show "built despite flagged data". A pii
+                # event WITHOUT a token is warn-only (the brief already went); keep going.
+                token = data.get("token")
+                if token and force_pii:
+                    forced_pii = list(data.get("findings", []))
+                    try:
+                        session.send_confirmed(token, "")
+                    except Exception as exc:  # noqa: BLE001
+                        return self._make_result(
+                            job, notebook_rel, "failed", error=str(exc), pii=forced_pii
+                        )
+                elif token:
                     return self._make_result(
                         job, notebook_rel, "pii_blocked", pii=data.get("findings", [])
                     )
@@ -541,6 +717,7 @@ class BatchPlanner:
                     status,
                     proposals=proposals,
                     error=str(data.get("text", "") or "The assistant reported an error."),
+                    pii=forced_pii,
                 )
             elif kind == "idle":
                 if follow_ups > 0:
@@ -553,10 +730,15 @@ class BatchPlanner:
                             notebook_rel,
                             "built" if proposals else "empty",
                             proposals=proposals,
+                            pii=forced_pii,
                         )
                     continue
                 return self._make_result(
-                    job, notebook_rel, "built" if proposals else "empty", proposals=proposals
+                    job,
+                    notebook_rel,
+                    "built" if proposals else "empty",
+                    proposals=proposals,
+                    pii=forced_pii,
                 )
             elif kind == "closed":
                 return self._make_result(
@@ -565,16 +747,17 @@ class BatchPlanner:
                     "built" if proposals else "failed",
                     proposals=proposals,
                     error="" if proposals else "The session closed before proposing anything.",
+                    pii=forced_pii,
                 )
 
-    def _await_ready(self, session, q, deadline: float) -> bool:
+    def _await_ready(self, session, q, deadline: float, abort: threading.Event) -> bool:
         """Wait until the (possibly still-starting) session can take a turn. The stub
         and an already-warm session report ready immediately; a real provider session
         announces ``ready`` (or ``fail``) over the stream once its handshake lands."""
         if session.is_ready():
             return True
         while True:
-            if self._abort.is_set():
+            if abort.is_set():
                 return False  # honour cancel during startup, not just after the brief
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -660,6 +843,13 @@ class BatchPlanner:
             with contextlib.suppress(Exception):
                 self._discard_notebook(result.notebook_rel)
             result.notebook_rel = None
+        # Stamp a stable id on each proposal so applied-state survives a refine. The hub
+        # tracks "applied" by pid, NOT by (job, position): a refine REPLACES the proposal
+        # list, and a positional key would let the new proposal inherit the old one's
+        # "applied" flag (blocking re-apply). setdefault keeps a kept-prev proposal's id
+        # stable across a no-op refine, so it stays applied and can't be double-written.
+        for p in result.proposals:
+            p.setdefault("pid", secrets.token_urlsafe(6))
         with self._results_lock:
             if 0 <= index < len(self._results):
                 self._results[index] = result

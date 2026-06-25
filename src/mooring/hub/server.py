@@ -1530,10 +1530,12 @@ class Hub:
     ):
         """A builder session for one batch notebook: the SAME value-free, background
         copilot as the interactive chat (allowlist + deny-all + empty workdir + the
-        single egress assembler), with the outbound PII guard forced to BLOCK mode — a
-        batch has no human to click "Send anyway", so a held brief must stop the job,
-        never slip through in warn mode. NOT registered in self._chats; the planner
-        owns its lifecycle and closes it the moment the build finishes."""
+        single egress assembler), with the outbound PII guard forced to BLOCK mode, so a
+        flagged brief stops the job by default rather than slipping through in warn mode.
+        The analyst can still override a block per job from the review tray ("Build
+        anyway" -> api_batch_force), which re-runs it auto-confirming the held brief. NOT
+        registered in self._chats; the planner owns its lifecycle and closes it the moment
+        the build finishes."""
         from dataclasses import replace
 
         provider = self._provider_for()
@@ -1729,6 +1731,38 @@ class Hub:
         telemetry.log_event("ai_batch_refine")
         return JSONResponse({"ok": True})
 
+    async def api_batch_force(self, request: Request) -> JSONResponse:
+        """Re-build ONE pii-blocked job, overriding the outbound-PII guard — the tray's
+        "Build anyway". The human reviewing the tray authorizes forwarding the flagged
+        brief verbatim (the batch analogue of the chat's "Send anyway"); the notebook is
+        still only PROPOSED into, never written, so the existing per-notebook Apply gate
+        remains the only write path."""
+        if not self.app_cfg.ai_enabled:
+            return JSONResponse({"enabled": False}, status_code=404)
+        if not self.app_cfg.ai_batch_enabled:
+            return JSONResponse({"enabled": False, "reason": "batch_disabled"}, status_code=403)
+        data = await request.json()
+        batch_id = str(data.get("batch_id", ""))
+        with self._batch_lock:
+            run = self._batches.get(batch_id)
+        if run is None:
+            return JSONResponse({"error": "Unknown batch."}, status_code=404)
+        if run["status"] == "closed":
+            return JSONResponse({"error": "This batch is finished."}, status_code=409)
+        try:
+            job_idx = int(data.get("job"))
+        except (TypeError, ValueError):
+            return JSONResponse({"error": "A job index is required."}, status_code=400)
+        run["broadcaster"].touch()
+        from mooring.ai.batch import BatchError
+
+        try:
+            await asyncio.to_thread(run["planner"].force, job_idx)
+        except BatchError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        telemetry.log_event("ai_batch_force")
+        return JSONResponse({"ok": True})
+
     async def api_batch_stream(self, request: Request) -> StreamingResponse | JSONResponse:
         batch_id = request.path_params["batch_id"]
         with self._batch_lock:
@@ -1784,8 +1818,9 @@ class Hub:
         """Value-free per-job view for the live review tray: status, the user's own
         brief, and each proposal's source/diff (never a data value). In-flight jobs show
         as queued/building with no proposals yet; built jobs carry their proposals."""
-        applied = run["applied"]
+        applied = run["applied"]  # stable proposal ids (pid), not (job, position) tuples
         refining = run["planner"].refining_indices()
+        forcing = run["planner"].forcing_indices()
         out = []
         for idx, res in enumerate(results):
             proposals = [
@@ -1795,7 +1830,7 @@ class Hub:
                     "rationale": str(p.get("rationale", "")),
                     "code": str(p.get("code", "")),
                     "diffs": p.get("diffs", []),
-                    "applied": (idx, j) in applied,
+                    "applied": p.get("pid") in applied,
                 }
                 for j, p in enumerate(res.proposals)
             ]
@@ -1810,6 +1845,7 @@ class Hub:
                     "pii": res.pii,
                     "proposals": proposals,
                     "refining": idx in refining,
+                    "forcing": idx in forcing,
                 }
             )
         return out
@@ -1840,12 +1876,15 @@ class Hub:
         res = results[job_idx]
         if res.notebook_rel is None or not 0 <= prop_idx < len(res.proposals):
             return JSONResponse({"error": "No such proposal."}, status_code=404)
-        # Idempotent: a re-submit of an already-applied proposal (e.g. a tray re-render
-        # re-armed the button) is a no-op, so the same cell can never be appended twice.
-        with self._batch_lock:
-            if (job_idx, prop_idx) in run["applied"]:
-                return JSONResponse({"ok": True, "noop": True})
         proposal = res.proposals[prop_idx]
+        pid = proposal.get("pid")
+        # Idempotent by the proposal's STABLE id (not its position): a re-submit of an
+        # already-applied proposal (a tray re-render re-armed the button) is a no-op, so
+        # the same cell can never be appended twice. Keying by position would wrongly
+        # treat a refined proposal at the same slot as already applied — the Bug this fixes.
+        with self._batch_lock:
+            if pid is not None and pid in run["applied"]:
+                return JSONResponse({"ok": True, "noop": True})
         ops = proposal.get("ops")
         if isinstance(ops, list) and ops:
             op_dicts = ops
@@ -1874,7 +1913,8 @@ class Hub:
         except CellWriteError as exc:
             return JSONResponse({"error": str(exc)}, status_code=502)
         with self._batch_lock:
-            run["applied"].add((job_idx, prop_idx))
+            if pid is not None:
+                run["applied"].add(pid)
         telemetry.log_event("ai_batch_apply")
         return JSONResponse({"ok": True, "can_undo": undo_depth > 0, "undo_depth": undo_depth})
 
@@ -1941,6 +1981,7 @@ def create_app(hub: Hub) -> Starlette:
             Route("/api/ai/batch/tray/{batch_id}", hub.api_batch_tray),
             Route("/api/ai/batch/apply", hub.api_batch_apply, methods=["POST"]),
             Route("/api/ai/batch/refine", hub.api_batch_refine, methods=["POST"]),
+            Route("/api/ai/batch/force", hub.api_batch_force, methods=["POST"]),
             Mount("/static", StaticFiles(directory=static)),
         ],
         lifespan=lifespan,
