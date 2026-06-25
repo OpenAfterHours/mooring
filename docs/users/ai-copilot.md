@@ -26,10 +26,11 @@ uvx "mooring[copilot]"               # …or a one-off run (doesn't stay install
 Then sign in to GitHub Copilot. You can do it **from the hub** or from the
 command line — either works:
 
-- **In the hub** — the **AI copilot sign-in** card shows whether Copilot is
-  connected (and as which account). Click **Sign in to Copilot** to authorise in a
-  browser; **Switch account** changes which account is used. If you open the chat
-  before signing in, it shows a **Sign in to Copilot** button right there too.
+- **In the hub** — open the **🤖 Copilot** menu in the header to see whether
+  Copilot is connected (and as which account). Click **Sign in to Copilot** to
+  authorise in a browser; **Switch account** changes which account is used. If you
+  open the chat before signing in, it shows a **Sign in to Copilot** button right
+  there too.
 - **From the command line** — these assume `mooring` is on your `PATH` (installed
   via one of the first three forms, not a one-off `uvx` run):
 
