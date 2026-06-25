@@ -45,6 +45,56 @@ def _proposal(code="result = df.head()"):
     return ("proposal", {"code": code, "rationale": "summary"})
 
 
+class HoldingSession(ChatBroadcaster):
+    """A builder that HOLDS its brief (broadcasting a tokened "pii" event) and, on the
+    analyst's send_confirmed, replays ``on_confirm`` — modelling the block-mode guard plus
+    the "Send anyway" override the batch's force() drives."""
+
+    def __init__(self, findings=None, *, on_confirm=None):
+        super().__init__()
+        self._findings = findings or [{"line": 1, "kind": "person name"}]
+        self._on_confirm = on_confirm if on_confirm is not None else [_proposal(), ("idle", {})]
+        self.sent = []
+        self.confirmed = []
+        self.closed = False
+
+    def send(self, text, live_schema_text=""):
+        self.sent.append(text)
+        self._broadcast(ChatEvent("pii", {"token": "tok", "findings": self._findings}))
+
+    def send_confirmed(self, token, live_schema_text=""):
+        self.confirmed.append(token)
+        for kind, data in self._on_confirm:
+            self._broadcast(ChatEvent(kind, data))
+
+    def close(self):
+        self.closed = True
+        super().close()
+
+
+def _force_planner(tmp_path, sessions, *, pii=None, config=None, track_discards=None):
+    """A planner whose open_session hands out pre-built sessions in order, with a discard
+    hook that actually unlinks (so a re-created notebook reuses the freed name, as the hub
+    does)."""
+    it = iter(sessions)
+
+    def discard(nb):
+        if track_discards is not None:
+            track_discards.append(nb)
+        p = tmp_path / nb
+        if p.exists():
+            p.unlink()
+
+    return BatchPlanner(
+        config=config or BatchConfig(enabled=True, job_timeout=3),
+        pii=pii or PiiConfig(),
+        make_notebook=lambda name: notebook_template.create_unique(tmp_path, name),
+        build_context=lambda nb, ds: ("CTX", None),
+        open_session=lambda ctx, nb, m, e, d: next(it),
+        discard_notebook=discard,
+    )
+
+
 def _make_planner(
     tmp_path, open_session, *, config=None, pii=None, is_disabled=None, on_progress=None
 ):
@@ -198,7 +248,7 @@ def test_await_ready_returns_false_immediately_on_abort(tmp_path):
     planner._abort.set()
     q = sess.subscribe()
     deadline = time.monotonic() + 60  # large: abort, not the deadline, must end the wait
-    assert planner._await_ready(sess, q, deadline) is False
+    assert planner._await_ready(sess, q, deadline, planner._abort) is False
 
 
 def test_non_built_jobs_discard_their_orphan_skeleton(tmp_path):
@@ -379,6 +429,201 @@ def test_refine_blocks_a_pii_note_and_rejects_bad_targets(tmp_path):
     with pytest.raises(BatchError):
         planner.refine(99, "no such job")
     planner.close()
+
+
+def test_force_overrides_a_session_held_block(tmp_path):
+    # A name-bearing brief is held by the block-mode guard -> pii_blocked. "Build anyway"
+    # re-runs the job, auto-confirming the held brief, and the override is kept visible.
+    held = HoldingSession([{"line": 1, "kind": "person name"}])
+    forced = HoldingSession([{"line": 1, "kind": "person name"}])
+    planner = _force_planner(tmp_path, [held, forced])
+    planner.start()
+    [idx] = planner.add([BatchJob("nb", "analyse Jane Doe's spend")])
+    planner.wait_idle()
+    res = planner.snapshot()[0]
+    assert res.status == "pii_blocked" and res.notebook_rel is None
+
+    planner.force(idx)
+    planner.wait_idle()
+    planner.close()
+    res2 = planner.snapshot()[0]
+    assert res2.status == "built"
+    assert res2.notebook_rel == "notebooks/nb.py" and (tmp_path / res2.notebook_rel).is_file()
+    assert len(res2.proposals) == 1
+    assert res2.pii and res2.pii[0]["kind"] == "person name"  # override stays visible
+    assert forced.confirmed == ["tok"]  # the held brief was auto-confirmed, not re-blocked
+    assert planner.forcing_indices() == set()
+
+
+def test_force_rebuilds_a_preflight_checksum_blocked_job(tmp_path):
+    # A card brief is blocked by the deterministic pre-flight BEFORE any session opens.
+    # "Build anyway" still rebuilds it (creating the notebook the pre-flight never did).
+    forced = HoldingSession([{"line": 1, "kind": "payment card"}])
+    planner = _force_planner(
+        tmp_path,
+        [forced],
+        pii=PiiConfig(enabled=True),
+        config=BatchConfig(enabled=True, pii_policy="block_job", job_timeout=3),
+    )
+    planner.start()
+    [idx] = planner.add([BatchJob("leak", _CARD_BRIEF)])
+    planner.wait_idle()
+    res = planner.snapshot()[0]
+    assert res.status == "pii_blocked" and res.notebook_rel is None
+    assert not (tmp_path / "notebooks/leak.py").exists()  # pre-flight created nothing
+
+    planner.force(idx)
+    planner.wait_idle()
+    planner.close()
+    res2 = planner.snapshot()[0]
+    assert res2.status == "built"
+    assert res2.notebook_rel == "notebooks/leak.py" and (tmp_path / res2.notebook_rel).is_file()
+    assert forced.confirmed == ["tok"]
+
+
+def test_force_runs_even_after_block_batch_aborted_the_run(tmp_path):
+    # block_batch sets the run-wide abort; a forced rebuild uses its OWN cancel event so the
+    # analyst can still override the one blocked job without un-aborting the whole batch.
+    forced = HoldingSession([{"line": 1, "kind": "payment card"}])
+    planner = _force_planner(
+        tmp_path,
+        [forced],
+        pii=PiiConfig(enabled=True),
+        config=BatchConfig(enabled=True, pii_policy="block_batch", job_timeout=3),
+    )
+    planner.start()
+    planner.add([BatchJob("clean", "summarise"), BatchJob("leak", _CARD_BRIEF)])
+    planner.wait_idle()
+    snap = planner.snapshot()
+    assert snap[1].status == "pii_blocked" and snap[0].status == "not_run"
+    assert planner._abort.is_set()  # the whole run was aborted
+
+    planner.force(1)
+    planner.wait_idle()
+    planner.close()
+    snap2 = planner.snapshot()
+    assert snap2[1].status == "built"
+    assert forced.confirmed == ["tok"]
+
+
+def test_force_that_proposes_nothing_restores_the_blocked_state(tmp_path):
+    # If "Build anyway" yields nothing usable, the blocked state is restored (annotated) so
+    # the tray offers the button again, and the skeleton the forced build made is binned.
+    held = HoldingSession([{"line": 1, "kind": "email address"}])
+    empty = HoldingSession([{"line": 1, "kind": "email address"}], on_confirm=[("idle", {})])
+    discards = []
+    planner = _force_planner(tmp_path, [held, empty], track_discards=discards)
+    planner.start()
+    [idx] = planner.add([BatchJob("nb", "email support")])
+    planner.wait_idle()
+    assert planner.snapshot()[0].status == "pii_blocked"
+
+    planner.force(idx)
+    planner.wait_idle()
+    planner.close()
+    res = planner.snapshot()[0]
+    assert res.status == "pii_blocked"  # restored
+    assert "Build anyway didn't produce" in res.error
+    assert len(discards) >= 2  # the initial skeleton AND the forced one were binned
+    assert planner.forcing_indices() == set()
+
+
+def test_force_rejects_a_non_blocked_or_unknown_job(tmp_path):
+    planner = _planner_with_sessions(tmp_path, [[_proposal(), ("idle", {})]])
+    planner.start()
+    [idx] = planner.add([BatchJob("nb", "x")])
+    planner.wait_idle()
+    assert planner.snapshot()[0].status == "built"
+    with pytest.raises(BatchError):
+        planner.force(idx)  # built, not blocked
+    with pytest.raises(BatchError):
+        planner.force(99)  # no such job
+    planner.close()
+
+
+def test_refine_inherits_a_force_built_jobs_override(tmp_path):
+    # Once a job is force-built ("Build anyway"), its revisions keep the override: the
+    # flagged brief is auto-confirmed again instead of re-blocking the revision.
+    held = HoldingSession([{"line": 1, "kind": "person name"}])
+    forced = HoldingSession(
+        [{"line": 1, "kind": "person name"}], on_confirm=[_proposal("v1 = 1"), ("idle", {})]
+    )
+    refined = HoldingSession(
+        [{"line": 1, "kind": "person name"}], on_confirm=[_proposal("v2 = 2"), ("idle", {})]
+    )
+    planner = _force_planner(tmp_path, [held, forced, refined])
+    planner.start()
+    [idx] = planner.add([BatchJob("nb", "analyse Jane Doe")])
+    planner.wait_idle()
+    assert planner.snapshot()[0].status == "pii_blocked"
+
+    planner.force(idx)
+    planner.wait_idle()
+    res = planner.snapshot()[0]
+    assert res.status == "built" and res.proposals[0]["code"] == "v1 = 1" and res.pii
+
+    planner.refine(idx, "use a bar chart")
+    planner.wait_idle()
+    planner.close()
+    res2 = planner.snapshot()[0]
+    assert res2.status == "built" and res2.proposals[0]["code"] == "v2 = 2"
+    assert res2.pii  # the override stays sticky across the revision
+    assert refined.confirmed == ["tok"]  # the revision auto-confirmed, not re-blocked
+
+
+def test_refine_of_a_clean_job_blocked_by_pii_keeps_prev_with_a_clear_note(tmp_path):
+    # A NON-overridden job whose revision trips the guard (a name the note introduced) keeps
+    # its proposal and surfaces WHY — it isn't auto-overridden (only force-built jobs are).
+    planner = _force_planner(
+        tmp_path,
+        [
+            ScriptedSession([_proposal("kept = 1"), ("idle", {})]),  # clean initial build
+            HoldingSession([{"line": 1, "kind": "person name"}]),  # the revision is held
+        ],
+    )
+    planner.start()
+    planner.add([BatchJob("nb", "summarise")])
+    planner.wait_idle()
+    base = planner.snapshot()[0]
+    assert base.status == "built" and not base.pii  # built clean -> not overridden
+
+    planner.refine(0, "mention the customer")
+    planner.wait_idle()
+    planner.close()
+    res = planner.snapshot()[0]
+    assert res.status == "built" and res.proposals[0]["code"] == "kept = 1"  # prev kept
+    assert "person name" in res.error  # the block reason is surfaced, not "proposed nothing"
+
+
+def test_proposal_pid_is_fresh_on_a_real_refine_but_stable_on_a_noop(tmp_path):
+    # Applied-state is tracked by pid, so a refine that REPLACES the proposal mints a new
+    # pid (the revised cell is not "already applied"), while a no-op refine keeps the old
+    # pid (the still-current proposal stays applied and is never double-written).
+    planner = _planner_with_sessions(
+        tmp_path,
+        [
+            [_proposal("v1 = 1"), ("idle", {})],  # initial build
+            [_proposal("v2 = 2"), ("idle", {})],  # successful refine -> replaces
+            [("idle", {})],  # no-op refine -> keeps prev
+        ],
+    )
+    planner.start()
+    planner.add([BatchJob("rev", "chart revenue")])
+    planner.wait_idle()
+    pid0 = planner.snapshot()[0].proposals[0]["pid"]
+    assert pid0
+
+    planner.refine(0, "use a bar chart")
+    planner.wait_idle()
+    pid1 = planner.snapshot()[0].proposals[0]["pid"]
+    assert pid1 and pid1 != pid0  # replaced proposal -> fresh id
+
+    planner.refine(0, "and totals")
+    planner.wait_idle()
+    planner.close()
+    res = planner.snapshot()[0]
+    assert res.proposals[0]["code"] == "v2 = 2"  # kept (no-op)
+    assert res.proposals[0]["pid"] == pid1  # same id -> stays applied
 
 
 def test_name_from_brief_falls_back():

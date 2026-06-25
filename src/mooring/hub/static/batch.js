@@ -324,6 +324,9 @@
     $("jobs")
       .querySelectorAll("[data-refine]")
       .forEach((b) => b.addEventListener("click", onRefine));
+    $("jobs")
+      .querySelectorAll("[data-force]")
+      .forEach((b) => b.addEventListener("click", onForce));
   }
 
   function allApplied(j) {
@@ -335,9 +338,17 @@
     let body = "";
     if (j.error) body += `<div class="job-err">${escapeHtml(j.error)}</div>`;
     if (j.pii && j.pii.length) {
-      body += `<div class="job-err">Blocked: ${j.pii
-        .map((f) => escapeHtml(f.kind))
-        .join(", ")} detected in the brief.</div>`;
+      const kinds = j.pii.map((f) => escapeHtml(f.kind)).join(", ");
+      if (j.status === "pii_blocked") {
+        // A flagged brief held the build. The analyst reviewing the tray can override it
+        // (parity with the chat's "Send anyway") — the brief is then forwarded verbatim.
+        body += `<div class="job-err">Blocked: ${kinds} detected in the brief.${
+          j.forcing ? "" : ` <button class="small" data-force="${j.index}">Build anyway</button>`
+        }</div>`;
+      } else {
+        // Built after the analyst chose Build anyway — keep the override visible.
+        body += `<div class="job-warn">⚠ Built despite flagged data (${kinds}) — you chose Build anyway.</div>`;
+      }
     }
     (j.proposals || []).forEach((p) => (body += renderProposal(j, p)));
     // Revise a built notebook's proposal BEFORE applying — fold a note into its brief
@@ -352,7 +363,13 @@
             <button class="small" data-refine="${j.index}">Refine</button>
           </div>`;
     }
-    const status = allApplied(j) ? "applied" : j.refining ? "refining" : j.status;
+    const status = allApplied(j)
+      ? "applied"
+      : j.forcing
+        ? "building"
+        : j.refining
+          ? "refining"
+          : j.status;
     return `<div class="job-card">
       <div class="job-head">
         <span class="job-name">${escapeHtml(j.name || "notebook")}</span>
@@ -417,6 +434,32 @@
       return;
     }
     btn.textContent = "Applied ✓";
+  }
+
+  // "Build anyway": re-run a PII-blocked job with the guard overridden. The flagged
+  // brief is forwarded verbatim, so confirm the override first (it's the human gate the
+  // batch otherwise lacks). The job goes building → built via the tray, with the override
+  // kept visible on the result.
+  async function onForce(e) {
+    clearError();
+    const idx = Number(e.currentTarget.getAttribute("data-force"));
+    if (
+      !window.confirm(
+        "This brief was flagged as possibly containing sensitive data (e.g. a card, IBAN, " +
+          "NHS number, or a person's name). Build the notebook anyway? The brief will be " +
+          "sent to the assistant exactly as written."
+      )
+    ) {
+      return;
+    }
+    e.currentTarget.disabled = true;
+    const { ok, body } = await postJSON("/api/ai/batch/force", { batch_id: batchId, job: idx });
+    if (!ok) {
+      showError(body.error || "Could not start the build.");
+      e.currentTarget.disabled = false;
+      return;
+    }
+    scheduleTrayRefresh();
   }
 
   async function onOpen(e) {

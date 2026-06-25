@@ -1559,6 +1559,98 @@ def test_batch_threads_per_job_model_and_effort(batch_client, monkeypatch):
     assert ("claude-opus", "high") in seen
 
 
+def test_batch_force_overrides_a_pii_block_and_makes_it_appliable(batch_client, monkeypatch):
+    # A flagged brief blocks the job; "Build anyway" (the human override) rebuilds it, the
+    # tray shows it built with the override kept visible, and the proposal is appliable.
+    from mooring.ai.chat import StubChatSession
+
+    client, hub = batch_client
+    monkeypatch.setattr(
+        Hub,
+        "_make_batch_session",
+        lambda self, ctx, nb, model="", reasoning_effort=None, dictionary=None: StubChatSession(
+            system_context=ctx, pii_enabled=True, pii_block=True
+        ),
+    )
+    bid, tray = _run_batch(client, [{"name": "leak", "brief": "email me at a@b.com about it"}])
+    job = tray["jobs"][0]
+    assert job["status"] == "pii_blocked" and job["pii"]  # value-free findings surfaced
+
+    forced = client.post("/api/ai/batch/force", json={"batch_id": bid, "job": 0})
+    assert forced.status_code == 200 and forced.json()["ok"] is True
+    tray2 = _wait_caught_up(client, bid)
+    job2 = tray2["jobs"][0]
+    assert job2["status"] == "built"
+    assert job2["pii"]  # the override stays visible on the built job
+    assert job2["proposals"] and job2["proposals"][0]["applied"] is False
+
+    applied = client.post("/api/ai/batch/apply", json={"batch_id": bid, "job": 0, "proposal": 0})
+    assert applied.status_code == 200 and applied.json()["ok"] is True
+    nb = (hub.cfg.workspace() / "notebooks/leak.py").read_text("utf-8")
+    assert "df.describe()" in nb  # the overridden proposal actually wrote
+
+
+def test_batch_force_unknown_batch_404(batch_client):
+    client, _ = batch_client
+    resp = client.post("/api/ai/batch/force", json={"batch_id": "nope", "job": 0})
+    assert resp.status_code == 404
+
+
+def test_batch_refine_inherits_a_forced_jobs_override(batch_client, monkeypatch):
+    # A force-built job stays overridden: refining it must NOT re-block on the same flagged
+    # brief — the revision auto-confirms, and the override stays visible on the result.
+    from mooring.ai.chat import StubChatSession
+
+    client, _ = batch_client
+    monkeypatch.setattr(
+        Hub,
+        "_make_batch_session",
+        lambda self, ctx, nb, model="", reasoning_effort=None, dictionary=None: StubChatSession(
+            system_context=ctx, pii_enabled=True, pii_block=True
+        ),
+    )
+    bid, tray = _run_batch(client, [{"name": "leak", "brief": "email me at a@b.com"}])
+    assert tray["jobs"][0]["status"] == "pii_blocked"
+    assert client.post("/api/ai/batch/force", json={"batch_id": bid, "job": 0}).status_code == 200
+    built = _wait_caught_up(client, bid)
+    assert built["jobs"][0]["status"] == "built" and built["jobs"][0]["pii"]
+
+    refined = client.post(
+        "/api/ai/batch/refine", json={"batch_id": bid, "job": 0, "feedback": "add a chart"}
+    )
+    assert refined.status_code == 200
+    after = _wait_caught_up(client, bid)
+    job = after["jobs"][0]
+    assert job["status"] == "built"  # NOT re-blocked
+    assert "add a chart" in job["brief"]
+    assert job["pii"]  # the override stays sticky and visible
+
+
+def test_batch_apply_then_refine_then_apply_the_revision(batch_client):
+    # Regression: after applying a proposal, a refine REPLACES it; the revised proposal must
+    # be appliable again (not stuck "Applied" from the old positional key).
+    client, hub = batch_client
+    bid, tray = _run_batch(client, [{"name": "rev", "brief": "chart revenue"}])
+    assert tray["jobs"][0]["status"] == "built"
+
+    first = client.post("/api/ai/batch/apply", json={"batch_id": bid, "job": 0, "proposal": 0})
+    assert first.status_code == 200 and first.json().get("noop") is not True
+    applied_tray = client.get(f"/api/ai/batch/tray/{bid}").json()
+    assert applied_tray["jobs"][0]["proposals"][0]["applied"] is True
+
+    refined = client.post(
+        "/api/ai/batch/refine", json={"batch_id": bid, "job": 0, "feedback": "use a bar chart"}
+    )
+    assert refined.status_code == 200
+    tray2 = _wait_caught_up(client, bid)
+    assert tray2["jobs"][0]["proposals"][0]["applied"] is False  # iterated -> appliable again
+
+    again = client.post("/api/ai/batch/apply", json={"batch_id": bid, "job": 0, "proposal": 0})
+    assert again.status_code == 200 and again.json().get("noop") is not True
+    nb = (hub.cfg.workspace() / "notebooks/rev.py").read_text("utf-8")
+    assert nb.count("df.describe()") == 2  # the original and the revised cell both landed
+
+
 def test_batch_apply_is_idempotent(batch_client):
     # A repeat apply (e.g. a tray re-render re-armed the button) is a no-op, so the same
     # cell can never be appended twice.
