@@ -28,7 +28,9 @@ function applyTheme(theme) {
   try {
     // Only rewrite on a real change so we don't fire redundant storage events.
     if (localStorage.getItem(LS_THEME) !== theme) localStorage.setItem(LS_THEME, theme);
-  } catch (e) {}
+  } catch {
+    // localStorage may be unavailable (private mode / blocked); theming is best-effort.
+  }
 }
 
 let busy = false;
@@ -538,7 +540,9 @@ async function refreshCopilotStatus(probe) {
     const data = await api("/api/ai/status" + (probe ? "?probe=1" : ""));
     if (data.enabled === false) return; // AI disabled — the card stays hidden
     renderCopilotStatus(data);
-  } catch (e) {}
+  } catch {
+    // A cached-status probe failing is non-fatal; leave the card as-is.
+  }
 }
 
 async function startCopilotLogin() {
