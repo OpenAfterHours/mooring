@@ -6,7 +6,7 @@
 // globally; under Node it is require()d. Nothing here touches `document`, the
 // network, or storage — the value-blind/PII posture lives in chat.js + the hub.
 
-var ChatCore = (function () {
+const ChatCore = (function () {
   // -- slash commands -------------------------------------------------------
   // Registry: a name + one-line help. The behaviour lives in chat.js; these are
   // pure metadata + a parser, so each command maps onto an EXISTING capability
@@ -54,7 +54,7 @@ var ChatCore = (function () {
       typeof input === "string" &&
       input.startsWith("/") &&
       !input.startsWith("//") &&
-      input.indexOf(" ") === -1
+      !input.includes(" ")
     );
   }
 
@@ -72,7 +72,7 @@ var ChatCore = (function () {
     this.cursor = -1;
     this.draft = "";
     if (!t) return;
-    if (this.items.length && this.items[this.items.length - 1] === t) return; // dedup repeats
+    if (this.items.length && this.items.at(-1) === t) return; // dedup repeats
     this.items.push(t);
     if (this.items.length > this.max) this.items.shift();
   };
@@ -106,7 +106,7 @@ var ChatCore = (function () {
     if (typeof text !== "string") return null;
     const at = typeof caret === "number" ? caret : text.length;
     const upto = text.slice(0, at);
-    const m = upto.match(/(?:^|\s)@([^\s@]*)$/);
+    const m = /(?:^|\s)@([^\s@]*)$/.exec(upto);
     if (!m) return null;
     return { start: at - m[1].length - 1, query: m[1] };
   }
@@ -277,7 +277,7 @@ var ChatCore = (function () {
   // because chat.js's escapeHtml only escapes & < > (the code is rendered as
   // element text, not an attribute), so " and ' survive un-escaped — and being
   // harmless in a text context, highlighting them opens no injection.
-  const TOKEN_RE = /(#[^\n]*)|("[^"\n]*"|'[^'\n]*')|([A-Za-z_][A-Za-z0-9_]*)/g;
+  const TOKEN_RE = /(#[^\n]*)|("[^"\n]*"|'[^'\n]*')|([A-Za-z_]\w*)/g;
   function highlightCode(escaped) {
     if (typeof escaped !== "string") return "";
     return escaped.replace(TOKEN_RE, function (m, com, str, word) {

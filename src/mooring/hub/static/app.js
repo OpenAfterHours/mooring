@@ -16,7 +16,7 @@ const STATE_BADGES = {
   "local": "local",
 };
 
-const PUSH_STATES = ["modified", "new local", "deleted locally"];
+const PUSH_STATES = new Set(["modified", "new local", "deleted locally"]);
 
 // Appearance, shared with the chat window (same origin) via this localStorage
 // key; a `storage` event lets an open chat re-theme live. The server is the
@@ -24,7 +24,7 @@ const PUSH_STATES = ["modified", "new local", "deleted locally"];
 const LS_THEME = "mooring.ui.theme";
 
 function applyTheme(theme) {
-  document.documentElement.setAttribute("data-theme", theme);
+  document.documentElement.dataset.theme = theme;
   try {
     // Only rewrite on a real change so we don't fire redundant storage events.
     if (localStorage.getItem(LS_THEME) !== theme) localStorage.setItem(LS_THEME, theme);
@@ -100,7 +100,7 @@ async function action(path, body, refreshAfter = true) {
 function openChatWindow(path) {
   const url = `/ai/chat?notebook=${encodeURIComponent(path)}`;
   const name = "mooringAI_" + path.replace(/[^a-z0-9]/gi, "_");
-  const height = Math.min(960, (window.screen && window.screen.availHeight) || 900);
+  const height = Math.min(960, window.screen?.availHeight || 900);
   const win = window.open(url, name, `popup,width=560,height=${height},left=80,top=60`);
   if (win) win.focus();
   else window.open(url, "_blank"); // popup blocked → fall back to a tab
@@ -191,12 +191,16 @@ function fileActions(file, opts) {
   opts = opts || {};
   const actions = [];
   if (file.state === "conflict") {
-    actions.push(["Use remote", () => action("/api/resolve", { path: file.path, strategy: "theirs" })]);
-    actions.push(["Keep both", () => action("/api/resolve", { path: file.path, strategy: "keep-both" })]);
-    actions.push(["Push as copy", () => action("/api/resolve", { path: file.path, strategy: "push-copy" })]);
-  } else if (PUSH_STATES.includes(file.state)) {
-    actions.push(["Push", () => action("/api/push", { paths: [file.path] })]);
-    actions.push(["Propose", () => action("/api/propose", { paths: [file.path] })]);
+    actions.push(
+      ["Use remote", () => action("/api/resolve", { path: file.path, strategy: "theirs" })],
+      ["Keep both", () => action("/api/resolve", { path: file.path, strategy: "keep-both" })],
+      ["Push as copy", () => action("/api/resolve", { path: file.path, strategy: "push-copy" })],
+    );
+  } else if (PUSH_STATES.has(file.state)) {
+    actions.push(
+      ["Push", () => action("/api/push", { paths: [file.path] })],
+      ["Propose", () => action("/api/propose", { paths: [file.path] })],
+    );
     // Revert restores the last synced version. Notebook-only: data files and Power BI
     // members aren't snapshotted (so an Undo would be a dead promise) and a lone PBIP
     // member can't be reverted without breaking the artifact — use the CLI for those.
@@ -258,8 +262,7 @@ function buildRow(pathCell, state, actions) {
     btn.className = "small";
     btn.textContent = label;
     btn.addEventListener("click", handler);
-    actionsTd.appendChild(btn);
-    actionsTd.appendChild(document.createTextNode(" "));
+    actionsTd.append(btn, " ");
   }
 
   tr.append(pathTd, stateTd, actionsTd);
@@ -306,13 +309,15 @@ function buildArtifactRows(artifact, files) {
   if (artifact.to_push) {
     const paths = artifact.members.filter((p) => {
       const f = byPath.get(p);
-      return f && PUSH_STATES.includes(f.state);
+      return f && PUSH_STATES.has(f.state);
     });
-    actions.push(["Push", () => pushAction(paths, paths.length)]);
-    actions.push(["Propose", () => proposeAction(paths, paths.length)]);
+    actions.push(
+      ["Push", () => pushAction(paths, paths.length)],
+      ["Propose", () => proposeAction(paths, paths.length)],
+    );
   }
   const pointer = byPath.get(artifact.pointer);
-  if (pointer && pointer.has_local) {
+  if (pointer?.has_local) {
     actions.push(["Open", () => action("/api/open", { path: artifact.pointer }, false)]);
     actions.push(["Delete", () => deleteAction(artifact.pointer, "project")]);
   }
@@ -501,7 +506,7 @@ function renderCopilotStatus(s) {
   const switchBtn = $("copilot-switch");
   if (!s || s.available === false) {
     statusEl.textContent =
-      (s && s.detail) ||
+      s?.detail ||
       "GitHub Copilot isn't available in this build (install the mooring[copilot] extra).";
     connectBtn.classList.add("hidden");
     switchBtn.classList.add("hidden");
@@ -586,11 +591,11 @@ $("login-start").addEventListener("click", startLogin);
 $("btn-refresh").addEventListener("click", refresh);
 $("btn-pull").addEventListener("click", () => action("/api/pull", {}));
 $("btn-push").addEventListener("click", () => {
-  const count = lastFiles.filter((f) => PUSH_STATES.includes(f.state)).length;
+  const count = lastFiles.filter((f) => PUSH_STATES.has(f.state)).length;
   return pushAction(null, count);
 });
 $("btn-propose").addEventListener("click", () => {
-  const count = lastFiles.filter((f) => PUSH_STATES.includes(f.state)).length;
+  const count = lastFiles.filter((f) => PUSH_STATES.has(f.state)).length;
   return proposeAction(null, count);
 });
 $("btn-new").addEventListener("click", () => {
@@ -665,6 +670,6 @@ window.addEventListener("storage", (event) => {
 
 // Match the toggle to the theme the pre-paint script already applied, so it's
 // never momentarily out of sync; refresh() reconciles with the server value.
-$("theme-select").value = document.documentElement.getAttribute("data-theme") || "system";
+$("theme-select").value = document.documentElement.dataset.theme || "system";
 
 refresh();

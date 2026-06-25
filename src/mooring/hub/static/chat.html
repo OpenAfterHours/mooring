@@ -10,9 +10,11 @@
        via /api/state and a same-origin storage event when the theme changes. -->
   <script>
     try {
-      document.documentElement.setAttribute(
-        "data-theme", localStorage.getItem("mooring.ui.theme") || "__MOORING_DEFAULT_THEME__");
-    } catch (e) {}
+      document.documentElement.dataset.theme =
+        localStorage.getItem("mooring.ui.theme") || "__MOORING_DEFAULT_THEME__";
+    } catch {
+      // localStorage may be unavailable (private mode); the CSS default applies.
+    }
   </script>
   <link rel="stylesheet" href="/static/style.css">
 </head>

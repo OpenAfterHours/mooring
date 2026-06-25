@@ -132,7 +132,7 @@ function maybeScroll() {
 // them. highlightCode (chat_core.js) is only ever fed escapeHtml(...) output.
 
 function escapeHtml(s) {
-  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  return s.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
 }
 
 function inlineMd(s) {
@@ -308,7 +308,7 @@ function onTool(d) {
     row._detail = "";
     toolStack.push(row);
   } else if (d.progress) {
-    const row = toolStack[toolStack.length - 1];
+    const row = toolStack.at(-1);
     if (row) {
       row._detail = d.progress;
       makeExpandable(row);
@@ -376,7 +376,7 @@ const GUTTER_CLASS = { "+": "add-line", "-": "del-line", " ": "ctx-line" };
 // {code, rationale} (the append proposal, and the stub) defaults to kind "append".
 function addProposal(d) {
   clearPending();
-  const kind = (d && d.kind) || "append";
+  const kind = d?.kind || "append";
   const meta = PROPOSAL_KIND[kind] || PROPOSAL_KIND.append;
   const card = document.createElement("div");
   card.className = "proposal-card" + (kind === "append" ? "" : " proposal-edit");
@@ -390,7 +390,7 @@ function addProposal(d) {
   head.appendChild(tn);
   card.appendChild(head);
 
-  if (d.rationale && d.rationale.trim()) {
+  if (d.rationale?.trim()) {
     const r = document.createElement("div");
     r.className = "proposal-rationale";
     r.textContent = d.rationale.trim();
@@ -584,7 +584,7 @@ function copyCode(code, note) {
   const done = () => {
     if (note) note.textContent = " copied";
   };
-  if (navigator.clipboard && navigator.clipboard.writeText) {
+  if (navigator.clipboard?.writeText) {
     navigator.clipboard.writeText(code).then(done, () => {});
   }
 }
@@ -598,7 +598,7 @@ function summarizeKinds(findings) {
 }
 
 function showPiiBanner(items) {
-  if (!items || !items.length) return;
+  if (!items?.length) return;
   const sig = items.map((i) => `${i.where}|${i.kind}`).sort().join(";");
   if (shownPii.has(sig)) return; // don't re-nag on a model/dataset re-open
   shownPii.add(sig);
@@ -868,7 +868,7 @@ function showCopilotSignin(detail) {
   box.innerHTML = "";
   const msg = document.createElement("p");
   msg.textContent =
-    (detail && detail.trim()) ||
+    detail?.trim() ||
     "You're not signed in to GitHub Copilot.";
   const sub = document.createElement("p");
   sub.className = "muted";
@@ -1180,7 +1180,7 @@ function populateEfforts(preferDefault) {
   const model = MODELS.find((m) => m.id === $("chat-model").value);
   const sel = $("chat-effort");
   sel.innerHTML = "";
-  const efforts = (model && model.efforts) || [];
+  const efforts = model?.efforts || [];
   if (!efforts.length) {
     $("effort-wrap").classList.add("hidden");
     return;
@@ -1344,10 +1344,10 @@ function onGlobalKeydown(e) {
   // has focus (the prompt, the model/effort <select> type-ahead, a button, …),
   // so they can't hijack normal keyboard use of those controls.
   const ae = document.activeElement;
-  const tag = ae && ae.tagName;
+  const tag = ae?.tagName;
   if (
     tag === "SELECT" || tag === "INPUT" || tag === "TEXTAREA" || tag === "BUTTON" ||
-    (ae && ae.isContentEditable)
+    ae?.isContentEditable
   ) {
     return;
   }
