@@ -418,12 +418,18 @@ async function refresh() {
   $("connect-repo").classList.toggle("hidden", state.configured || showAddRepo);
   $("login-card").classList.toggle("hidden", !state.configured || state.logged_in);
   $("files-card").classList.toggle("hidden", !showFiles);
-  // Copilot sign-in card: shown wherever the notebook surface is usable (local mode
+  // Copilot sign-in menu: shown wherever the notebook surface is usable (local mode
   // or logged in) and AI is enabled. Copilot's sign-in is independent of the GitHub
-  // login above, so it gets its own card. Status is fetched cached (no CLI spawn).
+  // login, so it lives in its own header dropdown rather than taking up a card the
+  // user has to scroll past. Status is fetched cached (no CLI spawn).
   const showCopilot = aiChatEnabled && showFiles;
-  $("copilot-card").classList.toggle("hidden", !showCopilot);
-  if (showCopilot) refreshCopilotStatus(false);
+  const copilotMenu = $("copilot-menu");
+  copilotMenu.classList.toggle("hidden", !showCopilot);
+  if (showCopilot) {
+    refreshCopilotStatus(false);
+  } else {
+    copilotMenu.open = false; // don't leave the dropdown open when it's hidden
+  }
 
   // Pull / Push all / Propose only make sense against a connected, logged-in repo.
   // In local mode the notebooks are usable but there's nothing to sync to, so hide
@@ -581,6 +587,13 @@ async function pollCopilotLogin() {
   }
   setTimeout(pollCopilotLogin, 2500); // still pending — keep polling
 }
+
+// Native <details> stays open until its summary is clicked again; close it when
+// the user clicks anywhere outside the dropdown, the way a header menu should.
+document.addEventListener("click", (e) => {
+  const menu = $("copilot-menu");
+  if (menu.open && !menu.contains(e.target)) menu.open = false;
+});
 
 $("copilot-connect").addEventListener("click", startCopilotLogin);
 $("copilot-switch").addEventListener("click", startCopilotLogin);

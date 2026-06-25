@@ -24,6 +24,21 @@
     <div id="repo-info"></div>
     <select id="repo-select" class="hidden" title="Switch repo" aria-label="Switch repo"></select>
     <button id="connect-repo" class="small hidden" title="Connect a team repo to sync &amp; share">&#9875; Connect a repo</button>
+    <details id="copilot-menu" class="header-menu hidden">
+      <summary title="AI copilot sign-in">&#129302; Copilot</summary>
+      <div class="header-menu-panel">
+        <p class="muted">The copilot uses GitHub Copilot, which signs in
+          <b>separately</b> from your GitHub login &mdash; it can even be a
+          different account.</p>
+        <div id="copilot-status" class="muted"></div>
+        <div class="toolbar">
+          <button id="copilot-connect" class="primary small hidden">Sign in to Copilot</button>
+          <button id="copilot-switch" class="small hidden">Switch account</button>
+          <button id="copilot-check" class="small">Check status</button>
+        </div>
+        <div id="copilot-note" class="muted"></div>
+      </div>
+    </details>
     <select id="theme-select" title="Appearance (hub, chat &amp; notebooks)" aria-label="Appearance (hub, chat &amp; notebooks)">
       <option value="light">&#9728; Light</option>
       <option value="dark">&#9789; Dark</option>
@@ -57,20 +72,6 @@
         <div id="login-code" class="code"></div>
         <p class="muted">Waiting for you to authorize&hellip;</p>
       </div>
-    </section>
-
-    <section id="copilot-card" class="card hidden">
-      <h2>&#129302; AI copilot sign-in</h2>
-      <p class="muted">The copilot uses GitHub Copilot, which signs in
-        <b>separately</b> from your GitHub login above &mdash; it can even be a
-        different account.</p>
-      <div id="copilot-status" class="muted"></div>
-      <div class="toolbar">
-        <button id="copilot-connect" class="primary small hidden">Sign in to Copilot</button>
-        <button id="copilot-switch" class="small hidden">Switch account</button>
-        <button id="copilot-check" class="small">Check status</button>
-      </div>
-      <div id="copilot-note" class="muted"></div>
     </section>
 
     <section id="files-card" class="card hidden">
