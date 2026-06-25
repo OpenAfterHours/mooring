@@ -687,67 +687,101 @@ def push(
     for index, f in enumerate(candidates):
         if index > 0 and throttle:
             sleep(throttle)  # contents-API writes trip secondary rate limits if rapid
-        in_review = bool(mft.review_branch) and f.path in mft.review_files
-        target = mft.review_branch if in_review else cfg.branch
-        base = review_tree.get(f.path) if in_review else f.base_sha
-        dest = " → review branch (PR)" if in_review else ""
-        response: dict | None = None
-        if f.state is FileState.DELETED_LOCAL:
-            if not in_review:
-                response = client.delete_file(
-                    f.path, message or f"Delete {f.path} via mooring", target, base
-                )
-                mft.files.pop(f.path, None)
-                result.lines.append(f"deleted  {f.path}")
-            elif base is not None:
-                response = client.delete_file(
-                    f.path, message or f"Propose deleting {f.path} via mooring", target, base
-                )
-                mft.review_files[f.path] = None
-                result.lines.append(f"deleted  {f.path}{dest}")
-            else:
-                mft.review_files[f.path] = None
-                result.lines.append(f"deleted  {f.path} (already absent on review branch)")
-        else:
-            data = _read_checked(workspace, f, cfg, result)
-            if data is None:
-                continue
-            try:
-                response = client.put_file(
-                    f.path,
-                    data,
-                    message or f"Update {f.path} via mooring",
-                    target,
-                    base_sha=base,
-                )
-            except RemoteConflict:
-                result.blocked_conflicts.append(f.path)
-                if base is None:
-                    # We tried to *create* the file but it already exists on the
-                    # target — our cached remote view is stale (manifest out of
-                    # sync with cfg.branch). Force the next pull to refetch.
-                    stale_remote = True
-                    reason = "already on the remote — pull first"
-                elif in_review:
-                    reason = "review branch changed — refresh and retry"
-                else:
-                    reason = "remote changed — pull first"
-                result.lines.append(f"conflict {f.path} ({reason})")
-                continue
-            if in_review:
-                mft.review_files[f.path] = response["content"]["sha"]
-            else:
-                mft.files[f.path] = response["content"]["sha"]
-                mft.review_files.pop(f.path, None)
-            result.lines.append(f"pushed   {f.path}{dest}")
-        if in_review:
+        outcome = _push_candidate(client, cfg, workspace, mft, review_tree, f, message, result)
+        stale_remote = stale_remote or outcome.stale_remote
+        if not outcome.counted:
+            continue
+        if outcome.touched_review:
             touched_review = True
-        else:  # only cfg.branch writes advance the sync base
-            commit = (response or {}).get("commit", {}).get("sha", "")
-            if commit:
-                last_commit = commit
+        elif outcome.commit:  # only cfg.branch writes advance the sync base
+            last_commit = outcome.commit
         result.pushed += 1
 
+    _finalize_push(workspace, mft, cfg, result, last_commit, touched_review, stale_remote)
+    return result
+
+
+@dataclass
+class _PushOutcome:
+    """Per-file effects of pushing one candidate, folded into push()'s accumulators."""
+
+    counted: bool = False  # False == the original `continue` (skipped / conflicted)
+    commit: str = ""  # cfg.branch commit sha (blank for review-branch writes)
+    touched_review: bool = False
+    stale_remote: bool = False
+
+
+def _push_candidate(client, cfg, workspace, mft, review_tree, f, message, result) -> _PushOutcome:
+    """Push or delete ONE candidate to its target branch (cfg.branch, or the open
+    proposal's review branch). Mutates ``mft`` + ``result``; returns the per-file effects
+    push() folds into its accumulators."""
+    in_review = bool(mft.review_branch) and f.path in mft.review_files
+    target = mft.review_branch if in_review else cfg.branch
+    base = review_tree.get(f.path) if in_review else f.base_sha
+    dest = " → review branch (PR)" if in_review else ""
+    if f.state is FileState.DELETED_LOCAL:
+        response = _push_delete(client, mft, f, target, base, in_review, dest, message, result)
+    else:
+        data = _read_checked(workspace, f, cfg, result)
+        if data is None:
+            return _PushOutcome()
+        try:
+            response = client.put_file(
+                f.path, data, message or f"Update {f.path} via mooring", target, base_sha=base
+            )
+        except RemoteConflict:
+            return _push_conflict(f, base, in_review, result)
+        if in_review:
+            mft.review_files[f.path] = response["content"]["sha"]
+        else:
+            mft.files[f.path] = response["content"]["sha"]
+            mft.review_files.pop(f.path, None)
+        result.lines.append(f"pushed   {f.path}{dest}")
+    commit = "" if in_review else (response or {}).get("commit", {}).get("sha", "")
+    return _PushOutcome(counted=True, commit=commit, touched_review=in_review)
+
+
+def _push_delete(client, mft, f, target, base, in_review, dest, message, result) -> dict | None:
+    """Delete one candidate on its target branch, mirroring the deletion into the
+    manifest (or the review-file map for a proposal). Returns the API response, if any."""
+    if not in_review:
+        response = client.delete_file(
+            f.path, message or f"Delete {f.path} via mooring", target, base
+        )
+        mft.files.pop(f.path, None)
+        result.lines.append(f"deleted  {f.path}")
+        return response
+    if base is not None:
+        response = client.delete_file(
+            f.path, message or f"Propose deleting {f.path} via mooring", target, base
+        )
+        mft.review_files[f.path] = None
+        result.lines.append(f"deleted  {f.path}{dest}")
+        return response
+    mft.review_files[f.path] = None
+    result.lines.append(f"deleted  {f.path} (already absent on review branch)")
+    return None
+
+
+def _push_conflict(f, base, in_review, result) -> _PushOutcome:
+    """Record a per-file optimistic-concurrency rejection; never silent. ``base is None``
+    means we tried to *create* a file that already exists on the target — our cached
+    remote view is stale, so flag a forced refetch on the next pull."""
+    result.blocked_conflicts.append(f.path)
+    stale_remote = base is None
+    if base is None:
+        reason = "already on the remote — pull first"
+    elif in_review:
+        reason = "review branch changed — refresh and retry"
+    else:
+        reason = "remote changed — pull first"
+    result.lines.append(f"conflict {f.path} ({reason})")
+    return _PushOutcome(stale_remote=stale_remote)
+
+
+def _finalize_push(workspace, mft, cfg, result, last_commit, touched_review, stale_remote) -> None:
+    """Persist the manifest after a push: clear an emptied review branch, surface the PR
+    compare URL, advance the sync base, and force a refetch when the remote went stale."""
     if not mft.review_files:
         mft.review_branch = ""
     if touched_review and mft.review_branch:
@@ -763,7 +797,6 @@ def push(
         mft.head_commit = ""
     mft.branch = cfg.branch
     manifest_mod.save(workspace, mft)
-    return result
 
 
 def propose(

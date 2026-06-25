@@ -345,24 +345,50 @@ def apply_cell_patch(source: str, ops) -> str:
     if rewrites:
         if len(ops) != 1:
             raise ValueError("a whole-notebook rewrite cannot be combined with other edits")
-        cls = _cell_class(ir)
-        codes = [normalize_cell_code(str(c)) for c in rewrites[0].cells]
-        codes = [c for c in codes if c.strip()]
-        if not codes:
-            raise ValueError("a rewrite must contain at least one cell")
-        for code in codes:
-            _check_parses(code)
-        # Preserve a cell's NAME + config when its code is byte-identical to an existing
-        # cell, so a rewrite that leaves a cell unchanged doesn't silently rename a
-        # `def load_customers()` cell to `_`. New/changed cells get the default name.
-        by_code = {}
-        for cell in original:
-            by_code.setdefault(cell.code, cell)
-        ir.cells[:] = [
-            _with_code(by_code[c], c) if c in by_code else _new_cell(cls, c) for c in codes
-        ]
-        return _finish(codegen, MarimoConvert, ir)
+        return _apply_replace_all(codegen, MarimoConvert, ir, original, rewrites[0])
 
+    edits, deletes, appends = _collect_ops(ops, original)
+
+    new_cells = [
+        _with_code(cell, edits[i]) if i in edits else cell
+        for i, cell in enumerate(original)
+        if i not in deletes
+    ]
+    cls = _cell_class(ir)
+    new_cells.extend(_new_cell(cls, code) for code in appends)
+    if not new_cells:
+        raise ValueError("the patch would empty the notebook")
+    ir.cells[:] = new_cells
+    return _finish(codegen, MarimoConvert, ir)
+
+
+def _apply_replace_all(codegen, MarimoConvert, ir, original, rewrite) -> str:
+    """Whole-notebook rewrite: replace every cell with ``rewrite.cells``. Preserves a
+    cell's NAME + config when its new code is byte-identical to an existing cell."""
+    cls = _cell_class(ir)
+    codes = [normalize_cell_code(str(c)) for c in rewrite.cells]
+    codes = [c for c in codes if c.strip()]
+    if not codes:
+        raise ValueError("a rewrite must contain at least one cell")
+    for code in codes:
+        _check_parses(code)
+    # Preserve a cell's NAME + config when its code is byte-identical to an existing
+    # cell, so a rewrite that leaves a cell unchanged doesn't silently rename a
+    # `def load_customers()` cell to `_`. New/changed cells get the default name.
+    by_code = {}
+    for cell in original:
+        by_code.setdefault(cell.code, cell)
+    ir.cells[:] = [_with_code(by_code[c], c) if c in by_code else _new_cell(cls, c) for c in codes]
+    return _finish(codegen, MarimoConvert, ir)
+
+
+def _collect_ops(ops, original) -> tuple[dict[int, str], set[int], list[str]]:
+    """Validate and bucket append/edit/delete ops into (edits, deletes, appends).
+
+    Enforces in-range indices, a carried anchor that still matches, and at most one
+    operation per cell. Raises :class:`CellPatchConflict` (stale/out-of-range) or
+    ``ValueError`` (bad or duplicate op).
+    """
     edits: dict[int, str] = {}
     deletes: set[int] = set()
     appends: list[str] = []
@@ -400,18 +426,7 @@ def apply_cell_patch(source: str, ops) -> str:
             edits[idx] = code
         else:
             deletes.add(idx)
-
-    new_cells = [
-        _with_code(cell, edits[i]) if i in edits else cell
-        for i, cell in enumerate(original)
-        if i not in deletes
-    ]
-    cls = _cell_class(ir)
-    new_cells.extend(_new_cell(cls, code) for code in appends)
-    if not new_cells:
-        raise ValueError("the patch would empty the notebook")
-    ir.cells[:] = new_cells
-    return _finish(codegen, MarimoConvert, ir)
+    return edits, deletes, appends
 
 
 def _finish(codegen, MarimoConvert, ir) -> str:
