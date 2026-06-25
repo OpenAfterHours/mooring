@@ -21,6 +21,7 @@ import re
 from urllib.parse import urlsplit
 
 DEFAULT_HOST = "github.com"
+_GHE_SUFFIX = ".ghe.com"
 
 # hostname labels, optionally followed by :port
 _HOST_RE = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*(:\d+)?$")
@@ -49,8 +50,8 @@ def normalize_host(value: str) -> str:
     host = text.split(":", 1)[0]
     if host == DEFAULT_HOST or host.endswith("." + DEFAULT_HOST):
         return DEFAULT_HOST
-    if host.endswith(".ghe.com"):
-        tenant = host[: -len(".ghe.com")].rsplit(".", 1)[-1]
+    if host.endswith(_GHE_SUFFIX):
+        tenant = host[: -len(_GHE_SUFFIX)].rsplit(".", 1)[-1]
         return f"{tenant}.ghe.com"
     return text
 
@@ -62,6 +63,6 @@ def web_root(host: str) -> str:
 def api_root(host: str) -> str:
     if host == DEFAULT_HOST:
         return "https://api.github.com"
-    if host.endswith(".ghe.com"):
+    if host.endswith(_GHE_SUFFIX):
         return f"https://api.{host}"
     return f"{web_root(host)}/api/v3"

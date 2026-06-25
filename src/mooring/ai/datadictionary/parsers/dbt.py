@@ -73,7 +73,7 @@ def _dbt_column(node: dict, dropped: set[str]) -> Column:
 def _dbt_ref(to, field) -> str:
     """Render a dbt FK target as 'table.field' — names only, never a literal."""
     target = _scalar_str(to).strip()
-    if target.startswith("ref(") or target.startswith("source("):
+    if target.startswith(("ref(", "source(")):
         # ref('dim_x') / source('s','t') -> last quoted token
         inner = target[target.find("(") + 1 : target.rfind(")")]
         parts = [p.strip().strip("'\"") for p in inner.split(",") if p.strip()]

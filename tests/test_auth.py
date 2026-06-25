@@ -64,7 +64,7 @@ class _Resp:
 
 
 def test_device_flow_hint_default_host_suggests_enterprise():
-    exc = Exception("boom")
+    exc = RuntimeError("boom")
     exc.response = _Resp(404)
     msg = auth.device_flow_hint("github.com", exc)
     assert "github.com" in msg
@@ -74,7 +74,7 @@ def test_device_flow_hint_default_host_suggests_enterprise():
 
 
 def test_device_flow_hint_enterprise_host_no_suggestion():
-    exc = Exception("boom")
+    exc = RuntimeError("boom")
     exc.response = _Resp(404)
     msg = auth.device_flow_hint("ghe.example", exc)
     assert "ghe.example" in msg
@@ -83,7 +83,7 @@ def test_device_flow_hint_enterprise_host_no_suggestion():
 
 
 def test_device_flow_hint_without_status_uses_message():
-    msg = auth.device_flow_hint("ghe.example", Exception("connection refused"))
+    msg = auth.device_flow_hint("ghe.example", RuntimeError("connection refused"))
     assert "connection refused" in msg
 
 

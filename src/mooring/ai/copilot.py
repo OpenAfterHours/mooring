@@ -39,6 +39,7 @@ _PROBE_TIMEOUT = 30.0  # seconds to check sign-in status
 _STATUS_TTL = 45.0  # cache the (CLI-spawning) auth probe this long
 _MODELS_TTL = 300.0  # cache the model list this long (it changes rarely)
 _MAX_LOGIN_LINES = 50
+_COPILOT_UNAVAILABLE = "The Copilot CLI is not available in this build."
 
 
 class CopilotProvider:
@@ -88,7 +89,7 @@ class CopilotProvider:
                 self.name,
                 available=False,
                 connected=False,
-                detail="The Copilot CLI is not available in this build.",
+                detail=_COPILOT_UNAVAILABLE,
             )
         with self._cache_lock:
             fresh = (
@@ -114,7 +115,7 @@ class CopilotProvider:
                 self.name,
                 available=False,
                 connected=False,
-                detail="The Copilot CLI is not available in this build.",
+                detail=_COPILOT_UNAVAILABLE,
             )
         with self._cache_lock:
             if (
@@ -170,7 +171,7 @@ class CopilotProvider:
         mirroring :meth:`login_interactive`.
         """
         if not self.available():
-            raise AIError("The Copilot CLI is not available in this build.")
+            raise AIError(_COPILOT_UNAVAILABLE)
         cli = self._cli_path()
         with self._login_lock:
             if self._login_proc is not None and self._login_proc.poll() is None:
@@ -224,7 +225,7 @@ class CopilotProvider:
     def login_interactive(self, host: str | None = None) -> int:
         """Run ``copilot login`` attached to the terminal (the CLI command path)."""
         if not self.available():
-            raise AIError("The Copilot CLI is not available in this build.")
+            raise AIError(_COPILOT_UNAVAILABLE)
         cmd = [self._cli_path(), "login"]
         if host:
             cmd += ["--host", host]

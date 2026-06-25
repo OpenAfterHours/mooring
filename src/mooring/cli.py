@@ -23,6 +23,9 @@ from mooring.runtime import (  # noqa: F401
 )
 
 
+_REPO_ARG_HELP = "act on this repo instead of the active one"
+
+
 def _truststore_disabled(env: Mapping[str, str]) -> bool:
     return env.get("MOORING_TRUSTSTORE", "1").strip().lower() in ("0", "false", "no", "off")
 
@@ -186,7 +189,7 @@ def _build_parser() -> argparse.ArgumentParser:
         status, pull, push, propose, open_cmd, new, delete_cmd, rollback_cmd, init_cmd, deps, build_reqs
     ):
         cmd.add_argument(
-            "--repo", default=None, metavar="ALIAS", help="act on this repo instead of the active one"
+            "--repo", default=None, metavar="ALIAS", help=_REPO_ARG_HELP
         )
 
     ai = sub.add_parser("ai", help="AI copilot: sign in to Copilot and check status")
@@ -204,7 +207,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "check", help="parse context/ dictionaries and report tables, columns, and dropped keys"
     )
     ai_dict_check.add_argument(
-        "--repo", default=None, metavar="ALIAS", help="act on this repo instead of the active one"
+        "--repo", default=None, metavar="ALIAS", help=_REPO_ARG_HELP
     )
     ai_pii = ai_sub.add_parser(
         "pii", help="scan context/ and notebook source for structured-PII risks (offline)"
@@ -214,7 +217,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "check", help="scan instructions, dictionaries, and notebooks for PII shapes"
     )
     ai_pii_check.add_argument(
-        "--repo", default=None, metavar="ALIAS", help="act on this repo instead of the active one"
+        "--repo", default=None, metavar="ALIAS", help=_REPO_ARG_HELP
     )
     ai_pii_check.add_argument(
         "--notebook", default=None, metavar="REL", help="also scan a single notebook (workspace-relative)"
@@ -223,7 +226,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "model", help="download/verify the local NER name-detection model (needs the pii extra)"
     )
     ai_pii_model.add_argument(
-        "--repo", default=None, metavar="ALIAS", help="act on this repo instead of the active one"
+        "--repo", default=None, metavar="ALIAS", help=_REPO_ARG_HELP
     )
     ai_pii_sub.add_parser(
         "doctor",

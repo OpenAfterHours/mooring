@@ -50,6 +50,7 @@ def _static_dir() -> Path:
 
 # Sentinel returned by Hub._restore_undo when a token-scoped undo can't run because a
 # newer snapshot is now on top of the (shared) per-notebook undo stack.
+_UNKNOWN_CHAT_SESSION = "Unknown chat session."
 _UNDO_SUPERSEDED = object()
 
 
@@ -1103,7 +1104,7 @@ class Hub:
         sid = request.path_params["sid"]
         session = self._chats.get(sid)
         if session is None:
-            return JSONResponse({"error": "Unknown chat session."}, status_code=404)
+            return JSONResponse({"error": _UNKNOWN_CHAT_SESSION}, status_code=404)
         return StreamingResponse(
             self._sse_gen(session),
             media_type="text/event-stream",
@@ -1150,7 +1151,7 @@ class Hub:
         sid = str(data.get("sid", ""))
         session = self._chats.get(sid)
         if session is None:
-            return JSONResponse({"error": "Unknown chat session."}, status_code=404)
+            return JSONResponse({"error": _UNKNOWN_CHAT_SESSION}, status_code=404)
         # Refresh the live-kernel schema so dataframes added since chat-open (or the
         # last turn) are visible without reopening. Value-free + best-effort; the
         # session re-injects it only when it changed. Off-thread — it does kernel I/O.
@@ -1188,7 +1189,7 @@ class Hub:
         with self._chat_lock:
             target = self._chat_targets.get(sid)
         if target is None:
-            return JSONResponse({"error": "Unknown chat session."}, status_code=404)
+            return JSONResponse({"error": _UNKNOWN_CHAT_SESSION}, status_code=404)
         # Apply WRITES the notebook, so it is the highest-value gate. This early
         # refusal covers the common case; _apply_with_undo re-checks under
         # _apply_lock right before the write to close the toggle/write race.
@@ -1263,7 +1264,7 @@ class Hub:
         with self._chat_lock:
             target = self._chat_targets.get(sid)
         if target is None:
-            return JSONResponse({"error": "Unknown chat session."}, status_code=404)
+            return JSONResponse({"error": _UNKNOWN_CHAT_SESSION}, status_code=404)
         # Rollback WRITES the notebook (restores a snapshot), so it is gated by the
         # per-notebook opt-out exactly like apply — otherwise a disabled notebook
         # could still be rewritten through the undo path.

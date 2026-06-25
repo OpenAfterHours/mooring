@@ -39,6 +39,8 @@ EDIT_TOOL_NAMES = [
 # Cell-source format reminder for every propose tool. The displayed file source shows
 # marimo's wrapper (`@app.cell` / `def _()` / a trailing `return (...)`); a cell's
 # source is the BODY ONLY — mooring regenerates the wrapper and the return.
+_RATIONALE_DESC = "a one-line reason (optional)"
+
 _CELL_FORMAT = (
     " Each cell is the BODY ONLY (top-level statements) — do NOT include '@app.cell', "
     "'def _():', or a trailing 'return (...)'; those are added automatically."
@@ -368,7 +370,7 @@ def build_tools(
                 "type": "object",
                 "properties": {
                     "code": {"type": "string", "description": "the cell BODY (no @app.cell/def/return)"},
-                    "rationale": {"type": "string", "description": "a one-line reason (optional)"},
+                    "rationale": {"type": "string", "description": _RATIONALE_DESC},
                 },
                 "required": ["code"],
             },
@@ -389,7 +391,7 @@ def build_tools(
                     "properties": {
                         "index": {"type": "integer", "description": "the cell number to edit (0-based)"},
                         "code": {"type": "string", "description": "the new cell BODY (no @app.cell/def/return)"},
-                        "rationale": {"type": "string", "description": "a one-line reason (optional)"},
+                        "rationale": {"type": "string", "description": _RATIONALE_DESC},
                     },
                     "required": ["index", "code"],
                 },
@@ -427,7 +429,7 @@ def build_tools(
                             "description": "indices of cells to remove",
                             "items": {"type": "integer"},
                         },
-                        "rationale": {"type": "string", "description": "a one-line reason (optional)"},
+                        "rationale": {"type": "string", "description": _RATIONALE_DESC},
                     },
                 },
                 skip_permission=True,  # surfaces a proposal only; the analyst applies it
@@ -447,7 +449,7 @@ def build_tools(
                             "description": "the full ordered list of cell BODIES (each: no @app.cell/def/return)",
                             "items": {"type": "string"},
                         },
-                        "rationale": {"type": "string", "description": "a one-line reason (optional)"},
+                        "rationale": {"type": "string", "description": _RATIONALE_DESC},
                     },
                     "required": ["cells"],
                 },

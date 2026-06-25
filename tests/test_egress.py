@@ -86,7 +86,7 @@ def test_guard_prompt_routes_through_egress():
 
 # -- build_system_context: scrubs every value-bearing fragment ------------------
 
-_BASE = dict(schema_text="DATASET", notebook_source="import marimo", notebook_rel="nb.py")
+_BASE = {"schema_text": "DATASET", "notebook_source": "import marimo", "notebook_rel": "nb.py"}
 
 
 def test_build_system_context_scrubs_every_fragment():
