@@ -28,7 +28,7 @@ def _index():
 
 
 def test_working_set_picks_by_dataset_and_notebook_and_expands_fk():
-    tables, reasons, n_more = locality.working_set(
+    tables, reasons, _ = locality.working_set(
         _index(),
         dataset_columns={"loan_id", "region_id", "exposure_amt"},
         dataset_stem="fact_loans",

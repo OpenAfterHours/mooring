@@ -166,7 +166,7 @@ def test_state_local_mode_flags_ai_disabled(unconfigured_client):
 def test_local_mode_new_lists_and_opens_without_login(unconfigured_client, monkeypatch):
     # The headline: create a notebook, see it listed as "local", and open it — all
     # with no repo and no GitHub token. The editor is faked so no marimo spawns.
-    client, hub = unconfigured_client
+    client, _hub = unconfigured_client
 
     class FakeEditor:
         def __init__(self, workspace, theme="system"):
