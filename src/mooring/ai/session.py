@@ -147,7 +147,7 @@ class CopilotChatSession(ChatBroadcaster):
             # timeout, so the deadline must live HERE. A timeout raises and is turned
             # into a "fail" event below, which re-enables the UI just like an error.
             loop.run_until_complete(asyncio.wait_for(self._aopen(), _START_TIMEOUT))
-        except BaseException as exc:  # noqa: BLE001 - surfaced via start()/the stream
+        except BaseException as exc:  # noqa: BLE001  # surfaced via start()/the stream
             from mooring.ai.copilot import friendly_error
 
             # A machine-readable reason lets the chat UI branch on "not signed in"
@@ -312,7 +312,7 @@ class CopilotChatSession(ChatBroadcaster):
         future = asyncio.run_coroutine_threadsafe(self._session.send(text), self._loop)
         try:
             future.result(timeout=_SEND_TIMEOUT)
-        except Exception as exc:  # noqa: BLE001 - surface to the chat, don't crash the hub
+        except Exception as exc:  # noqa: BLE001  # surface to the chat, don't crash the hub
             from mooring.ai.copilot import friendly_error
 
             self._broadcast(ChatEvent("fail", {"text": friendly_error(str(exc))}))
@@ -327,7 +327,7 @@ class CopilotChatSession(ChatBroadcaster):
         # futures after shutdown".
         try:
             asyncio.run_coroutine_threadsafe(self._aclose(), loop).result(timeout=10)
-        except Exception:  # noqa: BLE001 - best-effort teardown
+        except Exception:  # noqa: BLE001  # best-effort teardown
             pass
         loop.call_soon_threadsafe(loop.stop)
 

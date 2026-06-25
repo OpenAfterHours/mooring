@@ -152,7 +152,7 @@ def _parse_ir(MarimoConvert, source: str):
         return MarimoConvert.from_py(source).to_ir()
     except (MarimoTooOld, MarimoTransportError):
         raise
-    except Exception as exc:  # noqa: BLE001 - marimo parse failures surface as ValueError
+    except Exception as exc:  # noqa: BLE001  # marimo parse failures surface as ValueError
         raise ValueError(f"could not parse the notebook source: {exc}") from exc
 
 
@@ -419,7 +419,7 @@ def _finish(codegen, MarimoConvert, ir) -> str:
     result = codegen.generate_filecontents_from_ir(ir)
     try:
         MarimoConvert.from_py(result).to_ir()
-    except Exception as exc:  # noqa: BLE001 - any parse failure means a bad write
+    except Exception as exc:  # noqa: BLE001  # any parse failure means a bad write
         raise ValueError(f"the edited notebook would not parse: {exc}") from exc
     return result
 
@@ -485,7 +485,7 @@ class KernelControl:
         url = self.base + path
         if params:
             url += "?" + urllib.parse.urlencode(params)
-        req = urllib.request.Request(url)  # noqa: S310 - localhost only
+        req = urllib.request.Request(url)  # noqa: S310  # localhost only
         try:
             with self._opener.open(req, timeout=self.timeout) as resp:  # noqa: S310
                 return resp.read().decode("utf-8", "replace")

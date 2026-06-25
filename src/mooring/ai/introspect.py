@@ -115,7 +115,7 @@ def _mooring_probe(_path):
 # The collection logic, exec'd here so the SAME source the kernel runs is also
 # importable + unit-testable (no drift between the tested and injected code).
 _collect_ns: dict = {}
-exec(_COLLECT_SRC, _collect_ns)  # noqa: S102 - our own constant, no external input
+exec(_COLLECT_SRC, _collect_ns)  # noqa: S102  # our own constant, no external input
 collect_schemas = _collect_ns["_mooring_collect_schemas"]
 
 

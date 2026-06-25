@@ -319,7 +319,7 @@ class ChatBroadcaster:
                 ner.load_model(mid)
                 self._ner_ready = True
                 self._set_ner({"state": "ready"})
-            except Exception:  # noqa: BLE001 - report, never crash the session
+            except Exception:  # noqa: BLE001  # report, never crash the session
                 self._set_ner({"state": "error"})
 
         threading.Thread(target=run, name="ner-prepare", daemon=True).start()
@@ -335,7 +335,7 @@ class ChatBroadcaster:
 
                 ner.load_model(self._pii_name_model)
             self._ner_ready = True
-        except Exception:  # noqa: BLE001 - best-effort warm-up
+        except Exception:  # noqa: BLE001  # best-effort warm-up
             pass
 
     def _on_ner_progress(self, done: int, total: int) -> None:

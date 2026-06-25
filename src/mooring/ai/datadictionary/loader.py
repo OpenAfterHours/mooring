@@ -100,7 +100,7 @@ def _parse_file(path: Path, rel: str, domain: str, max_file_bytes: int, workspac
     # valid-but-oddly-typed YAML degrades to an error report, never a crash.
     try:
         tables = parser(data, domain, dropped, mapping)
-    except Exception as exc:  # noqa: BLE001 - report and skip the file, don't crash the chat
+    except Exception as exc:  # noqa: BLE001  # report and skip the file, don't crash the chat
         return [], ParseReport(rel, domain, "error", error=f"could not parse: {exc}")
     report = ParseReport(
         path=rel,

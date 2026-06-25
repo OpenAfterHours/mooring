@@ -321,7 +321,7 @@ class BatchPlanner:
                 future.result()
         except CancelledError:
             self._record(index, job, notebook_rel, "not_run", error="Batch cancelled.")
-        except Exception as exc:  # noqa: BLE001 - defensive; _run_job is meant to catch
+        except Exception as exc:  # noqa: BLE001  # defensive; _run_job is meant to catch
             self._record(index, job, notebook_rel, "failed", error=f"The build failed: {exc}")
         with self._cond:
             self._pending -= 1
@@ -346,7 +346,7 @@ class BatchPlanner:
             return self._make_result(job, notebook_rel, "not_run", error="Batch cancelled.")
         try:
             system_context, dictionary = self._build_context(notebook_rel, job.dataset_rel)
-        except Exception as exc:  # noqa: BLE001 - one job's failure must not abort the batch
+        except Exception as exc:  # noqa: BLE001  # one job's failure must not abort the batch
             return self._make_result(
                 job, notebook_rel, "failed", error=f"Could not read the notebook context: {exc}"
             )
@@ -428,7 +428,7 @@ class BatchPlanner:
             prev = self._refining_prev.pop(index, None)
         try:
             result = None if future.cancelled() else future.result()
-        except Exception:  # noqa: BLE001 - defensive; _build is meant to catch
+        except Exception:  # noqa: BLE001  # defensive; _build is meant to catch
             result = None
         if result is not None and result.status == "built":
             self._commit(index, result)  # adopt the revised proposal
@@ -515,7 +515,7 @@ class BatchPlanner:
                     follow_ups -= 1
                     try:
                         session.send(_FOLLOW_UP_PROMPT, "")
-                    except Exception:  # noqa: BLE001 - finish with whatever we have
+                    except Exception:  # noqa: BLE001  # finish with whatever we have
                         return self._make_result(
                             job, notebook_rel, "built" if proposals else "empty", proposals=proposals
                         )

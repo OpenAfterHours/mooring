@@ -220,7 +220,7 @@ class EditorServer:
                     f"marimo exited during startup (code {self._proc.returncode})."
                 )
             try:
-                urllib.request.urlopen(url, timeout=1)  # noqa: S310 - localhost only
+                urllib.request.urlopen(url, timeout=1)  # noqa: S310  # localhost only
                 return
             except urllib.error.HTTPError:
                 return  # any HTTP response (401 included) means the server is up

@@ -164,7 +164,7 @@ def available(backend: str = "gliner") -> bool:
         return ner_spacy.available()
     try:
         import gliner  # noqa: F401
-    except Exception:  # noqa: BLE001 - any import failure means "not available"
+    except Exception:  # noqa: BLE001  # any import failure means "not available"
         return False
     return True
 
@@ -198,7 +198,7 @@ def load_model(model: "ModelRef | str | None" = None):
             kwargs["variant"] = ref.variant
         try:
             obj = GLiNER.from_pretrained(ref.id, **kwargs)
-        except Exception as exc:  # noqa: BLE001 - network / disk / bad model id
+        except Exception as exc:  # noqa: BLE001  # network / disk / bad model id
             raise NerUnavailable(f"could not load NER model {ref.id!r}: {exc}") from exc
         _models[key] = obj
         return obj
@@ -234,7 +234,7 @@ def is_cached(model: "ModelRef | str | None" = None) -> bool:
             kwargs["allow_patterns"] = allow
         snapshot_download(ref.id, **kwargs)
         return True
-    except Exception:  # noqa: BLE001 - not cached, or hub not installed
+    except Exception:  # noqa: BLE001  # not cached, or hub not installed
         return False
 
 
@@ -269,7 +269,7 @@ def download_model(model: "ModelRef | str | None" = None, on_progress=None) -> N
             except TypeError:  # older hub without tqdm_class — fall back, no % then
                 pass
         snapshot_download(ref.id, **kwargs)
-    except Exception as exc:  # noqa: BLE001 - network / disk / bad model id
+    except Exception as exc:  # noqa: BLE001  # network / disk / bad model id
         raise NerUnavailable(f"could not download NER model {ref.id!r}: {exc}") from exc
 
 
@@ -302,7 +302,7 @@ def _progress_tqdm(on_progress):
                 total = sum(v[1] for v in bars.values())
             try:
                 on_progress(done, total)
-            except Exception:  # noqa: BLE001 - never let reporting break the download
+            except Exception:  # noqa: BLE001  # never let reporting break the download
                 pass
 
     return _ProgressTqdm
@@ -372,7 +372,7 @@ def scan_names(
             continue
         try:
             ents = predict(chunk)
-        except Exception:  # noqa: BLE001 - a bad chunk must not abort the scan
+        except Exception:  # noqa: BLE001  # a bad chunk must not abort the scan
             continue
         for kind, start in ents:
             if not isinstance(start, int):

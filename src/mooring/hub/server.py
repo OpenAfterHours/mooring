@@ -180,9 +180,9 @@ class Hub:
 
         def _warm() -> None:
             with contextlib.suppress(Exception):
-                import marimo  # noqa: F401 - prime the import cache for the live probe
+                import marimo  # noqa: F401  # prime the import cache for the live probe
             with contextlib.suppress(Exception):
-                import copilot  # noqa: F401 - prime the Copilot SDK import
+                import copilot  # noqa: F401  # prime the Copilot SDK import
             with contextlib.suppress(Exception):
                 # Prime the provider's auth/model caches so the first open is warm too —
                 # status() first so the hub's Copilot sign-in row can show "connected as
@@ -352,7 +352,7 @@ class Hub:
 
     # -- endpoints -------------------------------------------------------------
 
-    def api_state(self, request: Request) -> JSONResponse:
+    def api_state(self, _request: Request) -> JSONResponse:
         cfg = self.cfg
         body: dict = {
             "version": __version__,
@@ -500,10 +500,10 @@ class Hub:
         telemetry.log_event("ui_theme", theme=theme)
         return JSONResponse({"ok": True, "theme": theme})
 
-    def api_login_start(self, request: Request) -> JSONResponse:
+    def api_login_start(self, _request: Request) -> JSONResponse:
         try:
             device = auth.start_device_flow(self.cfg.client_id, host=self.cfg.host)
-        except Exception as exc:  # noqa: BLE001 - shown in the UI
+        except Exception as exc:  # noqa: BLE001  # shown in the UI
             return JSONResponse(
                 {"error": auth.device_flow_hint(self.cfg.host, exc)}, status_code=502
             )
@@ -515,7 +515,7 @@ class Hub:
             {"user_code": device.user_code, "verification_uri": device.verification_uri}
         )
 
-    def api_login_poll(self, request: Request) -> JSONResponse:
+    def api_login_poll(self, _request: Request) -> JSONResponse:
         with self._lock:
             device = self._device
             if device is None:
@@ -542,7 +542,7 @@ class Hub:
             self._next_poll = time.monotonic() + result.interval
         return JSONResponse({"status": "pending"})
 
-    def api_logout(self, request: Request) -> JSONResponse:
+    def api_logout(self, _request: Request) -> JSONResponse:
         auth.delete_token(host=self.cfg.host)
         self._user_login = ""
         telemetry.log_event("logout")
@@ -732,7 +732,7 @@ class Hub:
             )
         try:
             editor = self.ensure_editor()
-        except Exception as exc:  # noqa: BLE001 - shown in the UI
+        except Exception as exc:  # noqa: BLE001  # shown in the UI
             return JSONResponse({"error": f"Could not start the editor: {exc}"}, status_code=502)
         telemetry.log_event("open", kind="notebook", uv=editor.use_uv())
         payload = {"path": rel_path, "url": editor.url_for(rel_path)}
@@ -909,7 +909,7 @@ class Hub:
                     scrubbed.append(fr)
                 frames = scrubbed
             return introspect.format_live_schemas(frames), banner
-        except Exception:  # noqa: BLE001 - never block chat on introspection
+        except Exception:  # noqa: BLE001  # never block chat on introspection
             return "", []
 
     def _live_schema_for_sid(self, sid: str) -> tuple[str, list[dict]]:
@@ -995,10 +995,10 @@ class Hub:
         html = (_static_dir() / filename).read_text("utf-8")
         return HTMLResponse(html.replace("__MOORING_DEFAULT_THEME__", self.app_cfg.ui_theme))
 
-    def index_page(self, request: Request) -> HTMLResponse:
+    def index_page(self, _request: Request) -> HTMLResponse:
         return self._themed_page("index.html")
 
-    def chat_page(self, request: Request) -> HTMLResponse | JSONResponse:
+    def chat_page(self, _request: Request) -> HTMLResponse | JSONResponse:
         if not self.app_cfg.ai_enabled:
             return JSONResponse({"error": "The AI copilot is disabled."}, status_code=404)
         return self._themed_page("chat.html")
@@ -1042,7 +1042,7 @@ class Hub:
                 reasoning_effort=reasoning_effort,
                 dictionary=index,
             )
-        except Exception as exc:  # noqa: BLE001 - AIError surfaces to the UI in Phase 1
+        except Exception as exc:  # noqa: BLE001  # AIError surfaces to the UI in Phase 1
             return JSONResponse({"error": str(exc)}, status_code=502)
         # The live-kernel schema is deferred off the open path (see _build_chat_context),
         # so live_text is ""; the first turn picks it up. This seeds the (empty) snapshot.
@@ -1168,7 +1168,7 @@ class Hub:
         if confirm:
             try:
                 await asyncio.to_thread(session.send_confirmed, confirm, live_text)
-            except Exception as exc:  # noqa: BLE001 - AIError surfaces to the UI
+            except Exception as exc:  # noqa: BLE001  # AIError surfaces to the UI
                 return JSONResponse({"error": str(exc)}, status_code=502)
             telemetry.log_event("ai_chat_send", confirmed=1)
             return JSONResponse({"ok": True, "pii": live_banner})
@@ -1177,7 +1177,7 @@ class Hub:
             return JSONResponse({"error": "Type a message."}, status_code=400)
         try:
             await asyncio.to_thread(session.send, text, live_text)
-        except Exception as exc:  # noqa: BLE001 - AIError surfaces to the UI in Phase 1
+        except Exception as exc:  # noqa: BLE001  # AIError surfaces to the UI in Phase 1
             return JSONResponse({"error": str(exc)}, status_code=502)
         telemetry.log_event("ai_chat_send")
         return JSONResponse({"ok": True, "pii": live_banner})
@@ -1311,7 +1311,7 @@ class Hub:
             notebook_undo.discard(workspace, notebook_rel, token)
             return notebook_undo.depth(workspace, notebook_rel)
 
-    def api_chat_datasets(self, request: Request) -> JSONResponse:
+    def api_chat_datasets(self, _request: Request) -> JSONResponse:
         """The value-free dataset PATHS for the chat's @-mention autocomplete, plus
         the current theme. A LIGHT alternative to /api/state, which (when logged in)
         makes GitHub sync round-trips this window doesn't need. Sync def -> Starlette
@@ -1324,7 +1324,7 @@ class Hub:
         datasets = schema.list_datasets(cfg.workspace(), cfg.folders)
         return JSONResponse({"datasets": datasets, "ui_theme": self.app_cfg.ui_theme})
 
-    async def api_chat_models(self, request: Request) -> JSONResponse:
+    async def api_chat_models(self, _request: Request) -> JSONResponse:
         """The models the user can pick, plus the configured defaults (value-free)."""
         if not self.app_cfg.ai_enabled:
             return JSONResponse({"enabled": False}, status_code=404)
@@ -1400,12 +1400,12 @@ class Hub:
             )
         try:
             st = await run_in_threadpool(provider.connect, host)
-        except Exception as exc:  # noqa: BLE001 - AIError/OSError surface to the UI
+        except Exception as exc:  # noqa: BLE001  # AIError/OSError surface to the UI
             return JSONResponse({"error": str(exc)}, status_code=502)
         telemetry.log_event("ai_login_start")
         return JSONResponse({"ok": True, "detail": st.detail})
 
-    def api_ai_login_poll(self, request: Request) -> JSONResponse:
+    def api_ai_login_poll(self, _request: Request) -> JSONResponse:
         """Poll the in-progress Copilot sign-in. ``pending`` while the CLI is still
         running (browser open), then a real status probe confirms the outcome.
 
@@ -1601,7 +1601,7 @@ class Hub:
             )
         return jobs, None
 
-    async def api_batch_state(self, request: Request) -> JSONResponse:
+    async def api_batch_state(self, _request: Request) -> JSONResponse:
         """What the batch page needs to render: whether batch is enabled, its caps,
         the value-free dataset paths for per-job dataset selection, and the theme."""
         if not self.app_cfg.ai_enabled:
@@ -1868,7 +1868,7 @@ class Hub:
         telemetry.log_event("ai_batch_apply")
         return JSONResponse({"ok": True, "can_undo": undo_depth > 0, "undo_depth": undo_depth})
 
-    def batch_page(self, request: Request) -> HTMLResponse | JSONResponse:
+    def batch_page(self, _request: Request) -> HTMLResponse | JSONResponse:
         if not self.app_cfg.ai_enabled:
             return JSONResponse({"error": "The AI copilot is disabled."}, status_code=404)
         return self._themed_page("batch.html")

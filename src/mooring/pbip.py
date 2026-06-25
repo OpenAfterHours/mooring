@@ -84,6 +84,6 @@ def launch(path: Path) -> None:
             "Opening .pbip files needs Windows with Power BI Desktop installed."
         )
     try:
-        os.startfile(path)  # noqa: S606 - user-initiated from the localhost hub
+        os.startfile(path)  # noqa: S606  # user-initiated from the localhost hub
     except OSError as exc:
         raise PbipLaunchError(f"Could not open {path.name}: {exc}") from exc

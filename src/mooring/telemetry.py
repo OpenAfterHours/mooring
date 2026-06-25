@@ -134,7 +134,7 @@ def configure(destination: str, *, identity: dict, level: str = "info", session=
             if not _atexit_registered:
                 atexit.register(flush)
                 _atexit_registered = True
-    except Exception:  # noqa: BLE001 - telemetry must never break the app
+    except Exception:  # noqa: BLE001  # telemetry must never break the app
         _enabled = False
         _sink = None
 
@@ -180,7 +180,7 @@ def flush(timeout: float = 3.0) -> None:
         deadline = time.monotonic() + timeout
         while _queue.unfinished_tasks > 0 and time.monotonic() < deadline:
             time.sleep(0.02)
-    except Exception:  # noqa: BLE001 - flushing is best-effort
+    except Exception:  # noqa: BLE001  # flushing is best-effort
         pass
 
 
@@ -197,7 +197,7 @@ def _emit(name: str, severity: int, fields: dict) -> None:
         event["user"] = _user_login
         event.update(fields)
         _queue.put_nowait(event)
-    except Exception:  # noqa: BLE001 - dropping an event must never raise
+    except Exception:  # noqa: BLE001  # dropping an event must never raise
         pass
 
 
@@ -208,7 +208,7 @@ def _run() -> None:
             sink = _sink
             if item is not None and sink is not None:
                 sink(item)
-        except Exception:  # noqa: BLE001 - drop the event, never die
+        except Exception:  # noqa: BLE001  # drop the event, never die
             pass
         finally:
             _queue.task_done()

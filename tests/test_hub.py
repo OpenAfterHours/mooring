@@ -173,7 +173,7 @@ def test_local_mode_new_lists_and_opens_without_login(unconfigured_client, monke
             self.workspace = workspace
 
         def ensure_started(self):
-            pass
+            pass  # no-op: in-memory editor double, nothing to launch
 
         def use_uv(self):
             return False
@@ -182,7 +182,7 @@ def test_local_mode_new_lists_and_opens_without_login(unconfigured_client, monke
             return f"http://editor/{rel_path}"
 
         def shutdown(self):
-            pass
+            pass  # no-op: in-memory editor double, nothing to tear down
 
     monkeypatch.setattr(server, "EditorServer", FakeEditor)
 
@@ -388,7 +388,7 @@ def test_switch_changes_editor_workspace(configured, monkeypatch):
             FakeEditor.instances.append(self)
 
         def ensure_started(self):
-            pass
+            pass  # no-op: in-memory editor double, nothing to launch
 
         def use_uv(self):
             return False
@@ -397,7 +397,7 @@ def test_switch_changes_editor_workspace(configured, monkeypatch):
             return f"http://editor/{rel_path}"
 
         def shutdown(self):
-            pass
+            pass  # no-op: in-memory editor double, nothing to tear down
 
     monkeypatch.setattr(server, "EditorServer", FakeEditor)
     write_ws(tmp_path, "ws1", "notebooks/a.py", "a")
@@ -1021,7 +1021,7 @@ def test_chat_stream_emits_sse_frames(unconfigured_client, monkeypatch):
             return qq
 
         def send(self, text):
-            pass
+            pass  # no-op: test double
 
     client, hub = unconfigured_client
     monkeypatch.setattr(Hub, "_make_chat_session", lambda self, *a, **k: QuickSession())
@@ -1289,7 +1289,7 @@ class _FakeAuthProvider:
     """A controllable stand-in for CopilotProvider's auth surface."""
 
     def __init__(self):
-        from mooring.ai.base import ProviderStatus  # noqa: F401 - referenced below
+        from mooring.ai.base import ProviderStatus  # noqa: F401  # referenced below
 
         self.connected = False
         self.running = False

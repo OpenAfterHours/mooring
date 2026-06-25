@@ -274,7 +274,7 @@ def scan_prose(
             findings = findings + ner.scan_names(
                 text, labels=labels, threshold=threshold, model=model, backend=backend
             )
-        except Exception:  # noqa: BLE001 - advisory path: never fail the caller
+        except Exception:  # noqa: BLE001  # advisory path: never fail the caller
             pass
     return findings
 
@@ -313,7 +313,7 @@ def guard_prompt(
     names_failed = False
     try:
         findings += scan(text)
-    except Exception:  # noqa: BLE001 - fail open on the live path, but report it
+    except Exception:  # noqa: BLE001  # fail open on the live path, but report it
         structured_failed = True
     if names:
         try:
@@ -322,12 +322,14 @@ def guard_prompt(
             findings += ner.scan_names(
                 text, labels=labels, threshold=threshold, model=model, backend=backend
             )
-        except Exception:  # noqa: BLE001 - extra missing / model load / inference error
+        except Exception:  # noqa: BLE001  # extra missing / model load / inference error
             names_failed = True
-    scan_error = (
-        "both" if structured_failed and names_failed
-        else "structured" if structured_failed
-        else "names" if names_failed
-        else ""
-    )
+    if structured_failed and names_failed:
+        scan_error = "both"
+    elif structured_failed:
+        scan_error = "structured"
+    elif names_failed:
+        scan_error = "names"
+    else:
+        scan_error = ""
     return (bool(findings) and block), findings, scan_error

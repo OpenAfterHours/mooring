@@ -37,7 +37,7 @@ def _inject_truststore(env: Mapping[str, str] | None = None) -> None:
         import truststore
 
         truststore.inject_into_ssl()
-    except Exception as exc:  # noqa: BLE001 - never let TLS setup brick the app
+    except Exception as exc:  # noqa: BLE001  # never let TLS setup brick the app
         print(f"Warning: could not enable the OS trust store for TLS: {exc}")
 
 
@@ -273,7 +273,7 @@ def cmd_selftest(app_cfg: config.AppConfig, cfg: config.Config) -> int:
             importlib.import_module(name)
             version = importlib.metadata.version(name)
             print(f"  ok  {name} {version}")
-        except Exception as exc:  # noqa: BLE001 - report and continue
+        except Exception as exc:  # noqa: BLE001  # report and continue
             failures.append(name)
             print(f"  FAIL {name}: {exc}")
     _print_paths(cfg)
@@ -1032,7 +1032,7 @@ def _coerce_config_value(values: list[str]):
     raw = values[0]
     try:
         return tomllib.loads(f"_v = {raw}")["_v"]
-    except Exception:  # noqa: BLE001 - not a TOML literal -> treat as a bare string
+    except Exception:  # noqa: BLE001  # not a TOML literal -> treat as a bare string
         return raw
 
 
@@ -1176,7 +1176,7 @@ def main(argv: list[str] | None = None) -> int:
         return _dispatch(parser, command, app_cfg, cfg, args)
     except SystemExit:
         raise  # user-facing errors (sys.exit / argparse) are not app failures
-    except BaseException as exc:  # noqa: BLE001 - record genuine failures, then re-raise
+    except BaseException as exc:  # noqa: BLE001  # record genuine failures, then re-raise
         telemetry.log_error(exc=exc, command=command)
         raise
 

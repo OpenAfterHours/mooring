@@ -119,7 +119,7 @@ def test_login_with_host_persists_and_uses_it(capsys, monkeypatch):
 
     class FakeClient:
         def __init__(self, *a, **k):
-            pass
+            pass  # no-op: stub double, accepts and ignores constructor args
 
         def get_user(self):
             return {"login": "octo"}

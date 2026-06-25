@@ -83,7 +83,7 @@ def _from_xlsx(p: Path) -> DatasetSchema:
 def _safe_count(fn) -> int | None:
     try:
         return int(fn())
-    except Exception:  # noqa: BLE001 - a row count is a nicety, never block on it
+    except Exception:  # noqa: BLE001  # a row count is a nicety, never block on it
         return None
 
 

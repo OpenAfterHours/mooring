@@ -43,7 +43,7 @@ def available() -> bool:
     """True if the spaCy library imports (the ``pii-spacy`` extra is installed)."""
     try:
         import spacy  # noqa: F401
-    except Exception:  # noqa: BLE001 - any import failure means "not available"
+    except Exception:  # noqa: BLE001  # any import failure means "not available"
         return False
     return True
 
@@ -75,7 +75,7 @@ def is_ready(model: "str | None" = None) -> bool:
         return False
     try:
         target = _resolve(model)
-    except Exception:  # noqa: BLE001 - companion not installed / not vendored
+    except Exception:  # noqa: BLE001  # companion not installed / not vendored
         return False
     if target in _models:
         return True
@@ -96,7 +96,7 @@ def load(model: "str | None" = None):
         ) from exc
     try:
         target = _resolve(model)
-    except Exception as exc:  # noqa: BLE001 - companion missing / model not vendored
+    except Exception as exc:  # noqa: BLE001  # companion missing / model not vendored
         raise NerUnavailable(f"spaCy model unavailable: {exc}") from exc
     cached = _models.get(target)
     if cached is not None:
@@ -107,7 +107,7 @@ def load(model: "str | None" = None):
             return cached
         try:
             nlp = spacy.load(target)
-        except Exception as exc:  # noqa: BLE001 - not installed / bad path / version skew
+        except Exception as exc:  # noqa: BLE001  # not installed / bad path / version skew
             raise NerUnavailable(f"could not load spaCy model {target!r}: {exc}") from exc
         # Names + orgs only need the entity recogniser; disable the rest for speed.
         for pipe in list(getattr(nlp, "pipe_names", [])):

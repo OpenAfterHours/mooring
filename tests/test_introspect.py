@@ -25,7 +25,7 @@ def _run_probe(namespace: dict, tmp_path) -> dict:
     back what it wrote — faithfully simulating /api/kernel/run."""
     out = tmp_path / "schema.json"
     src = introspect.probe_source(out)
-    exec(src, namespace)  # noqa: S102 - the frozen probe, our own source
+    exec(src, namespace)  # noqa: S102  # the frozen probe, our own source
     assert out.exists(), "probe did not write the sidecar file"
     return json.loads(out.read_text("utf-8"))
 
