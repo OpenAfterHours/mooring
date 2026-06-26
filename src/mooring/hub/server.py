@@ -41,6 +41,7 @@ from mooring import (
 )
 from mooring.editor import EditorServer, free_port
 from mooring.github import AuthFailed, GitHubClient, GitHubError, compare_url
+from mooring.hub import settings_schema
 from mooring.runtime import workspace_hint
 
 
@@ -506,6 +507,185 @@ class Hub:
             editor.apply_theme(theme)
         telemetry.log_event("ui_theme", theme=theme)
         return JSONResponse({"ok": True, "theme": theme})
+
+    # -- settings / profile ----------------------------------------------------
+    # A per-machine Settings page reached from the header. The editable surface is
+    # the curated registry in settings_schema.py — which IS the allowlist the rest
+    # of the config write path lacks (config_store.set_value writes any key verbatim).
+    # Writes mirror api_set_theme: persist via config_store, then re-read the config
+    # in place (NOT the destructive reload()). Team/synced decisions (the per-notebook
+    # AI opt-out, sync folders) and the structural value-blindness guarantees are
+    # intentionally NOT here. See docs/admins/configuration.md.
+
+    def settings_page(self, _request: Request) -> HTMLResponse:
+        """The Settings page, served like chat/batch so it pre-paints the theme."""
+        return self._themed_page("settings.html")
+
+    @staticmethod
+    def _enum_options(spec) -> list[dict] | None:
+        """[{value, label}] for an enum control (friendly labels where the spec gives
+        them, else the raw token), or None for a non-enum control."""
+        if not spec.enum_values:
+            return None
+        labels = spec.enum_labels or spec.enum_values
+        return [{"value": v, "label": label} for v, label in zip(spec.enum_values, labels)]
+
+    def _needs_confirm(self, spec, value) -> bool:
+        """Whether writing ``value`` is a privacy-weakening flip that needs an explicit
+        confirm. Wraps the registry rule with one runtime refinement: the warn-only
+        downgrade of ``ai.pii.block_prompt`` only weakens anything when the scan itself
+        (``ai.pii.enabled``) is on, so we don't pop a scary dialog for a no-op toggle."""
+        if not settings_schema.needs_confirm(spec, value):
+            return False
+        if spec.key == "ai.pii.block_prompt" and not self.app_cfg.ai_pii:
+            return False
+        return True
+
+    def _settings_payload(self) -> dict:
+        """Value-free snapshot of every editable setting for the page: the EFFECTIVE
+        value (read off the live app_cfg, so it reflects MOORING_* overrides — what the
+        app actually runs with) plus whether an env var is masking the file, the
+        read-only admin block, and the live PII guard status."""
+        import os
+
+        cfg = self.app_cfg
+        editable = []
+        for spec in settings_schema.EDITABLE:
+            value = getattr(cfg, spec.accessor)
+            if isinstance(value, tuple):
+                value = list(value)
+            editable.append(
+                {
+                    "key": spec.key,
+                    "label": spec.label,
+                    "group": spec.group,
+                    "type": spec.type,
+                    "control": spec.control,
+                    "value": value,
+                    "default": spec.default,
+                    "sensitivity": spec.sensitivity,
+                    "weakens": spec.weaken_value is not None,
+                    "enum_options": self._enum_options(spec),
+                    "min": spec.minimum,
+                    "max": spec.maximum,
+                    "help": spec.help,
+                    "env_overridden": bool(
+                        spec.env_var and os.environ.get(spec.env_var) is not None
+                    ),
+                }
+            )
+        return {
+            "groups": list(settings_schema.GROUPS),
+            "editable": editable,
+            "admin": self._admin_rows(),
+            "pii": self._pii_status(),
+            "ai_enabled": cfg.ai_enabled,
+        }
+
+    def _admin_rows(self) -> list[dict]:
+        """Read-only 'managed by your admin' rows: identity, telemetry, the NER model
+        supply-chain pins, and the team-consistent sync scope. Value-free — the logging
+        endpoint URL and the OAuth client id are shown only as on/off / present-absent,
+        never their literal value."""
+        cfg = self.app_cfg
+        single = cfg.config_for(None)
+        return [
+            {"label": "GitHub OAuth client id", "value": "set" if cfg.client_id else "not set"},
+            {"label": "Repo owner", "value": single.owner or "—"},
+            {"label": "Repo", "value": single.repo or "—"},
+            {"label": "GitHub host", "value": cfg.host},
+            {"label": "AI provider", "value": cfg.ai_provider},
+            {"label": "Central logging", "value": f"on ({cfg.log_level})" if cfg.log_endpoint else "off"},
+            {"label": "PII name model", "value": cfg.ai_pii_name_model},
+            {"label": "PII name model revision", "value": cfg.ai_pii_name_revision or "latest"},
+            {"label": "PII name model variant", "value": cfg.ai_pii_name_variant or "default"},
+            {"label": "Synced folders", "value": ", ".join(cfg.folders) or "—"},
+            {"label": "Sync excludes", "value": ", ".join(cfg.exclude) or "—"},
+        ]
+
+    def api_get_settings(self, _request: Request) -> JSONResponse:
+        return JSONResponse(self._settings_payload())
+
+    def _apply_setting_change(self) -> None:
+        """Make a just-written config.toml change live WITHOUT the destructive reload():
+        re-read the whole config under the lock (so the loader applies every
+        normalization and the TOML-key -> field mapping in one place), re-theme open
+        editors if the theme changed, and tear down chats if the copilot was turned off.
+        Open chats/batches otherwise survive — a model/PII change applies to the NEXT
+        chat (its guard/model is captured at open), mirroring the theme endpoint. The
+        provider auto-rebuilds for a new model because _provider_for keys on it."""
+        was_ai = self.app_cfg.ai_enabled
+        old_theme = self.app_cfg.ui_theme
+        with self._lock:
+            self.app_cfg = config.load_app_config()
+        if self.app_cfg.ui_theme != old_theme:
+            for editor in list(self.editors.values()):
+                editor.apply_theme(self.app_cfg.ui_theme)
+        if was_ai and not self.app_cfg.ai_enabled:
+            self._close_all_chats()
+
+    async def api_set_settings(self, request: Request) -> JSONResponse:
+        """Persist one per-machine setting and make it live. The allowlist is the
+        registry: a key with no SettingSpec is a 400, so this can never write the
+        dead/unread keys a raw `mooring config set` could. A privacy-weakening flip
+        needs an explicit confirm (409 needs_confirm otherwise)."""
+        data = await request.json()
+        key = str(data.get("key", ""))
+        spec = settings_schema.by_key(key)
+        if spec is None:
+            return JSONResponse({"error": f"Unknown or read-only setting {key!r}."}, status_code=400)
+        if "value" not in data:
+            return JSONResponse({"error": "A value is required."}, status_code=400)
+        try:
+            value = settings_schema.coerce(spec, data["value"])
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        if self._needs_confirm(spec, value) and not bool(data.get("confirm")):
+            return JSONResponse(
+                {"needs_confirm": True, "key": key, "message": spec.confirm}, status_code=409
+            )
+        try:
+            config_store.set_value(key, value)
+        except tomllib.TOMLDecodeError:
+            return JSONResponse(
+                {"error": "Your config.toml is malformed — fix it before changing settings."},
+                status_code=409,
+            )
+        except OSError as exc:
+            return JSONResponse({"error": f"Could not save the setting: {exc}"}, status_code=502)
+        self._apply_setting_change()
+        # Value-free telemetry: the key plus, for non-text settings, the new
+        # boolean/number/enum — never a model id, label, or path.
+        extra = {"value": value} if spec.type in ("bool", "int", "float", "enum") else {}
+        telemetry.log_event("settings_change", key=key, **extra)
+        return JSONResponse({"ok": True, **self._settings_payload()})
+
+    async def api_reset_settings(self, request: Request) -> JSONResponse:
+        """Revert one setting to the packaged default (delete it from config.toml)."""
+        data = await request.json()
+        key = str(data.get("key", ""))
+        spec = settings_schema.by_key(key)
+        if spec is None:
+            return JSONResponse({"error": f"Unknown or read-only setting {key!r}."}, status_code=400)
+        # Resetting can itself be the weakening direction (e.g. ai.pii.enabled reverts
+        # to its off default), so gate it the same as a set rather than letting Reset
+        # silently slip past the confirm the toggle requires.
+        if self._needs_confirm(spec, spec.default) and not bool(data.get("confirm")):
+            return JSONResponse(
+                {"needs_confirm": True, "key": key, "message": spec.confirm}, status_code=409
+            )
+        try:
+            config_store.unset_value(key)
+        except tomllib.TOMLDecodeError:
+            return JSONResponse(
+                {"error": "Your config.toml is malformed — fix it before changing settings."},
+                status_code=409,
+            )
+        except OSError as exc:
+            return JSONResponse({"error": f"Could not save the setting: {exc}"}, status_code=502)
+        self._apply_setting_change()
+        telemetry.log_event("settings_reset", key=key)
+        return JSONResponse({"ok": True, **self._settings_payload()})
 
     def api_login_start(self, _request: Request) -> JSONResponse:
         try:
@@ -1960,6 +2140,10 @@ def create_app(hub: Hub) -> Starlette:
             Route("/api/repo/switch", hub.api_repo_switch, methods=["POST"]),
             Route("/api/repo/remove", hub.api_repo_remove, methods=["POST"]),
             Route("/api/ui/theme", hub.api_set_theme, methods=["POST"]),
+            Route("/settings", hub.settings_page),
+            Route("/api/settings", hub.api_get_settings),
+            Route("/api/settings", hub.api_set_settings, methods=["POST"]),
+            Route("/api/settings/reset", hub.api_reset_settings, methods=["POST"]),
             Route("/api/login/start", hub.api_login_start, methods=["POST"]),
             Route("/api/login/poll", hub.api_login_poll),
             Route("/api/logout", hub.api_logout, methods=["POST"]),
