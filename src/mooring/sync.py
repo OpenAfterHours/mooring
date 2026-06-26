@@ -565,12 +565,24 @@ def pull(
             del mft.files[path]
 
     mft.branch = cfg.branch
-    mft.head_commit = prep.head
-    # A completed pull has reconciled the manifest with the full remote tree under
-    # the current scope, so record that scope: the next same-head pull/status can
-    # trust the fast path again, and a later scope widening will be detected.
-    mft.scope_folders = tuple(cfg.folders)
-    mft.scope_exclude = tuple(cfg.exclude)
+    if result.skipped_conflicts:
+        # A skipped conflict keeps its OLD base sha in mft.files while the remote has
+        # moved on, so the manifest is NOT a faithful snapshot of the remote tree.
+        # Recording the new head here would let the _remote_entries fast path serve
+        # that stale sha as the remote view on the next cycle, masking the still-
+        # unresolved CONFLICT as a plain MODIFIED — which wedges pull (a no-op on
+        # MODIFIED) and push (a 409 "remote changed") with no way out, and hides the
+        # per-file resolution UI (gated on FileState.CONFLICT). Leave head_commit
+        # empty so the next pull/status/push refetches the live tree and re-detects
+        # the conflict, keeping it resolvable.
+        mft.head_commit = ""
+    else:
+        mft.head_commit = prep.head
+        # A completed pull has reconciled the manifest with the full remote tree under
+        # the current scope, so record that scope: the next same-head pull/status can
+        # trust the fast path again, and a later scope widening will be detected.
+        mft.scope_folders = tuple(cfg.folders)
+        mft.scope_exclude = tuple(cfg.exclude)
     manifest_mod.save(workspace, mft)
     return result
 
@@ -771,11 +783,14 @@ def _push_delete(client, mft, f, target, base, in_review, dest, message, result)
 
 
 def _push_conflict(f, base, in_review, result) -> _PushOutcome:
-    """Record a per-file optimistic-concurrency rejection; never silent. ``base is None``
-    means we tried to *create* a file that already exists on the target — our cached
-    remote view is stale, so flag a forced refetch on the next pull."""
+    """Record a per-file optimistic-concurrency rejection; never silent. A rejection
+    from cfg.branch — a ``base is None`` create-collision, or any base-mismatch that is
+    not a review-branch write — proves our cached remote view of cfg.branch is stale, so
+    flag a forced refetch on the next pull. Only a review-branch base-mismatch is left
+    alone ("refresh and retry"): it reflects the review branch moving, not cfg.branch,
+    whose head cache is still valid."""
     result.blocked_conflicts.append(f.path)
-    stale_remote = base is None
+    stale_remote = base is None or not in_review
     if base is None:
         reason = "already on the remote — pull first"
     elif in_review:

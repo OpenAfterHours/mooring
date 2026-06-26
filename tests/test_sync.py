@@ -235,6 +235,44 @@ def test_pull_keep_both_saves_remote_copy_and_keeps_mine_pushable(cfg):
     assert [f.state for f in report.files if f.path == "notebooks/a.py"] == [FileState.MODIFIED]
 
 
+def test_skipped_conflict_stays_conflict_on_next_cycle(cfg):
+    """Regression: a default skip-pull must not let the head-commit fast path mask an
+    unresolved conflict as MODIFIED on the next cycle. Before the fix, pull advanced
+    head_commit while leaving the conflicted file's base sha stale, so the next status
+    served the stale sha as the 'remote' view and reclassified CONFLICT -> MODIFIED —
+    hiding the per-file resolution UI and wedging pull (no-op) / push (409) with no way
+    out (the user-reported "pull never clears it, no choice offered" deadlock)."""
+    client = FakeClient({"notebooks/a.py": b"v1\n"})
+    sync.pull(client, cfg)
+    write_local(cfg, "notebooks/a.py", "mine\n")
+    client.seed("notebooks/a.py", b"theirs\n")  # a teammate changes the same file
+
+    def state():
+        report = sync.status(client, cfg)
+        return next(f.state for f in report.files if f.path == "notebooks/a.py")
+
+    assert state() is FileState.CONFLICT  # detected correctly the first time
+
+    result = sync.pull(client, cfg)  # default SKIP
+    assert result.skipped_conflicts == ["notebooks/a.py"]
+    # The head cache is invalidated so the manifest can't masquerade as a faithful
+    # snapshot of the remote tree while a conflict is unresolved.
+    assert manifest.load(cfg.workspace()).head_commit == ""
+
+    # The unresolved conflict must STILL be a conflict (was MODIFIED before the fix),
+    # so the hub keeps offering Use remote / Keep both / Push as copy.
+    assert state() is FileState.CONFLICT
+    # push keeps blocking it as a conflict instead of silently 409-looping.
+    push_result = sync.push(client, cfg, sleep=lambda s: None)
+    assert push_result.pushed == 0
+    assert push_result.blocked_conflicts == ["notebooks/a.py"]
+
+    # And it remains resolvable: taking theirs clears it cleanly.
+    sync.pull(client, cfg, strategy=ConflictStrategy.THEIRS)
+    assert sync.status(client, cfg).by_state(FileState.CONFLICT) == []
+    assert read_local(cfg, "notebooks/a.py") == "theirs\n"
+
+
 # -- push -----------------------------------------------------------------------
 
 
@@ -668,6 +706,31 @@ def test_push_create_conflict_on_stale_manifest_invalidates_cache(cfg):
     assert result.blocked_conflicts == ["notebooks/a.py"]
     assert any("already on the remote" in line for line in result.lines)
     assert manifest.load(cfg.workspace()).head_commit == ""
+
+
+def test_push_modify_conflict_on_stale_manifest_invalidates_cache(cfg):
+    """A base-PRESENT 409 from cfg.branch (the manifest's recorded base sha is stale,
+    not merely missing) must also invalidate the head cache so the next pull refetches
+    and re-detects the conflict. This is the general case behind the skip-pull livelock:
+    before the fix, _push_conflict only invalidated when base was None, so a base-
+    mismatch 409 left the stale head cache in place and the conflict never resurfaced."""
+    client = FakeClient({"notebooks/a.py": b"v1\n"})
+    sync.pull(client, cfg)
+    # Corrupt the manifest base to a real-but-wrong sha while pinning head_commit, so
+    # the fast path serves the stale sha as the 'remote' and the file looks MODIFIED.
+    mft = manifest.load(cfg.workspace())
+    mft.files["notebooks/a.py"] = "0" * 40
+    manifest.save(cfg.workspace(), mft)
+    write_local(cfg, "notebooks/a.py", "mine\n")
+
+    result = sync.push(client, cfg, sleep=lambda s: None)
+    assert result.pushed == 0
+    assert result.blocked_conflicts == ["notebooks/a.py"]
+    assert any("remote changed" in line for line in result.lines)
+    assert manifest.load(cfg.workspace()).head_commit == ""
+
+    # The next pull now refetches the live tree and re-detects the real conflict.
+    assert sync.status(client, cfg).by_state(FileState.CONFLICT)
 
 
 # -- resolve --------------------------------------------------------------------
