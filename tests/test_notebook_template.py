@@ -4,6 +4,8 @@ source + render — in marimo's edit view)."""
 
 from __future__ import annotations
 
+import tomllib
+
 import pytest
 
 from mooring import marimo_rt, notebook_template
@@ -56,3 +58,74 @@ def test_create_unique_keeps_the_readable_title_when_numbered(tmp_path):
 def test_create_unique_still_rejects_an_unslugable_name(tmp_path):
     with pytest.raises(ValueError):
         notebook_template.create_unique(tmp_path, "  ///  ")
+
+
+# -- sub-folder targets -------------------------------------------------------
+
+DEFAULT_FOLDERS = ("notebooks", "data", "reports")
+
+
+@pytest.mark.parametrize(
+    "raw, expected",
+    [
+        ("sales", ("notebooks", "sales")),
+        ("notebooks/sales", ("notebooks", "sales")),
+        ("packages/finance/notebooks/sales", ("packages/finance/notebooks", "sales")),
+        ("packages\\finance\\sales", ("packages/finance", "sales")),  # backslashes
+        ("/notebooks/sales/", ("notebooks", "sales")),  # surrounding slashes
+        ("sales.py", ("notebooks", "sales.py")),  # .py stripped later by slugify
+    ],
+)
+def test_split_target(raw, expected):
+    assert notebook_template.split_target(raw) == expected
+
+
+def test_create_into_a_subfolder(tmp_path):
+    rel = notebook_template.create(tmp_path, "Sales", folder="packages/finance/notebooks")
+    assert rel == "packages/finance/notebooks/Sales.py"
+    assert (tmp_path / rel).is_file()
+
+
+def test_create_default_folder_unchanged(tmp_path):
+    assert notebook_template.create(tmp_path, "x") == "notebooks/x.py"
+
+
+def test_create_from_input_default_does_not_register(tmp_path):
+    rel = notebook_template.create_from_input(tmp_path, "scratch", folders=DEFAULT_FOLDERS)
+    assert rel == "notebooks/scratch.py"
+    assert (tmp_path / rel).is_file()
+    assert not (tmp_path / "mooring.toml").exists()  # notebooks/ already synced
+
+
+def test_create_from_input_subfolder_auto_registers(tmp_path):
+    rel = notebook_template.create_from_input(
+        tmp_path, "packages/finance/notebooks/sales", folders=DEFAULT_FOLDERS
+    )
+    assert rel == "packages/finance/notebooks/sales.py"
+    assert (tmp_path / rel).is_file()
+    data = tomllib.loads((tmp_path / "mooring.toml").read_text("utf-8"))
+    assert data["sync"]["folders"] == ["packages/finance/notebooks"]
+
+
+def test_create_from_input_nested_under_synced_folder_is_not_registered(tmp_path):
+    # A folder already covered (nested under a synced root) needs no registration.
+    rel = notebook_template.create_from_input(tmp_path, "notebooks/sub/x", folders=("notebooks",))
+    assert rel == "notebooks/sub/x.py"
+    assert not (tmp_path / "mooring.toml").exists()
+
+
+def test_create_from_input_rejects_workspace_escape(tmp_path):
+    with pytest.raises(ValueError):
+        notebook_template.create_from_input(tmp_path, "../evil", folders=DEFAULT_FOLDERS)
+
+
+def test_create_from_input_rejects_dotfile_location(tmp_path):
+    with pytest.raises(ValueError):
+        notebook_template.create_from_input(tmp_path, ".secret/x", folders=DEFAULT_FOLDERS)
+
+
+def test_create_from_input_respects_exclude(tmp_path):
+    with pytest.raises(ValueError):
+        notebook_template.create_from_input(
+            tmp_path, "drafts/x", folders=("notebooks",), exclude=("drafts",)
+        )

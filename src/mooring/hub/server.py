@@ -104,7 +104,15 @@ class Hub:
 
     @property
     def cfg(self) -> config.Config:
-        return self.app_cfg.config_for(None)
+        from dataclasses import replace
+
+        cfg = self.app_cfg.config_for(None)
+        # Fold the repo's synced sub-folders (mooring.toml [sync] folders) into the
+        # scope so a notebook created in a uv-workspace package folder lists, opens,
+        # and syncs like any other. Re-read here (not cached) so a folder registered
+        # by a New on this run shows up on the very next /api/state.
+        folders = workspace_config.merge_extra_folders(cfg.folders, cfg.workspace())
+        return cfg if folders == cfg.folders else replace(cfg, folders=folders)
 
     def reload(self) -> None:
         with self._lock:
@@ -597,8 +605,11 @@ class Hub:
         from mooring import notebook_template
 
         data = await request.json()
+        cfg = self.cfg
         try:
-            rel_path = notebook_template.create(self.cfg.workspace(), data.get("name", ""))
+            rel_path = notebook_template.create_from_input(
+                cfg.workspace(), data.get("name", ""), folders=cfg.folders, exclude=cfg.exclude
+            )
         except (ValueError, FileExistsError) as exc:
             return JSONResponse({"error": str(exc)}, status_code=400)
         telemetry.log_event("new")

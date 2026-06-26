@@ -73,6 +73,16 @@ Rules worth knowing:
 | `warn_file_mb` | `10` | Warn when pushing a file larger than this many MB. |
 | `max_file_mb` | `45` | Refuse to push files larger than this. The GitHub Contents API fails somewhere below 50 MB, so don't raise it past ~45. |
 
+!!! note "Sub-folder notebooks travel in `mooring.toml`"
+
+    When someone creates a notebook in a sub-folder (e.g. a uv-workspace package's
+    `packages/finance/notebooks/`), mooring records that folder under `[sync] folders`
+    in the repo's **synced** `mooring.toml`. That list is **additive** — it *extends*
+    the `folders` above for the whole team, so a teammate who pulls picks the folder
+    up automatically without editing their own `config.toml`. You don't normally edit
+    it by hand. (This is distinct from the per-machine `config.toml` `[sync] folders`
+    here, which *replaces* the default.)
+
 #### Excluding files
 
 Some paths are **always** skipped in both directions, no configuration needed:

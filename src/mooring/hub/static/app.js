@@ -616,7 +616,9 @@ $("btn-propose").addEventListener("click", () => {
   return proposeAction(null, count);
 });
 $("btn-new").addEventListener("click", () => {
-  const name = prompt("Notebook name (e.g. sales-analysis):");
+  const name = prompt(
+    "Notebook name or path\n(e.g. sales-analysis, or packages/finance/notebooks/sales):",
+  );
   if (name) action("/api/new", { name });
 });
 // Batch build opens the workspace-level page in its own (reused) tab, beside the hub.

@@ -198,6 +198,53 @@ def test_local_mode_new_lists_and_opens_without_login(unconfigured_client, monke
     assert opened.json()["url"] == "http://editor/notebooks/scratch.py"
 
 
+def test_new_into_a_package_subfolder_registers_lists_and_opens(unconfigured_client, monkeypatch):
+    # Creating a notebook inside a uv-workspace package folder: it records the folder
+    # in the synced mooring.toml, then lists and opens like a top-level notebook.
+    client, hub = unconfigured_client
+
+    class FakeEditor:
+        def __init__(self, workspace, theme="system"):
+            self.workspace = workspace
+
+        def ensure_started(self):
+            pass
+
+        def use_uv(self):
+            return False
+
+        def url_for(self, rel_path):
+            return f"http://editor/{rel_path}"
+
+        def shutdown(self):
+            pass
+
+    monkeypatch.setattr(server, "EditorServer", FakeEditor)
+
+    rel = "packages/finance/notebooks/sales.py"
+    created = client.post("/api/new", json={"name": "packages/finance/notebooks/sales"})
+    assert created.status_code == 200
+    assert created.json()["url"] == f"http://editor/{rel}"
+
+    # The folder was registered in the synced mooring.toml, so it travels with the repo.
+    workspace = hub.cfg.workspace()
+    data = tomllib.loads((workspace / "mooring.toml").read_text("utf-8"))
+    assert data["sync"]["folders"] == ["packages/finance/notebooks"]
+
+    # And it now lists (folded into the sync scope) and opens.
+    files = {f["path"]: f for f in client.get("/api/state").json()["files"]}
+    assert files[rel]["state"] == "local"
+    opened = client.post("/api/open", json={"path": rel})
+    assert opened.status_code == 200
+
+
+def test_new_rejects_a_path_outside_the_workspace(unconfigured_client):
+    client, _ = unconfigured_client
+    resp = client.post("/api/new", json={"name": "../escape"})
+    assert resp.status_code == 400
+    assert "workspace" in resp.json()["error"]
+
+
 def test_state_env_no_project_lists_top_level_env_packages(unconfigured_client, monkeypatch):
     # No notebook pyproject (uvx/pip): the footer shows the env's top-level packages
     # (e.g. what `uvx --with` added), so an added package actually appears.

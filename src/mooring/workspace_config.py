@@ -4,10 +4,14 @@ Unlike the user config (``config_store.py``, which is per-machine), this file
 lives at the workspace root and rides pull/push/propose like any tracked file —
 so a setting written here travels to every teammate who syncs the repo.
 
-Today it carries one thing: the per-notebook AI opt-out
-(``[ai] disabled_notebooks``), the off switch that stops the copilot being
-opened on a notebook by mistake (e.g. one that handles PII). It stores only
-notebook PATHS — never a value. See docs/admins/ai-privacy.md.
+It carries two things, both PATHS only — never a value:
+
+- ``[ai] disabled_notebooks`` — the per-notebook AI opt-out, the off switch that
+  stops the copilot being opened on a notebook by mistake (e.g. one that handles
+  PII). See docs/admins/ai-privacy.md.
+- ``[sync] folders`` — extra synced sub-folders (e.g. a uv-workspace package's
+  notebooks/) registered when a notebook is created there, so the folder rides
+  pull/push for the whole team. ADDITIVE — see :func:`merge_extra_folders`.
 """
 
 from __future__ import annotations
@@ -138,3 +142,67 @@ def set_ai_disabled(workspace: Path, notebook_rel: str, disabled: bool) -> bool:
         else:
             config_path(workspace).unlink(missing_ok=True)
     return disabled
+
+
+# -- synced notebook folders --------------------------------------------------
+# Extra sync folders declared in the SYNCED mooring.toml so a sub-folder (e.g. a
+# uv-workspace package's notebooks/) created by one teammate rides pull/push for
+# everyone — without each machine adding it to its own [sync] folders. These are
+# ADDITIVE: they EXTEND the effective folder set (the union is taken in
+# merge_extra_folders), unlike config.toml's [sync] folders, which REPLACES the
+# built-in default. Stored under [sync] folders here; only PATHS, never values.
+
+
+def _folders_list(data: dict) -> list[str]:
+    """The normalized, de-duplicated ``[sync] folders`` list from already-parsed data
+    (tolerant of a bare string or a malformed value), order preserved."""
+    sync = data.get("sync")
+    if not isinstance(sync, dict):
+        return []
+    raw = sync.get("folders", [])
+    if isinstance(raw, str):  # tolerate a single bare string
+        raw = [raw]
+    if not isinstance(raw, list):
+        return []
+    out: list[str] = []
+    for p in raw:
+        norm = normalize_notebook(p)
+        if norm and norm not in out:
+            out.append(norm)
+    return out
+
+
+def extra_folders(workspace: Path) -> tuple[str, ...]:
+    """The repo's additional synced folders declared in ``mooring.toml`` (``()`` when
+    none). Fails open like the rest of the read side (a malformed file → no extras)."""
+    return tuple(_folders_list(_read_data(workspace)))
+
+
+def merge_extra_folders(folders: tuple[str, ...], workspace: Path) -> tuple[str, ...]:
+    """``folders`` unioned with the repo's :func:`extra_folders`, order-preserving and
+    de-duplicated. The single fold both adapters apply when building the active Config,
+    so the synced sub-folders drive every consumer of ``cfg.folders`` (scan/list/sync)."""
+    return tuple(dict.fromkeys((*folders, *extra_folders(workspace))))
+
+
+def add_extra_folder(workspace: Path, folder: str) -> None:
+    """Record ``folder`` in ``mooring.toml``'s ``[sync] folders`` if not already present,
+    preserving every other key/section (the :func:`set_ai_disabled` idiom: strict read,
+    sorted+deduped write, atomic replace, serialized by ``_WRITE_LOCK``). A no-op for an
+    empty/already-listed folder. Raises ``tomllib.TOMLDecodeError`` on a corrupt file
+    rather than overwriting it."""
+    key = normalize_notebook(folder)
+    if not key:
+        return
+    with _WRITE_LOCK:
+        data = _read_data_strict(workspace)
+        folders = _folders_list(data)
+        if key in folders:
+            return
+        folders.append(key)
+        sync = data.get("sync")
+        if not isinstance(sync, dict):
+            sync = {}
+        sync["folders"] = sorted(folders)  # stable diffs and sync merges
+        data["sync"] = sync
+        _write_data(workspace, data)
