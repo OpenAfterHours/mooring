@@ -448,7 +448,12 @@ async function refresh() {
   if (state.logged_in) {
     const userInfo = $("user-info");
     userInfo.innerHTML = "";
-    userInfo.append(`@${state.user} `);
+    const profile = document.createElement("a");
+    profile.href = "/settings";
+    profile.className = "profile-link";
+    profile.title = "Settings & preferences";
+    profile.textContent = `@${state.user}`;
+    userInfo.append(profile, " ");
     const logoutBtn = document.createElement("button");
     logoutBtn.className = "small";
     logoutBtn.textContent = "Log out";

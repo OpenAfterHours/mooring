@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>mooring · Settings</title>
+  <!-- Apply the theme before first paint (mirrors the hub): last-used theme, else
+       the server's inlined default. The theme control on this page writes through
+       the same /api/ui/theme path and localStorage key, so an open hub/chat
+       re-themes live via a same-origin storage event. -->
+  <script>
+    try {
+      document.documentElement.dataset.theme =
+        localStorage.getItem("mooring.ui.theme") || "__MOORING_DEFAULT_THEME__";
+    } catch {
+      // localStorage may be unavailable (private mode); the CSS default applies.
+    }
+  </script>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="settings-body">
+  <header>
+    <h1>&#9875; Settings</h1>
+    <a class="header-link" href="/" title="Back to the hub">&#8592; Back to hub</a>
+  </header>
+
+  <main>
+    <p id="settings-intro" class="muted">
+      These preferences are saved on <b>this machine only</b> (your user config).
+      Repositories are managed from the hub header; team-wide and admin settings are
+      shown read-only below.
+    </p>
+    <div id="error-banner" class="hidden"></div>
+    <div id="settings-root"></div>
+  </main>
+
+  <script src="/static/settings.js"></script>
+</body>
+</html>
