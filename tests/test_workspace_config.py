@@ -83,3 +83,44 @@ def test_corrupt_file_fails_open(tmp_path):
     (tmp_path / "mooring.toml").write_text("this is = not valid = toml", "utf-8")
     assert wc.disabled_notebooks(tmp_path) == set()
     assert wc.is_ai_disabled(tmp_path, "notebooks/a.py") is False
+
+
+# -- synced extra folders -----------------------------------------------------
+
+
+def test_extra_folders_missing_is_empty(tmp_path):
+    assert wc.extra_folders(tmp_path) == ()
+
+
+def test_add_extra_folder_round_trip(tmp_path):
+    wc.add_extra_folder(tmp_path, "packages/finance/notebooks")
+    data = tomllib.loads((tmp_path / "mooring.toml").read_text("utf-8"))
+    assert data["sync"]["folders"] == ["packages/finance/notebooks"]
+    assert wc.extra_folders(tmp_path) == ("packages/finance/notebooks",)
+
+
+def test_add_extra_folder_normalizes_dedupes_and_sorts(tmp_path):
+    wc.add_extra_folder(tmp_path, "packages\\sales\\notebooks")  # backslashes
+    wc.add_extra_folder(tmp_path, "/packages/finance/notebooks/")  # surrounding slashes
+    wc.add_extra_folder(tmp_path, "packages/sales/notebooks")  # duplicate of the first
+    data = tomllib.loads((tmp_path / "mooring.toml").read_text("utf-8"))
+    assert data["sync"]["folders"] == ["packages/finance/notebooks", "packages/sales/notebooks"]
+
+
+def test_add_extra_folder_preserves_unrelated_sections(tmp_path):
+    wc.set_ai_disabled(tmp_path, "notebooks/a.py", True)
+    wc.add_extra_folder(tmp_path, "packages/x/notebooks")
+    data = tomllib.loads((tmp_path / "mooring.toml").read_text("utf-8"))
+    assert data["ai"]["disabled_notebooks"] == ["notebooks/a.py"]  # untouched
+    assert data["sync"]["folders"] == ["packages/x/notebooks"]
+
+
+def test_merge_extra_folders_unions_without_duplicates(tmp_path):
+    wc.add_extra_folder(tmp_path, "packages/x/notebooks")
+    merged = wc.merge_extra_folders(("notebooks", "data"), tmp_path)
+    assert merged == ("notebooks", "data", "packages/x/notebooks")
+    # An already-present folder is not duplicated.
+    assert wc.merge_extra_folders(("notebooks", "packages/x/notebooks"), tmp_path) == (
+        "notebooks",
+        "packages/x/notebooks",
+    )

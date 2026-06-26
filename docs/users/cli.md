@@ -144,7 +144,9 @@ branch, so the changes can be reviewed as a pull request (see
   **Power BI Desktop** instead (e.g. `open reports/sales.pbip`) — see
   [Power BI reports](power-bi.md).
 - `new <name>` — create a notebook from the template and open it (e.g.
-  `new sales-analysis`).
+  `new sales-analysis`). Pass a path to place it in a sub-folder (e.g.
+  `new packages/finance/notebooks/sales`); mooring registers that folder so it
+  syncs for the team. A bare name goes in `notebooks/`.
 
 ### `init` / `deps` — notebook dependencies
 

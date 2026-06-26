@@ -10,7 +10,7 @@ import sys
 from collections.abc import Mapping
 from pathlib import Path
 
-from mooring import __version__, config, paths, pyproject_env, telemetry
+from mooring import __version__, config, paths, pyproject_env, telemetry, workspace_config
 
 # SELFTEST_PACKAGES, workspace_hint and legacy_workspace_hint now live in
 # mooring.runtime — a neutral module below both presentation adapters, so the web
@@ -135,7 +135,11 @@ def _build_parser() -> argparse.ArgumentParser:
     open_cmd.add_argument("path", help="workspace-relative notebook path")
 
     new = sub.add_parser("new", help="create a new notebook and open it")
-    new.add_argument("name", help="notebook name (e.g. sales-analysis)")
+    new.add_argument(
+        "name",
+        help="notebook name or path (e.g. sales-analysis, or "
+        "packages/finance/notebooks/sales)",
+    )
 
     delete_cmd = sub.add_parser(
         "delete",
@@ -503,7 +507,12 @@ def cmd_new(cfg: config.Config, name: str) -> int:
     workspace = cfg.workspace()
     if pyproject_env.scaffold(workspace):
         print(f"Created {pyproject_env.PYPROJECT_NAME} for this repo's notebook dependencies.")
-    rel_path = notebook_template.create(workspace, name)
+    try:
+        rel_path = notebook_template.create_from_input(
+            workspace, name, folders=cfg.folders, exclude=cfg.exclude
+        )
+    except (ValueError, FileExistsError) as exc:
+        sys.exit(str(exc))
     telemetry.log_event("new")
     print(f"Created {rel_path}")
     return cmd_open(cfg, rel_path)
@@ -1204,6 +1213,13 @@ def main(argv: list[str] | None = None) -> int:
         cfg = app_cfg.config_for(getattr(args, "repo", None))
     except KeyError:
         sys.exit(_unknown_alias(args.repo, app_cfg))
+    # Fold the repo's synced sub-folders (mooring.toml [sync] folders) into the scope,
+    # so notebooks under a uv-workspace package folder list and sync like the hub's do.
+    from dataclasses import replace
+
+    folders = workspace_config.merge_extra_folders(cfg.folders, cfg.workspace())
+    if folders != cfg.folders:
+        cfg = replace(cfg, folders=folders)
 
     telemetry.configure(
         app_cfg.log_endpoint,

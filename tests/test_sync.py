@@ -11,6 +11,21 @@ from mooring.config import Config
 from mooring.sync import ConflictStrategy, FileState, classify
 
 
+@pytest.mark.parametrize(
+    "path, folders, expected",
+    [
+        ("notebooks", ("notebooks", "data"), True),  # exact folder match
+        ("notebooks/sales.py", ("notebooks",), True),  # nested file
+        ("packages/x/notebooks/a.py", ("packages/x/notebooks",), True),  # deep root
+        ("packages/x/notebooks", ("notebooks", "data"), False),  # outside the scope
+        ("notebooksish/a.py", ("notebooks",), False),  # prefix is not a path boundary
+        ("reports/q1.py", (), False),  # empty scope covers nothing
+    ],
+)
+def test_within_folders(path, folders, expected):
+    assert sync.within_folders(path, folders) is expected
+
+
 # -- the decision matrix -----------------------------------------------------
 
 

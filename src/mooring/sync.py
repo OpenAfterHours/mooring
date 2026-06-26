@@ -101,6 +101,20 @@ def is_synced_path(rel_path: str, exclude: Iterable[str] = ()) -> bool:
     return not _excluded_by_patterns(rel_path, exclude)
 
 
+def within_folders(path: str, folders: tuple[str, ...]) -> bool:
+    """Whether a workspace-relative POSIX ``path`` (a file or a directory) falls under
+    one of the synced ``folders``. True when ``path`` equals a folder or is nested
+    inside it — i.e. exactly the paths :func:`synced_paths` would walk via ``rglob``.
+    Used to decide whether a notebook's target folder is already covered by the sync
+    scope (so a new sub-folder only needs registering when it is not)."""
+    p = path.replace("\\", "/").strip("/")
+    for folder in folders:
+        f = folder.replace("\\", "/").strip("/")
+        if f and (p == f or p.startswith(f + "/")):
+            return True
+    return False
+
+
 class FileState(Enum):
     SYNCED = "synced"
     MODIFIED = "modified"  # push candidate
