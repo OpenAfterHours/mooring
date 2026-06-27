@@ -4,11 +4,14 @@ Unlike the user config (``config_store.py``, which is per-machine), this file
 lives at the workspace root and rides pull/push/propose like any tracked file —
 so a setting written here travels to every teammate who syncs the repo.
 
-It carries two things, both PATHS only — never a value:
+It carries these, all PATHS only — never a value:
 
 - ``[ai] disabled_notebooks`` — the per-notebook AI opt-out, the off switch that
   stops the copilot being opened on a notebook by mistake (e.g. one that handles
   PII). See docs/admins/ai-privacy.md.
+- ``[shadow] ignore`` — notebooks whose filename shadows an importable module
+  (e.g. polars.py) that the team has acknowledged, so the guard stops warning.
+  See :mod:`mooring.shadow`.
 - ``[sync] folders`` — extra synced sub-folders (e.g. a uv-workspace package's
   notebooks/) registered when a notebook is created there, so the folder rides
   pull/push for the whole team. ADDITIVE — see :func:`merge_extra_folders`.
@@ -142,6 +145,66 @@ def set_ai_disabled(workspace: Path, notebook_rel: str, disabled: bool) -> bool:
         else:
             config_path(workspace).unlink(missing_ok=True)
     return disabled
+
+
+# -- shadow-guard ignore list -------------------------------------------------
+# Notebooks whose filename shadows an importable module (e.g. polars.py) that the
+# team has acknowledged and wants the guard to stop warning about — the targeted
+# off-ramp from the warning, so a deliberate name doesn't push anyone toward the
+# blunt per-machine kill switch. Synced like the AI opt-out (travels to teammates);
+# PATHS only. See mooring.shadow.
+
+
+def _shadow_ignore_list(data: dict) -> set[str]:
+    """The normalized ignore set from already-parsed data (tolerant of a bare string
+    or a malformed value)."""
+    shadow = data.get("shadow")
+    if not isinstance(shadow, dict):
+        return set()
+    raw = shadow.get("ignore", [])
+    if isinstance(raw, str):  # tolerate a single bare string
+        raw = [raw]
+    if not isinstance(raw, list):
+        return set()
+    return {normalize_notebook(p) for p in raw if str(p).strip()}
+
+
+def shadow_ignored(workspace: Path) -> set[str]:
+    """Notebooks (normalized paths) the shadow guard should stay quiet about. Fails
+    open like the rest of the read side (a malformed file → no ignores)."""
+    return _shadow_ignore_list(_read_data(workspace))
+
+
+def set_shadow_ignored(workspace: Path, notebook_rel: str, ignored: bool) -> bool:
+    """Add/remove a notebook from the shadow-guard ignore list, preserving every
+    other key and section in ``mooring.toml`` (the :func:`set_ai_disabled` idiom:
+    strict read, sorted+deduped write, prune-empty, atomic replace, serialized by
+    ``_WRITE_LOCK``). Returns the notebook's new ignored state."""
+    key = normalize_notebook(notebook_rel)
+    with _WRITE_LOCK:
+        data = _read_data_strict(workspace)
+        names = _shadow_ignore_list(data)
+        if ignored:
+            names.add(key)
+        else:
+            names.discard(key)
+        shadow = data.get("shadow")
+        if not isinstance(shadow, dict):
+            shadow = {}
+        if names:
+            shadow["ignore"] = sorted(names)
+            data["shadow"] = shadow
+        else:
+            shadow.pop("ignore", None)
+            if shadow:
+                data["shadow"] = shadow
+            else:
+                data.pop("shadow", None)
+        if data:
+            _write_data(workspace, data)
+        else:
+            config_path(workspace).unlink(missing_ok=True)
+    return ignored
 
 
 # -- synced notebook folders --------------------------------------------------

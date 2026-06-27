@@ -271,8 +271,22 @@ function buildRow(pathCell, state, actions) {
   return tr;
 }
 
+function shadowBadge(name) {
+  const span = document.createElement("span");
+  span.className = "badge warn";
+  span.textContent = `shadows ${name}`;
+  span.title =
+    `“import ${name}” would load this notebook instead of the ${name} module — ` +
+    "rename it; otherwise every notebook in this folder can fail to import.";
+  return span;
+}
+
 function buildFileRow(file, opts) {
-  return buildRow(file.path, file.state, fileActions(file, opts));
+  // A notebook whose filename shadows an importable package (e.g. polars.py) gets
+  // an amber badge so the sys.path[0] trap is visible before it becomes a kernel
+  // traceback. buildRow renders an array path cell as-is (string + badge node).
+  const pathCell = file.shadows ? [file.path, " ", shadowBadge(file.shadows)] : file.path;
+  return buildRow(pathCell, file.state, fileActions(file, opts));
 }
 
 function buildArtifactRows(artifact, files) {

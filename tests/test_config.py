@@ -15,6 +15,16 @@ def test_defaults_when_no_user_config(tmp_path):
     assert cfg.folders == ("notebooks", "data", "reports")
     assert cfg.exclude == ()
     assert cfg.warn_file_mb == 10
+    assert cfg.warn_shadowed_notebooks is True  # the shadow guard is on by default
+
+
+def test_warn_shadowed_notebooks_can_be_disabled(tmp_path):
+    p = tmp_path / "config.toml"
+    p.write_text("[sync]\nwarn_shadowed_notebooks = false\n", "utf-8")
+    assert load_config(user_config_path=p, env={}).warn_shadowed_notebooks is False
+    app = load_app_config(user_config_path=p, env={})
+    assert app.warn_shadowed_notebooks is False
+    assert app.config_for().warn_shadowed_notebooks is False
 
 
 def test_ai_config_is_nested_with_flat_shims(tmp_path):

@@ -172,6 +172,22 @@ def installed_top_level() -> list[str]:
     return _top_level_from(importlib.metadata.distributions())
 
 
+def importable_names(workspace: Path) -> frozenset[str]:
+    """Canonical names of the repo's declared dependencies — the ``extra`` set the
+    shadow guard treats as footgun stems beyond its baked danger list, so a team
+    package the repo actually uses (e.g. ``openpyxl``) is flagged if a notebook is
+    named after it. Cheap and frozen-safe: reads the synced ``pyproject.toml`` only,
+    no uv/venv. Distribution names whose import name differs (``scikit-learn`` ->
+    ``sklearn``) don't match a notebook stem and simply don't contribute — the baked
+    danger set carries those import names instead."""
+    names = set()
+    for req in declared_deps(workspace):
+        bare = _bare_name(req)
+        if bare:
+            names.add(_canonical(bare))
+    return frozenset(names)
+
+
 def declares(workspace: Path, dist_name: str) -> bool:
     """Whether the repo pyproject lists a requirement for ``dist_name``."""
     target = dist_name.lower()

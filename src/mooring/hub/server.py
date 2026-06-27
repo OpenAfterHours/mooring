@@ -35,6 +35,7 @@ from mooring import (
     config_store,
     pbip,
     pyproject_env,
+    shadow,
     sync,
     telemetry,
     workspace_config,
@@ -273,6 +274,14 @@ class Hub:
         artifact_of = {m.path: a.key for a in artifacts for m in a.members}
         # Notebooks the team has turned the copilot off for (synced mooring.toml).
         ai_off = workspace_config.disabled_notebooks(workspace)
+        # Notebooks whose filename shadows an importable module (e.g. polars.py) —
+        # surfaced as a per-row badge instead of an inscrutable kernel traceback.
+        shadowed: dict[str, str] = {}
+        if self.cfg.warn_shadowed_notebooks:
+            extra, ignore = self._shadow_policy(workspace)
+            shadowed = shadow.scan(
+                [f.path for f in report.files], workspace=workspace, extra=extra, ignore=ignore
+            )
         files = [
             {
                 "path": f.path,
@@ -282,6 +291,7 @@ class Hub:
                 "has_local": f.state is sync.FileState.LOCAL or f.local_sha is not None,
                 **({"artifact": artifact_of[f.path]} if f.path in artifact_of else {}),
                 **({"ai_disabled": True} if f.path.endswith(".py") and f.path in ai_off else {}),
+                **({"shadows": shadowed[f.path]} if f.path in shadowed else {}),
             }
             for f in report.files
         ]
@@ -310,6 +320,15 @@ class Hub:
 
             self._top_level_pkgs = pyproject_env.installed_top_level()
         return self._top_level_pkgs
+
+    def _shadow_policy(self, workspace: Path) -> tuple[frozenset[str], frozenset[str]]:
+        """The (extra, ignore) sets parameterising the shadow guard — the hub's
+        single assembly point, mirroring ``cli._shadow_policy`` (the two adapters
+        can't share it: the hub must not import the cli)."""
+        return (
+            pyproject_env.importable_names(workspace),
+            frozenset(workspace_config.shadow_ignored(workspace)),
+        )
 
     def _notebook_env(self, workspace: Path) -> dict:
         """Where a notebook's packages come from, the actively-selected list (the
@@ -936,6 +955,24 @@ class Hub:
                     f"{pyproject_env.PYPROJECT_NAME} but not bundled, so importing them will fail. "
                     "Ask your admin to include them in the build, or run mooring via uv."
                 )
+        # The shadow trap is backend-independent (plain sys.path[0] resolution), so it
+        # is checked outside the use_uv() gate. Folder-scoped: opening an innocent
+        # notebook still warns when a sibling poisons the directory. Merged into the
+        # single `warning` string the front-end shows (never clobbering missing-deps).
+        if self.cfg.warn_shadowed_notebooks:
+            extra, ignore = self._shadow_policy(workspace)
+            findings = shadow.folder_shadows(
+                rel_path, workspace=workspace, extra=extra, ignore=ignore
+            )
+            if findings:
+                names = ", ".join(sorted(set(findings.values())))
+                offenders = ", ".join(sorted(findings))
+                note = (
+                    f"Notebook name(s) shadow an importable module ({offenders} → {names}). "
+                    "Rename the file(s); otherwise notebooks in this folder can fail to import."
+                )
+                existing = payload.get("warning")
+                payload["warning"] = f"{existing}\n{note}" if existing else note
         return JSONResponse(payload)
 
     # -- AI copilot (chat) -----------------------------------------------------

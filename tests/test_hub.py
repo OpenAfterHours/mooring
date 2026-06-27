@@ -163,6 +163,52 @@ def test_state_local_mode_flags_ai_disabled(unconfigured_client):
     assert files["notebooks/a.py"].get("ai_disabled") is True
 
 
+def test_state_flags_shadowing_notebook(unconfigured_client):
+    # A notebook whose name shadows an importable package gets a `shadows` field so
+    # the front-end can badge it; an innocent sibling does not.
+    client, hub = unconfigured_client
+    ws = hub.cfg.workspace()
+    (ws / "notebooks").mkdir(parents=True, exist_ok=True)
+    (ws / "notebooks" / "polars.py").write_text("import marimo\n", "utf-8")
+    (ws / "notebooks" / "clean.py").write_text("import marimo\n", "utf-8")
+    files = {f["path"]: f for f in client.get("/api/state").json()["files"]}
+    assert files["notebooks/polars.py"].get("shadows") == "polars"
+    assert "shadows" not in files["notebooks/clean.py"]
+
+
+def test_state_shadow_field_absent_when_disabled(unconfigured_client):
+    from dataclasses import replace
+
+    client, hub = unconfigured_client
+    hub.app_cfg = replace(hub.app_cfg, warn_shadowed_notebooks=False)
+    ws = hub.cfg.workspace()
+    (ws / "notebooks").mkdir(parents=True, exist_ok=True)
+    (ws / "notebooks" / "polars.py").write_text("import marimo\n", "utf-8")
+    files = {f["path"]: f for f in client.get("/api/state").json()["files"]}
+    assert "shadows" not in files["notebooks/polars.py"]
+
+
+def test_open_warning_includes_shadow(unconfigured_client, monkeypatch):
+    # Opening an innocent notebook still warns about a shadowing sibling, merged into
+    # the single `warning` string the front-end shows.
+    client, hub = unconfigured_client
+    ws = hub.cfg.workspace()
+    (ws / "notebooks").mkdir(parents=True, exist_ok=True)
+    (ws / "notebooks" / "polars.py").write_text("import marimo\n", "utf-8")
+    (ws / "notebooks" / "analysis.py").write_text("import marimo\n", "utf-8")
+
+    class FakeEditor:
+        def use_uv(self):
+            return True
+
+        def url_for(self, rel):
+            return "http://127.0.0.1:9/edit"
+
+    monkeypatch.setattr(hub, "ensure_editor", lambda: FakeEditor())
+    data = client.post("/api/open", json={"path": "notebooks/analysis.py"}).json()
+    assert "polars" in data.get("warning", "")
+
+
 def test_local_mode_new_lists_and_opens_without_login(unconfigured_client, monkeypatch):
     # The headline: create a notebook, see it listed as "local", and open it — all
     # with no repo and no GitHub token. The editor is faked so no marimo spawns.

@@ -35,6 +35,12 @@ folders = ["notebooks", "data", "reports"]
 exclude = []
 warn_file_mb = 10
 max_file_mb = 45
+# Warn when a notebook's filename shadows an importable module (e.g. a notebook
+# named polars.py, which makes `import polars` load the notebook instead of the
+# real package and breaks every notebook in that folder). Shown at `mooring status`
+# and when opening a notebook, plus a badge in the hub. Per-repo exceptions live in
+# the synced mooring.toml ([shadow] ignore); set this false to turn it off entirely.
+warn_shadowed_notebooks = true
 
 [workspace]
 path = ""        # empty = ~/PythonProjects/mooring/<owner>/<repo>
