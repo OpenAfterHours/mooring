@@ -17,6 +17,22 @@ def test_scaffold_writes_minimal_pyproject_and_is_idempotent(tmp_path):
     assert pe.scaffold(tmp_path, lock=False) is False
 
 
+def test_importable_names_from_declared_deps(tmp_path):
+    pe.pyproject_path(tmp_path).write_text(
+        '[project]\nname = "x"\nversion = "0"\n'
+        'dependencies = ["polars>=1", "scikit-learn", "Requests==2.0"]\n',
+        encoding="utf-8",
+    )
+    names = pe.importable_names(tmp_path)
+    assert "polars" in names
+    assert "requests" in names  # PEP 503 canonical (lowercased)
+    assert "scikit-learn" in names  # canonical dist name (won't match a stem; harmless)
+
+
+def test_importable_names_empty_without_pyproject(tmp_path):
+    assert pe.importable_names(tmp_path) == frozenset()
+
+
 def test_scaffold_skips_lock_without_uv(tmp_path, monkeypatch):
     monkeypatch.setattr(pe, "uv_available", lambda: False)
     pe.scaffold(tmp_path, lock=True)

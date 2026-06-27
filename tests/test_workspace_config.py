@@ -124,3 +124,56 @@ def test_merge_extra_folders_unions_without_duplicates(tmp_path):
         "notebooks",
         "packages/x/notebooks",
     )
+
+
+# -- shadow-guard ignore list -------------------------------------------------
+
+
+def test_shadow_ignored_missing_is_empty(tmp_path):
+    assert wc.shadow_ignored(tmp_path) == set()
+
+
+def test_set_shadow_ignored_round_trip(tmp_path):
+    assert wc.set_shadow_ignored(tmp_path, "notebooks/polars.py", True) is True
+    assert wc.shadow_ignored(tmp_path) == {"notebooks/polars.py"}
+    data = tomllib.loads((tmp_path / "mooring.toml").read_text("utf-8"))
+    assert data["shadow"]["ignore"] == ["notebooks/polars.py"]
+
+    assert wc.set_shadow_ignored(tmp_path, "notebooks/polars.py", False) is False
+    # An emptied list removes the file (no spurious new-local file to sync).
+    assert not (tmp_path / "mooring.toml").exists()
+
+
+def test_set_shadow_ignored_normalizes_sorts_and_dedupes(tmp_path):
+    wc.set_shadow_ignored(tmp_path, "notebooks\\z.py", True)  # backslash
+    wc.set_shadow_ignored(tmp_path, "/notebooks/a.py/", True)  # surrounding slashes
+    wc.set_shadow_ignored(tmp_path, "notebooks/z.py", True)  # duplicate of the first
+    data = tomllib.loads((tmp_path / "mooring.toml").read_text("utf-8"))
+    assert data["shadow"]["ignore"] == ["notebooks/a.py", "notebooks/z.py"]
+
+
+def test_shadow_ignore_preserves_unrelated_sections(tmp_path):
+    wc.set_ai_disabled(tmp_path, "notebooks/a.py", True)
+    wc.set_shadow_ignored(tmp_path, "notebooks/polars.py", True)
+    data = tomllib.loads((tmp_path / "mooring.toml").read_text("utf-8"))
+    assert data["ai"]["disabled_notebooks"] == ["notebooks/a.py"]  # untouched
+    assert data["shadow"]["ignore"] == ["notebooks/polars.py"]
+
+    # Removing the shadow ignore prunes only [shadow]; the [ai] section stays.
+    wc.set_shadow_ignored(tmp_path, "notebooks/polars.py", False)
+    data = tomllib.loads((tmp_path / "mooring.toml").read_text("utf-8"))
+    assert "shadow" not in data
+    assert data["ai"]["disabled_notebooks"] == ["notebooks/a.py"]
+
+
+def test_shadow_ignore_read_fails_open_on_corrupt_file(tmp_path):
+    (tmp_path / "mooring.toml").write_text("this is = not valid = toml", "utf-8")
+    assert wc.shadow_ignored(tmp_path) == set()
+
+
+def test_shadow_ignore_write_does_not_clobber_corrupt_file(tmp_path):
+    original = "this is = not valid = toml"
+    (tmp_path / "mooring.toml").write_text(original, "utf-8")
+    with pytest.raises(tomllib.TOMLDecodeError):
+        wc.set_shadow_ignored(tmp_path, "notebooks/polars.py", True)
+    assert (tmp_path / "mooring.toml").read_text("utf-8") == original

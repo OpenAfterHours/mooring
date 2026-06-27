@@ -10,7 +10,7 @@ import sys
 from collections.abc import Mapping
 from pathlib import Path
 
-from mooring import __version__, config, paths, pyproject_env, telemetry, workspace_config
+from mooring import __version__, config, paths, pyproject_env, shadow, telemetry, workspace_config
 
 # SELFTEST_PACKAGES, workspace_hint and legacy_workspace_hint now live in
 # mooring.runtime — a neutral module below both presentation adapters, so the web
@@ -200,6 +200,19 @@ def _build_parser() -> argparse.ArgumentParser:
         build_reqs,
     ):
         cmd.add_argument("--repo", default=None, metavar="ALIAS", help=_REPO_ARG_HELP)
+
+    shadow_cmd = sub.add_parser("shadow", help="manage the notebook-name shadow guard")
+    shadow_sub = shadow_cmd.add_subparsers(dest="shadow_command", required=True)
+    shadow_ignore = shadow_sub.add_parser(
+        "ignore", help="silence the shadow warning for one notebook (it travels to teammates)"
+    )
+    shadow_ignore.add_argument("path", help="workspace-relative notebook path")
+    shadow_ignore.add_argument("--repo", default=None, metavar="ALIAS", help=_REPO_ARG_HELP)
+    shadow_unignore = shadow_sub.add_parser(
+        "unignore", help="re-enable the shadow warning for one notebook"
+    )
+    shadow_unignore.add_argument("path", help="workspace-relative notebook path")
+    shadow_unignore.add_argument("--repo", default=None, metavar="ALIAS", help=_REPO_ARG_HELP)
 
     ai = sub.add_parser("ai", help="AI copilot: sign in to Copilot and check status")
     ai_sub = ai.add_subparsers(dest="ai_command", required=True)
@@ -396,6 +409,8 @@ def cmd_status(cfg: config.Config) -> int:
     print(report.summary())
     if report.review_branch:
         print(f"proposal open on {report.review_branch}")
+    for line in _shadow_warning_lines(cfg, [f.path for f in report.files]):
+        print(line)
     return 0
 
 
@@ -475,6 +490,15 @@ def cmd_open(cfg: config.Config, rel_path: str) -> int:
         print(f"Opened {rel_path} in Power BI Desktop.")
         return 0
     server = EditorServer(workspace)
+    # Ungated by the launch backend: the sys.path[0] shadow trap is plain Python
+    # import resolution and bites uv and frozen runs alike, unlike the missing-deps
+    # note below (which is a bundle-only concern). Scans the whole folder, so opening
+    # an innocent notebook still warns when a sibling poisons the directory.
+    if cfg.warn_shadowed_notebooks:
+        extra, ignore = _shadow_policy(workspace)
+        findings = shadow.folder_shadows(rel_path, workspace=workspace, extra=extra, ignore=ignore)
+        for line in shadow.warning_lines(findings):
+            print(line)
     if not server.use_uv():
         for line in _missing_deps_lines(pyproject_env.missing_deps(workspace)):
             print(line)
@@ -499,6 +523,34 @@ def _missing_deps_lines(missing: list[str]) -> list[str]:
         "them will fail.",
         "  Ask your admin to include them in the build, or run mooring via uv.",
     ]
+
+
+def _shadow_policy(workspace: Path) -> tuple[frozenset[str], frozenset[str]]:
+    """The (extra, ignore) sets that parameterise the shadow guard — the single
+    place the policy is assembled, so the surfacing call sites stay uniform."""
+    return (
+        pyproject_env.importable_names(workspace),
+        frozenset(workspace_config.shadow_ignored(workspace)),
+    )
+
+
+def _shadow_warning_lines(cfg: config.Config, rel_paths: list[str]) -> list[str]:
+    if not cfg.warn_shadowed_notebooks:
+        return []
+    workspace = cfg.workspace()
+    extra, ignore = _shadow_policy(workspace)
+    findings = shadow.scan(rel_paths, workspace=workspace, extra=extra, ignore=ignore)
+    return shadow.warning_lines(findings)
+
+
+def cmd_shadow(cfg: config.Config, args: argparse.Namespace) -> int:
+    workspace = cfg.workspace()
+    rel = workspace_config.normalize_notebook(args.path)
+    ignoring = args.shadow_command == "ignore"
+    workspace_config.set_shadow_ignored(workspace, rel, ignoring)
+    telemetry.log_event("shadow", action=args.shadow_command)
+    print(f"{rel} is {'now ignored by' if ignoring else 'no longer ignored by'} the shadow guard.")
+    return 0
 
 
 def cmd_new(cfg: config.Config, name: str) -> int:
@@ -1189,6 +1241,8 @@ def _dispatch(
         return cmd_init(cfg)
     if command == "deps":
         return cmd_deps(cfg, args)
+    if command == "shadow":
+        return cmd_shadow(cfg, args)
     if command == "build-requirements":
         return cmd_build_requirements(cfg, args.output)
     if command == "delete":

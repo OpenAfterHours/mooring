@@ -48,6 +48,7 @@ class Config:
     exclude: tuple[str, ...] = ()
     warn_file_mb: int = 10
     max_file_mb: int = 45
+    warn_shadowed_notebooks: bool = True
     workspace_path: str = ""
 
     @property
@@ -87,6 +88,7 @@ class AppConfig:
     exclude: tuple[str, ...] = ()
     warn_file_mb: int = 10
     max_file_mb: int = 45
+    warn_shadowed_notebooks: bool = True
     log_endpoint: str = ""
     log_level: str = "info"
     # Appearance shared by the hub, the chat, and the notebooks (see normalize_theme).
@@ -140,6 +142,7 @@ class AppConfig:
                     exclude=self.exclude,
                     warn_file_mb=self.warn_file_mb,
                     max_file_mb=self.max_file_mb,
+                    warn_shadowed_notebooks=self.warn_shadowed_notebooks,
                 )
             alias = self.active_alias
         s = self.spec(alias)
@@ -153,6 +156,7 @@ class AppConfig:
             exclude=self.exclude,
             warn_file_mb=self.warn_file_mb,
             max_file_mb=self.max_file_mb,
+            warn_shadowed_notebooks=self.warn_shadowed_notebooks,
             workspace_path=s.workspace_path,
         )
 
@@ -403,6 +407,7 @@ def load_app_config(
         exclude=_str_list(sync.get("exclude", ()), "exclude"),
         warn_file_mb=int(sync.get("warn_file_mb", 10)),
         max_file_mb=int(sync.get("max_file_mb", 45)),
+        warn_shadowed_notebooks=_as_bool(sync.get("warn_shadowed_notebooks"), True),
         log_endpoint=env.get("MOORING_LOG_ENDPOINT", str(log.get("endpoint", ""))),
         log_level=env.get("MOORING_LOG_LEVEL", str(log.get("level", "info"))),
         ui_theme=normalize_theme(env.get("MOORING_UI_THEME", ui.get("theme", DEFAULT_THEME))),
