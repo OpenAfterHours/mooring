@@ -200,6 +200,10 @@ uv run mooring hub                       # run the hub from source
 See [contributing](docs/developers/contributing.md) for the architecture,
 integration testing, and project conventions.
 
+## License
+
+Mooring is released under the [MIT License](LICENSE).
+
 ---
 
 Built with [moonlit](https://github.com/openafterhours/moonlit).
