@@ -73,7 +73,7 @@ jobs:
         uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
 
       - name: Check tag matches project version
-        # scripts/release.ps1 keeps these in sync; this guard catches hand-rolled tags
+        # scripts/release.py keeps these in sync; this guard catches hand-rolled tags
         run: |
           version=$(uvx --from toml-cli toml get --toml-path pyproject.toml project.version)
           init_version=$(sed -n 's/^__version__ = "\(.*\)"$/\1/p' src/mooring/__init__.py)

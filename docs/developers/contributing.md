@@ -115,21 +115,21 @@ or `zensical.toml` go live automatically.
 
 ## Cutting a release
 
-`scripts/release.ps1` does the whole dance — bump, check, commit, tag, push:
+`scripts/release.py` does the whole dance — bump, check, commit, tag, push:
 
-```powershell
-.\scripts\release.ps1                  # patch: 0.1.0 -> 0.1.1
-.\scripts\release.ps1 minor            # 0.1.0 -> 0.2.0 (also: major)
-.\scripts\release.ps1 -Version 1.0.0   # set an explicit version
-.\scripts\release.ps1 minor -DryRun    # preview without changing anything
+```bash
+uv run python scripts/release.py                  # patch: 0.1.0 -> 0.1.1
+uv run python scripts/release.py minor            # 0.1.0 -> 0.2.0 (also: major)
+uv run python scripts/release.py --version 1.0.0  # set an explicit version
+uv run python scripts/release.py minor --dry-run  # preview without changing anything
 ```
 
-It refuses to run unless you are on a clean, up-to-date `main`; then it bumps
+It refuses to run unless you are on a clean, up-to-date `master`; then it bumps
 the version in `pyproject.toml` + `uv.lock` (via `uv version`) and
 `src/mooring/__init__.py`, runs lint and tests, commits `release: vX.Y.Z`,
-tags `vX.Y.Z`, and pushes branch and tag together. It runs in Windows
-PowerShell 5.1 or [pwsh](https://github.com/PowerShell/PowerShell) (so it
-works on macOS/Linux too).
+tags `vX.Y.Z`, and pushes branch and tag together. It needs only Python 3.12+
+with git and uv on `PATH` (no PowerShell), so it works the same on
+Windows/macOS/Linux.
 
 The pushed tag triggers `.github/workflows/release.yml`, which re-runs the
 checks, builds `mooring.pyz` / `mooring.exe`, attaches them to a GitHub

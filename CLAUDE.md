@@ -75,7 +75,7 @@ Tests that pin these guarantees use a `SECRET_VALUE_DO_NOT_LEAK` fixture and ass
 
 ## Releasing
 
-`scripts/release.ps1` (PowerShell 5.1 or pwsh) does the whole dance: refuses unless on a clean up-to-date `main`, bumps the version in `pyproject.toml` + `uv.lock` (`uv version`) and `src/mooring/__init__.py`, runs lint+tests, commits `release: vX.Y.Z`, tags, and pushes. The tag triggers `release.yml`, which re-checks, builds the frozen artifacts, attaches them to a GitHub Release, and publishes to PyPI — with a guard that fails if the tag and the two version strings disagree. Keep those three versions in sync.
+`scripts/release.py` (Python 3.12+, needs git + uv on PATH — run `uv run python scripts/release.py`) does the whole dance: refuses unless on a clean up-to-date `master`, bumps the version in `pyproject.toml` + `uv.lock` (`uv version`) and `src/mooring/__init__.py`, runs lint+tests, commits `release: vX.Y.Z`, tags, and pushes. The tag triggers `release.yml`, which re-checks, builds the frozen artifacts, attaches them to a GitHub Release, and publishes to PyPI — with a guard that fails if the tag and the two version strings disagree. Keep those three versions in sync.
 
 ## Docs
 
