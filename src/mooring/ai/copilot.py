@@ -59,6 +59,7 @@ class CopilotProvider:
         self._models_lock = threading.Lock()
         self._cached_models: list[dict] | None = None
         self._models_at = 0.0
+        self._models_error = ""  # why the last list_models() came back empty (a 403 etc.)
 
     # -- discovery ----------------------------------------------------------
 
@@ -378,12 +379,30 @@ class CopilotProvider:
                 return self._cached_models
         try:
             models = self._run(self._alist_models(), _PROBE_TIMEOUT)
-        except Exception:  # noqa: BLE001  # never raise into the hub; report none
+            error = ""
+        except Exception as exc:  # noqa: BLE001  # never raise into the hub; report via models_error
             models = []
+            # KEEP the reason so the UI can TELL the user instead of silently showing
+            # an empty model list. The common one is a 403 "not authorized to use this
+            # Copilot feature" (wrong/unlicensed account) — friendly_error turns that
+            # into "switch account or ask an admin". Value-free: a provider API error
+            # string, never any data.
+            error = friendly_error(str(exc))
         with self._models_lock:
             self._cached_models = models
             self._models_at = time.monotonic()
+            self._models_error = error
         return models
+
+    def models_error(self) -> str:
+        """Why the last :meth:`list_models` returned no models — a provider API error
+        such as a 403 'not authorized to use this Copilot feature' — or '' when the
+        last fetch was clean. Lets the hub surface WHY the model list is empty (so the
+        user can switch account or ask an admin) rather than show a dead dropdown.
+        Empty when simply NOT SIGNED IN (that path returns [] without an error; the
+        sign-in panel handles it)."""
+        with self._models_lock:
+            return self._models_error
 
     async def _alist_models(self) -> list[dict]:
         from copilot import CopilotClient

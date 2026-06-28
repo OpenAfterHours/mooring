@@ -887,7 +887,51 @@ function showCopilotSignin(detail) {
   note.className = "muted";
   btn.addEventListener("click", () => startCopilotLogin(btn, note));
   bar.append(btn, note);
-  box.append(msg, sub, bar);
+  // The device-flow code `copilot login` prints lands here once polling sees it
+  // (the CLI's own clipboard copy often fails, and switching account needs the
+  // code typed into the device page) — empty until then.
+  const codeBox = document.createElement("div");
+  codeBox.id = "signin-code-box";
+  codeBox.className = "hidden";
+  box.append(msg, sub, bar, codeBox);
+  box.classList.remove("hidden");
+}
+
+// Render the captured device-login code + URL into the sign-in notice. Built as
+// DOM (textContent), never innerHTML of the raw CLI lines, so nothing can inject.
+function renderSigninCode(login) {
+  const box = $("signin-code-box");
+  if (!box) return;
+  if (!login.code) {
+    box.classList.add("hidden");
+    return;
+  }
+  if (box.dataset.code === login.code) return; // already shown — don't rebuild
+  box.dataset.code = login.code;
+  box.innerHTML = "";
+  const p = document.createElement("p");
+  p.append(document.createTextNode("In the browser, enter this code at "));
+  const a = document.createElement("a");
+  a.href = login.url || "https://github.com/login/device";
+  a.target = "_blank";
+  a.rel = "noopener";
+  a.textContent = (login.url || "github.com/login/device").replace(/^https?:\/\//, "");
+  p.append(a, document.createTextNode(":"));
+  const code = document.createElement("div");
+  code.className = "code";
+  code.textContent = login.code;
+  const copy = document.createElement("button");
+  copy.className = "small";
+  copy.textContent = "Copy code";
+  copy.addEventListener("click", () => {
+    if (navigator.clipboard) {
+      navigator.clipboard.writeText(login.code).then(
+        () => { copy.textContent = "Copied"; setTimeout(() => { copy.textContent = "Copy code"; }, 1500); },
+        () => {},
+      );
+    }
+  });
+  box.append(p, code, copy);
   box.classList.remove("hidden");
 }
 
@@ -925,6 +969,12 @@ async function pollCopilotLogin(btn, note) {
     note.textContent = "";
     showError(data.detail || "Copilot sign-in didn't complete. Try again.");
     return;
+  }
+  // Still pending: show the device code so the user can enter it in the browser.
+  const login = ChatCore.parseDeviceLogin(data.output);
+  if (login.code) {
+    note.textContent = " waiting for you to authorize in the browser…";
+    renderSigninCode(login);
   }
   setTimeout(() => pollCopilotLogin(btn, note), 2500); // still pending — keep polling
 }
@@ -1213,6 +1263,10 @@ async function loadModels() {
   if (!MODELS.length) {
     wrap.classList.add("hidden");
     $("effort-wrap").classList.add("hidden");
+    // If the provider REJECTED the list (e.g. a 403 "not authorized" — a signed-in
+    // but unlicensed account), say so. A not-signed-in account returns no error
+    // here; the session's "fail" event shows the sign-in panel instead.
+    if (data.error) showError(data.error);
     return;
   }
   wrap.classList.remove("hidden");

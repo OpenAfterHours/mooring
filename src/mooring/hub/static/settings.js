@@ -36,6 +36,7 @@ function showError(msg) {
 
 let MODELS = []; // [{id, name, multiplier}] from /api/ai/models (empty if AI off)
 let modelsLoaded = false; // did the last /api/ai/models call succeed (AI on)?
+let modelsError = ""; // why the list is empty (e.g. a 403 "not authorized") — shown on the row
 
 // Build the value to send for a control, reading its DOM element. An emptied
 // number field yields null, which the caller treats as a no-op (not a bad write).
@@ -131,6 +132,14 @@ function renderRow(spec) {
   help.className = "settings-help muted";
   help.textContent = spec.help;
   left.appendChild(help);
+  // Why the model picker is empty (e.g. a 403 "not authorized") — so the row isn't a
+  // silent dead end. Only the model row carries it; only when the list failed.
+  if (spec.key === "ai.model" && modelsError) {
+    const note = document.createElement("div");
+    note.className = "settings-help env-note";
+    note.textContent = "Couldn’t load models — " + modelsError;
+    left.appendChild(note);
+  }
   if (spec.env_overridden) {
     const note = document.createElement("div");
     note.className = "settings-help muted env-note";
@@ -289,6 +298,7 @@ async function reload() {
 async function loadModels() {
   const { ok, data } = await api("/api/ai/models");
   MODELS = ok && data.models ? data.models : [];
+  modelsError = ok && data.error ? data.error : "";
   modelsLoaded = ok;
 }
 

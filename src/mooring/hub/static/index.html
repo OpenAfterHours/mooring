@@ -32,12 +32,24 @@
           <b>separately</b> from your GitHub login &mdash; it can even be a
           different account.</p>
         <div id="copilot-status" class="muted"></div>
+        <!-- "Signed in, but this account can't USE Copilot" (e.g. a 403 not-authorized).
+             Distinct from not-signed-in: the fix is Switch account or ask an admin. -->
+        <div id="copilot-authz" class="copilot-authz hidden"></div>
         <div class="toolbar">
           <button id="copilot-connect" class="primary small hidden">Sign in to Copilot</button>
           <button id="copilot-switch" class="small hidden">Switch account</button>
           <button id="copilot-check" class="small">Check status</button>
         </div>
         <div id="copilot-note" class="muted"></div>
+        <!-- The device-flow code `copilot login` prints (its own clipboard copy
+             often fails). Shown while polling so switching account is possible. -->
+        <div id="copilot-code-box" class="hidden">
+          <p>In the browser, enter this code at
+            <a id="copilot-link" href="https://github.com/login/device" target="_blank" rel="noopener">github.com/login/device</a>:
+          </p>
+          <div id="copilot-code" class="code"></div>
+          <div class="toolbar"><button id="copilot-copy" class="small">Copy code</button></div>
+        </div>
       </div>
     </details>
     <select id="theme-select" title="Appearance (hub, chat &amp; notebooks)" aria-label="Appearance (hub, chat &amp; notebooks)">
@@ -116,6 +128,9 @@
     </details>
   </footer>
 
+  <!-- Pure helpers (ChatCore.parseDeviceLogin for the Copilot sign-in); loaded
+       before app.js so the global is ready. No DOM/side effects on load. -->
+  <script src="/static/chat_core.js"></script>
   <script src="/static/app.js"></script>
 </body>
 </html>

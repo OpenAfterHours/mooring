@@ -1,10 +1,11 @@
 "use strict";
 
-// Pure, DOM-free helpers for the copilot REPL. Kept apart from chat.js so they
-// can be unit-tested under Node (see tests/js/chat_core.test.js) with no DOM.
-// In the browser this file is loaded BEFORE chat.js and exposes `ChatCore`
-// globally; under Node it is require()d. Nothing here touches `document`, the
-// network, or storage — the value-blind/PII posture lives in chat.js + the hub.
+// Pure, DOM-free helpers for the copilot REPL (and the hub's Copilot sign-in).
+// Kept apart from chat.js so they can be unit-tested under Node (see
+// tests/js/chat_core.test.js) with no DOM. In the browser this file is loaded
+// BEFORE chat.js (and before app.js on the hub) and exposes `ChatCore` globally;
+// under Node it is require()d. Nothing here touches `document`, the network, or
+// storage — the value-blind/PII posture lives in chat.js + the hub.
 
 const ChatCore = (function () {
   // -- slash commands -------------------------------------------------------
@@ -259,6 +260,33 @@ const ChatCore = (function () {
     return out;
   }
 
+  // -- Copilot device-login output -----------------------------------------
+  // `copilot login` runs an OAuth DEVICE flow and prints the one-time code +
+  // verification URL to stdout, e.g.:
+  //   "To authenticate, visit https://github.com/login/device and enter code 4B02-8583."
+  // The hub captures those lines (CopilotProvider._drain_login) and returns them
+  // via /api/ai/login/poll's `output`. The CLI tries to copy the code to the
+  // clipboard but that often fails ("Failed to copy to clipboard…"), and a
+  // switch-account flow lands on a device page that needs the code typed in — so
+  // the UI MUST surface it. Extract the code + URL (the rest is just "Waiting…").
+  // Pure: returns {code, url, lines}; empty strings until the code is printed.
+  function parseDeviceLogin(lines) {
+    const arr = Array.isArray(lines) ? lines.map((l) => String(l)) : [];
+    let code = "";
+    let url = "";
+    for (const line of arr) {
+      if (!code) {
+        const m = /\b[A-Z0-9]{4}-[A-Z0-9]{4}\b/.exec(line);
+        if (m) code = m[0];
+      }
+      if (!url) {
+        const u = /https?:\/\/[^\s]+/.exec(line);
+        if (u) url = u[0].replace(/[.,);]+$/, ""); // drop trailing sentence punctuation
+      }
+    }
+    return { code, url, lines: arr.filter((l) => l.trim()) };
+  }
+
   // -- conservative Python highlight, XSS-safe by contract -----------------
   // MUST be called with text that is ALREADY HTML-escaped. It runs in a SINGLE
   // pass and only wraps <span>s around whole source tokens (comment / string /
@@ -302,6 +330,7 @@ const ChatCore = (function () {
     diffLines,
     piiBadge,
     scanErrorMessage,
+    parseDeviceLogin,
     highlightCode,
     cleanJobs,
     PY_KW,

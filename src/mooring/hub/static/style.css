@@ -752,6 +752,13 @@ footer {
 button.ghost { color: var(--muted); }
 button.ghost:hover { color: var(--ink); }
 
+/* "Signed in but not authorized for Copilot" note in the Copilot menu. */
+.copilot-authz {
+  color: var(--warn);
+  font-size: 0.85rem;
+  margin: 0.25rem 0 0.5rem;
+}
+
 .settings-row {
   display: flex;
   gap: 1rem;
