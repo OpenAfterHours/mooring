@@ -1,4 +1,4 @@
-# ⚓ mooring
+# <img src="docs/assets/images/anchor-mark.svg" alt="" height="28"> mooring
 
 **Analyse your data with an AI copilot that never sees your data** — then share
 that work across your team over GitHub, with no git and no tokens. For teams of
