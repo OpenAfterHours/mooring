@@ -12,7 +12,8 @@ see [why the copilot can't see your data](../admins/ai-privacy.md).
 
 ## One-time setup
 
-The copilot ships as an optional extra (it bundles GitHub's Copilot CLI).
+The copilot ships as an optional extra (it brings GitHub's Copilot CLI, which is
+fetched automatically on first use, so the first sign-in needs internet access).
 Install mooring with the `copilot` extra — pick the form that matches how you
 run it, and quote the brackets so the shell doesn't glob them:
 

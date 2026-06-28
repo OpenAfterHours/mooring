@@ -59,7 +59,7 @@ default install (and out of the frozen `.pyz`):
 
 | Extra | Adds | Enables |
 |-------|------|---------|
-| `copilot` | `github-copilot-sdk` (bundles a native CLI) | the [AI copilot](../users/ai-copilot.md) |
+| `copilot` | `github-copilot-sdk` (fetches a native CLI on first use) | the [AI copilot](../users/ai-copilot.md) |
 | `pii` | `gliner` (torch + transformers) | [NER name detection](ai-privacy.md#name-detection-opt-in-local-ner) for the PII guard |
 | `pii-spacy` | `spacy` + the bundled `mooring-spacy-en-md` model | [offline name detection](ai-privacy.md#spacy-backend) for air-gapped teams |
 

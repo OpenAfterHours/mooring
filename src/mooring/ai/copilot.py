@@ -15,10 +15,13 @@ instruction are not persisted to ~/.copilot), embedding retrieval, and local
 config discovery. The agent therefore can only read the schema text we hand it;
 it can never reach the data files.
 
-Auth: the SDK has no programmatic login, so we drive the bundled CLI's
+Auth: the SDK has no programmatic login, so we drive the Copilot CLI's
 ``copilot login`` (OAuth device flow) and reuse the stored credential via
-``use_logged_in_user=True``. The bundled CLI is a native ``copilot.exe`` shipped
-inside the package; discovery is path-based and survives moonlit's extraction.
+``use_logged_in_user=True``. Older SDKs bundled a native ``copilot.exe`` inside
+the package; github-copilot-sdk >=1.0.2 instead downloads it to a shared cache at
+first use. Discovery (:meth:`CopilotProvider._cli_path`) checks
+``COPILOT_CLI_PATH``, the legacy bundled location, the SDK's download cache, then
+``PATH`` — and fetches it on demand for the login subprocess.
 """
 
 from __future__ import annotations
@@ -59,18 +62,36 @@ class CopilotProvider:
 
     # -- discovery ----------------------------------------------------------
 
-    def _cli_path(self) -> str | None:
+    def _cli_path(self, *, download: bool = False) -> str | None:
         override = os.environ.get("COPILOT_CLI_PATH")
         if override and Path(override).exists():
             return override
         try:
             import copilot as copilot_sdk
 
+            # Legacy layout: github-copilot-sdk <1.0.2 bundled the binary under
+            # <pkg>/bin/. Newer SDKs download it at first use instead (below).
             bin_name = "copilot.exe" if sys.platform == "win32" else "copilot"
             candidate = Path(copilot_sdk.__file__).parent / "bin" / bin_name
             if candidate.exists():
                 return str(candidate)
         except Exception:  # noqa: BLE001  # SDK not importable -> not available
+            pass
+        # github-copilot-sdk >=1.0.2 downloads the CLI to a shared cache at first
+        # use rather than bundling it. Prefer an already-cached binary; only fetch
+        # over the network when explicitly asked (the login subprocess needs a real
+        # binary on disk) so available()/status stay cheap and offline-safe.
+        try:
+            from copilot import _cli_download
+
+            cached = _cli_download.get_cached_cli_path()
+            if cached and Path(cached).exists():
+                return cached
+            if download:
+                fetched = _cli_download.get_or_download_cli()
+                if fetched and Path(fetched).exists():
+                    return fetched
+        except Exception:  # noqa: BLE001  # private SDK API absent/changed -> fall through
             pass
         return shutil.which("copilot")
 
@@ -79,7 +100,38 @@ class CopilotProvider:
             import copilot  # noqa: F401
         except Exception:  # noqa: BLE001
             return False
-        return self._cli_path() is not None
+        if self._cli_path() is not None:
+            return True
+        # github-copilot-sdk >=1.0.2 ships no bundled binary; it auto-downloads the
+        # CLI at first use when a version is pinned (a published wheel). Treat that
+        # as available so a fresh `mooring[copilot]` install works without a manual
+        # pre-download — the binary lands lazily on connect/session start. (An
+        # editable/source SDK pins CLI_VERSION=None and can't auto-download, so it
+        # stays unavailable unless a binary is already resolvable above.)
+        try:
+            from copilot._cli_version import CLI_VERSION
+
+            return CLI_VERSION is not None
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _require_cli(self) -> str:
+        """Resolve the CLI binary for a direct ``copilot login`` subprocess.
+
+        Unlike the SDK-client paths (probe/models/session), the login command
+        shells out to the binary directly, so it can't rely on the SDK's own
+        download-on-start. Fetch it on first use here, and raise a friendly
+        :class:`AIError` if it can't be obtained (offline, or a source SDK with no
+        pinned version) rather than tripping an assertion.
+        """
+        cli = self._cli_path(download=True)
+        if cli is None:
+            raise AIError(
+                "Couldn't obtain the Copilot CLI binary (the SDK downloads it on "
+                "first use). Check your network connection, or set COPILOT_CLI_PATH "
+                "to a manually-installed binary."
+            )
+        return cli
 
     # -- status -------------------------------------------------------------
 
@@ -172,8 +224,7 @@ class CopilotProvider:
         """
         if not self.available():
             raise AIError(_COPILOT_UNAVAILABLE)
-        cli = self._cli_path()
-        assert cli is not None  # available() above guarantees the CLI path
+        cli = self._require_cli()
         with self._login_lock:
             if self._login_proc is not None and self._login_proc.poll() is None:
                 return self._connecting_status("Sign-in already in progress.")
@@ -227,8 +278,7 @@ class CopilotProvider:
         """Run ``copilot login`` attached to the terminal (the CLI command path)."""
         if not self.available():
             raise AIError(_COPILOT_UNAVAILABLE)
-        cli = self._cli_path()
-        assert cli is not None  # available() above guarantees the CLI path
+        cli = self._require_cli()
         cmd = [cli, "login"]
         if host:
             cmd += ["--host", host]
