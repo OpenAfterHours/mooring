@@ -127,3 +127,27 @@ def test_require_cli_raises_when_unobtainable(isolate_discovery, monkeypatch):
     provider = CopilotProvider()
     with pytest.raises(AIError, match="Couldn't obtain the Copilot CLI"):
         provider._require_cli()
+
+
+def test_list_models_captures_authorization_error_then_clears(isolate_discovery, monkeypatch):
+    # A models.list 403 must NOT vanish: list_models returns [] AND models_error
+    # explains why (so the UI can tell the user to fix access), then a later clean
+    # fetch clears the stale reason. (_alist_models is stubbed so no real SDK runs.)
+    _fake_sdk(monkeypatch, cached=None, version="1.0.65")
+    provider = CopilotProvider()
+    monkeypatch.setattr(provider, "available", lambda: True)
+    monkeypatch.setattr(provider, "_alist_models", lambda: None)
+
+    def boom(*_a, **_k):
+        raise RuntimeError(
+            'Request models.list failed with message: 403 '
+            '"unauthorized: not authorized to use this Copilot feature"'
+        )
+
+    monkeypatch.setattr(provider, "_run", boom)
+    assert provider.list_models() == []
+    assert "authorized" in provider.models_error()  # friendly "isn't authorized…" guidance
+
+    monkeypatch.setattr(provider, "_run", lambda *_a, **_k: [{"id": "m", "name": "M"}])
+    assert provider.list_models(force=True) == [{"id": "m", "name": "M"}]
+    assert provider.models_error() == ""

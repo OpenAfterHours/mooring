@@ -531,6 +531,14 @@ function renderCopilotStatus(s) {
   const statusEl = $("copilot-status");
   const connectBtn = $("copilot-connect");
   const switchBtn = $("copilot-switch");
+  const authzEl = $("copilot-authz");
+  // "Signed in, but this account isn't authorized for Copilot" (e.g. a 403). Shown
+  // whenever the provider reported it, with Switch account offered as the fix.
+  authzEl.classList.toggle("hidden", !(s && s.authz_error));
+  if (s && s.authz_error) {
+    authzEl.textContent = s.authz_error;
+    switchBtn.classList.remove("hidden");
+  }
   if (!s || s.available === false) {
     statusEl.textContent =
       s?.detail ||
@@ -574,6 +582,8 @@ async function startCopilotLogin() {
   const note = $("copilot-note");
   $("copilot-connect").disabled = true;
   $("copilot-switch").disabled = true;
+  $("copilot-code-box").classList.add("hidden"); // reset any prior code
+  $("copilot-code").textContent = "";
   note.textContent = "Opening a browser to sign in to Copilot…";
   const data = await api("/api/ai/login/start", {});
   if (data.error) {
@@ -591,6 +601,7 @@ async function pollCopilotLogin() {
   const note = $("copilot-note");
   const data = await api("/api/ai/login/poll");
   if (data.status === "ok") {
+    $("copilot-code-box").classList.add("hidden");
     note.textContent = data.account ? `Signed in as @${data.account}.` : "Signed in to Copilot.";
     $("copilot-connect").disabled = false;
     $("copilot-switch").disabled = false;
@@ -598,11 +609,25 @@ async function pollCopilotLogin() {
     return;
   }
   if (data.status === "error") {
+    $("copilot-code-box").classList.add("hidden");
     $("copilot-connect").disabled = false;
     $("copilot-switch").disabled = false;
     note.textContent = "";
     showError(data.detail || "Copilot sign-in didn't complete.");
     return;
+  }
+  // Still pending: surface the device code `copilot login` printed. The CLI's own
+  // clipboard copy often fails and a switch-account flow needs the code typed in,
+  // so without this the device page is unusable (the original bug).
+  const login = ChatCore.parseDeviceLogin(data.output);
+  if (login.code) {
+    note.textContent = "Waiting for you to authorize in the browser…";
+    $("copilot-code").textContent = login.code;
+    if (login.url) {
+      $("copilot-link").href = login.url;
+      $("copilot-link").textContent = login.url.replace(/^https?:\/\//, "");
+    }
+    $("copilot-code-box").classList.remove("hidden");
   }
   setTimeout(pollCopilotLogin, 2500); // still pending — keep polling
 }
@@ -616,6 +641,16 @@ document.addEventListener("click", (e) => {
 
 $("copilot-connect").addEventListener("click", startCopilotLogin);
 $("copilot-switch").addEventListener("click", startCopilotLogin);
+$("copilot-copy").addEventListener("click", () => {
+  const code = $("copilot-code").textContent;
+  const btn = $("copilot-copy");
+  if (code && navigator.clipboard) {
+    navigator.clipboard.writeText(code).then(
+      () => { btn.textContent = "Copied"; setTimeout(() => { btn.textContent = "Copy code"; }, 1500); },
+      () => { /* clipboard blocked — the code is visible to copy by hand */ },
+    );
+  }
+});
 $("copilot-check").addEventListener("click", () => {
   $("copilot-note").textContent = "Checking…";
   refreshCopilotStatus(true).then(() => {

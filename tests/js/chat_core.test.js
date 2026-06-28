@@ -255,3 +255,34 @@ test("cleanJobs: tolerates empty / missing input", () => {
   assert.deepEqual(C.cleanJobs(null), []);
   assert.deepEqual(C.cleanJobs([{}, { brief: "" }]), []);
 });
+
+test("parseDeviceLogin: extracts the one-time code + URL from real CLI output", () => {
+  // The exact lines `copilot login` prints to stdout (captured live).
+  const r = C.parseDeviceLogin([
+    "To authenticate, visit https://github.com/login/device and enter code 4B02-8583.",
+    "Waiting for authorization...",
+    "Failed to copy to clipboard. Please visit https://github.com/login/device and enter the code 4B02-8583 manually.",
+  ]);
+  assert.equal(r.code, "4B02-8583");
+  assert.equal(r.url, "https://github.com/login/device"); // trailing "." stripped
+  assert.equal(r.lines.length, 3);
+});
+
+test("parseDeviceLogin: no code printed yet -> empty fields, output preserved", () => {
+  const r = C.parseDeviceLogin(["Waiting for authorization..."]);
+  assert.equal(r.code, "");
+  assert.equal(r.url, "");
+  assert.deepEqual(r.lines, ["Waiting for authorization..."]);
+});
+
+test("parseDeviceLogin: tolerates missing / non-array output", () => {
+  assert.deepEqual(C.parseDeviceLogin(undefined), { code: "", url: "", lines: [] });
+  assert.deepEqual(C.parseDeviceLogin(null), { code: "", url: "", lines: [] });
+  assert.deepEqual(C.parseDeviceLogin("nope"), { code: "", url: "", lines: [] });
+});
+
+test("parseDeviceLogin: a bare code without a URL still parses", () => {
+  const r = C.parseDeviceLogin(["your code is ABCD-1234"]);
+  assert.equal(r.code, "ABCD-1234");
+  assert.equal(r.url, "");
+});

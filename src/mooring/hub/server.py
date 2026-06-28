@@ -1561,13 +1561,19 @@ class Hub:
             return JSONResponse({"enabled": False}, status_code=404)
         provider = self._provider_for()
         models = await asyncio.to_thread(provider.list_models)
-        return JSONResponse(
-            {
-                "models": models,
-                "default_model": self.app_cfg.ai_model or "",
-                "default_effort": self.app_cfg.ai_reasoning_effort or "",
-            }
-        )
+        payload = {
+            "models": models,
+            "default_model": self.app_cfg.ai_model or "",
+            "default_effort": self.app_cfg.ai_reasoning_effort or "",
+        }
+        # When the list is empty because the provider REJECTED the request (e.g. a
+        # 403 "not authorized to use this Copilot feature" — a signed-in but
+        # unlicensed account), pass the reason through so the page can show it
+        # instead of a silently empty picker. Value-free (a provider error string).
+        error = getattr(provider, "models_error", lambda: "")()
+        if error and not models:
+            payload["error"] = error
+        return JSONResponse(payload)
 
     # -- AI copilot (Copilot sign-in) ------------------------------------------
     # GitHub Copilot signs in SEPARATELY from mooring's GitHub login (auth.py): a
@@ -1611,9 +1617,20 @@ class Hub:
         probe = request.query_params.get("probe", "").lower() in ("1", "true", "yes")
         if probe and hasattr(provider, "status"):
             st = provider.status(force=True)
+            # A forced check also re-lists models, so an AUTHORIZATION failure
+            # (signed in, but the account can't actually USE Copilot) is current —
+            # status()'s auth probe alone reports "connected" for such an account.
+            if hasattr(provider, "list_models"):
+                provider.list_models(force=True)
         else:
             st = provider.cached_status() if hasattr(provider, "cached_status") else None
-        return JSONResponse(self._ai_status_dict(st))
+        data = self._ai_status_dict(st)
+        # Surface "signed in but not authorized for Copilot" so the menu (which has
+        # the Switch account button) can tell the user how to fix access.
+        authz = getattr(provider, "models_error", lambda: "")()
+        if authz:
+            data["authz_error"] = authz
+        return JSONResponse(data)
 
     async def api_ai_login_start(self, request: Request) -> JSONResponse:
         """Kick off the Copilot browser sign-in (device flow) in the background.

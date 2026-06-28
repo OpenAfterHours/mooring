@@ -1327,6 +1327,29 @@ class _FakeModelProvider:
         ]
 
 
+class _FakeUnauthorizedProvider:
+    """Signed in, but the account can't USE Copilot: list_models returns [] and
+    reports WHY (a 403), exactly like CopilotProvider after a models.list 403. The
+    auth probe still says "connected" — authorization is a separate gate."""
+
+    def list_models(self, force=False):
+        return []
+
+    def models_error(self):
+        return (
+            "Copilot rejected the request: this account isn't authorized for the "
+            "Copilot SDK/agent feature. A GitHub org/enterprise admin must enable it."
+        )
+
+    def status(self, force=False):
+        from mooring.ai.base import ProviderStatus
+
+        return ProviderStatus("copilot", available=True, connected=True, account="phil")
+
+    def cached_status(self):
+        return self.status()
+
+
 def test_chat_models_lists_models(unconfigured_client, monkeypatch):
     client, _ = unconfigured_client
     monkeypatch.setattr("mooring.ai.get_provider", lambda app_cfg: _FakeModelProvider())
@@ -1336,6 +1359,28 @@ def test_chat_models_lists_models(unconfigured_client, monkeypatch):
     assert [m["id"] for m in data["models"]] == ["auto", "claude-opus-4.8"]
     assert data["models"][1]["efforts"] == ["low", "high", "max"]
     assert "default_model" in data and "default_effort" in data
+    assert "error" not in data  # a clean list carries no error
+
+
+def test_chat_models_surfaces_authorization_error(unconfigured_client, monkeypatch):
+    # An unlicensed account must not silently get an empty picker — the 403 reason
+    # rides along so the settings page / chat can tell the user to fix access.
+    client, _ = unconfigured_client
+    monkeypatch.setattr("mooring.ai.get_provider", lambda app_cfg: _FakeUnauthorizedProvider())
+    data = client.get("/api/ai/models").json()
+    assert data["models"] == []
+    assert "authorized" in data["error"]
+
+
+def test_ai_status_reports_authz_error_for_unlicensed_account(unconfigured_client, monkeypatch):
+    # The auth probe alone reports "connected" for a signed-in-but-unlicensed
+    # account, so the menu must ALSO surface the authorization failure (its Switch
+    # account button is the fix).
+    client, _ = unconfigured_client
+    monkeypatch.setattr("mooring.ai.get_provider", lambda app_cfg: _FakeUnauthorizedProvider())
+    data = client.get("/api/ai/status?probe=1").json()
+    assert data["connected"] is True
+    assert "authorized" in data["authz_error"]
 
 
 def test_provider_is_built_once_and_reused(unconfigured_client, monkeypatch):
@@ -1490,7 +1535,12 @@ def test_ai_login_poll_pending_then_ok(unconfigured_client, monkeypatch):
     client, _ = unconfigured_client
     fake = _use_auth_provider(monkeypatch)
     client.post("/api/ai/login/start", json={})
-    assert client.get("/api/ai/login/poll").json()["status"] == "pending"  # browser still open
+    pending = client.get("/api/ai/login/poll").json()
+    assert pending["status"] == "pending"  # browser still open
+    # The captured CLI output (where `copilot login` prints the device code + URL)
+    # MUST ride along so the UI can show it — switching account is impossible
+    # otherwise. ChatCore.parseDeviceLogin pulls the code out of these lines.
+    assert pending["output"] == ["visit https://github.com/login/device"]
     # The user authorised in the browser; the CLI exited and the account is connected.
     fake.running = False
     fake.connected = True
