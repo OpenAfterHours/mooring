@@ -37,22 +37,35 @@ extra_javascript = ["assets/javascripts/landing.js"]
 # derived from the docs/ directory layout.
 nav = [
   { "Home" = "index.md" },
-  { "For users" = [
-    { "Install & first run" = "users/index.md" },
+
+  # Quickstart is the landing page's primary CTA and the obvious "start here".
+  { "Quickstart (5 minutes)" = "users/quickstart.md" },
+
+  # Section names are the value props, in priority order. The flagship — the
+  # schema-only copilot — leads, pairing the capability page with the trust doc
+  # so the privacy story is the first thing a visitor meets in the nav.
+  { "AI that never sees your data" = [
+    { "What the copilot can do" = "users/ai-copilot.md" },
+    { "Why it can't see your data" = "admins/ai-privacy.md" },
+  ] },
+  { "Get started — just Python 3.12+" = [
+    { "Install & sign in" = "users/index.md" },
+  ] },
+  { "Share notebooks with your team" = [
     { "Daily workflow" = "users/daily-workflow.md" },
-    { "AI copilot" = "users/ai-copilot.md" },
+    { "When two people edit at once" = "users/conflicts.md" },
     { "Power BI reports" = "users/power-bi.md" },
-    { "Resolving conflicts" = "users/conflicts.md" },
+  ] },
+  { "Reference" = [
     { "Command-line reference" = "users/cli.md" },
   ] },
-  # Top-level (not nested under "For admins") so the privacy story is always
-  # visible in the nav — it's a trust doc for analysts and reviewers, not just admins.
-  { "Secure AI copilot" = "admins/ai-privacy.md" },
-  { "For admins" = [
+  { "Set up a team (admins)" = [
     { "Overview & checklist" = "admins/index.md" },
     { "GitHub setup" = "admins/github-setup.md" },
     { "Configuration" = "admins/configuration.md" },
-    { "Build & distribute" = "admins/build-and-distribute.md" },
+    # Frozen single-file builds are an advanced fallback for no-Python machines,
+    # not the default path — demoted to the last admin item.
+    { "Advanced: offline / frozen builds" = "admins/build-and-distribute.md" },
   ] },
   { "For developers" = [
     { "Architecture" = "developers/index.md" },

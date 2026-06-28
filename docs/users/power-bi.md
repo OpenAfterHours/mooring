@@ -4,9 +4,16 @@ icon: lucide/chart-column
 
 # Power BI reports
 
-Mooring can sync **Power BI projects** alongside your notebooks, so report
-definitions live in the same GitHub repo and travel with the data they
-visualise. You keep authoring in Power BI Desktop; mooring handles the sync.
+Mooring syncs **Power BI report projects** (`.pbip`) alongside your notebooks,
+so report definitions live in the same GitHub repo and are shared with your
+team — no git, no tokens. You keep authoring in Power BI Desktop; mooring
+handles the sync.
+
+!!! note "The schema-only AI guarantee is unaffected"
+
+    Syncing PBIP projects changes nothing about the copilot's privacy: it
+    still sees only your column names and types and your notebook's code, never
+    the data itself. See [Why it cannot see your data](../admins/ai-privacy.md).
 
 ## Save your report as a project (.pbip)
 

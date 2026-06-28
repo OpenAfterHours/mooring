@@ -4,49 +4,57 @@ icon: lucide/terminal
 
 # Command-line reference
 
-Everything the hub does is also available from a terminal. Run the app file with
-a command after it. The examples use `mooring.pyz`; with the Windows build, use
-`mooring.exe` instead.
+Everything the hub does is also available from a terminal — including the
+schema-only [AI copilot](ai-copilot.md), which sees your column names and types
+and your notebook's code, but never the data itself.
+
+The examples use bare `mooring <cmd>` — you installed it with `uvx mooring`,
+`uv tool install mooring`, or `pip install mooring`. For a one-off run without
+installing, prefix with `uvx`, e.g. `uvx mooring status`.
+
+!!! note "Running a frozen .pyz/.exe build?"
+    Use `python mooring.pyz <cmd>` (or `mooring.exe <cmd>`) instead of the bare
+    `mooring <cmd>` shown below.
 
 Running the app with **no command** opens the browser hub.
 
 ## Commands
 
 ```
-python mooring.pyz hub [--no-browser] [--port PORT]
-python mooring.pyz login [--host HOST]
-python mooring.pyz logout
-python mooring.pyz whoami
-python mooring.pyz repo list
-python mooring.pyz repo add owner/name [--alias NAME] [--branch BR]
-                            [--workspace PATH] [--host HOST] [--no-use]
-python mooring.pyz repo use <alias>
-python mooring.pyz repo remove <alias> | repo remove --all
-python mooring.pyz status [--repo ALIAS]
-python mooring.pyz pull [--theirs | --keep-both] [--repo ALIAS]
-python mooring.pyz push [paths...] [-m "message"] [--repo ALIAS]
-python mooring.pyz propose [paths...] [-m "message"] [--repo ALIAS]
-python mooring.pyz open notebooks/sales.py
-python mooring.pyz open reports/sales.pbip
-python mooring.pyz new sales-analysis
-python mooring.pyz delete notebooks/sales.py [-y]
-python mooring.pyz rollback notebooks/sales.py [-y] [--conflicts]
-python mooring.pyz init
-python mooring.pyz deps add polars "scipy>=1.11"
-python mooring.pyz deps remove polars
-python mooring.pyz deps list
-python mooring.pyz deps lock
-python mooring.pyz build-requirements [-o FILE]
-python mooring.pyz ai status
-python mooring.pyz ai login [--host HOST]
-python mooring.pyz ai dictionary check [--repo ALIAS]
-python mooring.pyz ai pii check [--repo ALIAS] [--notebook REL]
-python mooring.pyz ai pii model [--repo ALIAS]
-python mooring.pyz ai pii doctor
-python mooring.pyz config set <key> <value...> | config get <key>
-python mooring.pyz config unset <key> | config list | config path
-python mooring.pyz selftest
-python mooring.pyz version
+mooring hub [--no-browser] [--port PORT]
+mooring login [--host HOST]
+mooring logout
+mooring whoami
+mooring repo list
+mooring repo add owner/name [--alias NAME] [--branch BR]
+                 [--workspace PATH] [--host HOST] [--no-use]
+mooring repo use <alias>
+mooring repo remove <alias> | repo remove --all
+mooring status [--repo ALIAS]
+mooring pull [--theirs | --keep-both] [--repo ALIAS]
+mooring push [paths...] [-m "message"] [--repo ALIAS]
+mooring propose [paths...] [-m "message"] [--repo ALIAS]
+mooring open notebooks/sales.py
+mooring open reports/sales.pbip
+mooring new sales-analysis
+mooring delete notebooks/sales.py [-y]
+mooring rollback notebooks/sales.py [-y] [--conflicts]
+mooring init
+mooring deps add polars "scipy>=1.11"
+mooring deps remove polars
+mooring deps list
+mooring deps lock
+mooring build-requirements [-o FILE]
+mooring ai status
+mooring ai login [--host HOST]
+mooring ai dictionary check [--repo ALIAS]
+mooring ai pii check [--repo ALIAS] [--notebook REL]
+mooring ai pii model [--repo ALIAS]
+mooring ai pii doctor
+mooring config set <key> <value...> | config get <key>
+mooring config unset <key> | config list | config path
+mooring selftest
+mooring version
 ```
 
 ### `hub`
@@ -181,7 +189,7 @@ Delete a notebook from your workspace. A `.pbip` path removes the whole Power BI
 project (its pointer plus the `.SemanticModel/` and `.Report/` folders).
 
 ```
-python mooring.pyz delete notebooks/sales.py
+mooring delete notebooks/sales.py
 ```
 
 Deletion is **local only**: it removes the file(s) from your workspace, and the
@@ -196,7 +204,7 @@ Discard your local changes to a notebook and restore the last version you pulled
 or pushed — go back to the last synced checkpoint.
 
 ```
-python mooring.pyz rollback notebooks/sales.py
+mooring rollback notebooks/sales.py
 ```
 
 - Works on a file that is *modified* or *deleted locally*. A never-synced file
@@ -238,12 +246,12 @@ Read and edit your user `config.toml` by **dotted key**, without hand-editing th
 file (every other setting is preserved):
 
 ```
-python mooring.pyz config set ai.pii.enabled true
-python mooring.pyz config set ai.pii.name_labels person name organization
-python mooring.pyz config get ai.pii.enabled        # effective value
-python mooring.pyz config unset ai.pii.enabled      # revert to the default
-python mooring.pyz config list                      # whole effective config
-python mooring.pyz config path                      # config.toml location
+mooring config set ai.pii.enabled true
+mooring config set ai.pii.name_labels person name organization
+mooring config get ai.pii.enabled        # effective value
+mooring config unset ai.pii.enabled      # revert to the default
+mooring config list                      # whole effective config
+mooring config path                      # config.toml location
 ```
 
 `true`/`false` become booleans and numbers are parsed; several tokens become a
@@ -269,4 +277,4 @@ sync misbehaves.
 ### `version`
 
 Print the mooring version. `--version` (as a flag, e.g.
-`python mooring.pyz --version`) does the same.
+`mooring --version`) does the same.

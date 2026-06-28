@@ -19,6 +19,15 @@ off by default and described in [Team context](#team-context-opt-in-not-a-struct
 below. When it is on, the headline above holds for your data, but the model also
 sees whatever your team wrote into those files.
 
+New to mooring? The [5-minute quickstart](../users/quickstart.md) walks through
+installing (`uvx mooring`), signing in, and sharing a notebook with your team, and
+[What the copilot can do](../users/ai-copilot.md) shows the copilot at work. This
+page is the *why it's safe* companion to both — schema-only: it sees your column
+names and types and your notebook's code, but never the data itself.
+
+> Running a frozen `.pyz`/`.exe` build? Use `python mooring.pyz <cmd>` (or
+> `mooring.exe <cmd>`) in place of the `mooring <cmd>` examples below.
+
 ## What the assistant receives
 
 | Sent to the model | Why it's safe |
@@ -334,10 +343,11 @@ mooring ai pii model               # verifies the model loads (nothing to downlo
 ```
 
 - **Delivery options if even the companion isn't on your mirror.** The model is a static
-  folder, so deliver it however mooring itself reaches the box: sideload the folder and
-  point `[ai.pii] name_model` at its path, or **bundle it into the frozen `.pyz`/`.exe`**
-  your admin builds (the channel that already works), or have IT add the one static
-  companion wheel to the mirror. The maintainer vendors the model once with
+  folder, so deliver it however mooring itself reaches the box: have IT add the one static
+  companion wheel to your internal PyPI mirror (the same channel that already serves
+  `mooring`), or sideload the folder and point `[ai.pii] name_model` at its path — or, as
+  the advanced fallback for a machine with no Python tooling at all, **bundle it into the
+  frozen `.pyz`/`.exe`** your admin builds. The maintainer vendors the model once with
   `scripts/vendor_spacy_model.py`.
 - **Same privacy posture.** Local-only, value-free `(line, kind)` findings — identical to
   GLiNER. The trade-offs are accuracy (spaCy `md` is solid for people/orgs but weaker than

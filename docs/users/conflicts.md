@@ -42,10 +42,15 @@ On a conflicted file the hub offers:
 The same strategies are available on `pull`:
 
 ```
-python mooring.pyz pull              # skip conflicts, leave them for you to resolve
-python mooring.pyz pull --theirs     # overwrite local edits with remote versions
-python mooring.pyz pull --keep-both  # keep local edits, save remote versions as copies
+mooring pull              # skip conflicts, leave them for you to resolve
+mooring pull --theirs     # overwrite local edits with remote versions
+mooring pull --keep-both  # keep local edits, save remote versions as copies
 ```
+
+!!! note
+
+    Running a frozen `.pyz`/`.exe` build? Use `python mooring.pyz pull` (or
+    `mooring.exe pull`) instead.
 
 A plain `pull` (no flag) downloads everything that's safe and **skips**
 conflicted files so you can resolve them deliberately. See the

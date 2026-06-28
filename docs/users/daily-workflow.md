@@ -4,9 +4,26 @@ icon: lucide/refresh-cw
 
 # Daily workflow
 
-Everything below happens in the **hub** (the browser page that opens when you
-run the app). The same actions are available from the
+**Pull** a teammate's notebook, edit it, and **share** your changes back —
+all over GitHub with no git to learn and no personal access token to juggle,
+just Python 3.12 or newer. Everything below happens in the **hub** (the browser
+page that opens when you run the app). The same actions are available from the
 [command line](cli.md) if you prefer a terminal.
+
+!!! tip "Analyse your data with a copilot that never sees it"
+
+    Open any notebook and click **AI** to chat with a schema-only assistant — it
+    sees your column names and types and your notebook's code, but **never the data
+    itself**: only column names and notebook source leave your machine, never the
+    data values, cell outputs, or data-file contents. See
+    [What the copilot can do](ai-copilot.md) and
+    [why it cannot see your data](../admins/ai-privacy.md).
+
+!!! note "Running a frozen build?"
+
+    The CLI examples below assume the `uvx mooring` / PyPI install. Running a
+    frozen `.pyz`/`.exe` build instead? Use `python mooring.pyz <cmd>` (or
+    `mooring.exe <cmd>`) in place of `mooring <cmd>`.
 
 ## The seven actions
 
@@ -25,9 +42,9 @@ to see individual files); everything else is one row per file.
 
 ## A typical session
 
-1. **Pull** first, so you start from the team's latest.
-2. **Open** a notebook (or **New notebook** to start one), edit it in marimo,
-   and save.
+1. **Pull** first to grab a teammate's notebook and start from the team's latest.
+2. **Open** it — it runs in the same locked environment they used — (or **New
+   notebook** to start one), edit it in marimo, and save.
 3. Back in the hub, your edited file shows as *modified*.
 4. **Push** to share it. If someone changed the same file upstream since your
    last pull, the push is blocked and the file is marked *conflicted* —
@@ -145,8 +162,14 @@ workspace root, shared with the team through GitHub. Add to them with
 `mooring deps add <pkg>` (then `mooring push`), and see the whole set with
 `mooring deps list` — see the [CLI reference](cli.md#init-deps-notebook-dependencies).
 
-With [uv](https://docs.astral.sh/uv/) on your machine, notebooks open in that
-locked environment automatically. On a frozen `.pyz` with no uv, you can import
-whatever your admin built in; opening a notebook that needs something the build
-lacks shows a warning (ask your admin to add it — see
-[Build & distribute](../admins/build-and-distribute.md)).
+On the simple `uvx mooring` path, [uv](https://docs.astral.sh/uv/) is already
+on your machine, so notebooks open in the team's locked environment automatically
+— `mooring deps add <pkg>` and a push are all it takes to add a package for
+everyone.
+
+!!! note "Advanced: on a frozen `.pyz`/`.exe` with no uv"
+
+    With a frozen build and no uv, you can import whatever your admin built into
+    the bundle; opening a notebook that needs something the build lacks shows a
+    warning (ask your admin to add it — see
+    [Advanced: offline / frozen builds](../admins/build-and-distribute.md)).

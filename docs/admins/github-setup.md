@@ -8,7 +8,18 @@ This is the page to obtain **every GitHub detail mooring needs**. By the end you
 will have four values to configure the app — and you'll know exactly where each
 one came from.
 
+!!! note "Running a frozen build?"
+
+    CLI examples here use the bare `mooring <cmd>` form (install with `uvx
+    mooring`). Running a frozen `.pyz`/`.exe` build instead? Use `python
+    mooring.pyz <cmd>` (or `mooring.exe <cmd>`) in their place.
+
 ## What you'll end up with
+
+Once these four values exist, analysts get the whole mooring workflow with **no
+git and no personal access tokens to juggle** — just Python 3.12 or newer and a
+device-flow sign-in. The values below are the only GitHub plumbing the team ever
+touches.
 
 | Value | Config key | Comes from |
 |-------|------------|------------|
@@ -98,6 +109,14 @@ read the tree and blobs and to commit via the Contents API.
     have analysts use accounts in a dedicated machine-account org whose only
     access is the notebooks repo.
 
+!!! note "The AI copilot signs in separately"
+
+    This `repo` token is only for syncing notebooks. The optional AI copilot
+    authenticates through its **own** GitHub Copilot sign-in and is
+    schema-only — it sees your column names and types and your notebook's code,
+    but never the data itself. See
+    [Why it cannot see your data](ai-privacy.md).
+
 ## Organization approval
 
 If your notebooks repo lives in an **organization that restricts third-party
@@ -169,9 +188,11 @@ just works.
 You now have `client_id`, `owner`, `repo`, and `branch`. Configure them either
 by:
 
-- **Baking them into the build** — edit `config_default.toml` before building so
-  analysts receive a ready-to-use app. See [Configuration](configuration.md) and
-  [Build & distribute](build-and-distribute.md).
-- **The runtime setup form** — distribute an unconfigured build and have each
-  analyst enter the four values once in the hub. See
+- **The runtime setup form (simplest)** — share the four values with your team
+  and have each analyst paste them once into the hub. Nothing to build: they
+  install with `uvx mooring`, open the hub, and fill in the form. See
   [Configuration](configuration.md#the-runtime-setup-form).
+- **Baking them into the build (advanced)** — for the frozen `.pyz`/`.exe`
+  fallback, edit `config_default.toml` before building so analysts receive a
+  ready-to-use app. See [Configuration](configuration.md) and
+  [Advanced: offline / frozen builds](build-and-distribute.md).

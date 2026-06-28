@@ -14,6 +14,21 @@ packaged defaults  ←  user config file  ←  environment variables
 So a baked default can be overridden per-machine by a user file, and either can
 be overridden for a single run by an environment variable.
 
+!!! tip "Most analysts never touch any of this"
+
+    The simple path is `uvx mooring` (Python 3.12 or newer): on first run the hub
+    shows a one-time [runtime setup form](#the-runtime-setup-form) where you paste the
+    OAuth client id, owner, and repo, and you're done. Baking those values into a
+    frozen `.pyz`/`.exe` build (the [packaged default file](#the-packaged-default-file))
+    is an **optional, advanced** step for admins shipping to machines with no Python
+    tooling at all.
+
+!!! note "Running a frozen build?"
+
+    The CLI examples below use the bare `mooring <cmd>` form (or `uvx mooring <cmd>`
+    for a one-off). Running a frozen `.pyz`/`.exe` build instead? Use
+    `python mooring.pyz <cmd>` (or `mooring.exe <cmd>`).
+
 ## Config keys
 
 All keys live in `config_default.toml` (and the user `config.toml`), grouped
@@ -139,7 +154,32 @@ teammate's matching file is never pulled or deleted).
 | `endpoint` | `""` | Where to send usage/error events. Empty disables logging. See [Central logging](#central-logging) for the auto-detected URL-vs-path behaviour. |
 | `level` | `"info"` | `"info"` logs usage events **and** errors; `"error"` logs only errors. |
 
+## The runtime setup form
+
+This is the path **most analysts** take. With a plain `uvx mooring` (no baked
+config), the hub shows a setup card instead of the file list on first run. The
+analyst enters:
+
+- **OAuth client id** (only asked on first setup)
+- **GitHub URL** (only for [GitHub Enterprise](github-setup.md#github-enterprise);
+  leave empty for github.com — only asked on first setup)
+- **Repo owner**
+- **Repo name**
+- **Branch** (defaults to `main`)
+- **Short name** (optional alias; defaults to the repo name)
+
+On save, the hub registers the repo in the user `config.toml` (shown below) and
+reloads — no rebuild needed. The same card (via **+ Add repo…** in the header
+dropdown) registers additional repos later; each save adds to the registry
+rather than replacing it.
+
 ## The packaged default file
+
+!!! info "Advanced: only for frozen builds"
+
+    You only need this if you're baking a frozen `.pyz`/`.exe` for machines with no
+    Python tooling. Teams on the `uvx mooring` path skip it and use the
+    [runtime setup form](#the-runtime-setup-form) above instead.
 
 `src/mooring/config_default.toml` is baked into every build. Edit it **before
 building** so your team receives a pre-configured app:
@@ -231,24 +271,6 @@ documented in [AI privacy](ai-privacy.md).
     travels with the notebook. See
     [Turning the copilot off for a notebook](ai-privacy.md#turning-the-copilot-off-for-a-notebook).
 
-## The runtime setup form
-
-If a build ships **without** `client_id` / `owner` / `repo`, the hub shows a
-setup card instead of the file list. The analyst enters:
-
-- **OAuth client id** (only asked on first setup)
-- **GitHub URL** (only for [GitHub Enterprise](github-setup.md#github-enterprise);
-  leave empty for github.com — only asked on first setup)
-- **Repo owner**
-- **Repo name**
-- **Branch** (defaults to `main`)
-- **Short name** (optional alias; defaults to the repo name)
-
-On save, the hub registers the repo in the user `config.toml` shown above and
-reloads — no rebuild needed. The same card (via **+ Add repo…** in the header
-dropdown) registers additional repos later; each save adds to the registry
-rather than replacing it.
-
 ## Environment variables
 
 Any of these override both config files for a single run. They're mainly for
@@ -271,7 +293,13 @@ integration testing and CI, but work anywhere:
 See [Contributing](../developers/contributing.md#integration-testing) for using
 these to test against a scratch repo.
 
-## Central logging
+## Advanced / IT governance
+
+The rest of this page is for administrators rolling mooring out across a team —
+fleet-wide telemetry and corporate-network TLS. Individual analysts on the
+`uvx mooring` path don't need any of it.
+
+### Central logging
 
 Set `[logging] endpoint` (baked into the build, or in a user `config.toml`) to
 collect a record of how the app is used and what fails, from every copy, in one
@@ -294,7 +322,7 @@ endpoint = "https://collector.example.com/mooring"   # or \\server\share\mooring
 level = "info"   # "info" = usage + errors; "error" = errors only
 ```
 
-### What gets logged
+#### What gets logged
 
 Each event is one JSON object: a UTC timestamp, the event name, identity, and a
 few event-specific fields. Identity is **OS username, hostname, app version, OS,
@@ -317,7 +345,7 @@ command, and silently drops events if the destination is slow or unreachable
 (the process still exits within a few seconds). `mooring selftest` prints a
 `logging` line showing the active destination.
 
-## Corporate networks & TLS
+### Corporate networks & TLS
 
 Mooring verifies TLS connections against the **operating system's trust
 store** (via [truststore](https://truststore.readthedocs.io/), the same
