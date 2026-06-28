@@ -58,7 +58,9 @@
   --bg: var(--oah-slate-050);
   --card: #ffffff;
   --ink: var(--oah-slate-700);
-  --muted: var(--oah-slate-400);
+  /* a touch darker than slate-400 so muted/secondary text clears WCAG AA
+     (4.5:1) on the light page bg; the dark scheme keeps slate-300. */
+  --muted: #5b6577;
   --border: var(--oah-slate-200);
   /* light scheme uses the darker orange for accents/text (more readable on
      white); dark scheme below uses the brighter --oah-orange on slate. */
