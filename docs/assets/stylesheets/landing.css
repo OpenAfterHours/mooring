@@ -1,13 +1,30 @@
 /* ==========================================================================
-   mooring landing page (home.html) — OpenAfterHours "night sky" hero.
-   Adapted from moonlit-landing.css. Scoped to .mr-* so it only affects the
-   custom homepage; the docs area (.md-main) is hidden on the homepage.
+   mooring landing page (home.html) — OpenAfterHours "night sea" hero.
+   A crescent moon over a starfield, a band of water with a shimmering moon
+   reflection, and a boat that sails in, drops anchor, moors, and sails on
+   (the voyage is driven by landing.js; the hero copy stands without it).
+   Scoped to .mr-* so it only affects the custom homepage; the docs area
+   (.md-main) is hidden on the homepage.
    ========================================================================== */
 
-/* Hide the empty docs shell on the homepage; the hero owns the viewport. */
-.md-main:has(> .md-main__inner:empty) { display: none; }
+/* The homepage's docs shell (.md-main) is hidden by an inline style in
+   home.html's extrahead — that template is the only page using this layout.
+   We deliberately do NOT hide .md-main from here: landing.css is loaded
+   site-wide via extra_css, so a bare rule would blank every inner docs page. */
 
-/* Belt-and-braces: home.html also injects `.md-main { display:none }`. */
+/* Visually-hidden (screen-reader only): the feature-shelf section heading and
+   the copy-button live-status both render here without taking visual space. */
+.mr-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
 
 /* --- Top nav (homepage only) ---------------------------------------------- */
 .mr-topnav {
@@ -46,7 +63,8 @@
   font-size: 11px;
   letter-spacing: 0.12em;
   text-transform: uppercase;
-  color: var(--oah-slate-400);
+  /* slate-300 keeps this small label above the WCAG AA 4.5:1 threshold. */
+  color: var(--oah-slate-300);
   padding-left: 10px;
   border-left: 1px solid var(--oah-border);
 }
@@ -80,24 +98,32 @@
   background: rgba(255, 145, 0, 0.08);
 }
 
-/* --- Hero ------------------------------------------------------------------ */
+/* --- Hero / night-sea scene ------------------------------------------------ */
 .mr-hero {
   position: relative;
   overflow: hidden;
-  background: radial-gradient(ellipse at 70% 0%, var(--oah-slate-700), var(--oah-slate-900) 60%);
-  padding: clamp(48px, 9vw, 104px) 28px clamp(40px, 6vw, 72px);
+  min-height: clamp(600px, 84vh, 768px);
+  padding: clamp(36px, 6vw, 56px) 28px 0;
+  background: linear-gradient(180deg, #090a0d 0%, var(--oah-slate-900) 55%, #101218 100%);
+  /* Moon geometry lives here so the moon and its reflection track together. */
+  --mr-moon-right: clamp(8px, 7vw, 132px);
+  --mr-moon-w: clamp(168px, 22vw, 300px);
 }
 
-.mr-hero-grid {
+.mr-hero-copy {
   position: relative;
-  z-index: 2;
+  z-index: 4;
   max-width: 1120px;
   margin: 0 auto;
-  display: grid;
-  grid-template-columns: 1.05fr 1fr;
-  gap: 56px;
-  align-items: center;
+  /* Leave room below the copy to clear the water band + the moored boat. */
+  padding-bottom: clamp(214px, 26vh, 248px);
 }
+
+.mr-hero-copy-inner { max-width: 680px; }
+
+/* The boat tows this block in on mobile (see landing.js); promote it for a
+   smooth transform without affecting desktop, where it is never transformed. */
+[data-mr-text] { will-change: transform; }
 
 .mr-eyebrow {
   display: flex;
@@ -123,20 +149,20 @@
   margin: 0 0 20px;
   font-family: var(--oah-font-display);
   font-weight: 700;
-  font-size: clamp(38px, 6vw, 64px);
-  line-height: 1.04;
-  letter-spacing: -0.035em;
-  color: var(--oah-slate-100);
+  font-size: clamp(36px, 5.4vw, 56px);
+  line-height: 1.06;
+  letter-spacing: -0.03em;
+  color: var(--oah-slate-050);
 }
 
 .mr-accent { color: var(--oah-orange); }
 
 .mr-lede {
   margin: 0 0 28px;
-  max-width: 56ch;
-  font-size: 18px;
-  line-height: 1.55;
-  color: var(--oah-slate-200);
+  max-width: 58ch;
+  font-size: 17px;
+  line-height: 1.6;
+  color: var(--oah-slate-300);
 }
 
 /* Run-command box */
@@ -146,11 +172,11 @@
   gap: 10px;
   margin: 0 0 28px;
   padding: 9px 12px 9px 14px;
-  background: rgba(255, 255, 255, 0.04);
+  background: var(--oah-slate-850);
   border: 1px solid var(--oah-border);
   border-radius: var(--oah-radius-md);
   font-family: var(--md-code-font, monospace);
-  font-size: 13px;
+  font-size: 14px;
 }
 
 .mr-prompt { color: var(--oah-terminal-green); }
@@ -180,7 +206,7 @@
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  padding: 12px 22px;
+  padding: 12px 24px;
   border-radius: var(--oah-radius-md);
   font-size: 15px;
   font-weight: 600;
@@ -208,30 +234,15 @@
 
 .mr-btn-ghost:hover { color: var(--oah-orange); border-color: var(--oah-orange); }
 
-/* --- Hero anchor graphic --------------------------------------------------- */
-.mr-hero-art { display: flex; justify-content: center; }
-
-.mr-anchor-stage {
-  position: relative;
-  width: min(100%, 420px);
-  aspect-ratio: 1 / 1;
-  display: grid;
-  place-items: center;
-}
-
-.mr-anchor-glow {
+/* --- Crescent moon --------------------------------------------------------- */
+.mr-moon {
   position: absolute;
-  inset: 8%;
-  border-radius: 50%;
-  background: radial-gradient(circle at 42% 38%, rgba(255, 145, 0, 0.28), rgba(255, 145, 0, 0.06) 55%, transparent 70%);
-  filter: blur(6px);
-}
-
-.mr-anchor {
-  position: relative;
-  width: 56%;
-  height: 56%;
-  filter: drop-shadow(0 6px 26px rgba(255, 145, 0, 0.35));
+  z-index: 1;
+  top: clamp(-24px, 1vw, 28px);
+  right: var(--mr-moon-right);
+  width: var(--mr-moon-w);
+  height: var(--mr-moon-w);
+  pointer-events: none;
 }
 
 /* --- Starfield ------------------------------------------------------------- */
@@ -261,99 +272,207 @@
   50% { opacity: var(--mr-tw-max, 0.8); }
 }
 
+/* --- The sea: water band, moon reflection, wave hairlines ------------------ */
+.mr-water {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 170px;
+  z-index: 2;
+  background: linear-gradient(180deg, #0f1117 0%, #14171f 45%, #181c25 100%);
+  border-top: 1px solid rgba(255, 145, 0, 0.1);
+}
+
+.mr-reflection {
+  position: absolute;
+  bottom: 0;
+  /* Centred under the lit crescent (~0.6 of the moon box in from its right
+     edge), derived from the same vars as the moon so the two stay aligned. */
+  right: calc(var(--mr-moon-right) + 0.6 * var(--mr-moon-w) - 23px);
+  width: 46px;
+  height: 170px;
+  z-index: 2;
+  background: linear-gradient(180deg, rgba(243, 236, 220, 0.3), rgba(243, 236, 220, 0));
+  animation: mr-shimmer 5s ease-in-out infinite;
+  pointer-events: none;
+}
+
+.mr-wave {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 1px;
+  z-index: 2;
+  pointer-events: none;
+}
+
+.mr-wave-1 { bottom: 120px; background: rgba(216, 222, 233, 0.07); }
+.mr-wave-2 { bottom: 74px; background: rgba(216, 222, 233, 0.05); }
+
+@keyframes mr-shimmer {
+  0%, 100% { opacity: 0.5; transform: scaleX(1); }
+  50% { opacity: 0.8; transform: scaleX(1.18); }
+}
+
+/* --- The boat (sails across; landing.js drives `left` + the anchor) -------- */
+.mr-boat {
+  position: absolute;
+  z-index: 3;
+  bottom: 108px;
+  left: -14%;
+  transform: translateX(-50%);
+  width: 160px;
+  height: 118px;
+  pointer-events: none;
+  will-change: left;
+}
+
+.mr-rope {
+  position: absolute;
+  left: 50%;
+  top: 80px;
+  transform: translateX(-50%);
+  width: 3px;
+  height: 4px;
+  z-index: 1;
+  border-radius: 2px;
+  background: repeating-linear-gradient(180deg, #8a93a3 0 5px, transparent 5px 9px);
+}
+
+.mr-anchor-drop {
+  position: absolute;
+  left: 50%;
+  top: 74px;
+  transform: translateX(-50%) translateY(6px);
+  z-index: 1;
+}
+
+.mr-bob {
+  position: absolute;
+  left: 0;
+  top: 0;
+  z-index: 2;
+  transform-origin: center bottom;
+  animation: mr-bob 4.6s ease-in-out infinite;
+}
+
+@keyframes mr-bob {
+  0%, 100% { transform: translateY(0) rotate(-1.1deg); }
+  50% { transform: translateY(-5px) rotate(1.1deg); }
+}
+
 @media (prefers-reduced-motion: reduce) {
-  .mr-stars i { animation: none; }
+  .mr-stars i,
+  .mr-bob,
+  .mr-reflection { animation: none; }
 }
 
 /* --- Feature shelf --------------------------------------------------------- */
 .mr-shelf-wrap {
   background: var(--oah-slate-900);
-  padding: clamp(28px, 5vw, 56px) 28px;
+  padding: clamp(40px, 6vw, 80px) 28px;
 }
 
 .mr-shelf {
   max-width: 1120px;
   margin: 0 auto;
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-  gap: 16px;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 20px;
 }
 
 .mr-feat {
-  padding: 20px 22px;
-  background: rgba(255, 255, 255, 0.025);
-  border: 1px solid rgba(216, 222, 233, 0.1);
+  padding: 26px;
+  background: var(--oah-slate-850);
+  border: 1px solid var(--oah-border);
   border-radius: var(--oah-radius-lg);
-  transition: all 200ms ease;
+  transition: border-color 200ms ease, box-shadow 200ms ease, transform 200ms ease;
 }
 
 .mr-feat:hover {
   border-color: rgba(255, 145, 0, 0.45);
-  background: rgba(255, 145, 0, 0.04);
+  box-shadow: var(--oah-glow);
   transform: translateY(-2px);
 }
 
+.mr-feat-ico {
+  width: 24px;
+  height: 24px;
+  color: var(--oah-orange);
+}
+
 .mr-feat-k {
-  display: block;
-  margin-bottom: 8px;
+  margin: 18px 0 10px;
   font-family: var(--oah-font-display);
   font-weight: 600;
-  font-size: 16px;
-  color: var(--oah-slate-100);
+  font-size: 18px;
+  letter-spacing: -0.01em;
+  color: var(--oah-slate-050);
 }
 
 .mr-feat p {
   margin: 0;
   font-size: 14px;
-  line-height: 1.55;
+  line-height: 1.6;
   color: var(--oah-slate-300);
 }
 
 /* --- Start-here row -------------------------------------------------------- */
 .mr-start {
   background: var(--oah-slate-900);
-  padding: 8px 28px clamp(40px, 6vw, 72px);
+  padding: 0 28px clamp(56px, 8vw, 90px);
 }
 
 .mr-start-inner { max-width: 1120px; margin: 0 auto; }
 
 .mr-start-h {
+  margin: 0 0 24px;
   font-family: var(--oah-font-display);
-  font-size: 13px;
-  font-weight: 600;
-  letter-spacing: 0.16em;
-  text-transform: uppercase;
-  color: var(--oah-slate-400);
-  margin: 0 0 16px;
+  font-weight: 700;
+  font-size: clamp(24px, 3.5vw, 30px);
+  letter-spacing: -0.01em;
+  color: var(--oah-slate-050);
 }
 
 .mr-start-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-  gap: 16px;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 18px;
 }
 
 .mr-start-grid a {
   display: block;
-  padding: 18px 20px;
+  padding: 24px;
   border: 1px solid var(--oah-border);
+  border-left: 3px solid var(--oah-orange);
   border-radius: var(--oah-radius-lg);
   text-decoration: none;
-  background: var(--oah-slate-850);
-  transition: all 180ms ease;
+  background: rgba(255, 145, 0, 0.04);
+  transition: box-shadow 200ms ease, transform 200ms ease;
 }
 
-.mr-start-grid a:hover { border-color: var(--oah-orange); transform: translateY(-2px); }
+.mr-start-grid a:hover { box-shadow: var(--oah-glow); transform: translateY(-2px); }
 
-.mr-start-grid strong {
-  display: block;
+.mr-start-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
   font-family: var(--oah-font-display);
-  font-size: 16px;
-  color: var(--oah-slate-100);
-  margin-bottom: 4px;
+  font-weight: 600;
+  font-size: 17px;
+  color: var(--oah-orange);
 }
 
-.mr-start-grid span { font-size: 13px; color: var(--oah-slate-300); }
+.mr-start-head .mr-arrow { width: 16px; height: 16px; flex: none; }
+
+.mr-start-grid p {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.6;
+  color: var(--oah-slate-300);
+}
 
 /* --- Footer ---------------------------------------------------------------- */
 .mr-footer {
@@ -367,21 +486,40 @@
   padding: 28px;
   border-top: 1px solid var(--oah-border-soft);
   font-size: 13px;
-  color: var(--oah-slate-400);
+  /* slate-300 clears WCAG AA (4.5:1) over slate-900; slate-400 did not. */
+  color: var(--oah-slate-300);
 }
 
-.mr-footer a { color: var(--oah-slate-300); text-decoration: none; }
+.mr-footer a { color: var(--oah-slate-100); text-decoration: none; }
 .mr-footer a:hover { color: var(--oah-orange); }
 
 /* --- Responsive ------------------------------------------------------------ */
+@media (max-width: 1000px) {
+  .mr-shelf { grid-template-columns: repeat(2, 1fr); }
+}
+
 @media (max-width: 900px) {
-  .mr-hero-grid { grid-template-columns: 1fr; gap: 36px; }
-  .mr-hero-art { order: -1; }
-  .mr-anchor-stage { width: min(70%, 300px); }
   .mr-brand-org { display: none; }
   .mr-topnav-links { gap: 14px; }
 }
 
+@media (max-width: 720px) {
+  .mr-hero {
+    min-height: 560px;
+    /* Smaller moon, tucked toward the corner; reflection tracks via the vars. */
+    --mr-moon-right: -8px;
+    --mr-moon-w: 150px;
+  }
+  /* Clear the centred moored boat's full envelope (mast tip ~220px up). */
+  .mr-hero-copy { padding-bottom: clamp(220px, 32vh, 252px); }
+  .mr-moon { top: -16px; }
+}
+
+@media (max-width: 640px) {
+  .mr-start-grid { grid-template-columns: 1fr; }
+}
+
 @media (max-width: 600px) {
   .mr-topnav-links a:not(.mr-gh) { display: none; }
+  .mr-shelf { grid-template-columns: 1fr; }
 }
