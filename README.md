@@ -1,4 +1,4 @@
-# <img src="docs/assets/images/anchor-mark.svg" alt="" height="28"> mooring
+# <picture><source media="(prefers-color-scheme: dark)" srcset="docs/assets/images/anchor-mark.svg"><img src="docs/assets/images/anchor-mark-light.svg" alt="" height="28"></picture> mooring
 
 **Analyse your data with an AI copilot that never sees your data** — then share
 that work across your team over GitHub, with no git and no tokens. For teams of
