@@ -10,14 +10,18 @@ You need [uv](https://docs.astral.sh/uv/). Then:
 
 ```bash
 uv sync                                  # install everything (incl. dev deps)
+uv sync --extra copilot                  # also pull the AI deps (for chat-session tests)
 uv run pytest                            # unit tests — no network needed
 uv run ruff check src tests              # lint
+uv run lint-imports                      # enforce the architecture layering (.importlinter)
+node --test tests/js/                    # JS tests for the chat REPL helpers (no deps)
 uv run mooring hub                       # run the hub from source
 uv run python tests/manual_editor_check.py   # editor-subprocess smoke test
 ```
 
 The unit tests mock GitHub with `responses`, so they run offline. `ruff` is
-configured with a line length of 100.
+configured with a line length of 100. The AI chat-session tests need the
+`copilot` extra (`uv sync --extra copilot`); without it they skip.
 
 ## Running from source
 
@@ -25,13 +29,32 @@ configured with a line length of 100.
 `uv run mooring hub`, `uv run mooring status`. See the
 [CLI reference](../users/cli.md) for all commands.
 
+## Protecting the value-blindness
+
+The AI copilot is **schema-only** — it sees your column names and types and your
+notebook's code, but never the data itself. That is a maintained security property,
+not an accident, and two structural facts keep it true:
+
+- The `ai/` package reaches marimo and raw HTTP **only** through `marimo_rt.py`,
+  the single transport seam. A direct `ai → marimo`/`urllib`/`http` import is a
+  contract violation that `uv run lint-imports` fails — so any new egress path is
+  a review-visible change, not something that slips in quietly.
+- Tests pin the guarantee with a `SECRET_VALUE_DO_NOT_LEAK` fixture and assert it
+  never reaches the model (`test_schema.py`, `test_ai_tools.py`,
+  `test_chat_session.py`, `test_introspect.py`, …). Keep them green.
+
+See [CLAUDE.md](https://github.com/OpenAfterHours/mooring/blob/master/CLAUDE.md)
+and [Why it cannot see your data](../admins/ai-privacy.md) for the full layering
+and the privacy spec.
+
 ## Integration testing
 
-To exercise the real sync engine against a live repo, point mooring at a scratch
-repository with environment variables instead of logging in:
+For day-to-day work you sign in with the device flow. As a **dev-only**
+shortcut, you can exercise the real sync engine against a scratch repo by
+pointing mooring at it with environment variables instead of logging in:
 
 ```bash
-export MOORING_TOKEN="ghp_..."        # a PAT works; skips device flow
+export MOORING_TOKEN="ghp_..."        # dev shortcut: a PAT skips the device flow
 export MOORING_CLIENT_ID="Ov23li..."
 export MOORING_OWNER="your-org"
 export MOORING_REPO="scratch-notebooks"
@@ -40,8 +63,9 @@ uv run mooring pull
 ```
 
 These `MOORING_*` variables override both config files for the run — see
-[Configuration](../admins/configuration.md#environment-variables). Use a
-throwaway repo; pushes create real commits.
+[Configuration](../admins/configuration.md#environment-variables). This is a
+testing convenience, not how mooring is normally used; analysts never juggle a
+PAT. Use a throwaway repo; pushes create real commits.
 
 ## Gotchas worth knowing
 

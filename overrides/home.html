@@ -41,21 +41,22 @@
   <div class="mr-stars" data-count="140" data-seed="7" aria-hidden="true"></div>
   <div class="mr-hero-grid">
     <div class="mr-hero-copy">
-      <p class="mr-eyebrow">Git-free sharing · schema-only AI copilot</p>
-      <h1 class="mr-h1">Share <span class="mr-accent">marimo</span> notebooks via GitHub — <span class="mr-accent">no git</span> required.</h1>
+      <p class="mr-eyebrow">Schema-only AI for data teams · git-free notebook sharing</p>
+      <h1 class="mr-h1">Analyse your data with <span class="mr-accent">AI</span> — without your data ever <span class="mr-accent">leaving your machine</span>.</h1>
       <p class="mr-lede">
-        Analysts with only Python 3.12+ pull, edit, and push a shared repo's
-        notebooks over the GitHub REST API. No git, no pip, no setup — just run
-        the app and log in. And an opt-in AI copilot helps them write the code —
-        sent only your column names and notebook source, never your data values.
+        Mooring's copilot is sent only your schema — column names and types — and
+        your notebook source. It has no tool that can read a data file, a cell
+        output, or a single value, and mooring never sends those anywhere. Around
+        it, share and pick up marimo notebooks across your team over GitHub, with
+        no git and no tokens to manage. Just Python 3.12+.
       </p>
       <div class="mr-install" data-mr-install>
         <span class="mr-prompt">$</span>
-        <code class="mr-cmd">python mooring.pyz</code>
+        <code class="mr-cmd">uvx mooring</code>
         <button class="mr-copy" type="button" aria-label="Copy command">COPY</button>
       </div>
       <div class="mr-cta">
-        <a class="mr-btn-primary" href="{{ 'users/' | url }}">Read the docs →</a>
+        <a class="mr-btn-primary" href="{{ 'users/quickstart/' | url }}">Get started →</a>
         <a class="mr-btn-ghost" href="{{ gh }}" rel="noopener">View on GitHub</a>
       </div>
     </div>
@@ -82,20 +83,20 @@
 <section class="mr-shelf-wrap">
   <div class="mr-shelf">
     <article class="mr-feat">
-      <span class="mr-feat-k">No git anywhere</span>
-      <p>Pull and push over the GitHub REST API. The only requirement on an analyst's machine is Python 3.12 or newer.</p>
-    </article>
-    <article class="mr-feat">
-      <span class="mr-feat-k">Conflicts are explicit</span>
-      <p>Three-way change detection. Pull never overwrites local edits; push is blocked on conflicts and resolved per file.</p>
-    </article>
-    <article class="mr-feat">
-      <span class="mr-feat-k">Frozen package stack</span>
-      <p>polars, altair, plotly, openpyxl, fastexcel and requests are bundled in. No pip at runtime.</p>
-    </article>
-    <article class="mr-feat">
       <span class="mr-feat-k">AI that can't see your data</span>
-      <p>An opt-in copilot, sent only column names, dtypes and notebook source — never your data values. It proposes cells you review and Apply.</p>
+      <p>Ask the copilot to write and edit cells against your real datasets. By design it gets only schema and source — never a value, a cell output, or a data file. It proposes cells you review and Apply.</p>
+    </article>
+    <article class="mr-feat">
+      <span class="mr-feat-k">GitHub with no git, no tokens</span>
+      <p>Pull, edit, and push a shared repo's notebooks with nothing but Python 3.12+. Sign in once with a device code — no tokens to create, paste, or rotate.</p>
+    </article>
+    <article class="mr-feat">
+      <span class="mr-feat-k">Share in one team repo</span>
+      <p>One repo holds the team's notebooks. Push to share; everyone else pulls. Conflicts are always flagged and resolved per file, never silently clobbered.</p>
+    </article>
+    <article class="mr-feat">
+      <span class="mr-feat-k">Pick up a teammate's notebook</span>
+      <p>Pull the repo, open someone else's notebook, and start working — in the same locked environment they used. No setup, no “works on my machine”.</p>
     </article>
   </div>
 </section>
@@ -104,13 +105,13 @@
   <div class="mr-start-inner">
     <h2 class="mr-start-h">Where to start</h2>
     <div class="mr-start-grid">
-      <a href="{{ 'users/' | url }}">
+      <a href="{{ 'users/quickstart/' | url }}">
         <strong>For users →</strong>
-        <span>Install Python, run the app, pull / edit / push notebooks.</span>
+        <span>Install in seconds, pull / edit / push notebooks, and use the copilot.</span>
       </a>
       <a href="{{ 'admins/' | url }}">
         <strong>For admins →</strong>
-        <span>Set up the repo, register the OAuth app, build &amp; distribute.</span>
+        <span>Set up the shared repo, register the OAuth app, and configure a team.</span>
       </a>
       <a href="{{ 'developers/' | url }}">
         <strong>For developers →</strong>

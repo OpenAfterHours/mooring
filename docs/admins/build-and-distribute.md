@@ -2,29 +2,28 @@
 icon: lucide/package
 ---
 
-# Build & distribute
+# Advanced: offline / frozen builds
 
-Mooring reaches your team two ways: installed from **PyPI** with `uvx mooring`
-(on any Python 3.12+), or shipped as a single self-contained artifact built with
-[moonlit](https://github.com/openafterhours/moonlit) for analysts with no Python
-tooling. This page covers both — plus baking your config, building the artifacts,
-the release workflow, building a repo's package stack into a frozen artifact, and
-getting the app to your team.
+**The default way to install Mooring is `uvx mooring` on Python 3.12 or newer** —
+the analyst uses their own interpreter, signs in with the device flow, and there's
+no build step at all:
 
-!!! tip "Install from PyPI (no build step)"
+```bash
+uvx mooring                 # run it as a one-off, or:
+uv tool install mooring     # install it as a persistent CLI, or:
+pip install mooring         # plain pip into the active environment
+```
 
-    Anyone with **Python 3.12 or newer** can run Mooring without a frozen build —
-    they use their own interpreter, so they pick the version:
+This page is **only** for the advanced case: shipping a single self-contained
+artifact built with [moonlit](https://github.com/openafterhours/moonlit) to
+machines that have **no Python tooling at all**. If your team can run `uvx`, you
+do not need anything here — point them at
+[Install & first run](../users/index.md) instead.
 
-    ```bash
-    uvx mooring                 # run it directly, or:
-    pip install mooring && mooring
-    ```
-
-    On first launch they fill in the
-    [runtime setup form](configuration.md#the-runtime-setup-form) (or you bake
-    config and publish your own build). The rest of this page is about the frozen
-    `.pyz`/`.exe` for machines with **no** Python tooling at all.
+The frozen `.pyz`/`.exe` is a **fallback**, not the headline. The rest of this
+page covers baking your config, building those artifacts, the release workflow,
+building a repo's package stack into a frozen artifact, and getting the app to
+your team.
 
 !!! tip "Notebook dependencies live in the repo (PyPI/uvx)"
 
@@ -55,7 +54,9 @@ getting the app to your team.
 
 Mooring ships **lean** — the base install is just its own runtime. Three opt-in
 features live behind *extras*, so their heavy dependencies stay out of the
-default install (and out of the frozen `.pyz`):
+default install (and out of the frozen `.pyz`). These extras apply to **every**
+install method below, including the everyday `uvx mooring` path — not just frozen
+builds:
 
 | Extra | Adds | Enables |
 |-------|------|---------|

@@ -91,19 +91,21 @@ src/mooring/
 
 ## Key design choices
 
+- **Structurally value-blind copilot.** The copilot is schema-only — it sees your
+  column names and types and your notebook's code, but never the data itself.
+  Everything the model sees is assembled in a single module —
+  `ai/egress.build_system_context` — guarded by tests and an import-linter
+  contract. Adding a new path that sends context, or one that skips scrubbing, is
+  a review-visible change to that one file. This is the load-bearing privacy
+  invariant; don't bypass it. See
+  [why the copilot can't see your data](../admins/ai-privacy.md).
 - **No git, ever.** Everything goes through the GitHub REST API, so analysts
   need only Python 3.12 or newer.
 - **Conflicts are never silent.** Pull skips conflicted files; push relies on
   GitHub's SHA check to reject stale writes.
 - **Dependencies live with the repo.** A repo's notebook packages are declared in
   its own `pyproject.toml` + `uv.lock` (synced via GitHub). With uv, `editor.py`
-  runs notebooks in that locked env; a frozen `.pyz` carries a bundle the admin
-  built from the same file (no pip at runtime). Mooring itself stays lean.
-- **One egress choke point.** Everything the copilot's model sees is assembled in
-  a single module — `ai/egress.build_system_context` — guarded by tests and an
-  import-linter contract. Adding a new path that sends context, or one that skips
-  scrubbing, is a review-visible change to that one file. This is the load-bearing
-  privacy invariant; don't bypass it. See
-  [why the copilot can't see your data](../admins/ai-privacy.md).
+  runs notebooks in that locked env (a frozen `.pyz` carries an admin-built bundle
+  from the same file). Mooring itself stays lean.
 
 Ready to make changes? See [Contributing](contributing.md).

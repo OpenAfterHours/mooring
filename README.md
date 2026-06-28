@@ -1,19 +1,8 @@
 # ⚓ mooring
 
-Git-free [marimo](https://marimo.io) notebook sharing via GitHub — with a
-schema-only AI copilot that's sent your columns and code, never your data.
-
-Mooring is a single-file app (`mooring.pyz` / `mooring.exe`) for teams of data
-analysts, built on two pillars.
-
-**Share without git.** Pull, edit, and push marimo notebooks stored in a shared
-GitHub repo — **without git installed on their machines**. All sync happens over
-the GitHub REST API; the only requirement on an analyst's machine is Python 3.12
-or newer. Double-clicking the app opens a local browser **hub**: log in with a
-one-time device code, see every team notebook with its sync status, pull the
-latest, open notebooks in the bundled marimo editor, and push your changes back
-— one commit per file, with conflicts detected and resolved per file (never
-silently overwritten).
+**Analyse your data with an AI copilot that never sees your data** — then share
+that work across your team over GitHub, with no git and no tokens. For teams of
+data analysts on nothing but **Python 3.12+** (`uvx mooring`).
 
 **An AI copilot that can't see your data.** Mooring ships an optional,
 interactive copilot — backed by GitHub Copilot — that helps analysts write
@@ -23,8 +12,18 @@ notebook's **source code**, and your chat turns — never a value, a cell output
 or the contents of a data file. It *proposes* cells: you review the diff and
 Apply, and any Apply can be rolled back. The copilot is off until you install
 the `copilot` extra, sign in to Copilot, and have your organisation's Copilot
-agent policy enabled — so the git-free workflow above stands entirely on its
+agent policy enabled — so the git-free workflow below stands entirely on its
 own.
+
+**Share without git, and pick up where a teammate left off.** Pull, edit, and
+push marimo notebooks stored in a shared GitHub repo — **without git installed
+on their machines** and with **no personal access tokens to juggle**. All sync
+happens over the GitHub REST API; the only requirement on an analyst's machine
+is Python 3.12 or newer. Running the app opens a local browser **hub**: log in
+with a one-time device code, see every team notebook with its sync status, pull
+the latest, open a teammate's notebook in the bundled marimo editor (in the same
+locked environment they used), and push your changes back — one commit per file,
+with conflicts detected and resolved per file (never silently overwritten).
 
 ## How it works
 

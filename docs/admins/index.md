@@ -4,24 +4,24 @@ icon: lucide/settings
 
 # Admin overview
 
-As an admin you set up the shared GitHub repo, register the OAuth app, bake the
-configuration into the build, and distribute the app to your analysts. This
-section walks through each step.
+As an admin you set up the shared GitHub repo, register the OAuth app, and choose
+how analysts get their config. Your real job is enabling the analyst experience:
+schema-only AI analysis, GitHub with no git and no tokens to juggle, and easy
+sharing across the team. This section walks through each step.
 
 ## What your analysts experience
 
 Once you've done the setup below, an analyst's entire experience is:
 
-1. Install Python 3.13 (the version your build targets).
-2. Run the app file you gave them.
-3. Log in with a GitHub device code.
-4. Pull / edit / push.
+1. Install Python 3.12+ and run `uvx mooring`.
+2. Log in with a GitHub device code.
+3. Pull / edit / push.
 
-No git, no pip, no config — because you baked it in.
+No git, no PAT-juggling, no config — just Python 3.12 or newer.
 
-If you enable it, analysts also get an opt-in, schema-only **AI copilot** in the
-editor — sent only column names, dtypes, and notebook source, never your data
-values. See [Secure AI copilot](ai-privacy.md).
+If you enable it, analysts also get an opt-in **AI copilot** in the editor that
+is schema-only — it sees your column names and types and your notebook's code, but
+never the data itself. See [Why it cannot see your data](ai-privacy.md).
 
 ## End-to-end checklist
 
@@ -33,10 +33,9 @@ values. See [Secure AI copilot](ai-privacy.md).
       [GitHub setup](github-setup.md#organization-approval)
 - [ ] **Bake the config** (`client_id`, `owner`, `repo`, `branch`) into
       `config_default.toml` — [Configuration](configuration.md)
-- [ ] **Build** the `.pyz` / `.exe` (or a no-Python bundle) —
-      [Build & distribute](build-and-distribute.md)
-- [ ] **Distribute** the artifact to your team —
-      [Build & distribute](build-and-distribute.md#distribute)
+- [ ] **(Advanced, only for machines with no Python) build & distribute a frozen
+      build** — the default path needs no build; analysts just run `uvx mooring` —
+      [Advanced: offline / frozen builds](build-and-distribute.md)
 - [ ] **(Optional) Decide on the AI copilot** — whether to enable it: install the
       `copilot` extra, confirm your org's Copilot agent policy is on, and review
       the team-context and PII-guard settings before turning it on for a
@@ -50,9 +49,12 @@ values. See [Secure AI copilot](ai-privacy.md).
 
 ## The two ways to configure a team
 
+The recommended default is the simple PyPI path: analysts run `uvx mooring` and
+fill in the runtime setup form once (or you bake the config for them).
+
 | Approach | How analysts get config | Best for |
 |----------|-------------------------|----------|
-| **Baked** (recommended) | You edit `config_default.toml` and build; analysts get a ready-to-use app | Most teams |
-| **Runtime setup form** | You distribute an unconfigured build; each analyst types `client_id` / `owner` / `repo` / `branch` into a one-time form in the hub | Pilots, mixed repos, or when you can't rebuild |
+| **Runtime setup form** (recommended) | Analysts run `uvx mooring` and type `client_id` / `owner` / `repo` / `branch` into a one-time form in the hub | Most teams, pilots, mixed repos |
+| **Baked** | You edit `config_default.toml` and build a frozen artifact; analysts get a ready-to-use app | Machines with no Python tooling at all |
 
 Both are covered in [Configuration](configuration.md).
