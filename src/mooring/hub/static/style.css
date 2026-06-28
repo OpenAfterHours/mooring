@@ -1,10 +1,68 @@
+/* Space Grotesk (display/headings) — self-hosted; the app NEVER fetches fonts
+   at runtime (frozen builds run offline/air-gapped). One variable woff2 covers
+   the 300-700 weight axis. Vendored by scripts/vendor_fonts.py; SIL OFL 1.1
+   (see fonts/OFL.txt). Headings fall back to the system UI font if it's absent. */
+@font-face {
+  font-family: "Space Grotesk";
+  font-style: normal;
+  font-weight: 300 700;
+  font-display: swap;
+  src: url("/static/fonts/space-grotesk.woff2") format("woff2");
+}
+
+/* ==========================================================================
+   OpenAfterHours brand palette — the single source of truth for the app's
+   look, mirrored from the docs theme (docs/assets/stylesheets/oah-theme.css):
+   warm-orange accents on night-sky slate surfaces. These raw --oah-* tokens
+   never vary by theme; the semantic tokens below (--bg/--accent/--term-*…)
+   point AT them, and only the semantic tokens flip between light and dark.
+   ========================================================================== */
 :root {
-  --bg: #f6f8fa;
+  /* Brand orange */
+  --oah-orange: #ff9100;
+  --oah-orange-bright: #ffa724;
+  --oah-orange-hover: #e68200;
+  --oah-orange-soft: #ffb74d;
+  --oah-on-orange: #1a1208; /* near-black text that sits on an orange fill */
+
+  /* Night-sky slate */
+  --oah-slate-900: #0d0e11;
+  --oah-slate-850: #11141a;
+  --oah-slate-800: #161719;
+  --oah-slate-700: #1f2430;
+  --oah-slate-600: #2a3142;
+  --oah-slate-500: #3b4356;
+  --oah-slate-400: #64748b;
+  --oah-slate-300: #a0a4ab;
+  --oah-slate-200: #cbd0d8;
+  --oah-slate-100: #e2e4e8;
+  --oah-slate-050: #f1f5f9;
+
+  /* Accents */
+  --oah-terminal-green: #3dd68c;
+  --oah-star-amber: #ffc857;
+
+  /* Borders / radii / glow */
+  --oah-border: rgba(216, 222, 233, 0.12);
+  --oah-border-soft: rgba(216, 222, 233, 0.08);
+  --oah-radius-md: 8px;
+  --oah-radius-lg: 12px;
+  --oah-glow: 0 4px 20px rgba(255, 145, 0, 0.12);
+
+  /* Type — Space Grotesk display headings, system UI fallback */
+  --oah-font-display: "Space Grotesk", "Segoe UI", system-ui, sans-serif;
+}
+
+/* --- Semantic tokens: LIGHT scheme (clean, orange-accented) --------------- */
+:root {
+  --bg: var(--oah-slate-050);
   --card: #ffffff;
-  --ink: #1f2328;
-  --muted: #656d76;
-  --border: #d0d7de;
-  --accent: #0969da;
+  --ink: var(--oah-slate-700);
+  --muted: var(--oah-slate-400);
+  --border: var(--oah-slate-200);
+  /* light scheme uses the darker orange for accents/text (more readable on
+     white); dark scheme below uses the brighter --oah-orange on slate. */
+  --accent: var(--oah-orange-hover);
   --ok: #1a7f37;
   --warn: #9a6700;
   --bad: #cf222e;
@@ -23,26 +81,26 @@
 
 :root[data-theme="dark"] {
   color-scheme: dark;
-  --bg: #0d1117;
-  --card: #161b22;
-  --ink: #e6edf3;
-  --muted: #8b949e;
-  --border: #30363d;
-  --accent: #2f81f7;
-  --ok: #3fb950;
-  --warn: #d29922;
+  --bg: var(--oah-slate-900);
+  --card: var(--oah-slate-850);
+  --ink: var(--oah-slate-100);
+  --muted: var(--oah-slate-300);
+  --border: var(--oah-border);
+  --accent: var(--oah-orange);
+  --ok: var(--oah-terminal-green);
+  --warn: var(--oah-star-amber);
   --bad: #f85149;
   --review: #a371f7;
   --banner-bad-bg: #2d1417;
 }
 :root[data-theme="dark"] .chat-body {
-  --term-bg: #0d1117;
-  --term-ink: #e6edf3;
-  --term-dim: #8b949e;
-  --term-rule: #30363d;
-  --term-surface: #161b22;
-  --term-accent: #2f81f7;
-  --term-add: #3fb950;
+  --term-bg: var(--oah-slate-900);
+  --term-ink: var(--oah-slate-100);
+  --term-dim: var(--oah-slate-300);
+  --term-rule: var(--oah-slate-600);
+  --term-surface: var(--oah-slate-850);
+  --term-accent: var(--oah-orange);
+  --term-add: var(--oah-terminal-green);
   --term-del: #f85149;
   --tok-kw: #ff7b72;
   --tok-str: #a5d6ff;
@@ -51,26 +109,26 @@
 }
 @media (prefers-color-scheme: dark) {
   :root[data-theme="system"] {
-    --bg: #0d1117;
-    --card: #161b22;
-    --ink: #e6edf3;
-    --muted: #8b949e;
-    --border: #30363d;
-    --accent: #2f81f7;
-    --ok: #3fb950;
-    --warn: #d29922;
+    --bg: var(--oah-slate-900);
+    --card: var(--oah-slate-850);
+    --ink: var(--oah-slate-100);
+    --muted: var(--oah-slate-300);
+    --border: var(--oah-border);
+    --accent: var(--oah-orange);
+    --ok: var(--oah-terminal-green);
+    --warn: var(--oah-star-amber);
     --bad: #f85149;
     --review: #a371f7;
     --banner-bad-bg: #2d1417;
   }
   :root[data-theme="system"] .chat-body {
-    --term-bg: #0d1117;
-    --term-ink: #e6edf3;
-    --term-dim: #8b949e;
-    --term-rule: #30363d;
-    --term-surface: #161b22;
-    --term-accent: #2f81f7;
-    --term-add: #3fb950;
+    --term-bg: var(--oah-slate-900);
+    --term-ink: var(--oah-slate-100);
+    --term-dim: var(--oah-slate-300);
+    --term-rule: var(--oah-slate-600);
+    --term-surface: var(--oah-slate-850);
+    --term-accent: var(--oah-orange);
+    --term-add: var(--oah-terminal-green);
     --term-del: #f85149;
     --tok-kw: #ff7b72;
     --tok-str: #a5d6ff;
@@ -86,6 +144,23 @@ body {
   font-family: "Segoe UI", system-ui, sans-serif;
   background: var(--bg);
   color: var(--ink);
+}
+
+/* Display headings in Space Grotesk (the brand display face); body/UI stay on
+   the system font. The terminal surfaces (.chat-body) keep monospace headings
+   so they still read as a console. */
+h1,
+h2,
+h3 {
+  font-family: var(--oah-font-display);
+  letter-spacing: -0.01em;
+}
+h1 { letter-spacing: -0.02em; }
+.chat-body h1,
+.chat-body h2,
+.chat-body h3 {
+  font-family: var(--term-font);
+  letter-spacing: normal;
 }
 
 header {
@@ -177,9 +252,9 @@ button:hover { background: var(--bg); }
 button.primary {
   background: var(--accent);
   border-color: var(--accent);
-  color: #fff;
+  color: var(--oah-on-orange); /* near-black on orange — AA-safe, matches the docs button */
 }
-button.primary:hover { filter: brightness(1.1); }
+button.primary:hover { filter: brightness(1.05); }
 button.small { font-size: 0.8rem; padding: 0.15rem 0.5rem; }
 
 .toolbar { display: flex; gap: 0.5rem; margin-bottom: 0.75rem; flex-wrap: wrap; }
@@ -290,16 +365,24 @@ footer {
 .chat-body {
   --term-font: Consolas, "Cascadia Mono", "SFMono-Regular", Menlo, monospace;
   --term-bg: #fbfcfd;
-  --term-ink: #1f2328;
-  --term-dim: #656d76;
-  --term-rule: #d0d7de;
-  --term-surface: #f6f8fa;
-  --term-accent: #0969da;
+  --term-ink: var(--oah-slate-700);
+  --term-dim: var(--oah-slate-400);
+  --term-rule: var(--oah-slate-200);
+  --term-surface: var(--oah-slate-050);
+  --term-accent: var(--oah-orange-hover);
   --term-add: #1a7f37;
   --term-del: #cf222e;
-  --term-bar: #24292f;
-  --term-bar-ink: #e6edf3;
-  --term-bar-dim: #9aa4ad;
+  /* The top/status bars are a fixed night-sky "terminal frame" in EVERY theme:
+     these bar tokens are declared only here and inherited by the dark blocks
+     above, so the chrome reads the same whether the page is light or dark. */
+  --term-bar: var(--oah-slate-900);
+  --term-bar-ink: var(--oah-slate-100);
+  --term-bar-dim: var(--oah-slate-400);
+  --term-bar-rule: var(--oah-border-soft); /* hairline dividers between bars/notices */
+  --term-bar-edge: var(--oah-slate-600);   /* visible chrome borders (the status select) */
+  --term-bar-ok: var(--oah-terminal-green); /* "schema-only" / PII-active badge */
+  --term-bar-warn: var(--oah-star-amber);  /* PII-partial badge */
+  --term-bar-bad: #f85149;                 /* PII-off badge + disable-AI hover */
   /* syntax-highlight + PII-row colours; themed via the dark blocks at the top */
   --tok-kw: #cf222e;
   --tok-str: #0a3069;
@@ -327,25 +410,25 @@ footer {
   color: var(--term-bar-ink);
   font-size: 12px;
 }
-.chat-body #topbar { border-bottom: 1px solid #1b1f24; }
-.chat-body #statusbar { border-top: 1px solid #1b1f24; }
+.chat-body #topbar { border-bottom: 1px solid var(--term-bar-rule); }
+.chat-body #statusbar { border-top: 1px solid var(--term-bar-rule); }
 .chat-body #topbar .topbar-title { font-weight: 600; letter-spacing: 0.02em; }
 .chat-body #topbar #chat-target { flex: 1; color: var(--term-bar-dim); font-size: 11px; }
 .chat-body #topbar .badge.synced {
-  color: #3fb950;
-  border-color: #3fb950;
+  color: var(--term-bar-ok);
+  border-color: var(--term-bar-ok);
   background: transparent;
 }
 /* the PII-guard badge when the outbound scan is OFF (you are not protected) */
 .chat-body #topbar .badge.danger {
-  color: #f85149;
-  border-color: #f85149;
+  color: var(--term-bar-bad);
+  border-color: var(--term-bar-bad);
   background: transparent;
 }
 /* PARTIAL: structured scan runs but a configured name pass can't (model absent) */
 .chat-body #topbar .badge.warn {
-  color: #d29922;
-  border-color: #d29922;
+  color: var(--term-bar-warn);
+  border-color: var(--term-bar-warn);
   background: transparent;
 }
 /* off-switch: a subtle ghost button on the dark bar that reads as danger on hover */
@@ -356,8 +439,8 @@ footer {
   border: 1px solid var(--term-bar-dim);
 }
 .chat-body #topbar #disable-ai-btn:hover {
-  color: #f85149;
-  border-color: #f85149;
+  color: var(--term-bar-bad);
+  border-color: var(--term-bar-bad);
   background: transparent;
 }
 /* disabled notice: a calm footer above the (frozen) composer with the Enable action */
@@ -368,7 +451,7 @@ footer {
   gap: 0.5rem;
   padding: 0.5rem 0.8rem;
   color: var(--term-dim);
-  border-top: 1px solid #1b1f24;
+  border-top: 1px solid var(--term-bar-rule);
   font-size: 12px;
 }
 /* sign-in notice: a calm panel above the (frozen) composer when Copilot isn't
@@ -376,7 +459,7 @@ footer {
 .chat-body #signin-notice {
   flex: 0 0 auto;
   padding: 0.6rem 0.8rem;
-  border-top: 1px solid #1b1f24;
+  border-top: 1px solid var(--term-bar-rule);
   font-size: 12px;
   color: var(--term-dim);
 }
@@ -394,12 +477,12 @@ footer {
   font: inherit;
   font-size: 11px;
   padding: 0.05rem 0.25rem;
-  border: 1px solid #444c56;
+  border: 1px solid var(--term-bar-edge);
   border-radius: 4px;
-  background: #30363d;
+  background: var(--oah-slate-700);
   color: var(--term-bar-ink);
 }
-.chat-body .status-sep { color: #444c56; }
+.chat-body .status-sep { color: var(--term-bar-edge); }
 .chat-body .status-seg { color: var(--term-bar-dim); }
 .chat-body .status-state { margin-left: auto; color: var(--term-bar-dim); }
 /* NER prepare/download status, now a status-bar segment */
