@@ -17,6 +17,7 @@
     }
   </script>
   <link rel="stylesheet" href="/static/style.css">
+  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
 </head>
 <body class="chat-body">
   <!-- A terminal-style REPL beside the marimo tab. The model streams over SSE;
@@ -24,7 +25,7 @@
        talks to marimo over HTTP only — outputs/values never reach this page. -->
   <div id="term">
     <div id="topbar">
-      <span class="prompt-glyph">&#9875;</span>
+      <span class="prompt-glyph"><svg class="brand-mark" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 6v16M19 13l2-1a9 9 0 0 1-18 0l2 1M9 11h6"/><circle cx="12" cy="4" r="2"/></svg></span>
       <span class="topbar-title">mooring copilot</span>
       <span id="chat-target" class="muted"></span>
       <span class="badge synced" title="The assistant only ever sees column names &amp; types, never data values">schema-only</span>

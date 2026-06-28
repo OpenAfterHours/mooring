@@ -12,6 +12,7 @@
     } catch (e) {}
   </script>
   <link rel="stylesheet" href="/static/style.css">
+  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
   <style>
     /* Batch-specific layout. Colours come from style.css CSS variables (themed),
        and the .chat-body token/diff palette so generated source highlights the same
@@ -42,7 +43,7 @@
       border-radius: 6px; padding: 0.2rem 0.4rem; font: inherit;
     }
     #build-btn {
-      background: var(--term-accent); color: #fff; border: none; border-radius: 6px;
+      background: var(--term-accent); color: var(--oah-on-orange); border: none; border-radius: 6px;
       padding: 0.4rem 0.9rem; font: inherit; cursor: pointer;
     }
     #build-btn:disabled { opacity: 0.55; cursor: default; }
@@ -89,7 +90,7 @@
 <body class="chat-body">
   <div class="batch-wrap">
     <div class="batch-head">
-      <span class="prompt-glyph">&#9875;</span>
+      <span class="prompt-glyph"><svg class="brand-mark" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 6v16M19 13l2-1a9 9 0 0 1-18 0l2 1M9 11h6"/><circle cx="12" cy="4" r="2"/></svg></span>
       <h1>batch builder</h1>
       <span class="badge synced" title="Each builder only ever sees column names &amp; types, never data values">schema-only</span>
       <span class="grow"></span>
