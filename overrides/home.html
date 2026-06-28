@@ -1,14 +1,21 @@
 {#-
   mooring landing page — OpenAfterHours "night sky" theme.
   Custom homepage: replaces the header with a bespoke nav, fills the hero
-  block with the anchor hero + feature shelf + start-here, hides the empty
-  docs shell, and renders a custom footer. Inner pages use the standard theme.
+  block with an animated night-sea scene (crescent moon, water, and a boat
+  that sails in, moors, then sails on), followed by the feature shelf and
+  start-here grid, hides the empty docs shell, and renders a custom footer.
+  Inner pages use the standard theme. The boat voyage + starfield are wired
+  up as progressive enhancement in landing.js; the hero copy stands alone
+  without JavaScript.
 -#}
 {% extends "main.html" %}
 
 {% set gh = config.repo_url | default("https://github.com/OpenAfterHours/mooring", true) %}
 {% set anchor_svg %}
   <path d="M12 6v16M19 13l2-1a9 9 0 0 1-18 0l2 1M9 11h6"/><circle cx="12" cy="4" r="2"/>
+{% endset %}
+{% set arrow_svg %}
+  <svg class="mr-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
 {% endset %}
 
 {% block extrahead %}
@@ -37,10 +44,31 @@
 {% endblock %}
 
 {% block hero %}
-<section class="mr-hero">
-  <div class="mr-stars" data-count="140" data-seed="7" aria-hidden="true"></div>
-  <div class="mr-hero-grid">
-    <div class="mr-hero-copy">
+{#- id="mooring" matches the slug of index.md's H1 so the base theme's
+    "Skip to content" link (href="#mooring") lands on the hero copy, even
+    though this template empties the docs container. -#}
+<section class="mr-hero" id="mooring" tabindex="-1">
+  {#- Night sky: deterministic starfield (landing.js) + crescent moon. -#}
+  <div class="mr-stars" data-count="120" data-seed="7" aria-hidden="true"></div>
+  <svg class="mr-moon" viewBox="0 0 200 200" aria-hidden="true">
+    <defs>
+      <radialGradient id="mrMoonGlow" cx="50%" cy="50%" r="50%">
+        <stop offset="0%" stop-color="#fff6e0" stop-opacity="0.45"/>
+        <stop offset="40%" stop-color="#ffd98a" stop-opacity="0.16"/>
+        <stop offset="100%" stop-color="#ffd98a" stop-opacity="0"/>
+      </radialGradient>
+      <mask id="mrMoonCrescent">
+        <circle cx="100" cy="100" r="34" fill="#fff"/>
+        <circle cx="116" cy="93" r="32" fill="#000"/>
+      </mask>
+    </defs>
+    <circle cx="100" cy="100" r="98" fill="url(#mrMoonGlow)"/>
+    <circle cx="100" cy="100" r="34" fill="#f3ecdc" mask="url(#mrMoonCrescent)"/>
+  </svg>
+
+  {#- Hero copy: left-aligned within the page gutter, capped narrow. -#}
+  <div class="mr-hero-copy">
+    <div class="mr-hero-copy-inner" data-mr-text>
       <p class="mr-eyebrow">Schema-only AI for data teams · git-free notebook sharing</p>
       <h1 class="mr-h1">Analyse your data with <span class="mr-accent">AI</span> — without your data ever <span class="mr-accent">leaving your machine</span>.</h1>
       <p class="mr-lede">
@@ -54,48 +82,72 @@
         <span class="mr-prompt">$</span>
         <code class="mr-cmd">uvx mooring</code>
         <button class="mr-copy" type="button" aria-label="Copy command">COPY</button>
+        <span class="mr-sr-only" data-mr-copy-status aria-live="polite"></span>
       </div>
       <div class="mr-cta">
         <a class="mr-btn-primary" href="{{ 'users/quickstart/' | url }}">Get started →</a>
         <a class="mr-btn-ghost" href="{{ gh }}" rel="noopener">View on GitHub</a>
       </div>
     </div>
-    <div class="mr-hero-art">
-      <div class="mr-anchor-stage">
-        <div class="mr-anchor-glow" aria-hidden="true"></div>
-        <svg class="mr-anchor" viewBox="0 0 24 24" fill="none" role="img" aria-label="mooring anchor">
-          <defs>
-            <radialGradient id="mrAnchorGrad" cx="40%" cy="32%" r="85%">
-              <stop offset="0%" stop-color="#ffd388"/>
-              <stop offset="45%" stop-color="#ffb04a"/>
-              <stop offset="100%" stop-color="#c9442a"/>
-            </radialGradient>
-          </defs>
-          <g stroke="url(#mrAnchorGrad)" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M12 6v16M19 13l2-1a9 9 0 0 1-18 0l2 1M9 11h6"/><circle cx="12" cy="4" r="2"/>
-          </g>
-        </svg>
-      </div>
+  </div>
+
+  {#- The sea: water band, shimmering moon reflection, two wave hairlines. -#}
+  <div class="mr-water" aria-hidden="true"></div>
+  <div class="mr-reflection" aria-hidden="true"></div>
+  <div class="mr-wave mr-wave-1" aria-hidden="true"></div>
+  <div class="mr-wave mr-wave-2" aria-hidden="true"></div>
+
+  {#- The boat that moors. landing.js sails it in, drops the anchor, holds,
+      then sails on — looping. Static-moored under reduced motion / on mobile. -#}
+  <div class="mr-boat" data-mr-boat aria-hidden="true">
+    <div class="mr-rope" data-mr-rope></div>
+    <div class="mr-anchor-drop" data-mr-anchor>
+      <svg width="30" height="36" viewBox="0 0 30 36" fill="none" stroke="#cbd0d8" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="15" cy="5" r="3.2"/>
+        <line x1="15" y1="8.2" x2="15" y2="30"/>
+        <line x1="8" y1="14" x2="22" y2="14"/>
+        <path d="M5 23 C5 31 11 33 15 33 C19 33 25 31 25 23"/>
+        <path d="M3 21 L5 23 L8 22"/>
+        <path d="M27 21 L25 23 L22 22"/>
+      </svg>
+    </div>
+    <div class="mr-bob">
+      <svg width="160" height="100" viewBox="0 0 160 100" fill="none">
+        <rect x="86" y="6" width="3" height="64" fill="#cbd0d8"/>
+        <path d="M89 7 L104 11 L89 15 Z" fill="#ff9100"/>
+        <path d="M83 14 L83 68 L130 68 Z" fill="#e7e1d4"/>
+        <path d="M80 18 L80 68 L44 68 Z" fill="#ff9100" opacity="0.92"/>
+        <path d="M16 70 L144 70 L132 90 Q128 94 120 94 L40 94 Q32 94 28 90 Z" fill="#c9442a"/>
+        <rect x="16" y="70" width="128" height="5" fill="#ffc857"/>
+        <path d="M16 75 L144 75 L132 90 Q128 94 120 94 L40 94 Q32 94 28 90 Z" fill="#000" opacity="0.18"/>
+      </svg>
     </div>
   </div>
 </section>
 
 <section class="mr-shelf-wrap">
+  {#- Visually-hidden so the four feature <h3>s nest under a level-2 heading
+      (keeps the h1 → h2 → h3 outline valid for screen-reader navigation). -#}
+  <h2 class="mr-sr-only">Why mooring</h2>
   <div class="mr-shelf">
     <article class="mr-feat">
-      <span class="mr-feat-k">AI that can't see your data</span>
+      <svg class="mr-feat-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+      <h3 class="mr-feat-k">AI that can't see your data</h3>
       <p>Ask the copilot to write and edit cells against your real datasets. By design it gets only schema and source — never a value, a cell output, or a data file. It proposes cells you review and Apply.</p>
     </article>
     <article class="mr-feat">
-      <span class="mr-feat-k">GitHub with no git, no tokens</span>
+      <svg class="mr-feat-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/></svg>
+      <h3 class="mr-feat-k">GitHub with no git, no tokens</h3>
       <p>Pull, edit, and push a shared repo's notebooks with nothing but Python 3.12+. Sign in once with a device code — no tokens to create, paste, or rotate.</p>
     </article>
     <article class="mr-feat">
-      <span class="mr-feat-k">Share in one team repo</span>
+      <svg class="mr-feat-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.97 12.92A2 2 0 0 0 2 14.63v3.24a2 2 0 0 0 .97 1.71l3 1.8a2 2 0 0 0 2.06 0L12 19v-5.5l-5-3-4.03 2.42Z"/><path d="m7 16.5-4.74-2.85"/><path d="m7 16.5 5-3"/><path d="M7 16.5v5.17"/><path d="M12 13.5V19l3.97 2.38a2 2 0 0 0 2.06 0l3-1.8a2 2 0 0 0 .97-1.71v-3.24a2 2 0 0 0-.97-1.71L17 10.5l-5 3Z"/><path d="m17 16.5-5-3"/><path d="m17 16.5 4.74-2.85"/><path d="M17 16.5v5.17"/><path d="M7.97 4.42A2 2 0 0 0 7 6.13v4.37l5 3 5-3V6.13a2 2 0 0 0-.97-1.71l-3-1.8a2 2 0 0 0-2.06 0l-3 1.8Z"/><path d="M12 8 7.26 5.15"/><path d="m12 8 4.74-2.85"/><path d="M12 13.5V8"/></svg>
+      <h3 class="mr-feat-k">Share in one team repo</h3>
       <p>One repo holds the team's notebooks. Push to share; everyone else pulls. Conflicts are always flagged and resolved per file, never silently clobbered.</p>
     </article>
     <article class="mr-feat">
-      <span class="mr-feat-k">Pick up a teammate's notebook</span>
+      <svg class="mr-feat-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">{{ anchor_svg }}</svg>
+      <h3 class="mr-feat-k">Pick up a teammate's notebook</h3>
       <p>Pull the repo, open someone else's notebook, and start working — in the same locked environment they used. No setup, no “works on my machine”.</p>
     </article>
   </div>
@@ -106,20 +158,20 @@
     <h2 class="mr-start-h">Where to start</h2>
     <div class="mr-start-grid">
       <a href="{{ 'users/quickstart/' | url }}">
-        <strong>For users →</strong>
-        <span>Install in seconds, pull / edit / push notebooks, and use the copilot.</span>
+        <span class="mr-start-head">For users {{ arrow_svg }}</span>
+        <p>Install in seconds, pull / edit / push notebooks, and use the copilot.</p>
       </a>
       <a href="{{ 'admins/' | url }}">
-        <strong>For admins →</strong>
-        <span>Set up the shared repo, register the OAuth app, and configure a team.</span>
+        <span class="mr-start-head">For admins {{ arrow_svg }}</span>
+        <p>Set up the shared repo, register the OAuth app, and configure a team.</p>
       </a>
       <a href="{{ 'developers/' | url }}">
-        <strong>For developers →</strong>
-        <span>Architecture, dev setup, and contributing.</span>
+        <span class="mr-start-head">For developers {{ arrow_svg }}</span>
+        <p>Architecture, dev setup, and contributing.</p>
       </a>
       <a href="{{ 'admins/ai-privacy/' | url }}">
-        <strong>Evaluating for a sensitive-data team? →</strong>
-        <span>How the copilot is built so it can't see your data.</span>
+        <span class="mr-start-head">Evaluating for a sensitive-data team? {{ arrow_svg }}</span>
+        <p>How the copilot is built so it can't see your data.</p>
       </a>
     </div>
   </div>
