@@ -102,7 +102,15 @@
 .mr-hero {
   position: relative;
   overflow: hidden;
-  min-height: clamp(600px, 84vh, 768px);
+  display: flex;
+  flex-direction: column;
+  /* Fill the viewport below the sticky nav so the sea and the moored boat sit
+     at the bottom of the *screen* on landing, instead of being pushed below a
+     content-sized hero. The hero still grows if the copy ever needs more room.
+     (min-height is a floor; the vh fallback covers browsers without svh.) */
+  --mr-nav-h: 64px;
+  min-height: calc(100vh - var(--mr-nav-h));
+  min-height: calc(100svh - var(--mr-nav-h));
   padding: clamp(36px, 6vw, 56px) 28px 0;
   background: linear-gradient(180deg, #090a0d 0%, var(--oah-slate-900) 55%, #101218 100%);
   /* Moon geometry lives here so the moon and its reflection track together. */
@@ -113,10 +121,13 @@
 .mr-hero-copy {
   position: relative;
   z-index: 4;
+  width: 100%;
   max-width: 1120px;
   margin: 0 auto;
-  /* Leave room below the copy to clear the water band + the moored boat. */
-  padding-bottom: clamp(214px, 26vh, 248px);
+  /* Reserve room below the copy to clear the water band + the moored boat.
+     Sized to the (now lower, slightly smaller) boat so the hero doesn't get
+     pushed past the fold; @media (max-height) tightens it further on laptops. */
+  padding-bottom: clamp(170px, 20vh, 200px);
 }
 
 .mr-hero-copy-inner { max-width: 680px; }
@@ -278,7 +289,7 @@
   left: 0;
   right: 0;
   bottom: 0;
-  height: 170px;
+  height: 138px;
   z-index: 2;
   background: linear-gradient(180deg, #0f1117 0%, #14171f 45%, #181c25 100%);
   border-top: 1px solid rgba(255, 145, 0, 0.1);
@@ -291,7 +302,7 @@
      edge), derived from the same vars as the moon so the two stay aligned. */
   right: calc(var(--mr-moon-right) + 0.6 * var(--mr-moon-w) - 23px);
   width: 46px;
-  height: 170px;
+  height: 138px;
   z-index: 2;
   background: linear-gradient(180deg, rgba(243, 236, 220, 0.3), rgba(243, 236, 220, 0));
   animation: mr-shimmer 5s ease-in-out infinite;
@@ -307,8 +318,8 @@
   pointer-events: none;
 }
 
-.mr-wave-1 { bottom: 120px; background: rgba(216, 222, 233, 0.07); }
-.mr-wave-2 { bottom: 74px; background: rgba(216, 222, 233, 0.05); }
+.mr-wave-1 { bottom: 98px; background: rgba(216, 222, 233, 0.07); }
+.mr-wave-2 { bottom: 60px; background: rgba(216, 222, 233, 0.05); }
 
 @keyframes mr-shimmer {
   0%, 100% { opacity: 0.5; transform: scaleX(1); }
@@ -319,9 +330,13 @@
 .mr-boat {
   position: absolute;
   z-index: 3;
-  bottom: 108px;
+  bottom: 84px;
   left: -14%;
-  transform: translateX(-50%);
+  /* Scaled about its waterline (bottom-centre) so the hull stays on the sea and
+     the dropped anchor scales with it; landing.js only animates `left`, so the
+     scale here is preserved through the voyage. */
+  transform: translateX(-50%) scale(0.86);
+  transform-origin: 50% 100%;
   width: 160px;
   height: 118px;
   pointer-events: none;
@@ -494,6 +509,25 @@
 .mr-footer a:hover { color: var(--oah-orange); }
 
 /* --- Responsive ------------------------------------------------------------ */
+/* Short viewports (most laptops / non-maximised windows): tighten the hero copy
+   and the boat's clearance so the full copy AND the moored boat both fit above
+   the fold. Keyed on viewport *height*, so tall desktop monitors are untouched. */
+@media (max-height: 860px) {
+  .mr-hero { padding-top: clamp(26px, 4vh, 44px); }
+  .mr-hero-copy { padding-bottom: clamp(150px, 22vh, 184px); }
+  .mr-eyebrow { margin-bottom: 12px; }
+  .mr-h1 { font-size: clamp(30px, 4.4vw, 46px); margin-bottom: 12px; }
+  .mr-lede { font-size: 15.5px; line-height: 1.5; margin-bottom: 18px; }
+  .mr-install { margin-bottom: 18px; }
+}
+
+@media (max-height: 720px) {
+  .mr-hero-copy { padding-bottom: clamp(140px, 20vh, 168px); }
+  .mr-h1 { font-size: clamp(28px, 4vw, 40px); }
+  .mr-lede { margin-bottom: 14px; }
+  .mr-install { margin-bottom: 14px; }
+}
+
 @media (max-width: 1000px) {
   .mr-shelf { grid-template-columns: repeat(2, 1fr); }
 }
@@ -505,18 +539,24 @@
 
 @media (max-width: 720px) {
   .mr-hero {
-    min-height: 560px;
+    /* Still fill the screen below the nav (with a floor for short landscape
+       phones); the boat intro starts moored and centred regardless. */
+    min-height: max(520px, calc(100svh - var(--mr-nav-h)));
     /* Smaller moon, tucked toward the corner; reflection tracks via the vars. */
     --mr-moon-right: -8px;
     --mr-moon-w: 150px;
   }
-  /* Clear the centred moored boat's full envelope (mast tip ~220px up). */
-  .mr-hero-copy { padding-bottom: clamp(220px, 32vh, 252px); }
+  /* Clear the centred moored boat's full envelope (mast tip ~185px up now). */
+  .mr-hero-copy { padding-bottom: clamp(176px, 26vh, 200px); }
   .mr-moon { top: -16px; }
 }
 
 @media (max-width: 640px) {
   .mr-start-grid { grid-template-columns: 1fr; }
+  /* Drop the lede on phones (same breakpoint as the mobile boat intro): a
+     tighter eyebrow → headline → command → CTA lands harder. The value-blind
+     story is still carried by the feature shelf below. */
+  .mr-lede { display: none; }
 }
 
 @media (max-width: 600px) {
