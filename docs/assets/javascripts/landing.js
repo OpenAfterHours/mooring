@@ -114,7 +114,8 @@
 
     // Mobile: the boat is already moored (anchor down) when the page lands and
     // the hero copy is held off to the left; weigh anchor, then sail off to the
-    // right, towing the copy into place behind it.
+    // right, towing the copy into place behind it — then keep looping the
+    // voyage (sail in → moor → sail on), with the copy now left in place.
     if (narrow) {
       boat.style.transition = "none";
       boat.style.left = "50%";
@@ -127,8 +128,12 @@
         text.style.opacity = "0";
       }
       void boat.offsetWidth; // commit the moored/hidden state before animating
-      (async function intro() {
+      // Failsafe: never leave the hero copy hidden, whatever happens below.
+      setTimeout(showText, 6000);
+      (async function voyage() {
         try {
+          // Intro (the bit that only plays once): start moored, weigh anchor,
+          // then sail off to the right, towing the hero copy into place.
           await sleep(850); // landed — hold a beat, moored and bobbing
           if (!alive()) return showText();
           // weigh anchor
@@ -145,12 +150,55 @@
               "transform 2700ms cubic-bezier(0.22,1,0.36,1), opacity 1500ms ease-out";
             showText();
           }
+          await sleep(4250); // let the boat clear the right edge
+          if (!alive()) return showText();
+
+          // Loop: sail back in → drop anchor → moor → weigh anchor → sail on.
+          // The hero copy is already in place, so it stays put from here on.
+          while (alive()) {
+            // Reset off-screen left, anchor stowed.
+            boat.style.transition = "none";
+            boat.style.left = "-24%";
+            rope.style.transition = "none";
+            anchor.style.transition = "none";
+            up();
+            void boat.offsetWidth; // flush so the next transition takes effect
+            await sleep(80);
+            if (!alive()) return;
+
+            // 1. Sail in to the mooring spot.
+            boat.style.transition = "left 6000ms cubic-bezier(0.37,0.02,0.4,1)";
+            boat.style.left = "50%";
+            await sleep(6300);
+            if (!alive()) return;
+
+            // 2. Drop anchor.
+            rope.style.transition = "height 2000ms cubic-bezier(0.5,0,0.7,1)";
+            anchor.style.transition = "transform 2000ms cubic-bezier(0.5,0,0.7,1)";
+            down();
+            await sleep(2300);
+            if (!alive()) return;
+
+            // 3. Moored — hold.
+            await sleep(3500);
+            if (!alive()) return;
+
+            // 4. Weigh anchor.
+            rope.style.transition = "height 1800ms cubic-bezier(0.3,0,0.3,1)";
+            anchor.style.transition = "transform 1800ms cubic-bezier(0.3,0,0.3,1)";
+            up();
+            await sleep(2150);
+            if (!alive()) return;
+
+            // 5. Sail on, off the right edge, then loop.
+            boat.style.transition = "left 5500ms cubic-bezier(0.5,0,0.6,1)";
+            boat.style.left = "124%";
+            await sleep(5800);
+          }
         } catch (e) {
           showText();
         }
       })();
-      // Failsafe: never leave the hero copy hidden, whatever happens above.
-      setTimeout(showText, 6000);
       return;
     }
 
