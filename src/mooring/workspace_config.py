@@ -22,6 +22,7 @@ from __future__ import annotations
 import os
 import threading
 import tomllib
+from collections.abc import Iterable
 from pathlib import Path
 
 import tomli_w
@@ -249,23 +250,32 @@ def merge_extra_folders(folders: tuple[str, ...], workspace: Path) -> tuple[str,
 
 
 def add_extra_folder(workspace: Path, folder: str) -> None:
-    """Record ``folder`` in ``mooring.toml``'s ``[sync] folders`` if not already present,
+    """Record ``folder`` in ``mooring.toml``'s ``[sync] folders`` if not already present
+    (see :func:`add_extra_folders`, the single/­one-folder form)."""
+    add_extra_folders(workspace, [folder])
+
+
+def add_extra_folders(workspace: Path, folders: Iterable[str]) -> None:
+    """Record ``folders`` in ``mooring.toml``'s ``[sync] folders`` in ONE atomic write,
     preserving every other key/section (the :func:`set_ai_disabled` idiom: strict read,
-    sorted+deduped write, atomic replace, serialized by ``_WRITE_LOCK``). A no-op for an
-    empty/already-listed folder. Raises ``tomllib.TOMLDecodeError`` on a corrupt file
-    rather than overwriting it."""
-    key = normalize_notebook(folder)
-    if not key:
+    sorted+deduped write, atomic replace, serialized by ``_WRITE_LOCK``). A no-op when
+    every folder is empty/already-listed (so adopt never rewrites the file needlessly).
+    Raises ``tomllib.TOMLDecodeError`` on a corrupt file rather than overwriting it."""
+    keys = [k for k in (normalize_notebook(f) for f in folders) if k]
+    if not keys:
         return
     with _WRITE_LOCK:
         data = _read_data_strict(workspace)
-        folders = _folders_list(data)
-        if key in folders:
-            return
-        folders.append(key)
+        existing = _folders_list(data)
+        merged = list(existing)
+        for key in keys:
+            if key not in merged:
+                merged.append(key)
+        if merged == existing:
+            return  # nothing new — don't rewrite the file
         sync = data.get("sync")
         if not isinstance(sync, dict):
             sync = {}
-        sync["folders"] = sorted(folders)  # stable diffs and sync merges
+        sync["folders"] = sorted(merged)  # stable diffs and sync merges
         data["sync"] = sync
         _write_data(workspace, data)

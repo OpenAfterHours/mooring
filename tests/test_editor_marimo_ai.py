@@ -6,6 +6,7 @@ These inspect the workspace config the editor writes; no marimo subprocess runs.
 from __future__ import annotations
 
 import tomllib
+from pathlib import Path
 
 from mooring.editor import EditorServer
 
@@ -57,6 +58,38 @@ def test_apply_theme_rewrites_existing_config(tmp_path):
     editor.apply_theme("dark")  # the hub switched the toggle while running
     assert editor.theme == "dark"
     assert _read(ws)["display"]["theme"] == "dark"
+
+
+def test_writes_workspace_root_to_pythonpath(tmp_path):
+    # The workspace root goes on the notebook kernel's sys.path so a notebook in any
+    # sub-folder can import the repo's helper modules (`from lib import helpers`). It
+    # must be ABSOLUTE — marimo doesn't resolve a .marimo.toml pythonpath entry.
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    EditorServer(ws)._ensure_marimo_config()
+    assert _read(ws)["runtime"]["pythonpath"] == [str(ws.resolve())]
+
+
+def test_pythonpath_is_absolute_for_a_relative_workspace(tmp_path, monkeypatch):
+    # A relative workspace path must still produce an ABSOLUTE pythonpath entry, or the
+    # kernel's relative sys.path entry would resolve against the wrong cwd.
+    monkeypatch.chdir(tmp_path)
+    ws = Path("relws")
+    ws.mkdir()
+    EditorServer(ws)._ensure_marimo_config()
+    entry = _read(ws)["runtime"]["pythonpath"][0]
+    assert Path(entry).is_absolute()
+    assert Path(entry) == (tmp_path / "relws").resolve()
+
+
+def test_pythonpath_preserves_existing_entries_with_root_first(tmp_path):
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    (ws / ".marimo.toml").write_text(
+        '[runtime]\npythonpath = ["/some/other/dir"]\n', encoding="utf-8"
+    )
+    EditorServer(ws)._ensure_marimo_config()
+    assert _read(ws)["runtime"]["pythonpath"] == [str(ws.resolve()), "/some/other/dir"]
 
 
 def test_idempotent(tmp_path):

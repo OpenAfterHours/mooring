@@ -129,3 +129,48 @@ def test_create_from_input_respects_exclude(tmp_path):
         notebook_template.create_from_input(
             tmp_path, "drafts/x", folders=("notebooks",), exclude=("drafts",)
         )
+
+
+# -- is_marimo_app: tell a notebook from a plain helper module ----------------
+
+
+def test_is_marimo_app_detects_the_template():
+    src = notebook_template.TEMPLATE.format(version="0.0.0", title="t")
+    assert notebook_template.is_marimo_app(src) is True
+
+
+def test_is_marimo_app_true_for_minimal_app():
+    assert notebook_template.is_marimo_app("import marimo\napp = marimo.App()\n") is True
+
+
+def test_is_marimo_app_false_for_plain_module():
+    assert notebook_template.is_marimo_app("import pandas as pd\n\ndef clean(df):\n    return df\n") is False
+
+
+def test_is_marimo_app_false_for_bare_marimo_import():
+    # Imports marimo but builds no app — an incomplete stub, not a notebook.
+    assert notebook_template.is_marimo_app("import marimo\n") is False
+
+
+def test_is_marimo_app_false_for_empty():
+    assert notebook_template.is_marimo_app("") is False
+
+
+def test_is_marimo_app_ignores_leading_bom():
+    assert notebook_template.is_marimo_app("﻿import marimo\napp = marimo.App()\n") is True
+
+
+def test_is_marimo_app_anchored_not_bare_substring():
+    # A helper module that merely MENTIONS marimo.App (comment, docstring, or a factory
+    # `return marimo.App(...)`) is NOT a notebook — the match anchors to a top-level
+    # `<name> = marimo.App(` assignment, so it isn't opened+rewritten by the editor.
+    assert notebook_template.is_marimo_app("# wraps marimo.App(...) for tests\nx = 1\n") is False
+    assert notebook_template.is_marimo_app('"""docs: marimo.App( usage."""\nx = 1\n') is False
+    assert notebook_template.is_marimo_app("def make():\n    return marimo.App(width='full')\n") is False
+
+
+def test_is_marimo_app_finds_marker_past_4kb():
+    # A real notebook with a large leading header (e.g. a PEP 723 dependency block)
+    # before `app = marimo.App(` must still be detected — the sniff reads full source.
+    src = "# " + "x" * 6000 + "\nimport marimo\napp = marimo.App()\n"
+    assert notebook_template.is_marimo_app(src) is True

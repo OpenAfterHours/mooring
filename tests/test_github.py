@@ -52,6 +52,46 @@ def test_get_tree_filters_to_configured_folders():
 
 
 @responses.activate
+def test_get_full_tree_returns_all_blobs_unfiltered():
+    responses.add(responses.GET, f"{REPO}/git/commits/c0ffee", json={"tree": {"sha": "tree1"}})
+    responses.add(
+        responses.GET,
+        f"{REPO}/git/trees/tree1",
+        json={
+            "truncated": False,
+            "tree": [
+                {"path": "notebooks/a.py", "type": "blob", "sha": "a" * 40, "size": 10},
+                {"path": "analysis/q1.py", "type": "blob", "sha": "b" * 40, "size": 20},
+                {"path": "README.md", "type": "blob", "sha": "c" * 40, "size": 5},
+                {"path": "analysis", "type": "tree", "sha": "d" * 40},  # dropped (not a blob)
+            ],
+        },
+    )
+    entries = client().get_full_tree("c0ffee")
+    assert [e.path for e in entries] == ["notebooks/a.py", "analysis/q1.py", "README.md"]
+
+
+@responses.activate
+def test_sha256_guard_only_fires_for_in_scope_blobs():
+    # A SHA-256 repo whose synced folders are empty must report an empty tree, not
+    # error — the guard runs on the FILTERED (in-scope) entries, where a real sync
+    # would actually need them. get_full_tree (discovery) tolerates the long shas.
+    responses.add(responses.GET, f"{REPO}/git/commits/c0ffee", json={"tree": {"sha": "tree1"}})
+    responses.add(
+        responses.GET,
+        f"{REPO}/git/trees/tree1",
+        json={
+            "truncated": False,
+            "tree": [{"path": "analysis/q1.py", "type": "blob", "sha": "a" * 64, "size": 10}],
+        },
+    )
+    assert client().get_tree("c0ffee", ("notebooks",)) == []  # nothing in scope → no error
+    assert [e.path for e in client().get_full_tree("c0ffee")] == ["analysis/q1.py"]
+    with pytest.raises(GitHubError, match="SHA-256"):
+        client().get_tree("c0ffee", ("analysis",))  # in-scope sha-256 blob → error
+
+
+@responses.activate
 def test_get_tree_truncated_is_an_error():
     responses.add(responses.GET, f"{REPO}/git/commits/c0ffee", json={"tree": {"sha": "tree1"}})
     responses.add(responses.GET, f"{REPO}/git/trees/tree1", json={"truncated": True, "tree": []})

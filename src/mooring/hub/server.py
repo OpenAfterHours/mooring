@@ -33,6 +33,7 @@ from mooring import (
     auth,
     config,
     config_store,
+    notebook_template,
     pbip,
     pyproject_env,
     shadow,
@@ -101,6 +102,10 @@ class Hub:
         # The env can't change within a running process, so enumerate site-packages
         # once instead of on every /api/state poll. See _notebook_env.
         self._top_level_pkgs: list[str] | None = None
+        # Cache of the notebook-vs-module sniff (see _is_notebook), keyed by absolute
+        # path → (mtime_ns, is_notebook). /api/state re-lists on every refresh, so this
+        # avoids re-reading every .py off disk each time; a changed mtime invalidates it.
+        self._notebook_cache: dict[str, tuple[int, bool]] = {}
 
     # -- helpers -------------------------------------------------------------
 
@@ -282,16 +287,33 @@ class Hub:
             shadowed = shadow.scan(
                 [f.path for f in report.files], workspace=workspace, extra=extra, ignore=ignore
             )
+        def _has_local(f: sync.FileStatus) -> bool:
+            # A LOCAL row is on disk by definition (local_report doesn't hash, so it
+            # carries no sha); a sync row reports presence via its local_sha.
+            return f.state is sync.FileState.LOCAL or f.local_sha is not None
+
+        # Tell a runnable marimo notebook from a plain helper module (sniffed off disk).
+        # Only meaningful for a .py that exists locally; drives the Open/AI buttons and
+        # the "module" badge, and keeps the editor from opening (and rewriting) a module.
+        notebooks = {
+            f.path
+            for f in report.files
+            if f.path.endswith(".py") and _has_local(f) and self._is_notebook(workspace, f.path)
+        }
         files = [
             {
                 "path": f.path,
                 "state": f.state.value,
-                # A LOCAL row is on disk by definition (local_report doesn't hash, so
-                # it carries no sha); a sync row reports presence via its local_sha.
-                "has_local": f.state is sync.FileState.LOCAL or f.local_sha is not None,
+                "has_local": _has_local(f),
                 **({"artifact": artifact_of[f.path]} if f.path in artifact_of else {}),
                 **({"ai_disabled": True} if f.path.endswith(".py") and f.path in ai_off else {}),
                 **({"shadows": shadowed[f.path]} if f.path in shadowed else {}),
+                **({"is_notebook": True} if f.path in notebooks else {}),
+                **(
+                    {"is_module": True}
+                    if f.path.endswith(".py") and _has_local(f) and f.path not in notebooks
+                    else {}
+                ),
             }
             for f in report.files
         ]
@@ -313,6 +335,31 @@ class Hub:
             for a in artifacts
         ]
         return files, arts
+
+    def _is_notebook(self, workspace: Path, rel: str) -> bool:
+        """Whether the local ``.py`` at ``rel`` is a marimo notebook (vs a plain helper
+        module). A blank/whitespace-only file counts as a notebook — it opens as a fresh
+        notebook, matching the open guards (so the hub never badges a blank stub a
+        'module' while /api/open would happily open it). Reads the whole file (the
+        marimo marker can sit past a large header) but caches by mtime, so the per-row
+        sniff on every /api/state doesn't re-read unchanged files. Missing/unreadable →
+        False."""
+        path = workspace / rel
+        try:
+            mtime = path.stat().st_mtime_ns
+        except OSError:
+            return False
+        key = str(path)
+        cached = self._notebook_cache.get(key)
+        if cached is not None and cached[0] == mtime:
+            return cached[1]
+        try:
+            source = path.read_bytes().decode("utf-8", "ignore")
+        except OSError:
+            return False
+        result = not source.strip() or notebook_template.is_marimo_app(source)
+        self._notebook_cache[key] = (mtime, result)
+        return result
 
     def _installed_top_level(self) -> list[str]:
         if self._top_level_pkgs is None:
@@ -389,6 +436,10 @@ class Hub:
             "host": cfg.host,
             "workspace": str(cfg.workspace()),
             "workspace_hint": workspace_hint(cfg),
+            # The declared sync folders, so the hub can group files by folder and show
+            # the structure (incl. an adopted/declared folder that is still empty) —
+            # "here's where notebooks go" even before the first file lands.
+            "folders": list(cfg.folders),
             "repos": [
                 {
                     "alias": s.alias,
@@ -780,6 +831,63 @@ class Hub:
             lambda: sync.resolve(self.client(), self.cfg, data["path"], strategy, username),
         )
 
+    def api_discover(self, _request: Request) -> JSONResponse:
+        """Top-level repo folders that hold files outside the synced folders — the
+        adopt candidates. Read-only; called on demand by the hub (not on every
+        /api/state) so the extra full-tree read stays off the refresh hot path."""
+        cfg = self.cfg
+        if not cfg.is_configured or not auth.get_token(host=cfg.host):
+            return JSONResponse({"candidates": []})
+        try:
+            candidates = sync.discover_unsynced_folders(self.client(), cfg)
+        except (GitHubError, OSError) as exc:
+            telemetry.log_error(exc=exc, op="discover")
+            return JSONResponse({"error": str(exc)}, status_code=502)
+        return JSONResponse(
+            {
+                "candidates": [
+                    {"folder": c.folder, "files": c.files, "py_files": c.py_files}
+                    for c in candidates
+                ]
+            }
+        )
+
+    async def api_adopt(self, request: Request) -> JSONResponse:
+        """Register the chosen folders in the synced ``mooring.toml`` and pull them.
+
+        The request's folders are validated against what discovery actually found, so
+        adopt never registers a non-existent folder, then re-derives the scope and runs
+        a normal pull through :meth:`_sync_op` (so the response shape matches push/pull)."""
+        from dataclasses import replace
+
+        data = await request.json() if await request.body() else {}
+        requested = [str(f) for f in (data.get("folders") or [])]
+        if not requested:
+            return JSONResponse({"error": "No folders given."}, status_code=400)
+        cfg = self.cfg
+        try:
+            known = {c.folder for c in sync.discover_unsynced_folders(self.client(), cfg)}
+        except (GitHubError, OSError) as exc:
+            telemetry.log_error(exc=exc, op="adopt")
+            return JSONResponse({"error": str(exc)}, status_code=502)
+        chosen = [
+            folder
+            for folder in (workspace_config.normalize_notebook(r) for r in requested)
+            if folder in known
+        ]
+        if not chosen:
+            return JSONResponse({"error": "None of those folders are adoptable."}, status_code=400)
+        workspace = cfg.workspace()
+        try:
+            workspace_config.add_extra_folders(workspace, chosen)
+        except tomllib.TOMLDecodeError as exc:
+            return JSONResponse(
+                {"error": f"{workspace_config.WORKSPACE_CONFIG_NAME} is not valid TOML: {exc}"},
+                status_code=400,
+            )
+        new_cfg = replace(cfg, folders=workspace_config.merge_extra_folders(cfg.folders, workspace))
+        return self._sync_op("adopt", lambda: sync.pull(self.client(), new_cfg))
+
     def _sync_op(self, name: str, op) -> JSONResponse:
         try:
             result = op()
@@ -941,6 +1049,24 @@ class Hub:
                 {"error": "Only .py notebooks and .pbip projects can be opened."},
                 status_code=400,
             )
+        # Refuse to open a plain Python module as a notebook: the marimo editor would
+        # rewrite it into notebook form on save, corrupting a helper module. A blank
+        # stub is allowed (it becomes a new notebook); a non-empty module without the
+        # marimo.App marker is not. The hub already hides Open on such rows (is_module);
+        # this backstops a direct call / stale client. Reads the whole file — the marker
+        # can sit past a large leading header.
+        source = target.read_bytes().decode("utf-8", "ignore")
+        if source.strip() and not notebook_template.is_marimo_app(source):
+            return JSONResponse(
+                {
+                    "error": (
+                        f"{rel_path.rsplit('/', 1)[-1]} is a Python module, not a marimo "
+                        "notebook — opening it in the editor could overwrite it. Import it "
+                        "from a notebook instead."
+                    )
+                },
+                status_code=400,
+            )
         try:
             editor = self.ensure_editor()
         except Exception as exc:  # noqa: BLE001  # shown in the UI
@@ -961,9 +1087,12 @@ class Hub:
         # single `warning` string the front-end shows (never clobbering missing-deps).
         if self.cfg.warn_shadowed_notebooks:
             extra, ignore = self._shadow_policy(workspace)
-            findings = shadow.folder_shadows(
-                rel_path, workspace=workspace, extra=extra, ignore=ignore
-            )
+            # The notebook's folder AND the workspace root are both on the kernel's
+            # sys.path (the latter via runtime.pythonpath — see editor.py), so scan both.
+            findings = {
+                **shadow.root_shadows(workspace, extra=extra, ignore=ignore),
+                **shadow.folder_shadows(rel_path, workspace=workspace, extra=extra, ignore=ignore),
+            }
             if findings:
                 names = ", ".join(sorted(set(findings.values())))
                 offenders = ", ".join(sorted(findings))
@@ -2201,6 +2330,8 @@ def create_app(hub: Hub) -> Starlette:
             Route("/api/login/start", hub.api_login_start, methods=["POST"]),
             Route("/api/login/poll", hub.api_login_poll),
             Route("/api/logout", hub.api_logout, methods=["POST"]),
+            Route("/api/discover", hub.api_discover),
+            Route("/api/adopt", hub.api_adopt, methods=["POST"]),
             Route("/api/pull", hub.api_pull, methods=["POST"]),
             Route("/api/push", hub.api_push, methods=["POST"]),
             Route("/api/propose", hub.api_propose, methods=["POST"]),

@@ -217,7 +217,11 @@ function fileActions(file, opts) {
   }
   // has_local is server truth (the file exists on disk); some states such as a
   // remote-deleted conflict have no local file, so Open/Delete must not appear.
-  const openable = file.path.endsWith(".py") || file.path.endsWith(".pbip");
+  // A .py is openable only when it's a real marimo notebook (server-sniffed
+  // is_notebook): a plain helper module must NOT be opened in the editor, which
+  // would rewrite it into notebook form on save (the server also refuses).
+  const isNotebook = file.path.endsWith(".py") && file.is_notebook === true;
+  const openable = isNotebook || file.path.endsWith(".pbip");
   if (openable && file.has_local) {
     actions.push(["Open", () => openAction(file.path)]);
   }
@@ -226,7 +230,8 @@ function fileActions(file, opts) {
   // A notebook can be opted out of AI (synced mooring.toml) — when it is, the open
   // button is hidden and the toggle offers to turn it back on. The toggle is the
   // off switch for "this notebook now handles PII; don't let AI touch it by mistake".
-  if (aiChatEnabled && file.path.endsWith(".py") && file.has_local) {
+  // Modules (non-notebook .py) get no AI: the copilot operates on notebooks.
+  if (aiChatEnabled && isNotebook && file.has_local) {
     if (!file.ai_disabled) actions.push(["AI", () => openChatWindow(file.path)]);
     const label = file.ai_disabled ? "Enable AI" : "Disable AI";
     actions.push([label, () =>
@@ -281,11 +286,27 @@ function shadowBadge(name) {
   return span;
 }
 
+function moduleBadge() {
+  const span = document.createElement("span");
+  span.className = "badge module";
+  span.textContent = "module";
+  span.title =
+    "A Python module imported by notebooks — not a runnable marimo notebook, so it " +
+    "isn't opened in the editor (the workspace root is on the notebook's import path).";
+  return span;
+}
+
 function buildFileRow(file, opts) {
-  // A notebook whose filename shadows an importable package (e.g. polars.py) gets
-  // an amber badge so the sys.path[0] trap is visible before it becomes a kernel
-  // traceback. buildRow renders an array path cell as-is (string + badge node).
-  const pathCell = file.shadows ? [file.path, " ", shadowBadge(file.shadows)] : file.path;
+  opts = opts || {};
+  // Inside a folder section the row shows its folder-relative path (`rel`); elsewhere
+  // the full path. A notebook whose filename shadows an importable package (e.g.
+  // polars.py) gets an amber badge so the sys.path[0] trap is visible before it
+  // becomes a kernel traceback; a plain helper module gets a "module" badge.
+  const display = opts.rel && file.rel != null ? file.rel : file.path;
+  const extras = [];
+  if (file.shadows) extras.push(" ", shadowBadge(file.shadows));
+  if (file.is_module) extras.push(" ", moduleBadge());
+  const pathCell = extras.length ? [display, ...extras] : display;
   return buildRow(pathCell, file.state, fileActions(file, opts));
 }
 
@@ -342,16 +363,79 @@ function buildArtifactRows(artifact, files) {
   return [header, ...memberRows];
 }
 
-function renderFiles(files, artifacts) {
+// Create a notebook inside a specific folder (the section's "New here" button).
+function newNotebookIn(folder) {
+  const name = prompt(`Notebook name in ${folder}/\n(e.g. sales-analysis):`);
+  if (name) action("/api/new", { name: `${folder}/${name}` });
+}
+
+// A collapsible folder section: a header row (caret + name + count) and the file rows
+// under it. Reuses the PBIP caret/collapse pattern. An empty DECLARED folder still
+// renders — "here's where notebooks go" — with a disabled caret and a New-here button.
+function buildFolderSection(section) {
+  const memberRows = section.files.map((file) => {
+    const row = buildFileRow(file, { rel: true });
+    row.classList.add("member");
+    return row;
+  });
+
+  const caret = document.createElement("button");
+  caret.className = "small caret";
+  if (section.empty) {
+    caret.textContent = "·";
+    caret.disabled = true;
+  } else {
+    caret.textContent = "▾";
+    caret.addEventListener("click", () => {
+      const open = caret.textContent === "▾";
+      caret.textContent = open ? "▸" : "▾";
+      memberRows.forEach((row) => row.classList.toggle("hidden", open));
+    });
+  }
+
+  const name = document.createElement("b");
+  name.textContent = section.folder === "" ? " repo root " : ` ${section.folder}/ `;
+  const detail = document.createElement("span");
+  detail.className = "muted";
+  detail.textContent = section.empty ? "— empty" : `— ${section.files.length} file(s)`;
+
+  const tr = document.createElement("tr");
+  tr.className = "folder-header";
+  const headTd = document.createElement("td");
+  headTd.className = "path";
+  headTd.colSpan = 2;
+  headTd.append(caret, name, detail);
+  const actionsTd = document.createElement("td");
+  if (section.folder !== "") {
+    const btn = document.createElement("button");
+    btn.className = "small";
+    btn.textContent = "New here";
+    btn.title = `Create a notebook in ${section.folder}/`;
+    btn.addEventListener("click", () => newNotebookIn(section.folder));
+    actionsTd.append(btn);
+  }
+  tr.append(headTd, actionsTd);
+  return [tr, ...memberRows];
+}
+
+function renderFiles(files, artifacts, declaredFolders) {
   const tbody = $("files-table").querySelector("tbody");
   tbody.innerHTML = "";
-  $("empty-hint").classList.toggle("hidden", files.length > 0);
-  $("files-table").classList.toggle("hidden", files.length === 0);
+  // PBIP artifacts keep their own collapsible grouping; the rest group by folder so the
+  // structure (incl. an adopted/declared folder that is still empty) is visible.
+  const nonArtifact = files.filter((f) => !f.artifact);
+  const sections = FilesTree.group(nonArtifact, declaredFolders || []);
+  const hasRows = files.length > 0 || sections.length > 0;
+  $("files-table").classList.toggle("hidden", !hasRows);
+  // The empty-hint and the table are mutually exclusive: declared folders seed empty
+  // folder sections (each with its own "New here"), so once any row renders the hint
+  // would just duplicate that nudge — show it only when there's truly nothing.
+  $("empty-hint").classList.toggle("hidden", hasRows);
   for (const artifact of artifacts) {
     for (const row of buildArtifactRows(artifact, files)) tbody.appendChild(row);
   }
-  for (const file of files) {
-    if (!file.artifact) tbody.appendChild(buildFileRow(file));
+  for (const section of sections) {
+    for (const row of buildFolderSection(section)) tbody.appendChild(row);
   }
 }
 
@@ -367,6 +451,75 @@ function renderReviewBanner(review) {
   a.rel = "noopener";
   a.textContent = "create / view the pull request";
   banner.appendChild(a);
+}
+
+// The repo identity discovery last ran for. Discovery costs a full-tree fetch on
+// the server, so we run it once per repo-session (on login / repo switch), NOT on
+// every refresh() — and force a re-check (null) after an adopt so the banner clears.
+let lastDiscoverRepo = null;
+
+async function maybeDiscover(state) {
+  const banner = $("adopt-banner");
+  if (!state.logged_in) {
+    banner.classList.add("hidden");
+    lastDiscoverRepo = null;
+    return;
+  }
+  if (state.repo === lastDiscoverRepo) return;  // already checked this repo this session
+  lastDiscoverRepo = state.repo;
+  try {
+    const data = await api("/api/discover");
+    renderAdoptBanner(data.candidates || []);
+  } catch {
+    banner.classList.add("hidden");  // discovery is a non-essential prompt; never block
+  }
+}
+
+function renderAdoptBanner(candidates) {
+  const banner = $("adopt-banner");
+  banner.innerHTML = "";
+  banner.classList.toggle("hidden", candidates.length === 0);
+  if (!candidates.length) return;
+
+  const names = candidates.map((c) => c.folder);
+  const summary = document.createElement("div");
+  // Discovery surfaces any folder with syncable files, which can include data-only
+  // folders (0 .py) — so the copy says "files", not "Python files" (the per-folder
+  // button shows each folder's .py count for the notebook signal).
+  summary.append(
+    `Found ${candidates.length} folder(s) with files outside your synced folders: `,
+  );
+  names.forEach((name, i) => {
+    const b = document.createElement("b");
+    b.textContent = name;
+    summary.append(b, i < names.length - 1 ? ", " : ". ");
+  });
+  summary.append("Adopt them to sync their notebooks (and helper modules) for the team.");
+
+  const actions = document.createElement("div");
+  actions.className = "adopt-actions";
+  for (const c of candidates) {
+    const btn = document.createElement("button");
+    btn.className = "small";
+    btn.textContent = `Adopt ${c.folder} (${c.py_files} .py)`;
+    btn.addEventListener("click", () => adoptFolders([c.folder]));
+    actions.append(btn, " ");
+  }
+  if (candidates.length > 1) {
+    const all = document.createElement("button");
+    all.className = "small primary";
+    all.textContent = "Adopt all";
+    all.addEventListener("click", () => adoptFolders(names));
+    actions.append(all);
+  }
+  banner.append(summary, actions);
+}
+
+function adoptFolders(folders) {
+  // Force a re-check after the adopt (action() refreshes) so the banner reflects the
+  // now-narrowed candidate set — the adopted folders drop out, leaving any others.
+  lastDiscoverRepo = null;
+  return action("/api/adopt", { folders });
 }
 
 function renderRepoSelect(state) {
@@ -485,10 +638,13 @@ async function refresh() {
   }
   if (showFiles) {
     lastFiles = state.files || [];
-    renderFiles(lastFiles, state.artifacts || []);
+    renderFiles(lastFiles, state.artifacts || [], state.folders || []);
   } else {
     lastFiles = [];  // no file surface (login wall) — don't leave stale push/propose targets
   }
+  // Prompt to adopt any notebook folders the repo keeps outside the synced folders.
+  // Runs once per repo-session (see maybeDiscover), so it never rides the refresh loop.
+  await maybeDiscover(state);
 }
 
 async function startLogin() {
