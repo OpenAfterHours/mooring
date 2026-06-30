@@ -8,10 +8,11 @@
 // to the model over the hub only — no data value ever reaches this page.
 
 (function () {
-  // chat_core.js exposes its helpers as a bare top-level `const ChatCore` (a global
-  // LEXICAL binding) — NOT a property of `window`. So reach it the same way chat.js and
-  // app.js do, as bare `ChatCore`: `window.ChatCore` is undefined, which would make every
-  // call here (cleanJobs, additiveBlockLines, …) throw and silently break "Add to queue".
+  // Reach chat_core.js's helpers as the bare `ChatCore` global, like chat.js and app.js.
+  // They are declared as a top-level `const` (a global LEXICAL binding); chat_core.js also
+  // mirrors them onto `window.ChatCore`, but the bare global is the convention here.
+  // (Reading `window.ChatCore` silently broke this page — an uncaught TypeError on every
+  // call — before that mirror existed; the value is now defined either way.)
   const C = ChatCore;
   const $ = (id) => document.getElementById(id);
 
