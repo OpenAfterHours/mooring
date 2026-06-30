@@ -19,7 +19,74 @@
   <link rel="stylesheet" href="/static/style.css">
   <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
 </head>
-<body class="settings-body">
+<body class="settings-body has-scene">
+  <!-- Decorative day/night-sea backdrop (shared with the hub; see index.html).
+       aria-hidden + pointer-events:none; the boat sails in once via scene.js. -->
+  <div class="hub-scene" aria-hidden="true">
+    <div class="hub-stars" data-count="120" data-seed="7"></div>
+    <svg class="hub-sun" viewBox="0 0 200 200">
+      <defs>
+        <radialGradient id="hubSunGlow" cx="50%" cy="50%" r="50%">
+          <stop offset="0%" stop-color="#ffe6ae" stop-opacity="0.55"/>
+          <stop offset="38%" stop-color="#ffb74d" stop-opacity="0.22"/>
+          <stop offset="100%" stop-color="#ffb74d" stop-opacity="0"/>
+        </radialGradient>
+        <radialGradient id="hubSunDisc" cx="50%" cy="44%" r="55%">
+          <stop offset="0%" stop-color="#ffe7b3"/>
+          <stop offset="62%" stop-color="#ffb43c"/>
+          <stop offset="100%" stop-color="#ff9100"/>
+        </radialGradient>
+      </defs>
+      <circle cx="100" cy="100" r="98" fill="url(#hubSunGlow)"/>
+      <circle cx="100" cy="100" r="42" fill="url(#hubSunDisc)"/>
+    </svg>
+    <svg class="hub-moon" viewBox="0 0 200 200">
+      <defs>
+        <radialGradient id="hubMoonGlow" cx="50%" cy="50%" r="50%">
+          <stop offset="0%" stop-color="#fff6e0" stop-opacity="0.45"/>
+          <stop offset="40%" stop-color="#ffd98a" stop-opacity="0.16"/>
+          <stop offset="100%" stop-color="#ffd98a" stop-opacity="0"/>
+        </radialGradient>
+        <mask id="hubMoonCrescent">
+          <circle cx="100" cy="100" r="34" fill="#fff"/>
+          <circle cx="116" cy="93" r="32" fill="#000"/>
+        </mask>
+      </defs>
+      <circle cx="100" cy="100" r="98" fill="url(#hubMoonGlow)"/>
+      <circle cx="100" cy="100" r="34" fill="#f3ecdc" mask="url(#hubMoonCrescent)"/>
+    </svg>
+
+    <div class="hub-water"></div>
+    <div class="hub-reflection"></div>
+    <div class="hub-wave hub-wave-1"></div>
+    <div class="hub-wave hub-wave-2"></div>
+
+    <div class="hub-boat" data-hub-boat>
+      <div class="hub-rope" data-hub-rope></div>
+      <div class="hub-anchor" data-hub-anchor>
+        <svg width="30" height="36" viewBox="0 0 30 36" fill="none" stroke="var(--boat-metal)" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="15" cy="5" r="3.2"/>
+          <line x1="15" y1="8.2" x2="15" y2="30"/>
+          <line x1="8" y1="14" x2="22" y2="14"/>
+          <path d="M5 23 C5 31 11 33 15 33 C19 33 25 31 25 23"/>
+          <path d="M3 21 L5 23 L8 22"/>
+          <path d="M27 21 L25 23 L22 22"/>
+        </svg>
+      </div>
+      <div class="hub-bob">
+        <svg width="160" height="100" viewBox="0 0 160 100" fill="none">
+          <rect x="86" y="6" width="3" height="64" fill="var(--boat-metal)"/>
+          <path d="M89 7 L104 11 L89 15 Z" fill="#ff9100"/>
+          <path d="M83 14 L83 68 L130 68 Z" fill="#e7e1d4"/>
+          <path d="M80 18 L80 68 L44 68 Z" fill="#ff9100" opacity="0.92"/>
+          <path d="M16 70 L144 70 L132 90 Q128 94 120 94 L40 94 Q32 94 28 90 Z" fill="#c9442a"/>
+          <rect x="16" y="70" width="128" height="5" fill="#ffc857"/>
+          <path d="M16 75 L144 75 L132 90 Q128 94 120 94 L40 94 Q32 94 28 90 Z" fill="#000" opacity="0.18"/>
+        </svg>
+      </div>
+    </div>
+  </div>
+
   <header>
     <h1><svg class="brand-mark" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 6v16M19 13l2-1a9 9 0 0 1-18 0l2 1M9 11h6"/><circle cx="12" cy="4" r="2"/></svg>Settings</h1>
     <a class="header-link" href="/" title="Back to the hub">&#8592; Back to hub</a>
@@ -36,5 +103,7 @@
   </main>
 
   <script src="/static/settings.js"></script>
+  <!-- Decorative backdrop (starfield + the one-time boat voyage). Last in <body>. -->
+  <script src="/static/scene.js"></script>
 </body>
 </html>

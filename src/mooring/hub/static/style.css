@@ -70,6 +70,25 @@
   --bad: #cf222e;
   --review: #8250df;
   --banner-bad-bg: #ffebe9;
+
+  /* Night/day-sea backdrop (.hub-scene, hub + settings only). These DAY-palette
+     defaults paint a warm-sun daytime scene in light themes; the two dark blocks
+     below flip every --scene-* token to the docs NIGHT scene (moon + stars). The
+     flip rides the same data-theme gating as the semantic tokens above. */
+  --scene-sky: linear-gradient(180deg, #bcd6ec 0%, #d4e3ef 44%, #f1e9d8 100%);
+  --scene-water: linear-gradient(180deg, #a7c6dc 0%, #92b4cb 55%, #82a6bf 100%);
+  --scene-water-edge: rgba(255, 145, 0, 0.16);
+  --scene-reflection: linear-gradient(180deg, rgba(255, 201, 92, 0.5), rgba(255, 201, 92, 0));
+  --scene-wave: rgba(22, 48, 74, 0.07);
+  --scene-wave-soft: rgba(22, 48, 74, 0.05);
+  --scene-sun-display: block;
+  --scene-moon-display: none;
+  --scene-stars-display: none;
+  --scene-bar: rgba(244, 248, 251, 0.74); /* glass header over the scene */
+  --scene-scrim: rgba(244, 248, 251, 0.66); /* footer panel over the scene */
+  --scene-veil: transparent; /* day scene is already calm — no veil */
+  --scene-card-shadow: 0 8px 24px rgba(28, 50, 82, 0.12);
+  --boat-metal: #56697e; /* mast + anchor: darker for contrast on light water */
   color-scheme: light;
 }
 
@@ -94,6 +113,23 @@
   --bad: #f85149;
   --review: #a371f7;
   --banner-bad-bg: #2d1417;
+
+  /* NIGHT scene (the docs night-sea palette): dark sky/water, crescent moon +
+     starfield, cream moon-glitter reflection. Flips the day defaults above. */
+  --scene-sky: linear-gradient(180deg, #090a0d 0%, var(--oah-slate-900) 55%, #101218 100%);
+  --scene-water: linear-gradient(180deg, #0f1117 0%, #14171f 45%, #181c25 100%);
+  --scene-water-edge: rgba(255, 145, 0, 0.1);
+  --scene-reflection: linear-gradient(180deg, rgba(243, 236, 220, 0.3), rgba(243, 236, 220, 0));
+  --scene-wave: rgba(216, 222, 233, 0.07);
+  --scene-wave-soft: rgba(216, 222, 233, 0.05);
+  --scene-sun-display: none;
+  --scene-moon-display: block;
+  --scene-stars-display: block;
+  --scene-bar: rgba(13, 14, 17, 0.72);
+  --scene-scrim: rgba(13, 14, 17, 0.56);
+  --scene-veil: rgba(8, 9, 12, 0.12);
+  --scene-card-shadow: 0 8px 26px rgba(0, 0, 0, 0.45);
+  --boat-metal: #cbd0d8;
 }
 :root[data-theme="dark"] .chat-body {
   --term-bg: var(--oah-slate-900);
@@ -122,6 +158,22 @@
     --bad: #f85149;
     --review: #a371f7;
     --banner-bad-bg: #2d1417;
+
+    /* NIGHT scene under system-dark (mirrors the [data-theme="dark"] block). */
+    --scene-sky: linear-gradient(180deg, #090a0d 0%, var(--oah-slate-900) 55%, #101218 100%);
+    --scene-water: linear-gradient(180deg, #0f1117 0%, #14171f 45%, #181c25 100%);
+    --scene-water-edge: rgba(255, 145, 0, 0.1);
+    --scene-reflection: linear-gradient(180deg, rgba(243, 236, 220, 0.3), rgba(243, 236, 220, 0));
+    --scene-wave: rgba(216, 222, 233, 0.07);
+    --scene-wave-soft: rgba(216, 222, 233, 0.05);
+    --scene-sun-display: none;
+    --scene-moon-display: block;
+    --scene-stars-display: block;
+    --scene-bar: rgba(13, 14, 17, 0.72);
+    --scene-scrim: rgba(13, 14, 17, 0.56);
+    --scene-veil: rgba(8, 9, 12, 0.12);
+    --scene-card-shadow: 0 8px 26px rgba(0, 0, 0, 0.45);
+    --boat-metal: #cbd0d8;
   }
   :root[data-theme="system"] .chat-body {
     --term-bg: var(--oah-slate-900);
@@ -836,3 +888,187 @@ button.ghost:hover { color: var(--ink); }
 .switch input:checked + .slider::before { transform: translateX(1.1rem); }
 .switch input:focus-visible + .slider { outline: 2px solid var(--accent); outline-offset: 2px; }
 .switch input:disabled + .slider { opacity: 0.55; cursor: not-allowed; }
+
+/* ==========================================================================
+   Night/day-sea backdrop — hub (index.html) + settings.html only, gated by the
+   body.has-scene class. One composition, two palettes: a warm-sun DAY scene in
+   light themes and the docs NIGHT scene (crescent moon + starfield) in dark
+   themes, flipping via the --scene-* tokens declared in the theme blocks above.
+   The boat sails in once and moors on the right (scene.js); without JS, or under
+   reduced motion, it is a static moored boat. Ported/adapted from
+   docs/assets/stylesheets/landing.css + overrides/home.html — keep visually in
+   sync if the docs boat changes. The .chat-body terminals never get .has-scene.
+   ========================================================================== */
+
+/* Content layers sit above the fixed scene. The body keeps its opaque --bg as the
+   over-scroll/fallback colour; the fixed .hub-scene (a positioned child) paints
+   over that bg but below the z-index:1 content — robust without a transparent
+   body (which a future opaque-bg change could silently un-hide the scene under). */
+.has-scene header,
+.has-scene main,
+.has-scene footer { position: relative; z-index: 1; }
+
+.hub-scene {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  overflow: hidden;
+  pointer-events: none;
+  background: var(--scene-sky);
+  /* celestial geometry, shared by the sun, the moon and the reflection below them */
+  --scene-cel-right: clamp(8px, 7vw, 132px);
+  --scene-cel-w: clamp(168px, 22vw, 300px);
+  /* moored spot: just right of the centred 60rem card column, clamped so the boat
+     never leaves the viewport on narrow windows. scene.js sails it in to here. */
+  --boat-moor: min(calc(50% + 34.5rem), calc(100% - 5.5rem));
+}
+/* a faint veil so the scene recedes behind the content gutters (night only;
+   the day --scene-veil is transparent). Painted above the scene's own parts. */
+.hub-scene::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  background: var(--scene-veil);
+}
+
+/* Glass header + footer scrim keep their text legible over the scene. */
+.has-scene header {
+  background: var(--scene-bar);
+  backdrop-filter: blur(8px);
+}
+.has-scene footer {
+  background: var(--scene-scrim);
+  border: 1px solid var(--border);
+  border-radius: var(--oah-radius-lg);
+  padding: 0.7rem 1rem;
+  backdrop-filter: blur(3px);
+}
+/* lift the cards so they read as panels floating over the scene */
+.has-scene .card { box-shadow: var(--scene-card-shadow); }
+
+/* --- celestial body: warm sun (day) / crescent moon (night) ---------------- */
+.hub-sun,
+.hub-moon {
+  position: absolute;
+  z-index: 1;
+  top: clamp(-22px, 1vw, 28px);
+  right: var(--scene-cel-right);
+  width: var(--scene-cel-w);
+  height: var(--scene-cel-w);
+  pointer-events: none;
+}
+.hub-sun { display: var(--scene-sun-display); }
+.hub-moon { display: var(--scene-moon-display); }
+
+/* --- starfield (dark themes only) ------------------------------------------ */
+.hub-stars {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  display: var(--scene-stars-display);
+  pointer-events: none;
+}
+.hub-stars i {
+  position: absolute;
+  width: 2px;
+  height: 2px;
+  border-radius: 50%;
+  background: #fff;
+  opacity: 0.55;
+  box-shadow: 0 0 4px rgba(255, 255, 255, 0.5);
+  animation: hub-twinkle var(--hub-tw-duration, 3s) ease-in-out var(--hub-tw-delay, 0s) infinite;
+}
+.hub-stars i.lg { width: 3px; height: 3px; }
+.hub-stars i.amber { background: var(--oah-star-amber); box-shadow: 0 0 5px rgba(255, 200, 87, 0.6); }
+@keyframes hub-twinkle {
+  0%, 100% { opacity: 0.3; }
+  50% { opacity: 0.8; }
+}
+
+/* --- the sea: water band, shimmering reflection, two wave hairlines --------- */
+.hub-water {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 138px;
+  z-index: 2;
+  background: var(--scene-water);
+  border-top: 1px solid var(--scene-water-edge);
+}
+.hub-reflection {
+  position: absolute;
+  bottom: 0;
+  right: calc(var(--scene-cel-right) + 0.5 * var(--scene-cel-w) - 23px);
+  width: 46px;
+  height: 138px;
+  z-index: 2;
+  background: var(--scene-reflection);
+  animation: hub-shimmer 5s ease-in-out infinite;
+}
+.hub-wave {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 1px;
+  z-index: 2;
+}
+.hub-wave-1 { bottom: 98px; background: var(--scene-wave); }
+.hub-wave-2 { bottom: 60px; background: var(--scene-wave-soft); }
+@keyframes hub-shimmer {
+  0%, 100% { opacity: 0.5; transform: scaleX(1); }
+  50% { opacity: 0.8; transform: scaleX(1.18); }
+}
+
+/* --- the boat: sails in once and moors on the right (scene.js); a static
+       moored boat under reduced motion / without JS. Scaled about its waterline
+       so the hull stays on the sea; scene.js only animates `left`. ----------- */
+.hub-boat {
+  position: absolute;
+  z-index: 3;
+  bottom: 84px;
+  left: var(--boat-moor);
+  transform: translateX(-50%) scale(0.86);
+  transform-origin: 50% 100%;
+  width: 160px;
+  height: 118px;
+  pointer-events: none;
+  will-change: left;
+}
+.hub-rope {
+  position: absolute;
+  left: 50%;
+  top: 80px;
+  transform: translateX(-50%);
+  width: 3px;
+  height: 152px; /* resting state: anchor dropped (moored) */
+  z-index: 1;
+  border-radius: 2px;
+  background: repeating-linear-gradient(180deg, #8a93a3 0 5px, transparent 5px 9px);
+}
+.hub-anchor {
+  position: absolute;
+  left: 50%;
+  top: 74px;
+  transform: translateX(-50%) translateY(152px); /* resting state: dropped */
+  z-index: 1;
+}
+.hub-bob {
+  position: absolute;
+  left: 0;
+  top: 0;
+  z-index: 2;
+  transform-origin: center bottom;
+  animation: hub-bob 4.6s ease-in-out infinite;
+}
+@keyframes hub-bob {
+  0%, 100% { transform: translateY(0) rotate(-1.1deg); }
+  50% { transform: translateY(-5px) rotate(1.1deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hub-stars i,
+  .hub-bob,
+  .hub-reflection { animation: none; }
+}
