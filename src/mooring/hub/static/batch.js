@@ -8,7 +8,11 @@
 // to the model over the hub only — no data value ever reaches this page.
 
 (function () {
-  const C = window.ChatCore;
+  // chat_core.js exposes its helpers as a bare top-level `const ChatCore` (a global
+  // LEXICAL binding) — NOT a property of `window`. So reach it the same way chat.js and
+  // app.js do, as bare `ChatCore`: `window.ChatCore` is undefined, which would make every
+  // call here (cleanJobs, additiveBlockLines, …) throw and silently break "Add to queue".
+  const C = ChatCore;
   const $ = (id) => document.getElementById(id);
 
   // chat.js's escapeHtml, kept byte-for-byte so highlightCode's XSS contract holds
