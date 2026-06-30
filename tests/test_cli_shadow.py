@@ -61,7 +61,9 @@ def test_status_warning_helper_respects_ignore(workspace):
 def test_open_warns_before_launch(workspace, monkeypatch, capsys):
     from mooring import editor as editor_mod
 
-    (workspace / "notebooks" / "polars.py").write_text("import marimo\n", "utf-8")
+    (workspace / "notebooks" / "polars.py").write_text(
+        "import marimo\napp = marimo.App()\n", "utf-8"
+    )
 
     class FakeEditor:
         def __init__(self, ws, **kw):

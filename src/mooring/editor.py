@@ -144,7 +144,7 @@ class EditorServer:
     def _ensure_marimo_config(self) -> None:
         """Write the workspace ``.marimo.toml`` mooring relies on, for every editor.
 
-        Three things:
+        Four things:
         1. Turn marimo's OWN AI off (``ai.enabled``/``completion.copilot`` =
            false). marimo's built-in AI would send real column *sample values* to
            whatever model is configured — a data-confidentiality leak outside
@@ -153,7 +153,10 @@ class EditorServer:
         2. ``runtime.watcher_on_save = "autorun"`` so that when the copilot applies
            a cell (by writing the .py source), ``--watch`` reloads AND runs it —
            matching the "Apply = add + run" behaviour.
-        3. ``display.theme`` = the hub's appearance (``self.theme``) so notebooks
+        3. ``runtime.pythonpath`` = the workspace root, so a notebook in any
+           sub-folder can import the repo's shared helper modules (marimo only
+           auto-adds the notebook's own directory to sys.path). See the inline note.
+        4. ``display.theme`` = the hub's appearance (``self.theme``) so notebooks
            open in the same light/dark/system theme the user picked on the hub.
            mooring owns this key: the hub is the single control point, so a value
            set here intentionally overrides marimo's own appearance toggle.
@@ -182,10 +185,25 @@ class EditorServer:
                 runtime = data["runtime"] = {}
             if not isinstance(display, dict):
                 display = data["display"] = {}
+            # Put the workspace ROOT on the notebook kernel's sys.path so a notebook in
+            # any sub-folder can import the repo's helper modules (e.g. `from lib import
+            # helpers`). marimo only puts the notebook's OWN directory on sys.path[0], so
+            # cross-folder imports otherwise fail; runtime.pythonpath is its sanctioned
+            # fix (inserted at the head of sys.path at kernel init). An ABSOLUTE path —
+            # marimo does NOT resolve a .marimo.toml pythonpath entry (only a pyproject
+            # one), so a relative path would be ambiguous. Preserve any existing entries,
+            # keeping the workspace root first.
+            ws_root = str(self.workspace.resolve())
+            raw_pp = runtime.get("pythonpath")
+            existing_pp = (
+                [p for p in raw_pp if isinstance(p, str)] if isinstance(raw_pp, list) else []
+            )
+            desired_pp = [ws_root, *(p for p in existing_pp if p != ws_root)]
             already = (
                 ai.get("enabled") is False
                 and completion.get("copilot") is False
                 and runtime.get("watcher_on_save") == "autorun"
+                and runtime.get("pythonpath") == desired_pp
                 and display.get("theme") == self.theme
             )
             if already:
@@ -193,6 +211,7 @@ class EditorServer:
             ai["enabled"] = False
             completion["copilot"] = False
             runtime["watcher_on_save"] = "autorun"
+            runtime["pythonpath"] = desired_pp
             display["theme"] = self.theme
             # Write atomically: apply_theme() can rewrite this WHILE marimo is
             # running, and marimo re-reads the file on every page render. A

@@ -161,6 +161,28 @@ def test_folder_shadows_missing_dir_is_empty(tmp_path):
     assert shadow.folder_shadows("ghost/x.py", workspace=tmp_path) == {}
 
 
+# -- root_shadows: the workspace root is globally on sys.path (runtime.pythonpath) ---
+
+
+def test_root_shadows_flags_root_level_module(tmp_path):
+    # With the workspace root on every notebook's sys.path, a root-level polars.py
+    # shadows `import polars` for the whole repo, not just one folder.
+    _w(tmp_path, "polars.py")
+    _w(tmp_path, "notebooks/analysis.py")
+    assert shadow.root_shadows(tmp_path) == {"polars.py": "polars"}
+
+
+def test_root_shadows_ignores_subfolders(tmp_path):
+    # A shadowing file UNDER a folder is folder_shadows' job, not root_shadows'.
+    _w(tmp_path, "notebooks/polars.py")
+    assert shadow.root_shadows(tmp_path) == {}
+
+
+def test_root_shadows_clean_root_is_empty(tmp_path):
+    _w(tmp_path, "notebooks/analysis.py")
+    assert shadow.root_shadows(tmp_path) == {}
+
+
 # -- warning_lines formatting (the _missing_deps_lines house style) ----------
 
 

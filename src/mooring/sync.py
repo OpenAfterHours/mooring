@@ -115,6 +115,72 @@ def within_folders(path: str, folders: tuple[str, ...]) -> bool:
     return False
 
 
+@dataclass
+class FolderCandidate:
+    """A top-level repo folder that holds syncable files but is OUTSIDE the current
+    sync scope — what :func:`adopt`-style flows register so it rides sync. ``files`` is
+    every syncable file under it; ``py_files`` the Python ones (the notebook signal,
+    counted cheaply from the tree without fetching blob contents)."""
+
+    folder: str
+    files: int
+    py_files: int
+
+
+def _candidate_folder(rel: str, folders: tuple[str, ...]) -> str:
+    """The folder to offer for adoption for an out-of-scope file ``rel``: its top-level
+    segment, descended just deep enough that no already-synced folder is nested inside
+    it. So with ``notebooks/team-a`` synced and ``notebooks/team-b/x.py`` out of scope,
+    the candidate is ``notebooks/team-b`` (adopting bare ``notebooks`` would overlap the
+    synced ``team-a`` and the file/py counts would undercount what adoption registers).
+    ``rel`` is a file path with at least one ``/`` (discovery skips loose root files)."""
+    parts = rel.split("/")[:-1]  # the parent directories
+    for depth in range(1, len(parts) + 1):
+        cand = "/".join(parts[:depth])
+        if any(f != cand and f.startswith(cand + "/") for f in folders):
+            continue  # a synced folder nests inside cand → descend toward the file
+        return cand
+    return "/".join(parts)
+
+
+def discover_unsynced_folders(
+    client: GitHubClientProtocol, cfg: Config, head: str | None = None
+) -> list[FolderCandidate]:
+    """Top-level folders on ``cfg.branch`` that contain syncable files yet fall outside
+    the current scope (``cfg.folders``) — the candidates a user can adopt so notebooks
+    (and their helper modules) authored in a differently-organised repo finally sync.
+
+    Reads the FULL remote tree once (``get_full_tree`` — the same tree ``get_tree``
+    already fetches, so no extra round-trip beyond this one request) and groups blobs by
+    their first path segment, applying the SAME :func:`is_synced_path` / exclude filter
+    both sync sides use. That keeps the load-bearing local/remote symmetry: a folder
+    surfaced here syncs identically on both sides once registered. Paths already
+    :func:`within_folders` the scope are skipped (they already sync); loose root-level
+    files (no ``/``) are not folders and are skipped too. ``head`` lets a caller that
+    already knows ``cfg.branch``'s head (e.g. status) avoid the extra ref lookup.
+    """
+    if head is None:
+        head = client.get_branch_head(cfg.branch)
+    counts: dict[str, list[int]] = {}
+    for entry in client.get_full_tree(head):
+        rel = entry.path
+        if "/" not in rel:
+            continue  # a loose root-level file is not a folder candidate
+        if not is_synced_path(rel, cfg.exclude):
+            continue  # dotfiles / machine dirs / [sync] exclude — invisible to sync
+        if within_folders(rel, cfg.folders):
+            continue  # already in scope; it already syncs
+        top = _candidate_folder(rel, cfg.folders)
+        tally = counts.setdefault(top, [0, 0])
+        tally[0] += 1
+        if rel.endswith(".py"):
+            tally[1] += 1
+    return [
+        FolderCandidate(folder=top, files=tally[0], py_files=tally[1])
+        for top, tally in sorted(counts.items())
+    ]
+
+
 class FileState(Enum):
     SYNCED = "synced"
     MODIFIED = "modified"  # push candidate

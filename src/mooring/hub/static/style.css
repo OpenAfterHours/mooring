@@ -335,6 +335,16 @@ button.caret {
   padding: 0 0.3rem;
   font-size: 0.9rem;
 }
+button.caret:disabled { opacity: 0.4; cursor: default; }
+
+/* a helper module (non-notebook .py): imported by notebooks, not opened in the editor */
+.badge.module { color: var(--muted); border-color: var(--border); font-style: italic; }
+
+/* folder section header: groups files under a synced folder. An empty DECLARED folder
+   still shows ("here's where notebooks go"), set a touch apart from its file rows. */
+tr.folder-header td { border-top: 1px solid var(--border); padding-top: 0.5rem; }
+tr.folder-header td.path { font-family: inherit; }
+tr.folder-header b { font-weight: 600; }
 
 #error-banner {
   background: var(--banner-bad-bg);
@@ -344,6 +354,17 @@ button.caret {
   padding: 0.6rem 1rem;
   margin-bottom: 1rem;
 }
+
+/* Adopt prompt: notebook folders the repo keeps outside the synced folders. An
+   informational accent banner (not an error), shown until the folders are adopted. */
+#adopt-banner {
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  padding: 0.6rem 1rem;
+  margin: 0.4rem 0 0.8rem;
+  font-size: 0.9rem;
+}
+#adopt-banner .adopt-actions { margin-top: 0.45rem; }
 
 pre {
   background: var(--bg);

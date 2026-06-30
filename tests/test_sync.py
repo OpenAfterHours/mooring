@@ -26,6 +26,101 @@ def test_within_folders(path, folders, expected):
     assert sync.within_folders(path, folders) is expected
 
 
+# -- discovery of out-of-scope folders (adopt) -------------------------------
+
+
+def test_discover_unsynced_folders_groups_by_top_level(cfg):
+    client = FakeClient(
+        {
+            "notebooks/a.py": b"print(1)\n",  # in scope
+            "analysis/q1.py": b"print(1)\n",  # out of scope
+            "analysis/q2.py": b"print(2)\n",
+            "analysis/notes.md": b"# notes\n",
+            "lib/helpers.py": b"def f(): ...\n",
+            ".github/workflows/ci.yml": b"on: push\n",  # dot-dir — invisible to sync
+            "README.md": b"hi\n",  # loose root file — not a folder candidate
+        }
+    )
+    candidates = sync.discover_unsynced_folders(client, cfg)
+    assert [(c.folder, c.files, c.py_files) for c in candidates] == [
+        ("analysis", 3, 2),
+        ("lib", 1, 1),
+    ]
+
+
+def test_discover_descends_below_a_nested_synced_folder(cfg):
+    # With a deep folder already synced (notebooks/team-a), a sibling out-of-scope file
+    # must yield a candidate that does NOT overlap it (notebooks/team-b), with an
+    # accurate count — not the bare top-level "notebooks" that would re-cover team-a.
+    client = FakeClient(
+        {
+            "notebooks/team-a/keep.py": b"print(1)\n",  # already synced (scoped)
+            "notebooks/team-b/x.py": b"print(2)\n",  # out of scope
+            "notebooks/team-b/y.py": b"print(3)\n",
+        }
+    )
+    scoped = replace(cfg, folders=("notebooks/team-a",))
+    candidates = sync.discover_unsynced_folders(client, scoped)
+    assert [(c.folder, c.files, c.py_files) for c in candidates] == [("notebooks/team-b", 2, 2)]
+
+
+def test_discover_skips_folders_already_in_scope(cfg):
+    # A deep sub-folder under a scoped folder already syncs (rglob), so it is not a
+    # candidate; nor is a sibling under data/.
+    client = FakeClient({"notebooks/sub/deep.py": b"print(1)\n", "data/x.csv": b"a\n"})
+    assert sync.discover_unsynced_folders(client, cfg) == []
+
+
+def test_discover_honours_exclude(cfg):
+    client = FakeClient({"scratch/tmp.py": b"x\n", "lib/helpers.py": b"y\n"})
+    excluded = replace(cfg, exclude=("scratch",))
+    assert [c.folder for c in sync.discover_unsynced_folders(client, excluded)] == ["lib"]
+
+
+def test_discover_reuses_supplied_head(cfg, monkeypatch):
+    # status passes the head it already fetched so discovery doesn't re-look-up the ref.
+    client = FakeClient({"lib/helpers.py": b"y\n"})
+    monkeypatch.setattr(
+        client, "get_branch_head", lambda branch: pytest.fail("should not refetch head")
+    )
+    assert [c.folder for c in sync.discover_unsynced_folders(client, cfg, head=client.head)] == [
+        "lib"
+    ]
+
+
+def test_adopt_flow_registers_widens_and_pulls_then_stays_symmetric(cfg):
+    from mooring import workspace_config
+
+    client = FakeClient(
+        {
+            "notebooks/a.py": b"print(1)\n",
+            "analysis/q1.py": b"print(2)\n",
+            "lib/helpers.py": b"def f(): ...\n",
+        }
+    )
+    # A first pull only takes the in-scope notebook; the other folders are invisible.
+    assert sync.pull(client, cfg).pulled == 1
+    assert not (cfg.workspace() / "analysis/q1.py").exists()
+
+    # Discover the out-of-scope folders, register them in the synced mooring.toml, and
+    # pull with the widened scope (what `mooring adopt` / the hub do).
+    chosen = [c.folder for c in sync.discover_unsynced_folders(client, cfg)]
+    assert chosen == ["analysis", "lib"]
+    for folder in chosen:
+        workspace_config.add_extra_folder(cfg.workspace(), folder)
+    wide = replace(cfg, folders=workspace_config.merge_extra_folders(cfg.folders, cfg.workspace()))
+    assert sync.pull(client, wide).pulled == 2
+    assert read_local(wide, "analysis/q1.py") == "print(2)\n"
+    assert read_local(wide, "lib/helpers.py") == "def f(): ...\n"
+
+    # Symmetry: once adopted, the folders read as SYNCED on both sides — a later push
+    # must NOT see them as local-only files to delete remotely.
+    states = {f.path: f.state for f in sync.status(client, wide).files}
+    assert states["analysis/q1.py"] is FileState.SYNCED
+    assert states["lib/helpers.py"] is FileState.SYNCED
+    assert not sync.status(client, wide).by_state(FileState.DELETED_LOCAL)
+
+
 # -- the decision matrix -----------------------------------------------------
 
 

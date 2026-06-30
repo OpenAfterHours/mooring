@@ -79,6 +79,8 @@ class GitHubClientProtocol(Protocol):
         extra_paths: tuple[str, ...] = (),
     ) -> list[TreeEntry]: ...
 
+    def get_full_tree(self, commit_sha: str) -> list[TreeEntry]: ...
+
     def get_blob(self, sha: str) -> bytes: ...
 
     def create_ref(self, branch: str, sha: str) -> dict: ...
@@ -171,6 +173,26 @@ class GitHubClient:
         folders: tuple[str, ...],
         extra_paths: tuple[str, ...] = (),
     ) -> list[TreeEntry]:
+        prefixes = tuple(f"{f.rstrip('/')}/" for f in folders)
+        extra = frozenset(extra_paths)
+        entries = []
+        for e in self.get_full_tree(commit_sha):
+            if not (e.path.startswith(prefixes) or e.path in extra):
+                continue
+            # SHA-256 object-format repos can't be synced (their blob shas are 64 hex).
+            # Checked HERE, on the in-scope entries only, so a repo whose synced folders
+            # happen to be empty reports an empty tree rather than erroring — the same
+            # behaviour as before get_tree delegated to get_full_tree.
+            if len(e.sha) != 40:
+                raise GitHubError("SHA-256 object-format repos are not supported.")
+            entries.append(e)
+        return entries
+
+    def get_full_tree(self, commit_sha: str) -> list[TreeEntry]:
+        """Every blob in the commit's tree (recursive), UNFILTERED — the discovery
+        read behind :func:`mooring.sync.discover_unsynced_folders`. ``get_tree`` is the
+        same fetch narrowed to the synced folders (and is where the SHA-256 guard runs,
+        on the in-scope entries), so the two can never disagree about the tree."""
         commit = self._check(
             self._session.get(self._repo_url(f"git/commits/{commit_sha}"), timeout=30)
         )
@@ -186,18 +208,11 @@ class GitHubClient:
                 "The repository tree is too large for the GitHub trees API; "
                 "mooring cannot sync this repo."
             )
-        prefixes = tuple(f"{f.rstrip('/')}/" for f in folders)
-        extra = frozenset(extra_paths)
-        entries = []
-        for item in data.get("tree", []):
-            if item["type"] != "blob":
-                continue
-            if not (item["path"].startswith(prefixes) or item["path"] in extra):
-                continue
-            if len(item["sha"]) != 40:
-                raise GitHubError("SHA-256 object-format repos are not supported.")
-            entries.append(TreeEntry(item["path"], item["sha"], item.get("size", 0)))
-        return entries
+        return [
+            TreeEntry(item["path"], item["sha"], item.get("size", 0))
+            for item in data.get("tree", [])
+            if item["type"] == "blob"
+        ]
 
     def get_blob(self, sha: str) -> bytes:
         data = self._check(self._session.get(self._repo_url(f"git/blobs/{sha}"), timeout=120))

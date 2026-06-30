@@ -4,7 +4,7 @@ import pytest
 from conftest import FakeClient
 from starlette.testclient import TestClient
 
-from mooring import config, paths
+from mooring import config, paths, workspace_config
 from mooring.hub import server
 from mooring.hub.server import Hub, create_app
 
@@ -195,7 +195,9 @@ def test_open_warning_includes_shadow(unconfigured_client, monkeypatch):
     ws = hub.cfg.workspace()
     (ws / "notebooks").mkdir(parents=True, exist_ok=True)
     (ws / "notebooks" / "polars.py").write_text("import marimo\n", "utf-8")
-    (ws / "notebooks" / "analysis.py").write_text("import marimo\n", "utf-8")
+    (ws / "notebooks" / "analysis.py").write_text(
+        "import marimo\napp = marimo.App()\n", "utf-8"
+    )
 
     class FakeEditor:
         def use_uv(self):
@@ -495,8 +497,8 @@ def test_switch_changes_editor_workspace(configured, monkeypatch):
             pass  # no-op: in-memory editor double, nothing to tear down
 
     monkeypatch.setattr(server, "EditorServer", FakeEditor)
-    write_ws(tmp_path, "ws1", "notebooks/a.py", "a")
-    write_ws(tmp_path, "ws2", "notebooks/b.py", "b")
+    write_ws(tmp_path, "ws1", "notebooks/a.py", "import marimo\napp = marimo.App()\n")
+    write_ws(tmp_path, "ws2", "notebooks/b.py", "import marimo\napp = marimo.App()\n")
 
     assert client.post("/api/open", json={"path": "notebooks/a.py"}).status_code == 200
     client.post("/api/repo/switch", json={"alias": "sandbox"})
@@ -1892,3 +1894,92 @@ def test_batch_add_unknown_batch_404(batch_client):
 def test_batch_stream_unknown_batch_404(batch_client):
     client, _ = batch_client
     assert client.get("/api/ai/batch/stream/nope").status_code == 404
+
+
+# -- discover + adopt: folders outside the synced scope ------------------------
+
+
+def test_discover_lists_unsynced_folders(configured):
+    client, _, fake, _ = configured
+    fake.seed("notebooks/a.py", b"x\n")  # in scope
+    fake.seed("analysis/q1.py", b"y\n")  # out of scope
+    fake.seed("lib/helpers.py", b"z\n")
+    body = client.get("/api/discover").json()
+    found = {c["folder"]: c for c in body["candidates"]}
+    assert set(found) == {"analysis", "lib"}
+    assert found["analysis"]["py_files"] == 1 and found["analysis"]["files"] == 1
+
+
+def test_discover_empty_when_all_in_scope(configured):
+    client, _, fake, _ = configured
+    fake.seed("notebooks/a.py", b"x\n")
+    assert client.get("/api/discover").json()["candidates"] == []
+
+
+def test_adopt_registers_and_pulls(configured):
+    client, hub, fake, _ = configured
+    fake.seed("analysis/q1.py", b"y\n")
+    resp = client.post("/api/adopt", json={"folders": ["analysis"]})
+    assert resp.status_code == 200
+    ws = hub.cfg.workspace()
+    assert "analysis" in workspace_config.extra_folders(ws)
+    assert (ws / "analysis/q1.py").read_text("utf-8") == "y\n"
+    # Now that it is adopted, discovery no longer lists it.
+    assert client.get("/api/discover").json()["candidates"] == []
+
+
+def test_adopt_rejects_unknown_folder(configured):
+    client, hub, fake, _ = configured
+    fake.seed("analysis/q1.py", b"y\n")
+    resp = client.post("/api/adopt", json={"folders": ["nope"]})
+    assert resp.status_code == 400
+    assert workspace_config.extra_folders(hub.cfg.workspace()) == ()
+
+
+def test_adopt_requires_folders(configured):
+    client, _, _, _ = configured
+    assert client.post("/api/adopt", json={"folders": []}).status_code == 400
+
+
+# -- notebook vs module: flags, open guard, declared folders ------------------
+
+
+def test_state_flags_notebook_vs_module(unconfigured_client):
+    client, hub = unconfigured_client
+    ws = hub.cfg.workspace()
+    (ws / "notebooks").mkdir(parents=True, exist_ok=True)
+    (ws / "notebooks" / "real.py").write_text("import marimo\napp = marimo.App()\n", "utf-8")
+    (ws / "notebooks" / "helpers.py").write_text("def f():\n    return 1\n", "utf-8")
+    files = {f["path"]: f for f in client.get("/api/state").json()["files"]}
+    assert files["notebooks/real.py"].get("is_notebook") is True
+    assert "is_module" not in files["notebooks/real.py"]
+    assert files["notebooks/helpers.py"].get("is_module") is True
+    assert "is_notebook" not in files["notebooks/helpers.py"]
+
+
+def test_open_refuses_a_plain_module(unconfigured_client):
+    client, hub = unconfigured_client
+    ws = hub.cfg.workspace()
+    (ws / "notebooks").mkdir(parents=True, exist_ok=True)
+    (ws / "notebooks" / "helpers.py").write_text("def f():\n    return 1\n", "utf-8")
+    resp = client.post("/api/open", json={"path": "notebooks/helpers.py"})
+    assert resp.status_code == 400
+    assert "module" in resp.json()["error"].lower()
+
+
+def test_state_includes_declared_folders(unconfigured_client):
+    client, _ = unconfigured_client
+    assert client.get("/api/state").json()["folders"] == ["notebooks", "data", "reports"]
+
+
+def test_blank_stub_py_is_a_notebook_not_a_module(unconfigured_client):
+    # A blank/whitespace-only .py opens as a fresh notebook (the open guards allow it),
+    # so the listing must classify it as a notebook — never badge it 'module' while
+    # /api/open would happily open it.
+    client, hub = unconfigured_client
+    ws = hub.cfg.workspace()
+    (ws / "notebooks").mkdir(parents=True, exist_ok=True)
+    (ws / "notebooks" / "draft.py").write_text("   \n", "utf-8")
+    files = {f["path"]: f for f in client.get("/api/state").json()["files"]}
+    assert files["notebooks/draft.py"].get("is_notebook") is True
+    assert "is_module" not in files["notebooks/draft.py"]

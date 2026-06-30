@@ -229,6 +229,24 @@ def folder_shadows(
     return scan(rels, workspace=workspace, extra=extra, ignore=ignore)
 
 
+def root_shadows(
+    workspace: Path,
+    *,
+    extra: frozenset[str] = frozenset(),
+    ignore: frozenset[str] = frozenset(),
+) -> dict[str, str]:
+    """Shadowing ``.py`` files in the WORKSPACE ROOT.
+
+    Once the editor puts the workspace root on the notebook kernel's ``sys.path``
+    (``runtime.pythonpath`` — see editor.py, so a notebook in any sub-folder can import
+    the repo's helper modules), a root-level ``polars.py`` shadows ``import polars`` for
+    EVERY notebook, not just one folder — so the root is scanned globally, like a
+    directory every notebook shares. The root is just the folder with the empty
+    relative path, so this is exactly :func:`folder_shadows` of ``""`` (best-effort,
+    never raises)."""
+    return folder_shadows("", workspace=workspace, extra=extra, ignore=ignore)
+
+
 def warning_lines(findings: dict[str, str]) -> list[str]:
     """Format ``findings`` the house way (a ``Warning:`` head line + indented
     remediation, like ``cli._missing_deps_lines``). Empty when there's nothing."""

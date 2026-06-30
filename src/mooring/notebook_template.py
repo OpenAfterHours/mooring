@@ -30,6 +30,25 @@ if __name__ == "__main__":
 
 DEFAULT_FOLDER = "notebooks"
 
+# Every marimo notebook constructs its app with a top-level ``app = marimo.App(...)``
+# statement — mooring's TEMPLATE and marimo's own codegen both emit it at column 0.
+# Anchoring to that ASSIGNMENT (not a bare ``marimo.App(`` substring) is what tells a
+# runnable notebook from a plain helper module that merely mentions the call in a
+# comment, docstring, or factory (``return marimo.App(...)``) — the editor must NOT
+# open such a module, since marimo would rewrite it into notebook form on save.
+_MARIMO_APP_RE = re.compile(r"^\w+\s*=\s*marimo\.App\(", re.MULTILINE)
+
+
+def is_marimo_app(source: str) -> bool:
+    """Whether ``source`` looks like a marimo notebook rather than a plain Python
+    module: it contains a top-level ``<name> = marimo.App(`` statement. Content-only
+    and best-effort (not a full parse); a leading UTF-8 BOM doesn't affect the per-line
+    match. Pass the WHOLE source, not a truncated head — a large leading header (e.g. a
+    PEP 723 dependency block) can push the marker well past the first few KB. Empty or
+    marker-less source is False; a caller that wants to allow opening a blank stub
+    checks ``source.strip()`` separately."""
+    return _MARIMO_APP_RE.search(source) is not None
+
 
 def slugify(name: str) -> str:
     slug = re.sub(r"[^A-Za-z0-9._-]+", "-", name.strip()).strip("-")

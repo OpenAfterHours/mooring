@@ -131,6 +131,19 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     propose.add_argument("-m", "--message", default=None, help="commit message")
 
+    adopt = sub.add_parser(
+        "adopt",
+        help="sync notebook folders the repo keeps outside the standard synced folders",
+    )
+    adopt.add_argument(
+        "folders",
+        nargs="*",
+        help="folders to adopt (run with none to list candidates)",
+    )
+    adopt.add_argument(
+        "--all", dest="all_folders", action="store_true", help="adopt every candidate folder"
+    )
+
     open_cmd = sub.add_parser("open", help="open a notebook in the marimo editor")
     open_cmd.add_argument("path", help="workspace-relative notebook path")
 
@@ -191,6 +204,7 @@ def _build_parser() -> argparse.ArgumentParser:
         pull,
         push,
         propose,
+        adopt,
         open_cmd,
         new,
         delete_cmd,
@@ -399,9 +413,17 @@ def cmd_whoami(cfg: config.Config) -> int:
 def cmd_status(cfg: config.Config) -> int:
     from mooring import sync
 
-    report = sync.status(_client(cfg), cfg)
+    client = _client(cfg)
+    report = sync.status(client, cfg)
     if not report.files:
-        print("Workspace empty and no remote files. Try `mooring new <name>`.")
+        # An EMPTY in-scope report is exactly the headline case (a new repo whose
+        # notebooks all live outside the synced folders): run discovery so the hint can
+        # replace the misleading "workspace empty" line. Scoped to this branch so a
+        # normal status (with in-scope files) keeps sync's no-tree-fetch fast path —
+        # discovery needs the full tree, which would otherwise defeat it on every call.
+        hint = _adopt_hint_lines(client, cfg, report.head_commit)
+        for line in hint or ["Workspace empty and no remote files. Try `mooring new <name>`."]:
+            print(line)
         return 0
     width = max(len(f.path) for f in report.files)
     for f in report.files:
@@ -412,6 +434,27 @@ def cmd_status(cfg: config.Config) -> int:
     for line in _shadow_warning_lines(cfg, [f.path for f in report.files]):
         print(line)
     return 0
+
+
+def _adopt_hint_lines(client, cfg: config.Config, head: str) -> list[str]:
+    """Best-effort 'you have notebook folders outside the synced scope' hint for
+    ``status``. Reuses the head ``status`` already fetched so it costs one tree read,
+    and never breaks ``status`` — any discovery failure simply yields no hint."""
+    from mooring import sync
+    from mooring.github import GitHubError
+
+    try:
+        candidates = sync.discover_unsynced_folders(client, cfg, head=head or None)
+    except (GitHubError, OSError):
+        return []
+    if not candidates:
+        return []
+    shown = ", ".join(c.folder for c in candidates[:6])
+    more = "" if len(candidates) <= 6 else f", +{len(candidates) - 6} more"
+    return [
+        f"note: {len(candidates)} folder(s) outside the synced folders hold files: {shown}{more}",
+        "  Run `mooring adopt` to sync the ones with your notebooks (and their helper modules).",
+    ]
 
 
 def cmd_pull(cfg: config.Config, theirs: bool, keep_both: bool) -> int:
@@ -470,6 +513,79 @@ def cmd_propose(cfg: config.Config, only_paths: list[str], message: str | None) 
     return 0 if not result.blocked_conflicts else 1
 
 
+def cmd_adopt(cfg: config.Config, folders: list[str], all_folders: bool) -> int:
+    """Register repo folders that hold notebooks outside the standard synced folders
+    into the synced ``mooring.toml`` ``[sync] folders``, then pull them.
+
+    With no folders (and no ``--all``) it lists the candidates and exits. The chosen
+    folders are validated against what discovery actually found, so adopt never
+    registers a typo or a non-existent folder. The registration is written to the
+    SYNCED ``mooring.toml`` (via :func:`mooring.workspace_config.add_extra_folder`), so
+    pushing it shares the new scope with the whole team.
+    """
+    from dataclasses import replace
+
+    from mooring import sync
+    from mooring.github import GitHubError
+
+    client = _client(cfg)
+    try:
+        candidates = sync.discover_unsynced_folders(client, cfg)
+    except GitHubError as exc:
+        sys.exit(str(exc))
+    if not candidates:
+        print("No folders outside the synced folders. Nothing to adopt.")
+        return 0
+    if not folders and not all_folders:
+        print("Folders with files outside the synced folders:")
+        width = max(len(c.folder) for c in candidates)
+        for c in candidates:
+            print(f"  {c.folder:<{width}}  {c.py_files} Python file(s), {c.files} file(s) total")
+        print("\nAdopt one or more: `mooring adopt <folder> [...]` (or `mooring adopt --all`).")
+        print(
+            f"Adopted folders are saved to the repo's {workspace_config.WORKSPACE_CONFIG_NAME} "
+            "and pulled; push it to share them with the team."
+        )
+        return 0
+
+    known = {c.folder for c in candidates}
+    if all_folders:
+        chosen = sorted(known)
+    else:
+        chosen, unknown = [], []
+        for raw in folders:
+            norm = workspace_config.normalize_notebook(raw)
+            (chosen if norm in known else unknown).append(norm)
+        if unknown:
+            sys.exit(
+                f"Not adoptable: {', '.join(unknown)}. "
+                "Run `mooring adopt` (no arguments) to see the candidates."
+            )
+
+    import tomllib
+
+    workspace = cfg.workspace()
+    try:
+        workspace_config.add_extra_folders(workspace, chosen)
+    except tomllib.TOMLDecodeError as exc:
+        sys.exit(
+            f"Can't update {workspace_config.WORKSPACE_CONFIG_NAME}: it is not valid TOML "
+            f"({exc}). Fix it (pull a teammate's version, or repair it) and retry."
+        )
+    new_folders = workspace_config.merge_extra_folders(cfg.folders, workspace)
+    result = sync.pull(client, replace(cfg, folders=new_folders))
+    telemetry.log_event("adopt", folders=len(chosen), pulled=result.pulled)
+    print(f"Adopted: {', '.join(chosen)} (saved to {workspace_config.WORKSPACE_CONFIG_NAME}).")
+    for line in result.lines:
+        print(f"  {line}")
+    print(result.summary())
+    print(
+        f"Run `mooring push` to share {workspace_config.WORKSPACE_CONFIG_NAME} so teammates "
+        "pull these folders too."
+    )
+    return 0 if not result.skipped_conflicts else 1
+
+
 def cmd_open(cfg: config.Config, rel_path: str) -> int:
     import webbrowser
 
@@ -489,6 +605,21 @@ def cmd_open(cfg: config.Config, rel_path: str) -> int:
         telemetry.log_event("open", kind="pbip")
         print(f"Opened {rel_path} in Power BI Desktop.")
         return 0
+    if not rel_path.endswith(".py"):
+        sys.exit("Only .py notebooks and .pbip projects can be opened.")
+    # Refuse to open a plain Python module as a notebook: the marimo editor would
+    # rewrite it into notebook form on save. A blank stub is allowed (it becomes a new
+    # notebook); a non-empty module without the marimo.App marker is not. The whole file
+    # is read — a large leading header can push the `app = marimo.App(` marker past the
+    # first few KB.
+    from mooring import notebook_template
+
+    source = target.read_bytes().decode("utf-8", "ignore")
+    if source.strip() and not notebook_template.is_marimo_app(source):
+        sys.exit(
+            f"{rel_path} is a Python module, not a marimo notebook — opening it in the "
+            "editor could overwrite it. Import it from a notebook instead."
+        )
     server = EditorServer(workspace)
     # Ungated by the launch backend: the sys.path[0] shadow trap is plain Python
     # import resolution and bites uv and frozen runs alike, unlike the missing-deps
@@ -496,7 +627,13 @@ def cmd_open(cfg: config.Config, rel_path: str) -> int:
     # an innocent notebook still warns when a sibling poisons the directory.
     if cfg.warn_shadowed_notebooks:
         extra, ignore = _shadow_policy(workspace)
-        findings = shadow.folder_shadows(rel_path, workspace=workspace, extra=extra, ignore=ignore)
+        # The notebook's own folder AND the workspace root are both on the kernel's
+        # sys.path (the latter via runtime.pythonpath — see editor.py), so a shadowing
+        # .py in either breaks imports. Merged by path; notebooks never live at the root.
+        findings = {
+            **shadow.root_shadows(workspace, extra=extra, ignore=ignore),
+            **shadow.folder_shadows(rel_path, workspace=workspace, extra=extra, ignore=ignore),
+        }
         for line in shadow.warning_lines(findings):
             print(line)
     if not server.use_uv():
@@ -539,7 +676,13 @@ def _shadow_warning_lines(cfg: config.Config, rel_paths: list[str]) -> list[str]
         return []
     workspace = cfg.workspace()
     extra, ignore = _shadow_policy(workspace)
-    findings = shadow.scan(rel_paths, workspace=workspace, extra=extra, ignore=ignore)
+    # Include the workspace-root .py files: the root is on every notebook's sys.path
+    # (runtime.pythonpath), so a root-level shadow is globally dangerous, but root files
+    # aren't in the synced `rel_paths` list. Merged by path.
+    findings = {
+        **shadow.root_shadows(workspace, extra=extra, ignore=ignore),
+        **shadow.scan(rel_paths, workspace=workspace, extra=extra, ignore=ignore),
+    }
     return shadow.warning_lines(findings)
 
 
@@ -1233,6 +1376,8 @@ def _dispatch(
         return cmd_push(cfg, args.paths, args.message)
     if command == "propose":
         return cmd_propose(cfg, args.paths, args.message)
+    if command == "adopt":
+        return cmd_adopt(cfg, args.folders, args.all_folders)
     if command == "open":
         return cmd_open(cfg, args.path)
     if command == "new":
