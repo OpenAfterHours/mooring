@@ -8,7 +8,12 @@
 // to the model over the hub only — no data value ever reaches this page.
 
 (function () {
-  const C = window.ChatCore;
+  // Reach chat_core.js's helpers as the bare `ChatCore` global, like chat.js and app.js.
+  // They are declared as a top-level `const` (a global LEXICAL binding); chat_core.js also
+  // mirrors them onto `window.ChatCore`, but the bare global is the convention here.
+  // (Reading `window.ChatCore` silently broke this page — an uncaught TypeError on every
+  // call — before that mirror existed; the value is now defined either way.)
+  const C = ChatCore;
   const $ = (id) => document.getElementById(id);
 
   // chat.js's escapeHtml, kept byte-for-byte so highlightCode's XSS contract holds

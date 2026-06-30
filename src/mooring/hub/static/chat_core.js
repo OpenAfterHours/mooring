@@ -3,8 +3,9 @@
 // Pure, DOM-free helpers for the copilot REPL (and the hub's Copilot sign-in).
 // Kept apart from chat.js so they can be unit-tested under Node (see
 // tests/js/chat_core.test.js) with no DOM. In the browser this file is loaded
-// BEFORE chat.js (and before app.js on the hub) and exposes `ChatCore` globally;
-// under Node it is require()d. Nothing here touches `document`, the network, or
+// BEFORE chat.js (and before app.js on the hub) and exposes `ChatCore` both as a bare
+// global and as `window.ChatCore` (see the foot of the file); under Node it is
+// require()d. Nothing here touches `document`, the network, or
 // storage — the value-blind/PII posture lives in chat.js + the hub.
 
 const ChatCore = (function () {
@@ -337,4 +338,11 @@ const ChatCore = (function () {
   };
 })();
 
+// Expose to consumers by BOTH supported paths. A top-level `const` is a global LEXICAL
+// binding — reachable as the bare identifier `ChatCore` (how chat.js and app.js use it)
+// but NOT a property of `window`, so `window.ChatCore` would otherwise be undefined.
+// Mirroring it onto `window` is belt-and-suspenders: it stops a `window.ChatCore.*` call
+// silently throwing (the uncaught TypeError that once broke the batch builder's
+// "Add to queue"). Guarded so the Node test runner (no `window`) still require()s cleanly.
+if (typeof window !== "undefined") window.ChatCore = ChatCore;
 if (typeof module !== "undefined" && module.exports) module.exports = ChatCore;
