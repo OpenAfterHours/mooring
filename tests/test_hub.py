@@ -4,7 +4,7 @@ import pytest
 from conftest import FakeClient
 from starlette.testclient import TestClient
 
-from mooring import config, paths, workspace_config
+from mooring import config, paths, reveal, workspace_config
 from mooring.hub import server
 from mooring.hub.server import Hub, create_app
 
@@ -2067,7 +2067,7 @@ def test_reveal_calls_launcher(unconfigured_client, monkeypatch):
     (ws / "notebooks").mkdir(parents=True, exist_ok=True)
     (ws / "notebooks" / "helpers.py").write_text("def f():\n    return 1\n", "utf-8")
     revealed = []
-    monkeypatch.setattr(server.reveal, "reveal", revealed.append)
+    monkeypatch.setattr(reveal, "reveal", revealed.append)
     resp = client.post("/api/reveal", json={"path": "notebooks/helpers.py"})
     assert resp.status_code == 200
     assert "url" not in resp.json()  # nothing for the browser to open
@@ -2104,9 +2104,9 @@ def test_reveal_surfaces_launcher_error(unconfigured_client, monkeypatch):
     (ws / "notebooks" / "helpers.py").write_text("x = 1\n", "utf-8")
 
     def boom(_path):
-        raise server.reveal.RevealError("needs Windows")
+        raise reveal.RevealError("needs Windows")
 
-    monkeypatch.setattr(server.reveal, "reveal", boom)
+    monkeypatch.setattr(reveal, "reveal", boom)
     resp = client.post("/api/reveal", json={"path": "notebooks/helpers.py"})
     assert resp.status_code == 400
     assert "windows" in resp.json()["error"].lower()
