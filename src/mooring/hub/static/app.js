@@ -272,7 +272,42 @@ function fileActions(file, opts) {
   return actions;
 }
 
-function buildRow(pathCell, state, actions) {
+// Collapse a row's actions into ONE compact "Actions ▾" dropdown instead of a wall of
+// small buttons (a busy row — a modified, remote-existing notebook with AI on — can
+// offer up to ~8). Built as a <details> disclosure (the same idiom as the header
+// Copilot menu), deliberately NOT a native <select>: a <select> used as an ACTION menu
+// is a footgun — on Windows a focused, closed <select> fires 'change' on a single Arrow
+// keypress, so merely browsing it would run actions[0] (Push, or a conflict "Use remote"
+// that silently discards local edits) with no confirm. Here each action is a real
+// <button> that fires ONLY on an explicit click/Enter, and setBusy() disables them all
+// during a sync. The [text, handler] pairs are exactly what the buttons carried before.
+function actionsMenu(actions, label) {
+  const details = document.createElement("details");
+  details.className = "row-menu";
+
+  const summary = document.createElement("summary");
+  summary.className = "row-menu-summary";
+  summary.textContent = "Actions";
+  summary.setAttribute("aria-label", label ? `Actions for ${label}` : "File actions");
+  details.appendChild(summary);
+
+  const panel = document.createElement("div");
+  panel.className = "row-menu-panel";
+  for (const [text, handler] of actions) {
+    const btn = document.createElement("button");
+    btn.className = "row-menu-item";
+    btn.textContent = text;
+    btn.addEventListener("click", () => {
+      details.open = false; // close the menu first, then run the action
+      handler();
+    });
+    panel.appendChild(btn);
+  }
+  details.appendChild(panel);
+  return details;
+}
+
+function buildRow(pathCell, state, actions, label) {
   const tr = document.createElement("tr");
 
   const pathTd = document.createElement("td");
@@ -290,13 +325,7 @@ function buildRow(pathCell, state, actions) {
   stateTd.appendChild(badge);
 
   const actionsTd = document.createElement("td");
-  for (const [label, handler] of actions) {
-    const btn = document.createElement("button");
-    btn.className = "small";
-    btn.textContent = label;
-    btn.addEventListener("click", handler);
-    actionsTd.append(btn, " ");
-  }
+  if (actions.length) actionsTd.appendChild(actionsMenu(actions, label));
 
   tr.append(pathTd, stateTd, actionsTd);
   return tr;
@@ -334,7 +363,7 @@ function buildFileRow(file, opts) {
   if (file.shadows) extras.push(" ", shadowBadge(file.shadows));
   if (file.is_module) extras.push(" ", moduleBadge());
   const pathCell = extras.length ? [display, ...extras] : display;
-  return buildRow(pathCell, file.state, fileActions(file, opts));
+  return buildRow(pathCell, file.state, fileActions(file, opts), file.path);
 }
 
 function buildArtifactRows(artifact, files) {
@@ -386,7 +415,7 @@ function buildArtifactRows(artifact, files) {
     actions.push(["Delete", () => deleteAction(artifact.pointer, "project")]);
   }
 
-  const header = buildRow([caret, name, detail], artifact.state, actions);
+  const header = buildRow([caret, name, detail], artifact.state, actions, artifact.name);
   return [header, ...memberRows];
 }
 
@@ -815,11 +844,16 @@ async function pollCopilotLogin() {
   setTimeout(pollCopilotLogin, 2500); // still pending — keep polling
 }
 
-// Native <details> stays open until its summary is clicked again; close it when
-// the user clicks anywhere outside the dropdown, the way a header menu should.
+// A native <details> stays open until its summary is clicked again; close any open
+// menu when the user clicks outside it, the way a menu should. This covers the header
+// Copilot menu and every per-row actions menu — and, because clicking one row's summary
+// runs here too, opening a menu closes any other row menu that was left open.
 document.addEventListener("click", (e) => {
-  const menu = $("copilot-menu");
-  if (menu.open && !menu.contains(e.target)) menu.open = false;
+  const copilot = $("copilot-menu");
+  if (copilot.open && !copilot.contains(e.target)) copilot.open = false;
+  for (const menu of document.querySelectorAll("details.row-menu[open]")) {
+    if (!menu.contains(e.target)) menu.open = false;
+  }
 });
 
 $("copilot-connect").addEventListener("click", startCopilotLogin);

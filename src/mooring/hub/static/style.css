@@ -342,6 +342,55 @@ summary:focus-visible {
 }
 button.small { font-size: 0.8rem; padding: 0.15rem 0.5rem; }
 
+/* A file/artifact row's actions collapsed into one compact "Actions ▾" dropdown (was a
+   row of small buttons). A <details> disclosure — NOT a native <select>, which fires an
+   action on a single Arrow keypress when abused as a menu; here each item is a <button>
+   that runs only on an explicit click/Enter. The summary is styled to read as a pill
+   like the header repo/theme selects; the floating panel is anchored to the row. */
+.row-menu { position: relative; display: inline-block; }
+.row-menu > summary {
+  font: inherit;
+  font-size: 0.8rem;
+  padding: 0.15rem 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--card);
+  color: var(--ink);
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+  list-style: none; /* drop the default disclosure triangle; we add our own caret */
+}
+.row-menu > summary::-webkit-details-marker { display: none; }
+.row-menu > summary::after { content: " \25BE"; color: var(--muted); }
+.row-menu[open] > summary { background: var(--bg); }
+.row-menu-panel {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 0.25rem);
+  z-index: 20;
+  min-width: 10rem;
+  display: flex;
+  flex-direction: column;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.25rem;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.18);
+}
+.row-menu-item {
+  font: inherit;
+  font-size: 0.8rem;
+  text-align: left;
+  white-space: nowrap;
+  border: none;
+  background: transparent;
+  border-radius: 4px;
+  padding: 0.3rem 0.6rem;
+  cursor: pointer;
+}
+.row-menu-item:hover { background: var(--bg); }
+
 .toolbar { display: flex; gap: 0.5rem; margin-bottom: 0.75rem; flex-wrap: wrap; }
 
 .code {
@@ -928,6 +977,10 @@ button.ghost:hover { color: var(--ink); }
 .has-scene header,
 .has-scene main,
 .has-scene footer { position: relative; z-index: 1; }
+/* A last-row actions menu opens downward and can overflow the card into the footer's
+   band; lift main above the z-index:1 footer so its floating panels paint on top. Still
+   above the fixed .hub-scene (z-index:0), so the backdrop layering is unaffected. */
+.has-scene main { z-index: 2; }
 
 .hub-scene {
   position: fixed;
