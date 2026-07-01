@@ -89,3 +89,12 @@ def test_open_warns_before_launch(workspace, monkeypatch, capsys):
     assert cli.main(["open", "notebooks/polars.py"]) == 0
     out = capsys.readouterr().out
     assert "shadow" in out.lower() and "polars" in out
+
+
+def test_open_refuses_an_empty_init_py(workspace):
+    # An empty __init__.py must not open in marimo (it would be rewritten into notebook
+    # form and break the package) — the CLI open guard refuses it like the hub does.
+    (workspace / "notebooks" / "__init__.py").write_text("", "utf-8")
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["open", "notebooks/__init__.py"])
+    assert "module" in str(exc.value).lower()

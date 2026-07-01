@@ -174,3 +174,40 @@ def test_is_marimo_app_finds_marker_past_4kb():
     # before `app = marimo.App(` must still be detected — the sniff reads full source.
     src = "# " + "x" * 6000 + "\nimport marimo\napp = marimo.App()\n"
     assert notebook_template.is_marimo_app(src) is True
+
+
+# -- opens_as_notebook: which .py the editor may open (incl. the __init__.py carve-out) --
+
+
+def test_opens_as_notebook_true_for_marimo_app_any_name():
+    src = "import marimo\napp = marimo.App()\n"
+    assert notebook_template.opens_as_notebook("notebooks/real.py", src) is True
+
+
+def test_opens_as_notebook_true_for_blank_stub():
+    # A freshly created empty .py opens as a new notebook.
+    assert notebook_template.opens_as_notebook("notebooks/draft.py", "   \n") is True
+
+
+def test_opens_as_notebook_false_for_plain_module():
+    assert notebook_template.opens_as_notebook("notebooks/helpers.py", "def f():\n    return 1\n") is False
+
+
+def test_opens_as_notebook_false_for_empty_init_py():
+    # An empty __init__.py is a package marker, NOT a nascent notebook: opening it in
+    # marimo would rewrite it into notebook form (and autorun it), breaking the package.
+    assert notebook_template.opens_as_notebook("pkg/__init__.py", "") is False
+    assert notebook_template.opens_as_notebook("pkg/__init__.py", "\n") is False
+
+
+def test_opens_as_notebook_false_for_empty_main_py():
+    assert notebook_template.opens_as_notebook("pkg/__main__.py", "") is False
+
+
+def test_opens_as_notebook_handles_windows_separators():
+    assert notebook_template.opens_as_notebook("pkg\\__init__.py", "") is False
+
+
+def test_opens_as_notebook_non_dunder_double_trailing_underscore_stays_stub():
+    # Only true dunder names (__<name>__.py) are carved out; "foo__.py" is not a marker.
+    assert notebook_template.opens_as_notebook("notebooks/foo__.py", "") is True
