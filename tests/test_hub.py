@@ -730,6 +730,58 @@ def test_undo_rejects_traversal(configured):
     assert resp.status_code == 400
 
 
+class _RecordingLock:
+    """A threading.Lock stand-in that counts acquisitions (deterministic — no timing)."""
+
+    def __init__(self):
+        import threading
+
+        self._inner = threading.Lock()
+        self.acquisitions = 0
+
+    def __enter__(self):
+        self._inner.acquire()
+        self.acquisitions += 1
+        return self
+
+    def __exit__(self, *exc):
+        self._inner.release()
+        return False
+
+
+def test_rollback_apply_and_undo_serialize_on_the_same_lock(configured):
+    """The per-notebook undo stack is shared by THREE write paths — sync rollback
+    (/api/rollback), AI Apply (_apply_with_undo, called by BOTH the chat and the
+    batch Apply), and Undo/restore (_restore_undo, behind /api/undo and the chat
+    rollback). All three must serialize on the SAME hub._apply_lock object, or a
+    concurrent pair can race the snapshot stack. Pinned deterministically by
+    swapping in a counting lock and driving each path once — if a refactor moves
+    any path onto its own lock, its acquisition lands on the wrong object and the
+    count here stops adding up."""
+    from mooring import notebook_template
+
+    client, hub, fake, tmp_path = configured
+    rec = _RecordingLock()
+    hub._apply_lock = rec
+
+    # 1. the sync rollback endpoint
+    _seed_and_pull(hub, fake, "notebooks/a.py")
+    (tmp_path / "ws1" / "notebooks/a.py").write_text("mine\n", "utf-8", newline="\n")
+    assert client.post("/api/rollback", json={"path": "notebooks/a.py"}).status_code == 200
+    assert rec.acquisitions == 1
+
+    # 2. the shared Apply path (chat Apply and batch Apply both call _apply_with_undo)
+    ws = hub.cfg.workspace()
+    rel = notebook_template.create(ws, "lock guard")
+    nb = ws / rel
+    hub._apply_with_undo(nb, ws, rel, [{"op": "append", "code": "x = 1"}])
+    assert rec.acquisitions == 2
+
+    # 3. the undo/restore path (/api/undo and the chat rollback)
+    assert hub._restore_undo(nb, ws, rel) == 0  # consumed the one snapshot from (2)
+    assert rec.acquisitions == 3
+
+
 def test_state_reports_has_local_flag(configured):
     client, _, fake, tmp_path = configured
     write_ws(tmp_path, "ws1", "notebooks/local.py", "a")
