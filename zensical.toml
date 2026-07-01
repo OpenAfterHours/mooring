@@ -69,7 +69,26 @@ nav = [
   ] },
   { "For developers" = [
     { "Architecture" = "developers/index.md" },
+    # The agreed 2026-07 structural plan (app/ layer, hub thinning) — the seams
+    # several roadmap features land on.
+    { "Architecture plan (2026-07)" = "developers/architecture-plan.md" },
     { "Contributing" = "developers/contributing.md" },
+    # Design plans from the 2026-07 ideation review — proposals, not shipped code.
+    { "Roadmap" = [
+      "developers/roadmap/index.md",
+      { "Push guard" = "developers/roadmap/push-guard.md" },
+      { "Local safety net" = "developers/roadmap/local-safety-net.md" },
+      { "Staleness guard" = "developers/roadmap/staleness-guard.md" },
+      { "mooring doctor" = "developers/roadmap/mooring-doctor.md" },
+      { "Version history" = "developers/roadmap/version-history.md" },
+      { "Review my changes" = "developers/roadmap/review-my-changes.md" },
+      { "Pull digest" = "developers/roadmap/pull-digest.md" },
+      { "Duplicate as draft" = "developers/roadmap/duplicate-as-draft.md" },
+      { "Offline mode" = "developers/roadmap/offline-mode.md" },
+      { "Handover explainer" = "developers/roadmap/handover-explainer.md" },
+      { "Traceback fixer" = "developers/roadmap/traceback-fixer.md" },
+      { "Power BI semantic model" = "developers/roadmap/pbi-semantic-model.md" },
+    ] },
   ] },
 ]
 
