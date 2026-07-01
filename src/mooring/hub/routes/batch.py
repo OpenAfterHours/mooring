@@ -279,8 +279,9 @@ async def api_batch_cancel(request: Request) -> JSONResponse:
 async def api_batch_apply(request: Request) -> JSONResponse:
     """Apply ONE proposal from a finished batch into its notebook — the human's
     per-notebook authorization. Reuses the SAME single-notebook write path as the
-    chat Apply (_apply_with_undo: snapshot + _apply_lock + per-notebook opt-out
-    re-check), so there is no autonomous-write path; only the review is batched."""
+    chat Apply (the shared apply guard: snapshot + one lock + per-notebook opt-out
+    re-check — see app/apply.py), so there is no autonomous-write path; only the
+    review is batched."""
     hub = request.app.state.hub
     if not hub.app_cfg.ai_enabled:
         return JSONResponse({"enabled": False}, status_code=404)

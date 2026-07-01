@@ -146,8 +146,8 @@ async def api_chat_apply(request: Request) -> JSONResponse:
     if target is None:
         return _unknown_session()
     # Apply WRITES the notebook, so it is the highest-value gate. This early
-    # refusal covers the common case; _apply_with_undo re-checks under
-    # _apply_lock right before the write to close the toggle/write race.
+    # refusal covers the common case; the apply guard re-checks under its lock
+    # right before the write to close the toggle/write race (app/apply.py).
     if (blocked := hub._disabled_block(sid)) is not None:
         return blocked
     # The UI echoes the proposal's normalized ops; a bare ``code`` (the append

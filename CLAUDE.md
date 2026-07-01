@@ -34,12 +34,21 @@ Integration testing against a live repo: set `MOORING_TOKEN` (a PAT skips device
 The flat `src/mooring/` namespace hides a strict dependency direction that `uv run lint-imports` enforces. Imports may only point **down**:
 
 ```
-L4  cli.py, hub/            two sibling presentation adapters (hub must not import cli)
-L3  ai/*                    AI orchestration + privacy/safety
-L2  sync, manifest, pbip, deletion   domain core  ·  editor, schema, marimo_rt   marimo bridge
-L1  config, config_store, auth, github, runtime, ai_config   identity + config
-L0  githost, paths, gitsha  stdlib-pure leaves (import nothing else in mooring)
+L4   cli.py, hub/           two sibling presentation adapters (hub must not import cli)
+L3.5 app/                   application services shared by BOTH adapters (notebooks,
+                            chat_service, apply, batch_service) — imports no adapter
+L3   ai/*                   AI orchestration + privacy/safety
+L2   sync, manifest, pbip, deletion   domain core  ·  editor, schema, marimo_rt   marimo bridge
+L1   config, config_store, auth, github, runtime, ai_config   identity + config
+L0   githost, paths, gitsha  stdlib-pure leaves (import nothing else in mooring)
 ```
+
+The hub itself is split: `hub/server.py` holds the `Hub` state-holder +
+`create_app`/`run_hub`; the route handlers live in `hub/routes/*` (one module
+per concern) and reach the shared state via `request.app.state.hub`; themed
+pages in `hub/pages.py`; the one SSE transport in `hub/sse.py`. Orchestration
+that both adapters need lives in `app/`, never twice in `cli.py` + the hub.
+See `docs/developers/architecture-plan.md` for the why.
 
 Two consequences worth internalizing: the **sync domain core never imports `ai/` or `editor`**, and **`ai/` reaches marimo and raw HTTP only through `marimo_rt.py`** (the transport seam) — a direct `ai → marimo`/`urllib`/`http` import is a contract violation. Adding a backwards import will fail CI even if tests pass.
 
