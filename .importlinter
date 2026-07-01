@@ -18,6 +18,9 @@
 # (a neutral L1 helper below both adapters) and removed the hub->cli edge; Phase 8
 # added marimo_rt.py and the marimo-internals-isolated contract below (which needs
 # include_external_packages so the forbidden marimo._*/urllib edges are seen).
+# The 2026-07 architecture plan's P7 added the two lean-runtime contracts at the
+# bottom: the domain core has no import path to the heavy optional deps, and
+# spaCy stays behind its ner_spacy backend seam.
 
 [importlinter]
 root_package = mooring
@@ -117,4 +120,65 @@ forbidden_modules =
 # Only DIRECT imports are forbidden: ai -> marimo_rt -> marimo (the legitimate path
 # through the seam) is indirect and allowed; a NEW direct ai -> marimo/urllib import
 # is the violation we want to catch.
+allow_indirect_imports = True
+
+[importlinter:contract:frozen-core-is-lean]
+name = The frozen build ships lean — the domain core and config/identity layer have NO import path (even indirect) to the heavy optional deps: marimo, the Copilot SDK, spaCy
+type = forbidden
+source_modules =
+    mooring.githost
+    mooring.paths
+    mooring.gitsha
+    mooring.shadow
+    mooring.reveal
+    mooring.config
+    mooring.config_store
+    mooring.ai_config
+    mooring.auth
+    mooring.github
+    mooring.runtime
+    mooring.sync
+    mooring.manifest
+    mooring.pbip
+    mooring.deletion
+forbidden_modules =
+    marimo
+    copilot
+    spacy
+# Deliberately NOT requests: sync -> github -> requests is the product's
+# legitimate GitHub HTTP path (requests is a core dep, not a heavy optional).
+# No allow_indirect_imports here, so a transitive route through a helper module
+# is caught too — the lean footprint is a CI fact, not a discipline.
+
+[importlinter:contract:spacy-only-in-its-backend]
+name = spaCy (the optional pii-spacy extra) is imported only in ai/ner_spacy.py — everything else reaches it through that backend seam
+type = forbidden
+source_modules =
+    mooring.ai.base
+    mooring.ai.batch
+    mooring.ai.cellwrite
+    mooring.ai.chat
+    mooring.ai.context
+    mooring.ai.copilot
+    mooring.ai.datadictionary
+    mooring.ai.egress
+    mooring.ai.introspect
+    mooring.ai.locality
+    mooring.ai.ner
+    mooring.ai.pii
+    mooring.ai.scan
+    mooring.ai.secrets
+    mooring.ai.session
+    mooring.ai.tools
+    mooring.hub
+    mooring.cli
+    mooring.editor
+    mooring.marimo_rt
+forbidden_modules =
+    spacy
+# Direct imports only: ner.py legitimately DISPATCHES to the ner_spacy backend
+# (an indirect route to spaCy); the violation to catch is a new direct
+# `import spacy` outside the backend module. (import-linter has no "everything
+# except ner_spacy" source form, hence the explicit list — add new ai/ modules
+# here as they appear.)
 allow_indirect_imports = True
