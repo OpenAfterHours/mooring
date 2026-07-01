@@ -123,6 +123,20 @@ async function openAction(path) {
   }
 }
 
+// A plain helper module (a non-marimo .py) can't open in the marimo editor — that
+// would rewrite it into notebook form. Reveal it in the OS file manager so the user
+// edits it in their own editor; the change then syncs/pushes like any other file.
+function revealAction(path) {
+  return action("/api/reveal", { path });
+}
+
+// Open an external URL (e.g. GitHub) in a new tab, severing window.opener so the
+// opened page can't navigate this hub tab (external-site hygiene).
+function openExternal(url) {
+  const win = window.open(url, "_blank");
+  if (win) win.opener = null;
+}
+
 // The contents API is throttled to ~1 file/s; tell the user a long push is alive.
 function pushAction(paths, count) {
   if (count > 3) $("summary").textContent = `Pushing ${count} file(s)… (~${Math.ceil(count * 0.8)}s)`;
@@ -225,6 +239,18 @@ function fileActions(file, opts) {
   if (openable && file.has_local) {
     actions.push(["Open", () => openAction(file.path)]);
   }
+  // A plain helper module (non-marimo .py) can't open in marimo (it would be rewritten
+  // into notebook form), so instead of Open it gets Reveal — open it in the file manager
+  // to edit in your own editor. Edits still sync/push like any other file.
+  if (file.is_module && file.has_local) {
+    actions.push(["Reveal", () => revealAction(file.path)]);
+  }
+  // "View on GitHub" opens the file's blob page on the remote branch in a new tab. The
+  // server sets github_url only for files that exist on the remote (any file type), so
+  // this shows the REMOTE version — which can differ from unpushed local edits.
+  if (file.github_url) {
+    actions.push(["View on GitHub", () => openExternal(file.github_url)]);
+  }
   // AI copilot pops out into its own window (not a tab) so it can sit beside the
   // notebook. One window per notebook; clicking again focuses the existing one.
   // A notebook can be opted out of AI (synced mooring.toml) — when it is, the open
@@ -292,7 +318,8 @@ function moduleBadge() {
   span.textContent = "module";
   span.title =
     "A Python module imported by notebooks — not a runnable marimo notebook, so it " +
-    "isn't opened in the editor (the workspace root is on the notebook's import path).";
+    "isn't opened in the editor (the workspace root is on the notebook's import path). " +
+    "Use Reveal to open it in your own editor.";
   return span;
 }
 

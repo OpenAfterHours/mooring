@@ -1983,3 +1983,101 @@ def test_blank_stub_py_is_a_notebook_not_a_module(unconfigured_client):
     files = {f["path"]: f for f in client.get("/api/state").json()["files"]}
     assert files["notebooks/draft.py"].get("is_notebook") is True
     assert "is_module" not in files["notebooks/draft.py"]
+
+
+def test_empty_init_py_is_a_module_not_a_notebook(unconfigured_client):
+    # An empty __init__.py is a package marker, not a nascent notebook: it must be badged
+    # 'module' (no Open) so marimo can't rewrite it into notebook form and break imports.
+    client, hub = unconfigured_client
+    ws = hub.cfg.workspace()
+    (ws / "notebooks").mkdir(parents=True, exist_ok=True)
+    (ws / "notebooks" / "__init__.py").write_text("", "utf-8")
+    files = {f["path"]: f for f in client.get("/api/state").json()["files"]}
+    assert files["notebooks/__init__.py"].get("is_module") is True
+    assert "is_notebook" not in files["notebooks/__init__.py"]
+
+
+def test_open_refuses_an_empty_init_py(unconfigured_client):
+    # Backstop for a direct call / stale client: even though the hub hides Open on the
+    # module row, /api/open on an empty __init__.py must still refuse (400 'module').
+    client, hub = unconfigured_client
+    ws = hub.cfg.workspace()
+    (ws / "notebooks").mkdir(parents=True, exist_ok=True)
+    (ws / "notebooks" / "__init__.py").write_text("", "utf-8")
+    resp = client.post("/api/open", json={"path": "notebooks/__init__.py"})
+    assert resp.status_code == 400
+    assert "module" in resp.json()["error"].lower()
+
+
+def test_reveal_calls_launcher(unconfigured_client, monkeypatch):
+    client, hub = unconfigured_client
+    ws = hub.cfg.workspace()
+    (ws / "notebooks").mkdir(parents=True, exist_ok=True)
+    (ws / "notebooks" / "helpers.py").write_text("def f():\n    return 1\n", "utf-8")
+    revealed = []
+    monkeypatch.setattr(server.reveal, "reveal", revealed.append)
+    resp = client.post("/api/reveal", json={"path": "notebooks/helpers.py"})
+    assert resp.status_code == 200
+    assert "url" not in resp.json()  # nothing for the browser to open
+    assert revealed == [(ws / "notebooks" / "helpers.py").resolve()]
+
+
+def test_reveal_missing_file_404s(unconfigured_client):
+    client, _ = unconfigured_client
+    resp = client.post("/api/reveal", json={"path": "notebooks/nope.py"})
+    assert resp.status_code == 404
+
+
+def test_reveal_rejects_traversal(unconfigured_client):
+    client, _ = unconfigured_client
+    resp = client.post("/api/reveal", json={"path": "../evil.py"})
+    assert resp.status_code == 400
+
+
+def test_reveal_rejects_dot_state_dir(unconfigured_client):
+    # .mooring/ (manifest + undo snapshots) must stay unreachable through reveal.
+    client, hub = unconfigured_client
+    ws = hub.cfg.workspace()
+    (ws / ".mooring").mkdir(parents=True, exist_ok=True)
+    (ws / ".mooring" / "manifest.json").write_text("{}", "utf-8")
+    resp = client.post("/api/reveal", json={"path": ".mooring/manifest.json"})
+    assert resp.status_code == 400
+
+
+def test_reveal_surfaces_launcher_error(unconfigured_client, monkeypatch):
+    # On non-Windows (or if Explorer can't launch), RevealError becomes a friendly 400.
+    client, hub = unconfigured_client
+    ws = hub.cfg.workspace()
+    (ws / "notebooks").mkdir(parents=True, exist_ok=True)
+    (ws / "notebooks" / "helpers.py").write_text("x = 1\n", "utf-8")
+
+    def boom(_path):
+        raise server.reveal.RevealError("needs Windows")
+
+    monkeypatch.setattr(server.reveal, "reveal", boom)
+    resp = client.post("/api/reveal", json={"path": "notebooks/helpers.py"})
+    assert resp.status_code == 400
+    assert "windows" in resp.json()["error"].lower()
+
+
+def test_state_adds_github_url_for_remote_files(configured):
+    client, _, fake, tmp_path = configured
+    # A file that exists on the remote branch but not on disk (new-remote).
+    fake.seed("notebooks/shared.py", b"import marimo\napp = marimo.App()\n")
+    # A file that exists only locally, never pushed (new-local) — no remote blob.
+    write_ws(tmp_path, "ws1", "notebooks/localonly.py", "x = 1\n")
+    files = {f["path"]: f for f in client.get("/api/state").json()["files"]}
+    assert files["notebooks/shared.py"]["github_url"] == (
+        "https://github.com/acme/nbs/blob/main/notebooks/shared.py"
+    )
+    assert "github_url" not in files["notebooks/localonly.py"]
+
+
+def test_state_no_github_url_in_local_mode(unconfigured_client):
+    # No repo configured → no remote → no View-on-GitHub link.
+    client, hub = unconfigured_client
+    ws = hub.cfg.workspace()
+    (ws / "notebooks").mkdir(parents=True, exist_ok=True)
+    (ws / "notebooks" / "helpers.py").write_text("x = 1\n", "utf-8")
+    files = {f["path"]: f for f in client.get("/api/state").json()["files"]}
+    assert "github_url" not in files["notebooks/helpers.py"]

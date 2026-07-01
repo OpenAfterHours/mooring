@@ -36,13 +36,14 @@ from mooring import (
     notebook_template,
     pbip,
     pyproject_env,
+    reveal,
     shadow,
     sync,
     telemetry,
     workspace_config,
 )
 from mooring.editor import EditorServer, free_port
-from mooring.github import AuthFailed, GitHubClient, GitHubError, compare_url
+from mooring.github import AuthFailed, GitHubClient, GitHubError, blob_url, compare_url
 from mooring.hub import settings_schema
 from mooring.runtime import workspace_hint
 
@@ -273,8 +274,10 @@ class Hub:
         report carries either real three-way sync states or ``LOCAL`` rows, and the
         row shape is identical so the front-end renders both the same way. PBIP
         members are grouped into artifacts; per-notebook AI opt-outs (the synced
-        ``mooring.toml``) are flagged so the row hides its AI-open button.
+        ``mooring.toml``) are flagged so the row hides its AI-open button. Files present
+        on the remote branch also carry a ``github_url`` (View on GitHub).
         """
+        cfg = self.cfg
         artifacts, _ = pbip.group(report.files)
         artifact_of = {m.path: a.key for a in artifacts for m in a.members}
         # Notebooks the team has turned the copilot off for (synced mooring.toml).
@@ -314,6 +317,16 @@ class Hub:
                     if f.path.endswith(".py") and _has_local(f) and f.path not in notebooks
                     else {}
                 ),
+                # A "View on GitHub" link for any file that exists on the remote branch
+                # (a non-null remote sha == present at cfg.branch HEAD). It shows the
+                # REMOTE version, which can differ from unpushed local edits; it is
+                # omitted for local-only/never-pushed and remote-deleted files (whose
+                # blob URL would 404) and in no-repo mode (no remote sha at all).
+                **(
+                    {"github_url": blob_url(cfg.owner, cfg.repo, cfg.branch, f.path, host=cfg.host)}
+                    if f.remote_sha is not None and cfg.is_configured
+                    else {}
+                ),
             }
             for f in report.files
         ]
@@ -340,10 +353,11 @@ class Hub:
         """Whether the local ``.py`` at ``rel`` is a marimo notebook (vs a plain helper
         module). A blank/whitespace-only file counts as a notebook — it opens as a fresh
         notebook, matching the open guards (so the hub never badges a blank stub a
-        'module' while /api/open would happily open it). Reads the whole file (the
-        marimo marker can sit past a large header) but caches by mtime, so the per-row
-        sniff on every /api/state doesn't re-read unchanged files. Missing/unreadable →
-        False."""
+        'module' while /api/open would happily open it) — EXCEPT a dunder package marker
+        like ``__init__.py``, which is a module even when empty (see
+        :func:`notebook_template.opens_as_notebook`). Reads the whole file (the marimo
+        marker can sit past a large header) but caches by mtime, so the per-row sniff on
+        every /api/state doesn't re-read unchanged files. Missing/unreadable → False."""
         path = workspace / rel
         try:
             mtime = path.stat().st_mtime_ns
@@ -357,7 +371,7 @@ class Hub:
             source = path.read_bytes().decode("utf-8", "ignore")
         except OSError:
             return False
-        result = not source.strip() or notebook_template.is_marimo_app(source)
+        result = notebook_template.opens_as_notebook(rel, source)
         self._notebook_cache[key] = (mtime, result)
         return result
 
@@ -928,6 +942,30 @@ class Hub:
         # run it off the event loop so the first open doesn't freeze the whole hub.
         return await run_in_threadpool(self._open, data.get("path", ""))
 
+    async def api_reveal(self, request: Request) -> JSONResponse:
+        """Reveal a file in the OS file manager so the user can open a non-marimo .py
+        (a plain helper module) in their own editor. Deliberately SEPARATE from
+        /api/open — that stays the marimo-notebook path and still refuses modules
+        (opening one in marimo would rewrite it into notebook form). Revealing the
+        folder also sidesteps the Windows trap where the default verb for a .py runs
+        the script. Reuses _ws_file's containment + dot-part guards, so .mooring/ and
+        any workspace escape are unreachable."""
+        data = await request.json()
+        rel_path = str(data.get("path", ""))
+        try:
+            target = self._ws_file(self.cfg.workspace(), rel_path)
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        except FileNotFoundError:
+            return JSONResponse({"error": f"No such file: {rel_path}"}, status_code=404)
+        try:
+            reveal.reveal(target)
+        except reveal.RevealError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        telemetry.log_event("open", kind="reveal")
+        name = rel_path.rsplit("/", 1)[-1]
+        return JSONResponse({"path": rel_path, "lines": [f"Revealed {name} in the file manager"]})
+
     async def api_delete(self, request: Request) -> JSONResponse:
         from mooring import deletion
 
@@ -1052,11 +1090,13 @@ class Hub:
         # Refuse to open a plain Python module as a notebook: the marimo editor would
         # rewrite it into notebook form on save, corrupting a helper module. A blank
         # stub is allowed (it becomes a new notebook); a non-empty module without the
-        # marimo.App marker is not. The hub already hides Open on such rows (is_module);
-        # this backstops a direct call / stale client. Reads the whole file — the marker
-        # can sit past a large leading header.
+        # marimo.App marker — and a dunder package marker like __init__.py even when
+        # empty — is not (see notebook_template.opens_as_notebook). The hub already hides
+        # Open on such rows (is_module) and offers Reveal instead; this backstops a direct
+        # call / stale client. Reads the whole file — the marker can sit past a large
+        # leading header.
         source = target.read_bytes().decode("utf-8", "ignore")
-        if source.strip() and not notebook_template.is_marimo_app(source):
+        if not notebook_template.opens_as_notebook(rel_path, source):
             return JSONResponse(
                 {
                     "error": (
@@ -2338,6 +2378,7 @@ def create_app(hub: Hub) -> Starlette:
             Route("/api/resolve", hub.api_resolve, methods=["POST"]),
             Route("/api/new", hub.api_new, methods=["POST"]),
             Route("/api/open", hub.api_open, methods=["POST"]),
+            Route("/api/reveal", hub.api_reveal, methods=["POST"]),
             Route("/api/delete", hub.api_delete, methods=["POST"]),
             Route("/api/rollback", hub.api_rollback, methods=["POST"]),
             Route("/api/undo", hub.api_undo, methods=["POST"]),

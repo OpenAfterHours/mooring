@@ -609,13 +609,14 @@ def cmd_open(cfg: config.Config, rel_path: str) -> int:
         sys.exit("Only .py notebooks and .pbip projects can be opened.")
     # Refuse to open a plain Python module as a notebook: the marimo editor would
     # rewrite it into notebook form on save. A blank stub is allowed (it becomes a new
-    # notebook); a non-empty module without the marimo.App marker is not. The whole file
-    # is read — a large leading header can push the `app = marimo.App(` marker past the
-    # first few KB.
+    # notebook); a non-empty module without the marimo.App marker — and a dunder package
+    # marker like __init__.py even when empty — is not (see opens_as_notebook). The whole
+    # file is read — a large leading header can push the `app = marimo.App(` marker past
+    # the first few KB.
     from mooring import notebook_template
 
     source = target.read_bytes().decode("utf-8", "ignore")
-    if source.strip() and not notebook_template.is_marimo_app(source):
+    if not notebook_template.opens_as_notebook(rel_path, source):
         sys.exit(
             f"{rel_path} is a Python module, not a marimo notebook — opening it in the "
             "editor could overwrite it. Import it from a notebook instead."

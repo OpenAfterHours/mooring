@@ -11,6 +11,7 @@ from __future__ import annotations
 import base64
 from dataclasses import dataclass
 from typing import Protocol
+from urllib.parse import quote
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -51,6 +52,18 @@ def compare_url(
 ) -> str:
     """GitHub's compare page for opening a pull request from `branch` into `base`."""
     return f"{githost.web_root(host)}/{owner}/{repo}/compare/{base}...{branch}?expand=1"
+
+
+def blob_url(
+    owner: str, repo: str, branch: str, path: str, host: str = githost.DEFAULT_HOST
+) -> str:
+    """GitHub's web view of `path` at `branch` HEAD — the file's ``blob/`` page.
+
+    `path` is a repo-relative POSIX path; its segments are percent-encoded while the
+    ``/`` separators are preserved. The page shows the file as it exists on the REMOTE
+    branch, which can differ from the local working copy — so callers gate on the file
+    actually existing remotely (a non-null remote blob sha)."""
+    return f"{githost.web_root(host)}/{owner}/{repo}/blob/{branch}/{quote(path, safe='/')}"
 
 
 @dataclass

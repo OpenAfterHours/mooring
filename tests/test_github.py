@@ -9,6 +9,7 @@ from mooring.github import (
     GitHubError,
     RefAlreadyExists,
     RemoteConflict,
+    blob_url,
     compare_url,
 )
 
@@ -193,6 +194,25 @@ def test_compare_url():
 def test_compare_url_on_enterprise_host():
     assert compare_url("acme", "nbs", "main", "fix", host="ghe.service.group") == (
         "https://ghe.service.group/acme/nbs/compare/main...fix?expand=1"
+    )
+
+
+def test_blob_url():
+    assert blob_url("acme", "nbs", "main", "notebooks/sales.py") == (
+        "https://github.com/acme/nbs/blob/main/notebooks/sales.py"
+    )
+
+
+def test_blob_url_on_enterprise_host():
+    assert blob_url("acme", "nbs", "main", "reports/q3.py", host="ghe.service.group") == (
+        "https://ghe.service.group/acme/nbs/blob/main/reports/q3.py"
+    )
+
+
+def test_blob_url_percent_encodes_segments_but_keeps_slashes():
+    # A space in a path segment is encoded; the folder separators survive.
+    assert blob_url("acme", "nbs", "main", "my data/sales report.py") == (
+        "https://github.com/acme/nbs/blob/main/my%20data/sales%20report.py"
     )
 
 

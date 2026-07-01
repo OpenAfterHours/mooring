@@ -7,7 +7,7 @@
 #   L3  ai/*                AI orchestration + privacy/safety
 #   L2  sync/manifest/pbip/deletion (domain core) · editor/schema (marimo bridge)
 #   L1  config/config_store/auth/github            identity + config
-#   L0  githost/paths/gitsha/shadow                stdlib-pure leaves
+#   L0  githost/paths/gitsha/shadow/reveal          stdlib-pure leaves
 #
 # These contracts lock that direction so a backwards import can't silently
 # re-enter as the fast-moving ai/ subsystem keeps growing. They are intentionally
@@ -31,6 +31,7 @@ source_modules =
     mooring.paths
     mooring.gitsha
     mooring.shadow
+    mooring.reveal
 forbidden_modules =
     mooring.config
     mooring.config_store

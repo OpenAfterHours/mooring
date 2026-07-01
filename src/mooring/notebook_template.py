@@ -50,6 +50,27 @@ def is_marimo_app(source: str) -> bool:
     return _MARIMO_APP_RE.search(source) is not None
 
 
+def opens_as_notebook(name: str, source: str) -> bool:
+    """Whether the ``.py`` at ``name`` (a filename or workspace-relative path) with body
+    ``source`` should open in the marimo editor.
+
+    True for a real marimo app (:func:`is_marimo_app`) or a blank stub — a freshly
+    created empty ``.py`` becomes a new notebook. The one exception is a **dunder package
+    marker** (``__init__.py`` / ``__main__.py``, i.e. ``__<name>__.py``): those are
+    structural Python files that are legitimately empty, and opening one in marimo would
+    rewrite it into notebook form on save (and, under ``--watch`` autorun, execute it),
+    corrupting the package. Only ``name``'s final path component is inspected; a dunder
+    file that genuinely contains a ``marimo.App`` marker still counts (that path is
+    intentional and vanishingly rare). This is the single source of truth shared by the
+    hub's listing sniff and both open guards — keep callers pointed here so a stale
+    client or the CLI can't diverge from the badge."""
+    if is_marimo_app(source):
+        return True
+    stem = str(name).replace("\\", "/").rsplit("/", 1)[-1]
+    is_dunder = stem.startswith("__") and stem.endswith("__.py")
+    return not source.strip() and not is_dunder
+
+
 def slugify(name: str) -> str:
     slug = re.sub(r"[^A-Za-z0-9._-]+", "-", name.strip()).strip("-")
     slug = re.sub(r"-{2,}", "-", slug)
