@@ -89,8 +89,9 @@ async def api_rollback(request: Request) -> JSONResponse:
     discarding local edits. The pre-revert bytes of a ``.py`` are snapshotted onto
     the local undo stack first and the snapshot token returned (``undo_token``), so
     :func:`api_undo` can put them back — and refuse if a later write has since
-    landed on top. Held under ``_apply_lock`` so the snapshot+write can't race an
-    in-flight AI Apply on the same notebook (the same guard Apply/Undo take)."""
+    landed on top. Held under the shared apply guard's lock so the snapshot+write
+    can't race an in-flight AI Apply on the same notebook (the same guard
+    Apply/Undo take — see app/apply.py)."""
     from mooring import notebook_undo
 
     hub = request.app.state.hub
@@ -105,7 +106,7 @@ async def api_rollback(request: Request) -> JSONResponse:
             captured["token"] = notebook_undo.snapshot(workspace, rel, content)
 
     try:
-        with hub._apply_lock:
+        with hub.apply.lock:
             result = sync.revert(
                 hub.client(),
                 hub.cfg,
@@ -131,7 +132,7 @@ async def api_undo(request: Request) -> JSONResponse:
     ``token`` (from /api/rollback) must still be the newest entry — otherwise a
     later write (e.g. an AI Apply) is on top and we refuse (409) rather than
     restore the wrong layer."""
-    from mooring.hub.server import _UNDO_SUPERSEDED
+    from mooring.app.apply import UNDO_SUPERSEDED
 
     hub = request.app.state.hub
     data = await request.json()
@@ -146,11 +147,11 @@ async def api_undo(request: Request) -> JSONResponse:
         return JSONResponse({"error": f"No such notebook: {rel_path}"}, status_code=404)
     try:
         outcome = await asyncio.to_thread(
-            hub._restore_undo, nb_path, workspace, rel_path, expect_token=token
+            hub.apply.restore_undo, nb_path, workspace, rel_path, expect_token=token
         )
     except OSError as exc:  # momentarily locked — the snapshot is kept to retry
         return JSONResponse({"error": f"Could not restore the notebook: {exc}"}, status_code=502)
-    if outcome is _UNDO_SUPERSEDED:
+    if outcome is UNDO_SUPERSEDED:
         return JSONResponse(
             {
                 "ok": False,

@@ -37,6 +37,8 @@ from mooring import (
     workspace_config,
 )
 from mooring.app import notebooks as nb_ops
+from mooring.app.apply import ApplyGuard
+from mooring.app.chat_service import ChatService
 from mooring.editor import EditorServer, free_port
 from mooring.github import GitHubClient, GitHubError, blob_url
 from mooring.hub import settings_schema
@@ -46,10 +48,7 @@ def _static_dir() -> Path:
     return Path(str(resources.files("mooring.hub").joinpath("static")))
 
 
-# Sentinel returned by Hub._restore_undo when a token-scoped undo can't run because a
-# newer snapshot is now on top of the (shared) per-notebook undo stack.
 _UNKNOWN_CHAT_SESSION = "Unknown chat session."
-_UNDO_SUPERSEDED = object()
 
 
 class Hub:
@@ -63,16 +62,13 @@ class Hub:
         self._next_poll = 0.0
         self._user_login = ""
         self._lock = threading.Lock()
-        # AI copilot chat sessions, keyed by a hub-minted sid. Each is bound to
-        # one open notebook; the value is a chat.StubChatSession (Phase 0) or a
-        # CopilotChatSession (Phase 1) — both ChatBroadcasters.
-        self._chats: dict[str, object] = {}
-        self._chat_targets: dict[str, tuple[str, str]] = {}  # sid -> (workspace, notebook rel)
-        self._chat_lock = threading.Lock()
-        # Serializes the snapshot+write of an Apply and the restore of an Undo so two
-        # near-simultaneous clicks can't race the undo stack (single-user, rare clicks
-        # — a global lock is plenty and keeps the snapshot/restore atomic).
-        self._apply_lock = threading.Lock()
+        # The chat application service: the session registry + lifecycle, the
+        # context assembly (the sole egress.build_system_context caller), and the
+        # live-schema pipeline (app/chat_service.py — the landed P7).
+        self.chat = ChatService()
+        # THE per-notebook apply/undo write guard: chat Apply, batch Apply, Undo,
+        # and the sync rollback all serialize on apply.lock (app/apply.py).
+        self.apply = ApplyGuard()
         # Batch notebook-generation runs, keyed by a hub-minted batch_id. Each holds a
         # ChatBroadcaster for SSE progress, an abort Event, and (when finished) the
         # value-free per-job results the review tray + per-notebook Apply read. The
@@ -203,49 +199,53 @@ class Hub:
 
         threading.Thread(target=_warm, name="hub-warmup", daemon=True).start()
 
+    # -- chat service delegates -------------------------------------------------
+    # Thin views over app/chat_service + app/apply, kept on the Hub so the routes
+    # and the test suite keep one stable surface while the service owns the logic.
+
+    @property
+    def _chats(self) -> dict:
+        """The live session dict (a VIEW onto the service's registry — the suite
+        reads and seeds sessions through it)."""
+        return self.chat._chats
+
+    @property
+    def _chat_targets(self) -> dict:
+        """The sid -> (workspace, notebook) dict (the same view, for the suite)."""
+        return self.chat._targets
+
     def _close_all_chats(self) -> None:
-        with self._chat_lock:
-            sessions = list(self._chats.values())
-            self._chats.clear()
-            self._chat_targets.clear()
-        for session in sessions:
-            with contextlib.suppress(Exception):
-                session.close()  # ty: ignore[unresolved-attribute]
+        self.chat.close_all()
 
     def _close_chat(self, sid: str) -> None:
-        """Tear down one chat session (drop its target, close the provider)."""
-        with self._chat_lock:
-            session = self._chats.pop(sid, None)
-            self._chat_targets.pop(sid, None)
-        if session is not None:
-            with contextlib.suppress(Exception):
-                session.close()  # ty: ignore[unresolved-attribute]
+        self.chat.close(sid)
 
     def _close_chats_for_notebook(self, workspace: Path, notebook_rel: str) -> int:
-        """Close every live chat bound to one notebook. Used when AI is disabled for
-        it, so a window opened before the toggle stops streaming. Returns the count."""
-        want = (str(workspace), workspace_config.normalize_notebook(notebook_rel))
-        with self._chat_lock:
-            sids = [
-                sid
-                for sid, (ws, nb) in self._chat_targets.items()
-                if (ws, workspace_config.normalize_notebook(nb)) == want
-            ]
-        for sid in sids:
-            self._close_chat(sid)
-        return len(sids)
+        return self.chat.close_for_notebook(workspace, notebook_rel)
 
     def _disabled_block(self, sid: str) -> JSONResponse | None:
-        """The per-notebook opt-out gate shared by send/apply/rollback: if the
-        session's notebook is AI-disabled, tear the session down and return the 403
-        the chat UI locks on, else None. Re-checked at each egress (not just open)
-        because the notebook may be disabled mid-session from the hub or a sync."""
-        with self._chat_lock:
-            target = self._chat_targets.get(sid)
-        if target and workspace_config.is_ai_disabled(Path(target[0]), target[1]):
-            self._close_chat(sid)
+        """The per-notebook opt-out gate shared by send/apply/rollback: the service
+        decides (and tears the session down); the 403 the chat UI locks on is
+        transport, so it stays here."""
+        if self.chat.close_if_disabled(sid):
             return JSONResponse({"enabled": False, "reason": "notebook_disabled"}, status_code=403)
         return None
+
+    def _ws_file(self, workspace: Path, rel: str, *, suffix: str | None = None) -> Path:
+        return nb_ops.ws_file(workspace, rel, suffix=suffix)
+
+    def _build_chat_context(self, workspace: Path, notebook_rel: str, dataset_rel: str):
+        return self.chat.build_context(self.app_cfg, workspace, notebook_rel, dataset_rel)
+
+    def _live_schema_for_sid(self, sid: str) -> tuple[str, list[dict]]:
+        return self.chat.live_schema_for_sid(self.app_cfg, self.editors, sid)
+
+    def _reap_idle_chats(self) -> None:
+        self.chat.reap_idle(self.app_cfg.ai_chat_idle_timeout)
+
+    def _pii_status(self) -> dict:
+        return self.chat.pii_status(self.app_cfg)
+
 
     def shutdown(self) -> None:
         self._close_all_chats()
@@ -626,178 +626,9 @@ class Hub:
 
     # -- AI copilot (chat) -----------------------------------------------------
 
-    def _ws_file(self, workspace: Path, rel: str, *, suffix: str | None = None) -> Path:
-        """Resolve a workspace-relative path, rejecting escapes/missing files."""
-        # Reject any dot-prefixed path component (mirrors sync.is_synced_path) so the
-        # internal state dir — .mooring/ (manifest + undo snapshots) — is structurally
-        # unreachable through this resolver regardless of caller. Defence in depth.
-        if any(part.startswith(".") for part in Path(str(rel).replace("\\", "/")).parts):
-            raise ValueError("Path is not allowed.")
-        target = (workspace / rel).resolve()
-        try:
-            target.relative_to(workspace.resolve())
-        except ValueError as exc:
-            raise ValueError("Path escapes the workspace.") from exc
-        if suffix and not rel.endswith(suffix):
-            raise ValueError(f"Expected a {suffix} file.")
-        if not target.is_file():
-            raise FileNotFoundError(rel)
-        return target
 
-    def _build_chat_context(self, workspace: Path, notebook_rel: str, dataset_rel: str):
-        """Return ``(system_context, dictionary_index, pii_banner)`` for a chat.
 
-        The value-free core is the dataset SCHEMA + notebook SOURCE. When the
-        opt-in context feature is on, it also folds in the team instructions and
-        a locality-selected, value-minimised data-dictionary slice (with the
-        selected dataset's schema enriched by matching dictionary entries), and
-        returns the parsed index so the session can offer the pull tools.
 
-        When the opt-in PII guard is on, it additionally withholds any schema
-        column whose NAME is itself a PII value (a pivot/transpose on a PII key)
-        and, with ``scan_notebook_source``, collects value-free findings for the
-        notebook source into ``pii_banner`` (a one-time, warn-only UI banner —
-        the source is never mutated).
-        """
-        from dataclasses import replace
-
-        from mooring import schema
-        from mooring.ai import context as ctxmod
-        from mooring.ai import egress, locality, ner, pii
-        from mooring.ai.datadictionary import DictionaryIndex
-
-        pii_banner: list[dict] = []
-        repo_ctx = ctxmod.discover_context(
-            workspace,
-            context_dir=self.app_cfg.ai_context_dir,
-            enabled=self.app_cfg.ai_context,
-            max_kb=self.app_cfg.ai_context_max_kb,
-        )
-        index = repo_ctx.index
-        has_dict = not index.is_empty()
-
-        schema_text = ""
-        dataset_schema = None
-        if dataset_rel:
-            ds = self._ws_file(workspace, dataset_rel)
-            try:
-                dataset_schema = schema.extract_schema(ds)
-            except (ValueError, OSError) as exc:
-                raise ValueError(f"Could not read the schema for {dataset_rel}: {exc}") from exc
-            if self.app_cfg.ai_pii:
-                kept, col_findings = egress.scrub_columns(dataset_schema.columns)
-                if col_findings:  # a column NAME is itself a PII value — withhold it
-                    dataset_schema = replace(dataset_schema, columns=kept)
-                    pii_banner += [
-                        {"where": f"{dataset_rel} column", "kind": f.kind} for f in col_findings
-                    ]
-            schema_text = (
-                locality.enrich_dataset_schema(dataset_schema, index, dataset_rel)
-                if has_dict
-                else schema.format_for_ai(dataset_schema, source=dataset_rel)
-            )
-
-        source = self._ws_file(workspace, notebook_rel, suffix=".py").read_text("utf-8")
-        if self.app_cfg.ai_pii and self.app_cfg.ai_pii_scan_source:
-            # Warn-only: the notebook source is the analyst's own working file, so we
-            # never mutate it — we surface a value-free banner and let them decide.
-            # Resolve "auto" -> concrete and shape the name model only HERE, under the
-            # ai_pii gate — so a default (guard-off) install never imports spaCy just
-            # to pick a backend it won't use. Consistent with the chat session.
-            pii_backend = ner.resolve_backend(self.app_cfg.ai_pii_name_backend)
-            pii_name_model = ner.model_for(
-                pii_backend,
-                self.app_cfg.ai_pii_name_model,
-                self.app_cfg.ai_pii_name_revision,
-                self.app_cfg.ai_pii_name_variant,
-            )
-            pii_banner += [
-                {"where": f"{notebook_rel}:{f.line}", "kind": f.kind}
-                for f in pii.scan_prose(
-                    source,
-                    names=self.app_cfg.ai_pii_names,
-                    labels=self.app_cfg.ai_pii_name_labels,
-                    threshold=self.app_cfg.ai_pii_name_threshold,
-                    model=pii_name_model,
-                    backend=pii_backend,
-                )
-            ]
-
-        # Schemas of dataframes LIVE in the running kernel are DEFERRED off the open
-        # path (a freshly opened notebook's kernel is often still loading frames, so
-        # the probe's worst case is a multi-second poll). The very first turn picks
-        # them up via the per-turn refresh (api_chat_send -> _live_schema_for_sid),
-        # over the SAME value-free probe -> scrub -> format pipeline, so nothing about
-        # the privacy contract changes — only WHEN the probe runs. The system context
-        # opens on the file-based schema; the live schema joins on turn 1.
-        live_text = ""
-
-        dictionary_text = ""
-        if has_dict:
-            dataset_cols = (
-                {n for n, _ in dataset_schema.columns} if dataset_schema is not None else set()
-            )
-            stem = Path(dataset_rel).stem if dataset_rel else ""
-            tables, reasons, n_more = locality.working_set(
-                index,
-                dataset_columns=dataset_cols,
-                dataset_stem=stem,
-                notebook_source=source,
-                notebook_rel=notebook_rel,
-            )
-            dictionary_text = locality.seed_text(tables, reasons, n_more)
-
-        context = egress.build_system_context(
-            schema_text=schema_text,
-            notebook_source=source,
-            notebook_rel=notebook_rel,
-            live_schemas_text=live_text,
-            instructions_text=repo_ctx.instructions,
-            dictionary_text=dictionary_text,
-        )
-        return context, (index if has_dict else DictionaryIndex()), pii_banner, live_text
-
-    def _live_schema_text(self, workspace: Path, notebook_rel: str) -> tuple[str, list[dict]]:
-        """Value-free schema of the dataframes LIVE in ``notebook_rel``'s kernel.
-
-        Returns ``(rendered_text, pii_banner)``. Best-effort: any failure (live
-        schema off, no running editor/session, frames not loaded, probe error)
-        yields ``("", [])`` and the caller falls back to the file-based schema.
-        The ONE value-free pipeline (introspect probe -> ``scrub_columns`` ->
-        ``format_live_schemas``) shared by chat-open and the per-turn refresh.
-        """
-        if not self.app_cfg.ai_live_schema:
-            return "", []
-        from dataclasses import replace
-
-        from mooring.ai import egress, introspect
-
-        banner: list[dict] = []
-        try:
-            frames = introspect.live_dataset_schemas(self.editors.get(str(workspace)), notebook_rel)
-            if self.app_cfg.ai_pii:
-                scrubbed = []
-                for fr in frames:
-                    kept, ff = egress.scrub_columns(fr.columns)
-                    if ff:  # a pivot/transpose put a PII value in a column NAME
-                        banner += [
-                            {"where": f"live `{fr.name}` column", "kind": f.kind} for f in ff
-                        ]
-                        fr = replace(fr, columns=kept)
-                    scrubbed.append(fr)
-                frames = scrubbed
-            return introspect.format_live_schemas(frames), banner
-        except Exception:  # noqa: BLE001  # never block chat on introspection
-            return "", []
-
-    def _live_schema_for_sid(self, sid: str) -> tuple[str, list[dict]]:
-        """The current live-kernel schema for an open chat session (best-effort)."""
-        with self._chat_lock:
-            target = self._chat_targets.get(sid)
-        if target is None:
-            return "", []
-        workspace_str, notebook_rel = target
-        return self._live_schema_text(Path(workspace_str), notebook_rel)
 
     def _provider_for(self):
         """The shared AI provider, built once and reused so its auth (45s) and
@@ -850,100 +681,18 @@ class Hub:
             background=True,
         )
 
-    def _reap_idle_chats(self) -> None:
-        timeout = self.app_cfg.ai_chat_idle_timeout
-        with self._chat_lock:
-            dead = [sid for sid, s in self._chats.items() if s.idle_seconds() > timeout]  # ty: ignore[unresolved-attribute]
-            sessions = [self._chats.pop(sid) for sid in dead]
-            for sid in dead:
-                self._chat_targets.pop(sid, None)
-        for session in sessions:
-            with contextlib.suppress(Exception):
-                session.close()  # ty: ignore[unresolved-attribute]
 
 
 
 
 
-    def _pii_status(self) -> dict:
-        """Value-free snapshot of the outbound-PII guard for the chat UI badge: is
-        the pre-flight scan on, does a hit block, and can the optional name pass
-        actually run right now. Carries no finding, value, or path — only config
-        booleans plus the resolved backend name."""
-        cfg = self.app_cfg
-        enabled = bool(cfg.ai_pii)
-        names = bool(cfg.ai_pii_names)
-        backend = ""
-        names_active = False
-        if enabled and names:
-            from mooring.ai import ner
-
-            backend = ner.resolve_backend(cfg.ai_pii_name_backend)
-            model = ner.model_for(
-                backend, cfg.ai_pii_name_model, cfg.ai_pii_name_revision, cfg.ai_pii_name_variant
-            )
-            names_active = bool(ner.available(backend) and ner.is_ready(model, backend))
-        return {
-            "enabled": enabled,
-            "block": bool(cfg.ai_pii_block_prompt),
-            "names": names,
-            "names_active": names_active,
-            "backend": backend,
-        }
 
 
 
 
 
-    def _apply_with_undo(self, nb_path: Path, workspace: Path, notebook_rel: str, op_dicts) -> int:
-        """Snapshot the notebook, apply the patch, and return the new undo depth.
-
-        Runs in a thread (file IO), serialized with Undo by ``_apply_lock``. If the
-        patch fails the just-taken snapshot is discarded, so a failed Apply never
-        leaves a phantom Undo step.
-        """
-        from mooring import notebook_undo
-        from mooring.ai import cellwrite
-
-        with self._apply_lock:
-            # Final TOCTOU guard: a concurrent disable writes mooring.toml before it
-            # tears sessions down, so an in-flight Apply re-reads it here, under the
-            # same lock, and refuses to land on the now-protected notebook.
-            if workspace_config.is_ai_disabled(workspace, notebook_rel):
-                raise PermissionError("notebook_disabled")
-            token = notebook_undo.snapshot(workspace, notebook_rel, nb_path.read_bytes())
-            try:
-                cellwrite.apply_wire_patch(nb_path, op_dicts)
-            except BaseException:
-                notebook_undo.discard(workspace, notebook_rel, token)
-                raise
-            return notebook_undo.depth(workspace, notebook_rel)
 
 
-    def _restore_undo(
-        self, nb_path: Path, workspace: Path, notebook_rel: str, *, expect_token: str | None = None
-    ):
-        """Restore the most recent snapshot (the editor's --watch reloads it). Returns
-        the remaining undo depth, ``None`` when there is nothing to undo, or
-        :data:`_UNDO_SUPERSEDED` when ``expect_token`` is given but no longer the newest
-        snapshot (a later write is on top — restoring it would revert the wrong layer).
-
-        Write-then-discard: the snapshot is only consumed AFTER it is safely written
-        back, so a failed restore leaves the undo step intact to retry (symmetric with
-        the discard-on-failure in :meth:`_apply_with_undo`)."""
-        from mooring import notebook_undo
-        from mooring.paths import safe_write_bytes
-
-        with self._apply_lock:
-            peeked = notebook_undo.peek_latest(workspace, notebook_rel)
-            if peeked is None:
-                return None
-            token, prior = peeked
-            if expect_token is not None and token != expect_token:
-                return _UNDO_SUPERSEDED
-            safe_write_bytes(nb_path, prior)  # raises before the snapshot is consumed
-            notebook_undo.discard(workspace, notebook_rel, token)
-            return notebook_undo.depth(workspace, notebook_rel)
 
 
 

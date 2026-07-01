@@ -69,9 +69,7 @@ async def api_chat_open(request: Request) -> JSONResponse:
     # so name detection doesn't hang the first chat turn silently.
     session.prepare_pii_model()
     sid = secrets.token_urlsafe(9)
-    with hub._chat_lock:
-        hub._chats[sid] = session
-        hub._chat_targets[sid] = (str(workspace), notebook)
+    hub.chat.register(sid, session, workspace, notebook)
     telemetry.log_event("ai_chat_open")
     if pii_banner:  # count only — never a kind/value reaches the central sink
         telemetry.log_event("ai_pii", findings=len(pii_banner))
@@ -95,7 +93,7 @@ def api_chat_stream(request: Request) -> StreamingResponse | JSONResponse:
     # inside the shared event_stream generator it wraps.
     hub = request.app.state.hub
     sid = request.path_params["sid"]
-    session = hub._chats.get(sid)
+    session = hub.chat.get(sid)
     if session is None:
         return _unknown_session()
     return sse_response(event_stream(session, chat_replay(session)))
@@ -105,7 +103,7 @@ async def api_chat_send(request: Request) -> JSONResponse:
     hub = request.app.state.hub
     data = await request.json()
     sid = str(data.get("sid", ""))
-    session = hub._chats.get(sid)
+    session = hub.chat.get(sid)
     if session is None:
         return _unknown_session()
     # Refresh the live-kernel schema so dataframes added since chat-open (or the
@@ -144,8 +142,7 @@ async def api_chat_apply(request: Request) -> JSONResponse:
     hub = request.app.state.hub
     data = await request.json()
     sid = str(data.get("sid", ""))
-    with hub._chat_lock:
-        target = hub._chat_targets.get(sid)
+    target = hub.chat.target(sid)
     if target is None:
         return _unknown_session()
     # Apply WRITES the notebook, so it is the highest-value gate. This early
@@ -180,10 +177,10 @@ async def api_chat_apply(request: Request) -> JSONResponse:
     # cells, so the change appears in the open notebook tab.
     try:
         undo_depth = await asyncio.to_thread(
-            hub._apply_with_undo, nb_path, workspace, notebook_rel, op_dicts
+            hub.apply.apply_with_undo, nb_path, workspace, notebook_rel, op_dicts
         )
     except PermissionError:  # disabled between the gate above and the write
-        hub._close_chat(sid)
+        hub.chat.close(sid)
         return JSONResponse({"enabled": False, "reason": "notebook_disabled"}, status_code=403)
     except CellApplyConflict as exc:
         return JSONResponse({"error": str(exc)}, status_code=409)
@@ -197,8 +194,7 @@ async def api_chat_rollback(request: Request) -> JSONResponse:
     hub = request.app.state.hub
     data = await request.json()
     sid = str(data.get("sid", ""))
-    with hub._chat_lock:
-        target = hub._chat_targets.get(sid)
+    target = hub.chat.target(sid)
     if target is None:
         return _unknown_session()
     # Rollback WRITES the notebook (restores a snapshot), so it is gated by the
@@ -215,7 +211,9 @@ async def api_chat_rollback(request: Request) -> JSONResponse:
     except FileNotFoundError:
         return JSONResponse({"error": f"No such notebook: {notebook_rel}"}, status_code=404)
     try:
-        remaining = await asyncio.to_thread(hub._restore_undo, nb_path, workspace, notebook_rel)
+        remaining = await asyncio.to_thread(
+            hub.apply.restore_undo, nb_path, workspace, notebook_rel
+        )
     except OSError as exc:  # e.g. the file is momentarily locked — the snapshot is kept
         return JSONResponse({"error": f"Could not restore the notebook: {exc}"}, status_code=502)
     if remaining is None:

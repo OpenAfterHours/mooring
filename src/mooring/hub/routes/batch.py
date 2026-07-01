@@ -265,7 +265,7 @@ async def api_batch_apply(request: Request) -> JSONResponse:
         return JSONResponse({"error": f"No such notebook: {notebook_rel}"}, status_code=404)
     try:
         undo_depth = await asyncio.to_thread(
-            hub._apply_with_undo, nb_path, workspace, notebook_rel, op_dicts
+            hub.apply.apply_with_undo, nb_path, workspace, notebook_rel, op_dicts
         )
     except PermissionError:
         return JSONResponse({"enabled": False, "reason": "notebook_disabled"}, status_code=403)

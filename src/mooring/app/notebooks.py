@@ -46,6 +46,25 @@ def client_for(cfg: Config) -> GitHubClient:
     return GitHubClient(token, cfg.owner, cfg.repo, host=cfg.host)
 
 
+def ws_file(workspace: Path, rel: str, *, suffix: str | None = None) -> Path:
+    """Resolve a workspace-relative path, rejecting escapes/missing files."""
+    # Reject any dot-prefixed path component (mirrors sync.is_synced_path) so the
+    # internal state dir — .mooring/ (manifest + undo snapshots) — is structurally
+    # unreachable through this resolver regardless of caller. Defence in depth.
+    if any(part.startswith(".") for part in Path(str(rel).replace("\\", "/")).parts):
+        raise ValueError("Path is not allowed.")
+    target = (workspace / rel).resolve()
+    try:
+        target.relative_to(workspace.resolve())
+    except ValueError as exc:
+        raise ValueError("Path escapes the workspace.") from exc
+    if suffix and not rel.endswith(suffix):
+        raise ValueError(f"Expected a {suffix} file.")
+    if not target.is_file():
+        raise FileNotFoundError(rel)
+    return target
+
+
 class OpenRefused(Exception):
     """The path must not be opened; ``str(exc)`` is the user-facing reason."""
 
