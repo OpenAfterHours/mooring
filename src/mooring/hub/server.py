@@ -42,6 +42,7 @@ from mooring import (
     telemetry,
     workspace_config,
 )
+from mooring.app import notebooks as nb_ops
 from mooring.editor import EditorServer, free_port
 from mooring.github import AuthFailed, GitHubClient, GitHubError, blob_url, compare_url
 from mooring.hub import settings_schema
@@ -140,11 +141,9 @@ class Hub:
         self.prewarm_editor()
 
     def client(self) -> GitHubClient:
-        cfg = self.cfg
-        token = auth.get_token(host=cfg.host)
-        if not token:
-            raise AuthFailed("Not logged in.")
-        return GitHubClient(token, cfg.owner, cfg.repo, host=cfg.host)
+        # Shared construction (app/notebooks): RAISES AuthFailed/NotConfigured —
+        # never exits — so the hub process stays up and answers with an error.
+        return nb_ops.client_for(self.cfg)
 
     def username(self) -> str:
         if not self._user_login:
@@ -286,7 +285,7 @@ class Hub:
         # surfaced as a per-row badge instead of an inscrutable kernel traceback.
         shadowed: dict[str, str] = {}
         if self.cfg.warn_shadowed_notebooks:
-            extra, ignore = self._shadow_policy(workspace)
+            extra, ignore = nb_ops.shadow_policy(workspace)
             shadowed = shadow.scan(
                 [f.path for f in report.files], workspace=workspace, extra=extra, ignore=ignore
             )
@@ -381,15 +380,6 @@ class Hub:
 
             self._top_level_pkgs = pyproject_env.installed_top_level()
         return self._top_level_pkgs
-
-    def _shadow_policy(self, workspace: Path) -> tuple[frozenset[str], frozenset[str]]:
-        """The (extra, ignore) sets parameterising the shadow guard — the hub's
-        single assembly point, mirroring ``cli._shadow_policy`` (the two adapters
-        can't share it: the hub must not import the cli)."""
-        return (
-            pyproject_env.importable_names(workspace),
-            frozenset(workspace_config.shadow_ignored(workspace)),
-        )
 
     def _notebook_env(self, workspace: Path) -> dict:
         """Where a notebook's packages come from, the actively-selected list (the
@@ -872,35 +862,30 @@ class Hub:
         The request's folders are validated against what discovery actually found, so
         adopt never registers a non-existent folder, then re-derives the scope and runs
         a normal pull through :meth:`_sync_op` (so the response shape matches push/pull)."""
-        from dataclasses import replace
-
         data = await request.json() if await request.body() else {}
         requested = [str(f) for f in (data.get("folders") or [])]
         if not requested:
             return JSONResponse({"error": "No folders given."}, status_code=400)
         cfg = self.cfg
         try:
-            known = {c.folder for c in sync.discover_unsynced_folders(self.client(), cfg)}
+            candidates = sync.discover_unsynced_folders(self.client(), cfg)
         except (GitHubError, OSError) as exc:
             telemetry.log_error(exc=exc, op="adopt")
             return JSONResponse({"error": str(exc)}, status_code=502)
-        chosen = [
-            folder
-            for folder in (workspace_config.normalize_notebook(r) for r in requested)
-            if folder in known
-        ]
+        # Silently drop unknowns and adopt the valid subset (the CLI, by contrast,
+        # refuses the whole command when any requested folder isn't adoptable).
+        chosen, _unknown = nb_ops.resolve_adoptable(candidates, requested)
         if not chosen:
             return JSONResponse({"error": "None of those folders are adoptable."}, status_code=400)
-        workspace = cfg.workspace()
         try:
-            workspace_config.add_extra_folders(workspace, chosen)
+            return self._sync_op(
+                "adopt", lambda: nb_ops.adopt_folders(self.client(), cfg, chosen)
+            )
         except tomllib.TOMLDecodeError as exc:
             return JSONResponse(
                 {"error": f"{workspace_config.WORKSPACE_CONFIG_NAME} is not valid TOML: {exc}"},
                 status_code=400,
             )
-        new_cfg = replace(cfg, folders=workspace_config.merge_extra_folders(cfg.folders, workspace))
-        return self._sync_op("adopt", lambda: sync.pull(self.client(), new_cfg))
 
     def _sync_op(self, name: str, op) -> JSONResponse:
         try:
@@ -1074,7 +1059,14 @@ class Hub:
             return JSONResponse({"error": "Path escapes the workspace."}, status_code=400)
         if not target.is_file():
             return JSONResponse({"error": f"No such file: {rel_path}"}, status_code=404)
-        if rel_path.endswith(".pbip"):
+        # The gate (pbip / .py-only / module-refusal) is shared policy in
+        # app/notebooks — the hub hides Open on module rows (is_module) and offers
+        # Reveal instead; the gate backstops a direct call / stale client.
+        try:
+            kind = nb_ops.openable_kind(target, rel_path)
+        except nb_ops.OpenRefused as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        if kind == "pbip":
             try:
                 pbip.launch(target)
             except pbip.PbipLaunchError as exc:
@@ -1082,31 +1074,6 @@ class Hub:
             name = rel_path.rsplit("/", 1)[-1]
             telemetry.log_event("open", kind="pbip")
             return JSONResponse({"path": rel_path, "lines": [f"Opened {name} in Power BI Desktop"]})
-        if not rel_path.endswith(".py"):
-            return JSONResponse(
-                {"error": "Only .py notebooks and .pbip projects can be opened."},
-                status_code=400,
-            )
-        # Refuse to open a plain Python module as a notebook: the marimo editor would
-        # rewrite it into notebook form on save, corrupting a helper module. A blank
-        # stub is allowed (it becomes a new notebook); a non-empty module without the
-        # marimo.App marker — and a dunder package marker like __init__.py even when
-        # empty — is not (see notebook_template.opens_as_notebook). The hub already hides
-        # Open on such rows (is_module) and offers Reveal instead; this backstops a direct
-        # call / stale client. Reads the whole file — the marker can sit past a large
-        # leading header.
-        source = target.read_bytes().decode("utf-8", "ignore")
-        if not notebook_template.opens_as_notebook(rel_path, source):
-            return JSONResponse(
-                {
-                    "error": (
-                        f"{rel_path.rsplit('/', 1)[-1]} is a Python module, not a marimo "
-                        "notebook — opening it in the editor could overwrite it. Import it "
-                        "from a notebook instead."
-                    )
-                },
-                status_code=400,
-            )
         try:
             editor = self.ensure_editor()
         except Exception as exc:  # noqa: BLE001  # shown in the UI
@@ -1126,13 +1093,7 @@ class Hub:
         # notebook still warns when a sibling poisons the directory. Merged into the
         # single `warning` string the front-end shows (never clobbering missing-deps).
         if self.cfg.warn_shadowed_notebooks:
-            extra, ignore = self._shadow_policy(workspace)
-            # The notebook's folder AND the workspace root are both on the kernel's
-            # sys.path (the latter via runtime.pythonpath — see editor.py), so scan both.
-            findings = {
-                **shadow.root_shadows(workspace, extra=extra, ignore=ignore),
-                **shadow.folder_shadows(rel_path, workspace=workspace, extra=extra, ignore=ignore),
-            }
+            findings = nb_ops.open_shadow_findings(workspace, rel_path)
             if findings:
                 names = ", ".join(sorted(set(findings.values())))
                 offenders = ", ".join(sorted(findings))

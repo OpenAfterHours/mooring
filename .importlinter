@@ -3,11 +3,12 @@
 #
 # The codebase has a clean implicit layering that the flat module namespace hides:
 #
-#   L4  cli, hub            the two presentation adapters
-#   L3  ai/*                AI orchestration + privacy/safety
-#   L2  sync/manifest/pbip/deletion (domain core) · editor/schema (marimo bridge)
-#   L1  config/config_store/auth/github            identity + config
-#   L0  githost/paths/gitsha/shadow/reveal          stdlib-pure leaves
+#   L4   cli, hub            the two presentation adapters
+#   L3.5 app/                application services shared by both adapters
+#   L3   ai/*                AI orchestration + privacy/safety
+#   L2   sync/manifest/pbip/deletion (domain core) · editor/schema (marimo bridge)
+#   L1   config/config_store/auth/github            identity + config
+#   L0   githost/paths/gitsha/shadow/reveal          stdlib-pure leaves
 #
 # These contracts lock that direction so a backwards import can't silently
 # re-enter as the fast-moving ai/ subsystem keeps growing. They are intentionally
@@ -48,6 +49,7 @@ forbidden_modules =
     mooring.pyproject_env
     mooring.schema
     mooring.ai
+    mooring.app
     mooring.hub
     mooring.cli
     mooring.telemetry
@@ -70,6 +72,7 @@ forbidden_modules =
     mooring.editor
     mooring.schema
     mooring.ai
+    mooring.app
     mooring.hub
     mooring.cli
 
@@ -83,15 +86,26 @@ source_modules =
     mooring.deletion
 forbidden_modules =
     mooring.ai
+    mooring.app
     mooring.editor
     mooring.hub
     mooring.cli
 
 [importlinter:contract:ai-below-adapters]
-name = L3 AI orchestration sits below the adapters and never imports the web hub or the CLI
+name = L3 AI orchestration sits below the adapters and never imports the web hub, the CLI, or the app layer above it
 type = forbidden
 source_modules =
     mooring.ai
+forbidden_modules =
+    mooring.app
+    mooring.hub
+    mooring.cli
+
+[importlinter:contract:app-below-adapters]
+name = L3.5 app/ (application services shared by both adapters) never imports the web hub or the CLI — orchestration has a permanent home BELOW the adapters, so the god-object cannot regrow
+type = forbidden
+source_modules =
+    mooring.app
 forbidden_modules =
     mooring.hub
     mooring.cli
