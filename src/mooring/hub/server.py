@@ -38,6 +38,7 @@ from mooring import (
 )
 from mooring.app import notebooks as nb_ops
 from mooring.app.apply import ApplyGuard
+from mooring.app.batch_service import BatchService
 from mooring.app.chat_service import ChatService
 from mooring.editor import EditorServer, free_port
 from mooring.github import GitHubClient, GitHubError, blob_url
@@ -69,12 +70,9 @@ class Hub:
         # THE per-notebook apply/undo write guard: chat Apply, batch Apply, Undo,
         # and the sync rollback all serialize on apply.lock (app/apply.py).
         self.apply = ApplyGuard()
-        # Batch notebook-generation runs, keyed by a hub-minted batch_id. Each holds a
-        # ChatBroadcaster for SSE progress, an abort Event, and (when finished) the
-        # value-free per-job results the review tray + per-notebook Apply read. The
-        # builder sessions live and die inside the planner thread, not here.
-        self._batches: dict[str, dict] = {}
-        self._batch_lock = threading.Lock()
+        # The batch application service: the run registry (+ reap/abort/cancel)
+        # around the pure ai.batch.BatchPlanner (app/batch_service.py).
+        self.batch = BatchService()
         # One AI provider reused across opens, so the provider's auth (45s TTL) and
         # model-list (300s TTL) caches actually hit instead of being rebuilt — and
         # thrown away — on every chat-open / models request. Keyed on the config that
@@ -120,7 +118,7 @@ class Hub:
         self._close_all_chats()
         # In-flight batches are bound to the old workspace too — cancel them (their
         # un-reviewed proposals are lost; the UI warns not to switch repos mid-batch).
-        self._abort_all_batches()
+        self.batch.abort_all()
         # The provider is shaped by [ai] provider/model — a reload may change them,
         # so drop the cached one (rebuilt lazily on next use).
         with self._provider_lock:
@@ -248,8 +246,8 @@ class Hub:
 
 
     def shutdown(self) -> None:
-        self._close_all_chats()
-        self._abort_all_batches()
+        self.chat.close_all()
+        self.batch.abort_all()
         for editor in self.editors.values():
             # Suppress per editor (mirrors _close_all_chats): one editor failing to
             # die must not leak the others' marimo trees or skip the lifespan's
@@ -732,50 +730,8 @@ class Hub:
 
     # -- AI batch (the orchestrator) ------------------------------------------
 
-    def _abort_all_batches(self) -> None:
-        with self._batch_lock:
-            runs = list(self._batches.values())
-            self._batches.clear()
-        for run in runs:
-            run["abort"].set()
-            with contextlib.suppress(Exception):
-                if run.get("planner") is not None:
-                    run["planner"].close(cancel=True)
-            with contextlib.suppress(Exception):
-                run["broadcaster"].close()
 
-    def _reap_idle_batches(self) -> None:
-        """Drop batch runs that are caught up (no build in flight) and have had no
-        activity for the idle timeout, freeing their worker pool. A still-building run
-        is never reaped (its job events keep the broadcaster fresh)."""
-        timeout = self.app_cfg.ai_chat_idle_timeout
-        with self._batch_lock:
-            dead = [
-                bid
-                for bid, run in self._batches.items()
-                if run["status"] != "closed"
-                and run["planner"].is_idle()
-                and run["broadcaster"].idle_seconds() > timeout
-            ]
-            runs = [self._batches.pop(bid) for bid in dead]
-        for run in runs:
-            run["status"] = "closed"
-            with contextlib.suppress(Exception):
-                run["planner"].close()
-            with contextlib.suppress(Exception):
-                run["broadcaster"].close()
 
-    def _discard_batch_notebook(self, workspace: Path, notebook_rel: str) -> None:
-        """Best-effort remove the empty skeleton a non-built batch job left behind
-        (pii-blocked / failed / empty), so a batch doesn't litter the workspace. Path-
-        guarded via _ws_file; only ever a .py the batch itself just created and the
-        builder only PROPOSED into (never wrote), so no analyst work is lost."""
-        try:
-            target = self._ws_file(workspace, notebook_rel, suffix=".py")
-        except (ValueError, FileNotFoundError):
-            return
-        with contextlib.suppress(OSError):
-            target.unlink()
 
     def _make_batch_session(
         self, system_context, notebook_rel, model="", reasoning_effort=None, dictionary=None
@@ -810,11 +766,7 @@ class Hub:
         repeatedly while earlier jobs build, so the user can keep writing the next."""
         from mooring import notebook_template
         from mooring.ai.batch import BatchPlanner
-        from mooring.ai.chat import ChatEvent
-
-        def progress(ev):
-            broadcaster.touch()  # job activity keeps the run from being idle-reaped
-            broadcaster._broadcast(ChatEvent("job", ev))
+        from mooring.app import batch_service
 
         planner = BatchPlanner(
             config=self.app_cfg.ai.batch,
@@ -825,37 +777,14 @@ class Hub:
                 ctx, nb, model=model, reasoning_effort=(effort or None), dictionary=dic
             ),
             is_disabled=lambda nb: workspace_config.is_ai_disabled(workspace, nb),
-            discard_notebook=lambda nb: self._discard_batch_notebook(workspace, nb),
-            on_progress=progress,
+            discard_notebook=lambda nb: batch_service.discard_batch_notebook(workspace, nb),
+            # emit_job is the broadcaster's PUBLIC progress channel: it touches the
+            # activity clock (so a building run is never idle-reaped) and fans out.
+            on_progress=broadcaster.emit_job,
             abort=abort,
         )
         return planner.start()
 
-    def _parse_batch_jobs(self, raw_jobs):
-        """Validate a jobs payload into ``list[BatchJob]`` (value-free: name + brief +
-        dataset PATH). Returns ``(jobs, None)`` or ``(None, error_response)``. Shared by
-        open and add."""
-        from mooring.ai.batch import BatchJob
-
-        if not isinstance(raw_jobs, list) or not raw_jobs:
-            return None, JSONResponse({"error": "Provide at least one job."}, status_code=400)
-        jobs = []
-        for j in raw_jobs:
-            if not isinstance(j, dict):
-                return None, JSONResponse({"error": "Each job must be an object."}, status_code=400)
-            brief = str(j.get("brief", "")).strip()
-            if not brief:
-                return None, JSONResponse({"error": "Each job needs a brief."}, status_code=400)
-            jobs.append(
-                BatchJob(
-                    name=str(j.get("name", "")).strip(),
-                    brief=brief,
-                    dataset_rel=str(j.get("dataset", "")).strip(),
-                    model=str(j.get("model", "")).strip(),
-                    reasoning_effort=str(j.get("reasoning_effort", "")).strip(),
-                )
-            )
-        return jobs, None
 
 
 
@@ -865,41 +794,6 @@ class Hub:
 
 
 
-    def _batch_tray_jobs(self, run, results) -> list[dict]:
-        """Value-free per-job view for the live review tray: status, the user's own
-        brief, and each proposal's source/diff (never a data value). In-flight jobs show
-        as queued/building with no proposals yet; built jobs carry their proposals."""
-        applied = run["applied"]  # stable proposal ids (pid), not (job, position) tuples
-        refining = run["planner"].refining_indices()
-        forcing = run["planner"].forcing_indices()
-        out = []
-        for idx, res in enumerate(results):
-            proposals = [
-                {
-                    "proposal": j,
-                    "kind": str(p.get("kind", "append")),
-                    "rationale": str(p.get("rationale", "")),
-                    "code": str(p.get("code", "")),
-                    "diffs": p.get("diffs", []),
-                    "applied": p.get("pid") in applied,
-                }
-                for j, p in enumerate(res.proposals)
-            ]
-            out.append(
-                {
-                    "index": idx,
-                    "name": res.job.name,
-                    "brief": res.job.brief,
-                    "notebook": res.notebook_rel,
-                    "status": res.status,
-                    "error": res.error,
-                    "pii": res.pii,
-                    "proposals": proposals,
-                    "refining": idx in refining,
-                    "forcing": idx in forcing,
-                }
-            )
-        return out
 
 
 
@@ -976,6 +870,7 @@ def create_app(hub: Hub) -> Starlette:
             Route("/api/ai/batch/apply", batch.api_batch_apply, methods=["POST"]),
             Route("/api/ai/batch/refine", batch.api_batch_refine, methods=["POST"]),
             Route("/api/ai/batch/force", batch.api_batch_force, methods=["POST"]),
+            Route("/api/ai/batch/cancel", batch.api_batch_cancel, methods=["POST"]),
             Mount("/static", StaticFiles(directory=static)),
         ],
         lifespan=lifespan,

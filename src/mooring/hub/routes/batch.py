@@ -1,10 +1,9 @@
 """AI batch-orchestrator endpoints: open/add a queue, stream progress, the
-review tray, and per-proposal apply/refine/force."""
+review tray, per-proposal apply/refine/force, and cancel."""
 
 from __future__ import annotations
 
 import asyncio
-import secrets
 import threading
 from pathlib import Path
 
@@ -23,6 +22,70 @@ def _gates(hub) -> JSONResponse | None:
     if not hub.app_cfg.ai_batch_enabled:
         return JSONResponse({"enabled": False, "reason": "batch_disabled"}, status_code=403)
     return None
+
+
+def _parse_jobs(raw_jobs):
+    """Validate a jobs payload into ``list[BatchJob]`` (value-free: name + brief +
+    dataset PATH). Returns ``(jobs, None)`` or ``(None, error_response)``. Shared by
+    open and add."""
+    from mooring.ai.batch import BatchJob
+
+    if not isinstance(raw_jobs, list) or not raw_jobs:
+        return None, JSONResponse({"error": "Provide at least one job."}, status_code=400)
+    jobs = []
+    for j in raw_jobs:
+        if not isinstance(j, dict):
+            return None, JSONResponse({"error": "Each job must be an object."}, status_code=400)
+        brief = str(j.get("brief", "")).strip()
+        if not brief:
+            return None, JSONResponse({"error": "Each job needs a brief."}, status_code=400)
+        jobs.append(
+            BatchJob(
+                name=str(j.get("name", "")).strip(),
+                brief=brief,
+                dataset_rel=str(j.get("dataset", "")).strip(),
+                model=str(j.get("model", "")).strip(),
+                reasoning_effort=str(j.get("reasoning_effort", "")).strip(),
+            )
+        )
+    return jobs, None
+
+
+def _tray_jobs(hub, run, results) -> list[dict]:
+    """Value-free per-job view for the live review tray: status, the user's own
+    brief, and each proposal's source/diff (never a data value). In-flight jobs show
+    as queued/building with no proposals yet; built jobs carry their proposals."""
+    applied = run["applied"]  # stable proposal ids (pid), not (job, position) tuples
+    refining = run["planner"].refining_indices()
+    forcing = run["planner"].forcing_indices()
+    out = []
+    for idx, res in enumerate(results):
+        proposals = [
+            {
+                "proposal": j,
+                "kind": str(p.get("kind", "append")),
+                "rationale": str(p.get("rationale", "")),
+                "code": str(p.get("code", "")),
+                "diffs": p.get("diffs", []),
+                "applied": p.get("pid") in applied,
+            }
+            for j, p in enumerate(res.proposals)
+        ]
+        out.append(
+            {
+                "index": idx,
+                "name": res.job.name,
+                "brief": res.job.brief,
+                "notebook": res.notebook_rel,
+                "status": res.status,
+                "error": res.error,
+                "pii": res.pii,
+                "proposals": proposals,
+                "refining": idx in refining,
+                "forcing": idx in forcing,
+            }
+        )
+    return out
 
 
 async def api_batch_state(request: Request) -> JSONResponse:
@@ -54,7 +117,7 @@ async def api_batch_open(request: Request) -> JSONResponse:
     if (gate := _gates(hub)) is not None:
         return gate
     data = await request.json()
-    jobs, err = hub._parse_batch_jobs(data.get("jobs"))
+    jobs, err = _parse_jobs(data.get("jobs"))
     if err is not None:
         return err
     max_jobs = hub.app_cfg.ai_batch_max_jobs
@@ -66,22 +129,12 @@ async def api_batch_open(request: Request) -> JSONResponse:
     from mooring.ai.batch import BatchError
     from mooring.ai.chat import ChatBroadcaster
 
-    hub._reap_idle_batches()
+    hub.batch.reap_idle(hub.app_cfg.ai_chat_idle_timeout)
     workspace = hub.cfg.workspace()
     broadcaster = ChatBroadcaster()
     abort = threading.Event()
     planner = hub._new_batch_planner(workspace, broadcaster, abort)
-    batch_id = secrets.token_urlsafe(9)
-    run = {
-        "broadcaster": broadcaster,
-        "abort": abort,
-        "planner": planner,
-        "status": "open",
-        "applied": set(),
-        "workspace": str(workspace),
-    }
-    with hub._batch_lock:
-        hub._batches[batch_id] = run
+    batch_id = hub.batch.register(broadcaster, abort, planner, workspace)
     broadcaster.touch()
     try:
         # add() runs the PII pre-flight + mints the notebooks then submits builders;
@@ -101,13 +154,12 @@ async def api_batch_add(request: Request) -> JSONResponse:
         return gate
     data = await request.json()
     batch_id = str(data.get("batch_id", ""))
-    with hub._batch_lock:
-        run = hub._batches.get(batch_id)
+    run = hub.batch.get(batch_id)
     if run is None:
         return JSONResponse({"error": "Unknown batch."}, status_code=404)
     if run["status"] == "closed":
         return JSONResponse({"error": "This batch is finished."}, status_code=409)
-    jobs, err = hub._parse_batch_jobs(data.get("jobs"))
+    jobs, err = _parse_jobs(data.get("jobs"))
     if err is not None:
         return err
     from mooring.ai.batch import BatchError
@@ -131,8 +183,7 @@ async def api_batch_refine(request: Request) -> JSONResponse:
         return gate
     data = await request.json()
     batch_id = str(data.get("batch_id", ""))
-    with hub._batch_lock:
-        run = hub._batches.get(batch_id)
+    run = hub.batch.get(batch_id)
     if run is None:
         return JSONResponse({"error": "Unknown batch."}, status_code=404)
     if run["status"] == "closed":
@@ -164,8 +215,7 @@ async def api_batch_force(request: Request) -> JSONResponse:
         return gate
     data = await request.json()
     batch_id = str(data.get("batch_id", ""))
-    with hub._batch_lock:
-        run = hub._batches.get(batch_id)
+    run = hub.batch.get(batch_id)
     if run is None:
         return JSONResponse({"error": "Unknown batch."}, status_code=404)
     if run["status"] == "closed":
@@ -188,8 +238,7 @@ async def api_batch_force(request: Request) -> JSONResponse:
 async def api_batch_stream(request: Request) -> StreamingResponse | JSONResponse:
     hub = request.app.state.hub
     batch_id = request.path_params["batch_id"]
-    with hub._batch_lock:
-        run = hub._batches.get(batch_id)
+    run = hub.batch.get(batch_id)
     if run is None:
         return JSONResponse({"error": "Unknown batch."}, status_code=404)
     return sse_response(event_stream(run["broadcaster"], batch_replay(run)))
@@ -198,8 +247,7 @@ async def api_batch_stream(request: Request) -> StreamingResponse | JSONResponse
 async def api_batch_tray(request: Request) -> JSONResponse:
     hub = request.app.state.hub
     batch_id = request.path_params["batch_id"]
-    with hub._batch_lock:
-        run = hub._batches.get(batch_id)
+    run = hub.batch.get(batch_id)
     if run is None:
         return JSONResponse({"error": "Unknown batch."}, status_code=404)
     snapshot = run["planner"].snapshot()
@@ -207,9 +255,25 @@ async def api_batch_tray(request: Request) -> JSONResponse:
         {
             "status": run["status"],
             "pending": run["planner"].pending,
-            "jobs": hub._batch_tray_jobs(run, snapshot),
+            "jobs": _tray_jobs(hub, run, snapshot),
         }
     )
+
+
+async def api_batch_cancel(request: Request) -> JSONResponse:
+    """Stop ONE run: abort its in-flight builds, end the stream, mark it closed.
+    First-class — previously the only way to stop a runaway batch was switching
+    repos, which aborts every run as a side effect. The run entry is kept, so
+    the tray answers ``status: closed`` rather than a confusing 404."""
+    hub = request.app.state.hub
+    if not hub.app_cfg.ai_enabled:
+        return JSONResponse({"enabled": False}, status_code=404)
+    data = await request.json()
+    batch_id = str(data.get("batch_id", ""))
+    if not hub.batch.cancel(batch_id):
+        return JSONResponse({"error": "Unknown batch."}, status_code=404)
+    telemetry.log_event("ai_batch_cancel")
+    return JSONResponse({"ok": True})
 
 
 async def api_batch_apply(request: Request) -> JSONResponse:
@@ -222,8 +286,7 @@ async def api_batch_apply(request: Request) -> JSONResponse:
         return JSONResponse({"enabled": False}, status_code=404)
     data = await request.json()
     batch_id = str(data.get("batch_id", ""))
-    with hub._batch_lock:
-        run = hub._batches.get(batch_id)
+    run = hub.batch.get(batch_id)
     if run is None:
         return JSONResponse({"error": "Unknown batch."}, status_code=404)
     results = run["planner"].snapshot()
@@ -243,9 +306,8 @@ async def api_batch_apply(request: Request) -> JSONResponse:
     # already-applied proposal (a tray re-render re-armed the button) is a no-op, so
     # the same cell can never be appended twice. Keying by position would wrongly
     # treat a refined proposal at the same slot as already applied — the Bug this fixes.
-    with hub._batch_lock:
-        if pid is not None and pid in run["applied"]:
-            return JSONResponse({"ok": True, "noop": True})
+    if hub.batch.already_applied(run, pid):
+        return JSONResponse({"ok": True, "noop": True})
     ops = proposal.get("ops")
     if isinstance(ops, list) and ops:
         op_dicts = ops
@@ -273,8 +335,6 @@ async def api_batch_apply(request: Request) -> JSONResponse:
         return JSONResponse({"error": str(exc)}, status_code=409)
     except CellWriteError as exc:
         return JSONResponse({"error": str(exc)}, status_code=502)
-    with hub._batch_lock:
-        if pid is not None:
-            run["applied"].add(pid)
+    hub.batch.mark_applied(run, pid)
     telemetry.log_event("ai_batch_apply")
     return JSONResponse({"ok": True, "can_undo": undo_depth > 0, "undo_depth": undo_depth})

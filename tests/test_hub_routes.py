@@ -60,6 +60,7 @@ EXPECTED_ROUTES = {
     ("/api/ai/batch/apply", ("POST",), "api_batch_apply"),
     ("/api/ai/batch/refine", ("POST",), "api_batch_refine"),
     ("/api/ai/batch/force", ("POST",), "api_batch_force"),
+    ("/api/ai/batch/cancel", ("POST",), "api_batch_cancel"),  # added by P4 (first-class cancel)
 }
 
 

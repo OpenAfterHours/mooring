@@ -1862,6 +1862,28 @@ def test_batch_apply_is_idempotent(batch_client):
     assert nb.count("df.describe()") == 1  # applied exactly once
 
 
+def test_batch_cancel_stops_the_run_and_keeps_the_tray(batch_client):
+    # First-class cancel (P4): stops the run without switching repos. The registry
+    # entry is kept, so the tray answers "closed" rather than a confusing 404, and
+    # further work on the run is refused like any finished batch.
+    client, _hub = batch_client
+    bid, _tray = _run_batch(client, [{"name": "c", "brief": "chart revenue"}])
+    resp = client.post("/api/ai/batch/cancel", json={"batch_id": bid})
+    assert resp.status_code == 200 and resp.json()["ok"] is True
+    assert client.get(f"/api/ai/batch/tray/{bid}").json()["status"] == "closed"
+    add = client.post("/api/ai/batch/add", json={"batch_id": bid, "jobs": [{"brief": "x"}]})
+    assert add.status_code == 409
+    # And the SSE stream of a cancelled run says "closed" instead of pinging forever.
+    with client.stream("GET", f"/api/ai/batch/stream/{bid}") as stream:
+        head = next(stream.iter_lines())
+        assert head.startswith(": connected")
+
+
+def test_batch_cancel_unknown_batch_404(batch_client):
+    client, _hub = batch_client
+    assert client.post("/api/ai/batch/cancel", json={"batch_id": "nope"}).status_code == 404
+
+
 def test_batch_open_rejects_more_than_max_jobs(batch_client):
     client, _ = batch_client  # max_jobs = 5
     jobs = [{"brief": f"job {i}"} for i in range(6)]
