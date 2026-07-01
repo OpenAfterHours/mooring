@@ -51,13 +51,13 @@ def _parse_jobs(raw_jobs):
     return jobs, None
 
 
-def _tray_jobs(hub, run, results) -> list[dict]:
+def _tray_jobs(run, results) -> list[dict]:
     """Value-free per-job view for the live review tray: status, the user's own
     brief, and each proposal's source/diff (never a data value). In-flight jobs show
     as queued/building with no proposals yet; built jobs carry their proposals."""
-    applied = run["applied"]  # stable proposal ids (pid), not (job, position) tuples
-    refining = run["planner"].refining_indices()
-    forcing = run["planner"].forcing_indices()
+    applied = run.applied_pids()  # stable proposal ids (pid), not (job, position) tuples
+    refining = run.planner.refining_indices()
+    forcing = run.planner.forcing_indices()
     out = []
     for idx, res in enumerate(results):
         proposals = [
@@ -157,16 +157,16 @@ async def api_batch_add(request: Request) -> JSONResponse:
     run = hub.batch.get(batch_id)
     if run is None:
         return JSONResponse({"error": "Unknown batch."}, status_code=404)
-    if run["status"] == "closed":
+    if run.status == "closed":
         return JSONResponse({"error": "This batch is finished."}, status_code=409)
     jobs, err = _parse_jobs(data.get("jobs"))
     if err is not None:
         return err
     from mooring.ai.batch import BatchError
 
-    run["broadcaster"].touch()
+    run.broadcaster.touch()
     try:
-        indices = await asyncio.to_thread(run["planner"].add, jobs)
+        indices = await asyncio.to_thread(run.planner.add, jobs)
     except BatchError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
     telemetry.log_event("ai_batch_add", jobs=len(jobs))
@@ -186,18 +186,18 @@ async def api_batch_refine(request: Request) -> JSONResponse:
     run = hub.batch.get(batch_id)
     if run is None:
         return JSONResponse({"error": "Unknown batch."}, status_code=404)
-    if run["status"] == "closed":
+    if run.status == "closed":
         return JSONResponse({"error": "This batch is finished."}, status_code=409)
     try:
         job_idx = int(data.get("job"))
     except (TypeError, ValueError):
         return JSONResponse({"error": "A job index is required."}, status_code=400)
     feedback = str(data.get("feedback", ""))
-    run["broadcaster"].touch()
+    run.broadcaster.touch()
     from mooring.ai.batch import BatchError
 
     try:
-        await asyncio.to_thread(run["planner"].refine, job_idx, feedback)
+        await asyncio.to_thread(run.planner.refine, job_idx, feedback)
     except BatchError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
     telemetry.log_event("ai_batch_refine")
@@ -218,17 +218,17 @@ async def api_batch_force(request: Request) -> JSONResponse:
     run = hub.batch.get(batch_id)
     if run is None:
         return JSONResponse({"error": "Unknown batch."}, status_code=404)
-    if run["status"] == "closed":
+    if run.status == "closed":
         return JSONResponse({"error": "This batch is finished."}, status_code=409)
     try:
         job_idx = int(data.get("job"))
     except (TypeError, ValueError):
         return JSONResponse({"error": "A job index is required."}, status_code=400)
-    run["broadcaster"].touch()
+    run.broadcaster.touch()
     from mooring.ai.batch import BatchError
 
     try:
-        await asyncio.to_thread(run["planner"].force, job_idx)
+        await asyncio.to_thread(run.planner.force, job_idx)
     except BatchError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
     telemetry.log_event("ai_batch_force")
@@ -241,7 +241,7 @@ async def api_batch_stream(request: Request) -> StreamingResponse | JSONResponse
     run = hub.batch.get(batch_id)
     if run is None:
         return JSONResponse({"error": "Unknown batch."}, status_code=404)
-    return sse_response(event_stream(run["broadcaster"], batch_replay(run)))
+    return sse_response(event_stream(run.broadcaster, batch_replay(run)))
 
 
 async def api_batch_tray(request: Request) -> JSONResponse:
@@ -250,12 +250,12 @@ async def api_batch_tray(request: Request) -> JSONResponse:
     run = hub.batch.get(batch_id)
     if run is None:
         return JSONResponse({"error": "Unknown batch."}, status_code=404)
-    snapshot = run["planner"].snapshot()
+    snapshot = run.planner.snapshot()
     return JSONResponse(
         {
-            "status": run["status"],
-            "pending": run["planner"].pending,
-            "jobs": _tray_jobs(hub, run, snapshot),
+            "status": run.status,
+            "pending": run.planner.pending,
+            "jobs": _tray_jobs(run, snapshot),
         }
     )
 
@@ -289,7 +289,7 @@ async def api_batch_apply(request: Request) -> JSONResponse:
     run = hub.batch.get(batch_id)
     if run is None:
         return JSONResponse({"error": "Unknown batch."}, status_code=404)
-    results = run["planner"].snapshot()
+    results = run.planner.snapshot()
     try:
         job_idx = int(data.get("job"))
         prop_idx = int(data.get("proposal", 0))
@@ -306,7 +306,7 @@ async def api_batch_apply(request: Request) -> JSONResponse:
     # already-applied proposal (a tray re-render re-armed the button) is a no-op, so
     # the same cell can never be appended twice. Keying by position would wrongly
     # treat a refined proposal at the same slot as already applied — the Bug this fixes.
-    if hub.batch.already_applied(run, pid):
+    if run.already_applied(pid):
         return JSONResponse({"ok": True, "noop": True})
     ops = proposal.get("ops")
     if isinstance(ops, list) and ops:
@@ -315,7 +315,7 @@ async def api_batch_apply(request: Request) -> JSONResponse:
         op_dicts = [{"op": "append", "code": proposal["code"]}]
     else:
         return JSONResponse({"error": "Nothing to apply."}, status_code=400)
-    workspace = Path(run["workspace"])
+    workspace = Path(run.workspace)
     notebook_rel = res.notebook_rel
     from mooring.ai.cellwrite import CellApplyConflict, CellWriteError
 
@@ -335,6 +335,6 @@ async def api_batch_apply(request: Request) -> JSONResponse:
         return JSONResponse({"error": str(exc)}, status_code=409)
     except CellWriteError as exc:
         return JSONResponse({"error": str(exc)}, status_code=502)
-    hub.batch.mark_applied(run, pid)
+    run.mark_applied(pid)
     telemetry.log_event("ai_batch_apply")
     return JSONResponse({"ok": True, "can_undo": undo_depth > 0, "undo_depth": undo_depth})

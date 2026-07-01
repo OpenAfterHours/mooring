@@ -61,7 +61,7 @@ def batch_replay(run) -> list[str]:
     events for its whole life (no single terminal ``done`` — the user keeps
     adding; a late subscriber catches up via GET /tray). If the run was already
     closed (reaped / repo switch), say so instead of pinging forever."""
-    return [sse_event("closed", {})] if run["status"] == "closed" else []
+    return [sse_event("closed", {})] if run.status == "closed" else []
 
 
 async def event_stream(broadcaster, replay: list[str]):
