@@ -216,14 +216,28 @@ in-file cleanup.
 
 ## Status
 
-- [ ] P0 — guardrail tests + `batch.js` theme fix
-- [ ] P6 — egress mint gateway
-- [ ] P7 — lean-runtime lint contracts
-- [ ] P1 — `app/notebooks.py` dedup
-- [ ] P2 — hollow out the hub (rename-last)
-- [ ] P3 — `app/chat_service.py` + `app/apply.py`
-- [ ] P4 — `app/batch_service.py`
-- [ ] P5 — typed `BatchRun` + ordered teardown
+All phases landed on `feat/arch-migration` (2026-07-02), one commit per phase,
+each gated by the full suite (`ruff → lint-imports → pytest → node`):
+
+- [x] P0 — guardrail tests + `batch.js` theme fix *(two planned pins already
+  existed: batch-apply idempotence and the settings↔config round-trip)*
+- [x] P6 — egress mint gateway *(all 12 `ToolResult` sites route through
+  `egress.to_tool_result`/`to_error_result`; dictionary tools + the error
+  channel scrubbed)*
+- [x] P7 — lean-runtime lint contracts *(8 → 9 import-linter contracts)*
+- [x] P1 — `app/notebooks.py` dedup *(+ `client_for` raises, never exits)*
+- [x] P2 — hollow out the hub *(server.py 2425 → ~900 lines; `Hub` and
+  `server.py` keep their names as designed — rename-last held)*
+- [x] P3 — `app/chat_service.py` + `app/apply.py` *(the sole
+  `build_system_context` caller now lives in `app/`; the apply guard owns
+  the lock all three write paths share)*
+- [x] P4 — `app/batch_service.py` *(+ `POST /api/ai/batch/cancel`,
+  `ChatBroadcaster.emit_job()` replaces the private reach-through)*
+- [x] P5 — typed `BatchRun` + deterministic teardown-order pins *(lock
+  re-granularization deliberately not done, as planned)*
+
+Beyond the stop line, P8–P11 remain opportunistic — touch them only when
+already in those files.
 
 *Line numbers and counts in this page are as of `master` at v0.4.18
 (2026-07-01); they will drift — trust the names.*
