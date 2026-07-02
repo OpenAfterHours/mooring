@@ -149,6 +149,25 @@ EDITABLE: tuple[SettingSpec, ...] = (
         "more conservative choice.",
     ),
     SettingSpec(
+        key="ai.traceback_guard",
+        accessor="ai_traceback_guard",
+        label="Sanitise pasted tracebacks",
+        group="ai",
+        type="bool",
+        control="toggle",
+        default=True,
+        sensitivity="weakens",
+        env_var="MOORING_AI_TRACEBACK_GUARD",
+        weaken_value=False,
+        confirm="Turning the traceback guard OFF sends pasted Python tracebacks to the "
+        "assistant RAW. Tracebacks routinely embed data values (KeyError: 'a customer "
+        "name', a repr of the offending row), so this re-opens the paste-a-traceback "
+        "leak the guard exists to close. Continue?",
+        help="Rewrite a pasted traceback into a value-safe form (exception types and "
+        "workspace code kept, messages redacted unless provably value-free) and hold it "
+        "for a “Send sanitised” confirm. There is deliberately no send-raw option.",
+    ),
+    SettingSpec(
         key="ai.context",
         accessor="ai_context",
         label="Team context (instructions + data dictionary)",

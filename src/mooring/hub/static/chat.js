@@ -699,6 +699,47 @@ function addPiiNotice(findings) {
     ". It was sent — avoid pasting real values.";
 }
 
+// -- traceback guard ----------------------------------------------------------
+
+// A held traceback turn: the message contained a pasted Python traceback, which
+// was rewritten value-safe server-side. ONLY the sanitised rewrite is held under
+// the token — there is deliberately NO "send raw anyway" button, because no raw
+// copy exists to forward (an escape hatch here would recreate the leak one click
+// deep). The preview is rendered via textContent: it is data, never markup.
+function addTracebackHold(preview, redactions, piiFindings, token) {
+  const wrap = addRow("row-sys row-pii", "");
+  const p = document.createElement("p");
+  p.textContent = ChatCore.tracebackHoldSummary(redactions, piiFindings);
+  const pre = document.createElement("pre");
+  pre.textContent = preview;
+  const bar = document.createElement("div");
+  bar.className = "toolbar";
+  const sendBtn = document.createElement("button");
+  sendBtn.className = "primary small";
+  sendBtn.textContent = "Send sanitised";
+  const note = document.createElement("span");
+  note.className = "muted";
+  sendBtn.addEventListener("click", async () => {
+    sendBtn.disabled = true;
+    note.textContent = " sending…";
+    startTurnState();
+    const { data } = await api("/api/ai/chat/send", { sid, confirm_token: token });
+    if (data.reason === "notebook_disabled") {
+      lockForDisabled();
+      return;
+    }
+    if (data.error) {
+      showError(data.error);
+      setTurnState("error");
+      sendBtn.disabled = false; // don't leave the hold card stuck on an error
+      note.textContent = "";
+    }
+  });
+  bar.append(sendBtn, note);
+  wrap.append(p, pre, bar);
+  maybeScroll();
+}
+
 // -- turn lifecycle ---------------------------------------------------------
 
 // Reset per-turn render state and show the thinking indicator.
@@ -813,6 +854,15 @@ async function openChat() {
       // a names-only failure still scanned structured PII (see ChatCore).
       showError(ChatCore.scanErrorMessage(d.scan_error));
     }
+  });
+  source.addEventListener("traceback", (e) => {
+    // A pasted traceback was sanitised and the turn HELD: show the exact rewrite
+    // (the only text that can be sent) with the one "Send sanitised" confirm.
+    const d = JSON.parse(e.data);
+    if (!d.token) return;
+    setTurnState("idle"); // drop the thinking indicator; the turn is held
+    addTracebackHold(d.preview || "", d.redactions || [], d.pii_findings || [], d.token);
+    if (d.scan_error) showError(ChatCore.scanErrorMessage(d.scan_error));
   });
   source.addEventListener("ner", (e) => {
     const d = JSON.parse(e.data);

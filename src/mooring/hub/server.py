@@ -714,6 +714,10 @@ class Hub:
             # silently dropped on the way to the session (the session downloads any
             # NER model in the background and the prompt path skips it until ready).
             pii=self.app_cfg.ai.pii,
+            # Pasted-traceback sanitise-and-hold (default ON) — armed at the same
+            # seam as the PII config; the session already holds the workspace and
+            # notebook the sanitiser needs, so no route ever arms it separately.
+            traceback_guard=self.app_cfg.ai.traceback_guard,
             # Don't block the open request on the (CLI-spawning, networked) Copilot
             # handshake — stream readiness/failure over the SSE channel instead.
             background=True,
@@ -790,6 +794,9 @@ class Hub:
             reasoning_effort=reasoning_effort,
             dictionary=dictionary,
             pii=replace(self.app_cfg.ai.pii, block_prompt=True),
+            # The traceback guard holds only SANITISED text, so the batch worker can
+            # auto-confirm it unattended (unlike a PII hold) — see ai/batch.py.
+            traceback_guard=self.app_cfg.ai.traceback_guard,
             background=True,
         )
 

@@ -96,6 +96,14 @@ live_schema = true          # read the schema of dataframes live in the running 
                             # add mid-session are picked up without reopening. Value-free —
                             # names + dtypes only, never a value; set false to disable.
                             # See docs/admins/ai-privacy.md.
+traceback_guard = true      # when a chat message contains a pasted Python traceback,
+                            # rewrite it value-safe before it leaves (exception types and
+                            # workspace frames kept — their source re-read from disk —
+                            # messages and unrecognised lines redacted) and HOLD the turn
+                            # for a "Send sanitised" confirm. The raw paste is never kept,
+                            # so it cannot be sent. Setting this false lets raw tracebacks
+                            # (which can embed data values, e.g. KeyError: 'a customer
+                            # name') reach the model. See docs/admins/ai-privacy.md.
 
 # Per-notebook off switch: a user can turn the copilot off for ONE notebook (from
 # the hub row or the chat window) — e.g. before working with PII. That lives in a

@@ -4,9 +4,32 @@ icon: lucide/bug
 
 # Value-safe traceback fixer
 
-!!! note "Status: proposed"
-    Designed 2026-07 from a multi-agent ideation review; not yet implemented.
-    Scope and details may change as implementation starts.
+!!! success "Status: implemented"
+    All four phases shipped 2026-07: the fail-closed sanitiser (`ai/traceback.py`,
+    pure stdlib) behind the single `egress.sanitize_traceback` gateway (one-gateway
+    import rule pinned in `tests/test_egress.py`, module covered by the
+    `.importlinter` spaCy contract); the chat valve as ONE combined hold in
+    `ChatBroadcaster._pii_gate` — sanitise, PII-scan the *sanitised* text, store
+    only the rewrite in `_pending`, broadcast a `traceback` SSE event
+    `{preview, redactions, pii_findings, token}` — so the existing
+    `send_confirmed` path can only ever forward sanitised text and no send-raw
+    code path exists; the guard config threaded like `PiiConfig`
+    (`open_chat(traceback_guard=…)` → session ctor → `configure_traceback_guard`,
+    **not** armed from a hub route as this page originally sketched); the
+    `[ai] traceback_guard` default-ON key (+ `MOORING_AI_TRACEBACK_GUARD`, flat
+    accessor, weakening-confirm SettingSpec); the batch worker auto-confirming a
+    `traceback` hold (safe unattended — only sanitised text is ever held — and
+    without it a traceback-bearing brief would hang to timeout), recording
+    value-free redaction counts on the job result; the "Send sanitised" hold card
+    (`chat.js` + a pure `ChatCore.tracebackHoldSummary` formatter, deliberately
+    with no send-raw button); the phase-3 known-token rescue (live schema +
+    system context + on-disk notebook source); and the offline
+    `mooring ai traceback check` CLI. The workspace source re-read is restricted
+    to paths resolving UNDER the workspace that end in `.py` — a crafted frame
+    naming a workspace CSV cannot turn the sanitiser into a value channel
+    (pinned with a `SECRET_VALUE_DO_NOT_LEAK` fixture in `tests/test_traceback.py`).
+    `docs/admins/ai-privacy.md` now documents the sanitised-traceback channel
+    honestly in place of the old "never receives tracebacks" claim.
 
 ## Problem
 

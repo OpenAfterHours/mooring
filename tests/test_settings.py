@@ -21,6 +21,7 @@ _AI_ENV = [
     "MOORING_AI_REASONING_EFFORT",
     "MOORING_AI_CHAT_IDLE_SEC",
     "MOORING_AI_LIVE_SCHEMA",
+    "MOORING_AI_TRACEBACK_GUARD",
     "MOORING_AI_CONTEXT",
     "MOORING_AI_CONTEXT_DIR",
     "MOORING_AI_CONTEXT_MAX_KB",
@@ -178,6 +179,23 @@ def test_weakening_flip_needs_confirm(client):
     ok = c.post("/api/settings", json={"key": "ai.context", "value": True, "confirm": True})
     assert ok.status_code == 200
     assert hub.app_cfg.ai_context is True
+
+
+def test_traceback_guard_off_needs_confirm(client):
+    c, hub = client
+    # ON by default; turning the sanitise-and-hold OFF is the weakening direction
+    # (raw tracebacks — which can embed values — would reach the model).
+    assert hub.app_cfg.ai_traceback_guard is True
+    resp = c.post("/api/settings", json={"key": "ai.traceback_guard", "value": False})
+    assert resp.status_code == 409
+    body = resp.json()
+    assert body["needs_confirm"] is True and "RAW" in body["message"]
+    assert hub.app_cfg.ai_traceback_guard is True  # not applied
+    ok = c.post("/api/settings", json={"key": "ai.traceback_guard", "value": False, "confirm": True})
+    assert ok.status_code == 200 and hub.app_cfg.ai_traceback_guard is False
+    # Turning it back ON is the safe direction — no confirm required.
+    back = c.post("/api/settings", json={"key": "ai.traceback_guard", "value": True})
+    assert back.status_code == 200 and hub.app_cfg.ai_traceback_guard is True
 
 
 def test_non_weakening_direction_needs_no_confirm(client):

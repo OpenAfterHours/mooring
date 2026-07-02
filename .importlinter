@@ -217,6 +217,7 @@ source_modules =
     mooring.ai.secrets
     mooring.ai.session
     mooring.ai.tools
+    mooring.ai.traceback
     mooring.pushguard
     mooring.app
     mooring.hub

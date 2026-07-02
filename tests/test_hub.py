@@ -1260,6 +1260,72 @@ def test_chat_rollback_write_failure_keeps_snapshot(unconfigured_client, stub_ch
     assert "added = 1" not in nb.read_text("utf-8")  # the retry actually undid it
 
 
+def test_chat_send_traceback_held_then_confirm_forwards_sanitised(
+    unconfigured_client, monkeypatch
+):
+    # End-to-end over /api/ai/chat/send: a pasted traceback is sanitised and HELD
+    # (a "traceback" SSE event carries the confirm token), and the EXISTING
+    # confirm_token path forwards ONLY the sanitised rewrite — the raw paste is
+    # never stored, so no wire sequence can transmit it.
+    import json as _json
+    import queue as _queue
+
+    from mooring.ai.chat import StubChatSession
+
+    client, hub = unconfigured_client
+    monkeypatch.setattr(
+        Hub,
+        "_make_chat_session",
+        lambda self, ctx, ws, nb, **kw: StubChatSession(
+            system_context=ctx, traceback_guard=True, workspace=ws, notebook_rel=nb
+        ),
+    )
+    sid = _open_chat(client, hub, source=_NB_SRC).json()["sid"]
+    session = hub._chats[sid]
+    q = session.subscribe()
+    secret = "SECRET_VALUE_DO_NOT_LEAK"
+    tb_text = (
+        "Traceback (most recent call last):\n"
+        '  File "C:\\elsewhere\\lib.py", line 3, in f\n'
+        f"KeyError: '{secret}'"
+    )
+    resp = client.post("/api/ai/chat/send", json={"sid": sid, "text": tb_text})
+    assert resp.status_code == 200
+    assert session.last_sent == ""  # held — nothing forwarded yet
+    held = None
+    while True:
+        try:
+            ev = q.get_nowait()
+        except _queue.Empty:
+            break
+        if ev.kind == "traceback":
+            held = ev
+    assert held is not None and held.data["token"]
+    assert secret not in _json.dumps(held.data)  # the SSE payload is value-free
+    resp = client.post(
+        "/api/ai/chat/send", json={"sid": sid, "confirm_token": held.data["token"]}
+    )
+    assert resp.status_code == 200
+    assert "KeyError: <redacted:" in session.last_sent
+    assert secret not in session.last_sent
+
+
+def test_chat_send_traceback_guard_off_is_passthrough(unconfigured_client, stub_chat):
+    # The default stub session has the guard OFF — the same paste goes through
+    # unchanged, proving the hold above is the guard's doing, not the transport's.
+    client, hub = unconfigured_client
+    sid = _open_chat(client, hub, source=_NB_SRC).json()["sid"]
+    session = hub._chats[sid]
+    tb_text = (
+        "Traceback (most recent call last):\n"
+        '  File "C:\\elsewhere\\lib.py", line 3, in f\n'
+        "KeyError: 'v'"
+    )
+    resp = client.post("/api/ai/chat/send", json={"sid": sid, "text": tb_text})
+    assert resp.status_code == 200
+    assert session.last_sent == tb_text
+
+
 def test_chat_stream_emits_sse_frames(unconfigured_client, monkeypatch):
     from mooring.ai.chat import ChatBroadcaster, ChatEvent
 

@@ -352,6 +352,21 @@ def _build_parser() -> argparse.ArgumentParser:
         "doctor",
         help="check the PII guard config end-to-end: which backend runs, what's ready, what to fix",
     )
+    ai_tb = ai_sub.add_parser(
+        "traceback", help="preview the value-safe traceback rewrite (offline)"
+    )
+    ai_tb_sub = ai_tb.add_subparsers(dest="ai_traceback_command", required=True)
+    ai_tb_check = ai_tb_sub.add_parser(
+        "check", help="sanitise a pasted traceback from FILE (or stdin) and print the rewrite"
+    )
+    ai_tb_check.add_argument(
+        "file",
+        nargs="?",
+        default=None,
+        metavar="FILE",
+        help="file containing the traceback (omit to read from stdin)",
+    )
+    ai_tb_check.add_argument("--repo", default=None, metavar="ALIAS", help=_REPO_ARG_HELP)
 
     cfg_cmd = sub.add_parser("config", help="view and edit settings in your user config.toml")
     cfg_sub = cfg_cmd.add_subparsers(dest="config_command", required=True)
@@ -1492,6 +1507,54 @@ def cmd_ai_pii_check(
     return 0
 
 
+def cmd_ai_traceback_check(
+    app_cfg: config.AppConfig, cfg: config.Config, args: argparse.Namespace
+) -> int:
+    """Show exactly how the traceback guard would rewrite a pasted traceback, offline.
+
+    Mirrors ``ai pii check``: no Copilot, no network — a security reviewer can see
+    what survives sanitising before trusting the chat guard. Reads FILE, or stdin
+    when no file is given. The chat additionally rescues exception messages whose
+    quoted tokens are already in the session's context (live schema, notebook
+    source); this offline preview has no session, so it redacts more, never less.
+    """
+    del app_cfg  # symmetric signature with the other `ai` commands; not needed here
+    from mooring.ai import egress
+
+    if getattr(args, "file", None):
+        try:
+            text = Path(args.file).read_text("utf-8")
+        except OSError as exc:
+            print(f"Could not read {args.file}: {exc}")
+            return 1
+    else:
+        text = sys.stdin.read()
+    if not text.strip():
+        print("Nothing to check — paste a traceback on stdin or give a FILE.")
+        return 1
+    result = egress.sanitize_traceback(text, workspace=cfg.workspace())
+    if not result.detected:
+        print("No traceback detected — the text would be sent unchanged")
+        print("(after the usual outbound PII scan, when that guard is enabled).")
+        return 0
+    print("Sanitised rewrite (what the assistant would receive):")
+    print()
+    print(result.text)
+    print()
+    if result.findings:
+        print(f"redactions: {len(result.findings)}")
+        for f in result.findings:
+            print(f"  line {f.line}  {f.kind}")
+    else:
+        print("redactions: none (everything was provably value-free)")
+    print(
+        "\n(the raw paste is never stored or sent — the chat holds this rewrite for a"
+        "\n 'Send sanitised' confirm; in the chat, exception messages also survive when"
+        "\n every quoted token is already in the session's schema/notebook context)"
+    )
+    return 0
+
+
 def cmd_ai_pii_model(
     app_cfg: config.AppConfig, cfg: config.Config, args: argparse.Namespace
 ) -> int:
@@ -1674,7 +1737,8 @@ def _print_download_progress(done: int, total: int) -> None:
 
 def cmd_ai(app_cfg: config.AppConfig, cfg: config.Config, args: argparse.Namespace) -> int:
     """Manage the AI copilot: Copilot sign-in (login / status), dictionary check,
-    and the offline PII pre-flight scan (pii check).
+    the offline PII pre-flight scan (pii check), and the offline traceback-rewrite
+    preview (traceback check).
 
     Code generation lives in the interactive chat (hub "AI" button), not the CLI.
     """
@@ -1692,6 +1756,11 @@ def cmd_ai(app_cfg: config.AppConfig, cfg: config.Config, args: argparse.Namespa
             return cmd_ai_pii_model(app_cfg, cfg, args)
         if args.ai_pii_command == "doctor":
             return cmd_ai_pii_doctor(app_cfg)
+        return 2
+
+    if args.ai_command == "traceback":
+        if args.ai_traceback_command == "check":
+            return cmd_ai_traceback_check(app_cfg, cfg, args)
         return 2
 
     try:

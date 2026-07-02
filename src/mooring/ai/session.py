@@ -82,6 +82,7 @@ class CopilotChatSession(ChatBroadcaster):
         pii_name_threshold: float = 0.7,
         pii_name_model: "ModelRef | str | None" = None,
         pii_name_backend: str = "auto",
+        traceback_guard: bool = False,
     ) -> None:
         super().__init__()
         self.configure_pii(
@@ -92,6 +93,12 @@ class CopilotChatSession(ChatBroadcaster):
             threshold=pii_name_threshold,
             model=pii_name_model,
             backend=pii_name_backend,
+        )
+        # The traceback guard needs the workspace (to bound its source re-read)
+        # and the notebook (for the known-token rescue) — both already travel
+        # into this ctor, so no route/hub arming call exists to forget.
+        self.configure_traceback_guard(
+            enabled=traceback_guard, workspace=workspace, notebook_rel=notebook_rel
         )
         self._model = (model or "").strip()
         self._reasoning_effort = (reasoning_effort or "").strip() or None
@@ -115,6 +122,11 @@ class CopilotChatSession(ChatBroadcaster):
         # class defaults to "ready"; flip it so the hub can return the chat-open
         # response immediately and surface readiness over the SSE stream instead.
         self._mark_starting()
+
+    def _known_text(self) -> str:
+        # The system context (schema + notebook source + tool guide) the model has
+        # already been shown — the traceback guard's known-token rescue source.
+        return self._system_context
 
     # -- lifecycle ----------------------------------------------------------
 

@@ -24,7 +24,10 @@ this is the deterministic floor beneath it.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from mooring.ai import pii
+from mooring.ai import traceback as _traceback
 
 # Re-exported so the outbound-prompt valve routes through this one module too: a
 # chat session calls ``egress.guard_prompt`` rather than reaching into ``pii``.
@@ -35,6 +38,7 @@ __all__ = [
     "guard_prompt",
     "scrub_columns",
     "scrub_text",
+    "sanitize_traceback",
     "build_system_context",
     "to_tool_result",
     "to_error_result",
@@ -76,6 +80,29 @@ def scrub_text(text: str) -> tuple[str, list[Finding]]:
     drop = {f.line for f in findings}
     kept = [ln for i, ln in enumerate(text.splitlines(), start=1) if i not in drop]
     return "\n".join(kept), findings
+
+
+def sanitize_traceback(
+    text: str, *, workspace: Path | None, known_text: str = ""
+) -> _traceback.Sanitized:
+    """Rewrite any pasted Python traceback in ``text`` value-safe, fail-closed.
+
+    The single entry point for the traceback-guard channel — the SOLE caller of
+    the ``ai/traceback`` sanitiser (the same thin-gateway pattern as
+    :func:`scrub_columns`, enforced by ``tests/test_egress.py``): exception types
+    and workspace-resolving frames are kept (their source lines re-read from the
+    local ``.py`` file, never trusted from the paste), everything else inside a
+    detected block is redacted to value-free placeholders. ``known_text`` is text
+    the model has ALREADY been shown this session (system context, live schema,
+    notebook source); an exception message whose quoted tokens all appear in it
+    survives — re-stating them reveals nothing new. Returns the rewrite, the
+    value-free ``(line, kind)`` findings, and whether a traceback was detected.
+    """
+    return _traceback.sanitize(
+        text,
+        workspace=workspace,
+        known_tokens=_traceback.known_tokens_from(known_text),
+    )
 
 
 def to_tool_result(text: str):

@@ -156,6 +156,33 @@ def test_to_error_result_clean_message_unchanged():
     assert res.error == "dataset required"
 
 
+def test_sanitize_traceback_gateway_rewrites_value_safe():
+    # The gateway wraps the sanitiser: detection + fail-closed rewrite + the
+    # known-token rescue built from raw session text. Behavioural depth lives in
+    # test_traceback.py; this pins the gateway's contract shape.
+    secret = "SECRET_VALUE_DO_NOT_LEAK"
+    text = (
+        "Traceback (most recent call last):\n"
+        '  File "C:\\other\\lib.py", line 2, in f\n'
+        f"KeyError: '{secret}'"
+    )
+    result = egress.sanitize_traceback(text, workspace=None)
+    assert result.detected is True
+    assert secret not in result.text
+    assert "KeyError: <redacted:" in result.text
+    assert secret not in repr(result.findings)  # value-free findings
+    # known_text rescues an in-channel token (schema column, notebook source, …).
+    rescued = egress.sanitize_traceback(
+        text.replace(f"'{secret}'", "'revenue'"), workspace=None, known_text="revenue Int64"
+    )
+    assert "KeyError: 'revenue'" in rescued.text
+
+
+def test_sanitize_traceback_gateway_is_a_noop_on_prose():
+    result = egress.sanitize_traceback("group revenue by month?", workspace=None)
+    assert result.detected is False and result.text == "group revenue by month?"
+
+
 def test_egress_imports_without_the_copilot_sdk():
     """``copilot`` is the optional ``mooring[copilot]`` extra, and egress is
     imported on non-AI paths (the guard_prompt / Finding re-exports) — so its SDK
@@ -205,3 +232,23 @@ def test_no_module_bypasses_the_egress_scrub():
             assembler_defs.append(path.relative_to(_SRC_ROOT).as_posix())
     assert bypass == [], f"scrub_columns called outside egress.py: {bypass}"
     assert assembler_defs == ["ai/egress.py"], assembler_defs
+
+
+def test_only_egress_imports_the_traceback_sanitizer():
+    """The traceback sanitiser has ONE gateway: ``egress.sanitize_traceback``.
+
+    Nothing else in the source tree may import the ``ai/traceback`` module (by
+    either import form), so a new caller that would bypass the gateway — and with
+    it the known-token construction and the value-free result contract — is a
+    review-visible change to egress.py, exactly like the scrub_columns rule above.
+    """
+    import_forms = re.compile(
+        r"from\s+mooring\.ai\s+import\s+[^\n]*\btraceback\b|mooring\.ai\.traceback"
+    )
+    offenders = []
+    for path in _SRC_ROOT.rglob("*.py"):
+        if path.name == "egress.py" or path == _SRC_ROOT / "ai" / "traceback.py":
+            continue
+        if import_forms.search(path.read_text("utf-8")):
+            offenders.append(path.relative_to(_SRC_ROOT).as_posix())
+    assert offenders == [], f"ai/traceback imported outside egress.py: {offenders}"

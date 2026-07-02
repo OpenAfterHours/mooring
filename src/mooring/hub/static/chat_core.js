@@ -294,6 +294,32 @@ const ChatCore = (function () {
       : { text: "PII-active", cls: "on", title };
   }
 
+  // -- traceback guard hold card --------------------------------------------
+  // The analyst-facing summary line for a held (sanitised) traceback turn. Pure
+  // so it tests under node --test; chat.js renders it above the <pre> preview.
+  // `redactions` and `piiFindings` are value-free {line, kind} lists from the
+  // "traceback" SSE event — never any withheld text.
+  function tracebackHoldSummary(redactions, piiFindings) {
+    const n = (redactions || []).length;
+    const counted = n
+      ? ` (${n} redaction${n === 1 ? "" : "s"})`
+      : " (nothing needed redacting)";
+    let msg =
+      "Held before sending — your message contains a Python traceback, which can " +
+      "embed data values. It was rewritten to the value-safe version below" +
+      counted +
+      ". Only this sanitised version can be sent; the raw paste was not kept. " +
+      "Never retype a redacted value in prose.";
+    const kinds = [...new Set((piiFindings || []).map((f) => f.kind))];
+    if (kinds.length) {
+      msg +=
+        " The surrounding text also looks like it may contain " +
+        kinds.join(", ") +
+        " — review it before sending.";
+    }
+    return msg;
+  }
+
   // The analyst-facing message for a guard_prompt scan_error code (see
   // mooring.ai.pii.guard_prompt): only a STRUCTURED-scan failure means the prompt
   // went truly unchecked; a NAMES-only failure still scanned structured PII, so it
@@ -405,6 +431,7 @@ const ChatCore = (function () {
     additiveBlockLines,
     diffLines,
     piiBadge,
+    tracebackHoldSummary,
     scanErrorMessage,
     parseDeviceLogin,
     highlightCode,

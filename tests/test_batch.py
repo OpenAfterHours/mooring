@@ -156,6 +156,40 @@ def test_a_pii_brief_blocks_just_that_job_under_block_job(tmp_path):
     assert not (tmp_path / "notebooks/leak.py").exists()
 
 
+def test_a_traceback_brief_is_auto_confirmed_sanitised(tmp_path):
+    # A brief containing a traceback trips the session's traceback guard, which
+    # HOLDS the turn with a "traceback" event. Unattended, the worker must
+    # auto-confirm it (safe by construction: only the SANITISED rewrite is ever
+    # held) — without that branch the job would hang to its timeout. The
+    # value-free redaction report lands on the result for the tray.
+    secret = "SECRET_VALUE_DO_NOT_LEAK"
+    brief = (
+        "Fix this error in a fresh notebook:\n"
+        "\n"
+        "Traceback (most recent call last):\n"
+        '  File "C:\\elsewhere\\lib.py", line 3, in f\n'
+        f"KeyError: '{secret}'"
+    )
+    sessions = []
+
+    def opener(ctx, nb, m, e, d):
+        session = StubChatSession(
+            system_context=ctx, traceback_guard=True, workspace=tmp_path, notebook_rel=nb
+        )
+        sessions.append(session)
+        return session
+
+    planner = _make_planner(tmp_path, opener)
+    [result] = planner.run([BatchJob(name="fix", brief=brief)])
+    assert result.status == "built"  # auto-confirmed, not hung to timeout
+    assert result.proposals
+    assert result.traceback_redactions and result.traceback_redactions[0]["kind"]
+    assert secret not in repr(result.traceback_redactions)  # value-free report
+    [session] = sessions
+    assert secret not in session.last_sent  # only the sanitised rewrite was forwarded
+    assert "KeyError: <redacted:" in session.last_sent
+
+
 def test_a_pii_brief_aborts_the_whole_batch_under_block_batch(tmp_path):
     planner = _make_planner(
         tmp_path,

@@ -85,6 +85,10 @@ class AiConfig:
     context_dir: str = "context"
     context_max_kb: int = 256
     live_schema: bool = True
+    # Sanitise-and-hold for pasted Python tracebacks (which can embed data values).
+    # Default ON: it only ever REMOVES information, and the raw paste is never
+    # stored, so there is no send-raw path. Turning it off is a weakening flip.
+    traceback_guard: bool = True
     pii: PiiConfig = field(default_factory=PiiConfig)
     batch: BatchConfig = field(default_factory=BatchConfig)
 
@@ -174,6 +178,9 @@ def load_ai_config(ai: Mapping, env: Mapping[str, str]) -> AiConfig:
         context_max_kb=int(env.get("MOORING_AI_CONTEXT_MAX_KB", ai.get("context_max_kb", 256))),
         live_schema=_as_bool(
             env.get("MOORING_AI_LIVE_SCHEMA"), _as_bool(ai.get("live_schema"), True)
+        ),
+        traceback_guard=_as_bool(
+            env.get("MOORING_AI_TRACEBACK_GUARD"), _as_bool(ai.get("traceback_guard"), True)
         ),
         pii=pii,
         batch=batch,

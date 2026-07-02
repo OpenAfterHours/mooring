@@ -205,6 +205,36 @@ test("scanErrorMessage: a structured failure is the only 'sent unchecked' case",
   assert.match(C.scanErrorMessage("both"), /sent unchecked/);
 });
 
+test("tracebackHoldSummary: counts a single redaction and states the no-raw contract", () => {
+  const msg = C.tracebackHoldSummary([{ line: 3, kind: "exception message redacted" }], []);
+  assert.match(msg, /1 redaction\)/);
+  assert.ok(!/redactions\)/.test(msg), "singular for one redaction");
+  assert.match(msg, /raw paste was not kept/);
+  assert.match(msg, /Send/i);
+});
+
+test("tracebackHoldSummary: pluralises and appends deduped prose-PII kinds", () => {
+  const msg = C.tracebackHoldSummary(
+    [
+      { line: 3, kind: "exception message redacted" },
+      { line: 4, kind: "unrecognised line redacted" },
+    ],
+    [
+      { line: 1, kind: "payment card" },
+      { line: 2, kind: "payment card" },
+    ]
+  );
+  assert.match(msg, /2 redactions/);
+  assert.match(msg, /payment card/);
+  assert.equal(msg.split("payment card").length - 1, 1, "kinds are deduped");
+});
+
+test("tracebackHoldSummary: zero redactions reads as clean, no PII clause", () => {
+  const msg = C.tracebackHoldSummary([], []);
+  assert.match(msg, /nothing needed redacting/);
+  assert.ok(!/also looks like/.test(msg), "no PII sentence without findings");
+});
+
 test("highlightCode: wraps keywords/strings/comments", () => {
   const out = C.highlightCode(escapeHtml('def f():  # note\n    return "x"'));
   assert.match(out, /<span class="tok-kw">def<\/span>/);

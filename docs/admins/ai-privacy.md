@@ -35,7 +35,7 @@ names and types and your notebook's code, but never the data itself.
 | **Schema** — column names, dtypes, row count | Built by `schema.py`, which reads only a parquet footer or a csv/xlsx header. It never materialises a row, so no value is ever produced — proven by the `test_schema.py` "value never leaks" tests. |
 | **Live dataframe schemas** — names + dtypes of dataframes loaded in your kernel | Built by `ai/introspect.py`, which runs a **fixed, value-free probe** in your kernel and reads back only names + dtypes. Covers data loaded from *outside* the workspace. Value-free by construction, not by physical impossibility — see [Live dataframe schemas](#live-dataframe-schemas-data-outside-the-workspace). |
 | **Notebook `.py` source** | A marimo notebook is pure Python; the data is loaded at *runtime* (`pl.read_parquet(...)`). The source is code, not data. |
-| **Your chat messages** | What you type. The `/explain` walkthrough (and its "Add as notes cell" follow-up) sends **fixed, value-free prompt text** over this same channel — no new egress surface. |
+| **Your chat messages** | What you type. The `/explain` walkthrough (and its "Add as notes cell" follow-up) sends **fixed, value-free prompt text** over this same channel — no new egress surface. A pasted **traceback** is rewritten value-safe and held for your confirmation before it can leave — see [Pasted tracebacks](#pasted-tracebacks). |
 
 ## What it never receives
 
@@ -43,7 +43,12 @@ names and types and your notebook's code, but never the data itself.
 - **Variable *values*.** Mooring may read a live dataframe's **schema** (names +
   dtypes — see [Live dataframe schemas](#live-dataframe-schemas-data-outside-the-workspace)),
   but never a stored value or other kernel state.
-- **Error tracebacks** (which can embed values).
+- **Raw error tracebacks.** A traceback can embed values (`KeyError: 'ACME Ltd'`),
+  and mooring never captures one itself — but an analyst can *paste* one into the
+  chat. That paste is structurally rewritten value-safe and held for an explicit
+  confirm before anything leaves; the raw paste is never stored, so no code path
+  can forward it. What survives the rewrite is best-effort, not structural — see
+  [Pasted tracebacks](#pasted-tracebacks) for the exact contract.
 - **The contents of any data file.**
 
 ## The four structural guarantees
@@ -248,6 +253,64 @@ defence in depth, not a guarantee: a clean push scan does not mean a file is
 value-free. See the roadmap page
 [push guard](../developers/roadmap/push-guard.md) for the design.
 
+## Pasted tracebacks: sanitised and held (on by default, best-effort) { #pasted-tracebacks }
+
+When a cell errors, the single most tempting act is to paste the traceback into
+the chat — and tracebacks routinely embed data values: `KeyError: 'ACME Ltd'`,
+`could not convert string to float: '£1,234'`, a repr of the offending row
+inside a library frame. Mooring never captures a traceback itself (it reads no
+cell outputs and never opens the marimo websocket), so a paste is the only way
+one can reach the model — and that paste no longer travels raw.
+
+The **traceback guard** (`[ai] traceback_guard`, **on by default**) detects a
+traceback block in an outbound message and rewrites it **fail-closed** before
+any egress, then **holds the turn**. What survives the rewrite:
+
+- The **exception type** — `polars.exceptions.ColumnNotFoundError` is a code
+  identifier, not data. The fixed chained-exception separator lines are kept too.
+- **Frames that resolve into your workspace**: workspace-relative path, line
+  number, and function — with the quoted source line **re-read from the local
+  `.py` file**, never trusted from the paste. The re-read is restricted to paths
+  that resolve **under the workspace** and end in `.py`, so a crafted frame can
+  never make the sanitiser read a data file (pinned by `tests/test_traceback.py`).
+- **Frames outside the workspace** (site-packages, stdlib) keep only a
+  code-shaped file basename, the line number, and the function name; their
+  source lines are dropped.
+- The **exception message**, only when it is provably value-free: it matches a
+  fixed allowlist of interpreter messages ("division by zero", …), or every
+  quoted token in it already appears in text the model has been shown this
+  session (the dataset schema, the live-kernel schemas, the notebook source).
+  So `KeyError: 'revenue'` survives when `revenue` is a schema column — restating
+  it reveals nothing new — while `KeyError: 'ACME Ltd'` becomes
+  `KeyError: <redacted: 10 chars>`.
+
+Everything else inside the detected block — an unrecognised line, a pasted
+"source" line, a message that cannot be proven value-free — is redacted to a
+shape-preserving placeholder. Parser gaps fail **closed**, never open.
+
+The held turn shows a preview of *exactly* what will be sent, with one **Send
+sanitised** button. Unlike the PII guard there is deliberately **no "send raw
+anyway" escape**: only the sanitised rewrite is ever stored server-side, so no
+code path can transmit the raw paste. Prose around the traceback is untouched —
+it still goes through the [structured-PII prompt scan](#structured-pii-pre-flight-scan-opt-in-best-effort),
+whose value-free findings ride the same hold card.
+
+Honest caveats, in the same spirit as the scanners on this page:
+
+- **Best-effort, not structural.** An analyst can still **retype a redacted
+  value in prose** — the guard narrows the paste channel; it cannot close the
+  keyboard. Frame basenames and function names are kept only when they look like
+  code identifiers, but an identifier-shaped value would survive as one.
+- **The off switch is a policy decision.** `[ai] traceback_guard = false` (or
+  `MOORING_AI_TRACEBACK_GUARD`) turns the guard off per machine; flipping it off
+  on the Settings page requires an explicit weakening confirm, and raw
+  tracebacks then reach the model unchecked (aside from the opt-in PII scan).
+
+Run **`mooring ai traceback check [FILE]`** (or pipe a traceback on stdin) to
+see the exact rewrite **offline** — no Copilot, no network — before trusting the
+guard. The offline preview has no chat session, so it redacts *more* than the
+chat would (no known-token rescue), never less.
+
 ## Name detection (opt-in, local NER)
 
 A person's name — `where name == "Jane Smith"` — has no checksum or fixed shape, so
@@ -391,7 +454,11 @@ prose — so the rule stands regardless.
   value-bearing keys are dropped, that the dictionary tools can't reach a file, and
   that a secret in an instructions/description field is withheld. For live-kernel
   schemas, `tests/test_introspect.py` runs the exact probe the kernel runs and proves
-  the names-and-dtypes readback never carries a value.
+  the names-and-dtypes readback never carries a value. For the traceback guard,
+  `tests/test_traceback.py` proves a planted secret never survives the rewrite —
+  from an exception message, a pasted source line, a frame path, or a workspace
+  data file named by a crafted frame — and `tests/test_egress.py` pins that
+  nothing outside the egress gateway can reach the sanitiser.
 - **Live spike.** `scripts/spike_copilot_chat.py` opens a real session and asks
   the agent to read a file; it has no tool to do so.
 

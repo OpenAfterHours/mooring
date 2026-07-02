@@ -350,6 +350,46 @@ def test_pii_prompt_is_held_until_confirmed(fake_sdk, tmp_path):
         sess.close()
 
 
+def test_traceback_prompt_raw_never_reaches_the_sdk(fake_sdk, tmp_path):
+    # With the traceback guard armed, a traceback-bearing prompt is sanitised and
+    # HELD — the SDK sees nothing until confirm, and then ONLY the sanitised
+    # rewrite: no call sequence can forward the raw paste, because the raw paste
+    # is never stored. The workspace frame's source line is re-read from disk.
+    secret = "SECRET_VALUE_DO_NOT_LEAK"
+    sess = _make(tmp_path, traceback_guard=True).start()
+    try:
+        q = sess.subscribe()
+        client = FakeClient.last
+        assert client is not None and client.session is not None
+        session = client.session
+        sess.send(
+            "Traceback (most recent call last):\n"
+            f'  File "{tmp_path / "nb.py"}", line 1, in _\n'
+            f"    x = load({secret!r})\n"
+            f"KeyError: '{secret}'"
+        )
+        held = q.get(timeout=2)
+        assert held.kind == "traceback" and held.data["token"]
+        assert session.sent == []  # the SDK was sent nothing while held
+
+        sess.send_confirmed(held.data["token"])
+        kinds = []
+        while True:
+            ev = q.get(timeout=2)
+            kinds.append(ev.kind)
+            if ev.kind == "idle":
+                break
+        assert "message" in kinds
+        assert len(session.sent) == 1
+        forwarded = session.sent[0]
+        assert secret not in forwarded  # raw paste never crossed
+        assert 'File "nb.py", line 1, in _' in forwarded
+        assert "import marimo" in forwarded  # the disk re-read, not the doctored paste
+        assert "KeyError: <redacted:" in forwarded
+    finally:
+        sess.close()
+
+
 def test_close_tears_down(fake_sdk, tmp_path):
     sess = _make(tmp_path).start()
     fake = FakeClient.last
