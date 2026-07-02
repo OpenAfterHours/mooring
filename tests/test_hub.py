@@ -2445,3 +2445,49 @@ def test_restore_over_endpoint_returns_undo_token(configured):
     undo = client.post("/api/undo", json={"path": "notebooks/a.py", "token": token})
     assert undo.status_code == 200
     assert (tmp_path / "ws1" / "notebooks/a.py").read_text("utf-8") == "v2\n"
+
+
+# -- the health check endpoint (mooring doctor) --------------------------------
+
+
+def test_api_doctor_returns_results_and_redacted_report(configured, monkeypatch):
+    from mooring import doctor
+
+    canned = [
+        doctor.ProbeResult("python", "Python runtime", "pass", "Python 3.13, uv project."),
+        doctor.ProbeResult("auth", "GitHub login", "fail", "Expired.", "Log in again."),
+    ]
+    monkeypatch.setattr(doctor, "run_probes", lambda cfg, extra=(): canned)
+    client, _, _, _ = configured
+    resp = client.post("/api/doctor", json={})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert [r["status"] for r in body["results"]] == ["pass", "fail"]
+    assert body["results"][1]["fix"] == "Log in again."
+    assert body["report"].startswith("mooring doctor report")
+
+
+def test_api_doctor_appends_copilot_probe_when_ai_enabled(configured, monkeypatch):
+    from mooring import doctor
+
+    seen = {}
+
+    def fake_run(cfg, extra=()):
+        seen["extra"] = list(extra)
+        return [e() for e in extra]
+
+    class FakeProvider:
+        def status(self, force=False):
+            from mooring.ai.base import ProviderStatus
+
+            return ProviderStatus("copilot", available=True, connected=True, account="phil")
+
+    monkeypatch.setattr(doctor, "run_probes", fake_run)
+    client, hub, _, _ = configured
+    monkeypatch.setattr(type(hub), "_provider_for", lambda self: FakeProvider())
+    resp = client.post("/api/doctor", json={})
+    body = resp.json()
+    assert len(seen["extra"]) == 1  # the adapter appended the Copilot probe
+    assert body["results"][0]["id"] == "copilot"
+    assert body["results"][0]["status"] == "pass"
+    assert "@phil" in body["results"][0]["detail"]

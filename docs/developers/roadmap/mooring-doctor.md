@@ -4,10 +4,15 @@ icon: lucide/stethoscope
 
 # mooring doctor: diagnostics, will-it-run checks, open-failure triage
 
-!!! note "Status: proposed"
-    Designed 2026-07 from a multi-agent ideation review; not yet implemented.
-    Scope may change — in particular the later slices (per-notebook checks,
-    open-failure triage) may ship long after the first.
+!!! success "Status: implemented (slice a — phases 1–2)"
+    Shipped 2026-07-02: the diagnosis engine (`src/mooring/doctor.py` with its
+    own import-linter contract), `mooring doctor` / `mooring doctor --report`
+    on the CLI, and the hub's footer **Health check** (`POST /api/doctor`, run
+    off the event loop, never at startup) with the redacted Copy-report —
+    including the pinned sentinel tests (hostname/username/home never appear).
+    The Copilot probe is appended by each adapter, as designed. Slices (b)
+    ("will it run here" per-notebook checks, phase 3) and (c) (open-failure
+    triage cards, phase 4) remain open.
 
 ## Problem
 

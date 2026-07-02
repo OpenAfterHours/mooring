@@ -115,6 +115,18 @@ forbidden_modules =
     mooring.hub
     mooring.cli
 
+[importlinter:contract:doctor-below-adapters]
+name = The diagnosis engine (doctor.py) sits below ai/ and the adapters — the Copilot probe is appended BY the adapters (each may import both), never by the engine
+type = forbidden
+source_modules =
+    mooring.doctor
+forbidden_modules =
+    mooring.ai
+    mooring.pushguard
+    mooring.app
+    mooring.hub
+    mooring.cli
+
 [importlinter:contract:hub-not-cli]
 name = The web hub and the CLI are sibling adapters; the hub must not import the CLI
 type = forbidden

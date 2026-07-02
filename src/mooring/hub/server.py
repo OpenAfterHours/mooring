@@ -851,6 +851,7 @@ def create_app(hub: Hub) -> Starlette:
             Route("/api/repo/switch", setup.api_repo_switch, methods=["POST"]),
             Route("/api/repo/remove", setup.api_repo_remove, methods=["POST"]),
             Route("/api/ui/theme", setup.api_set_theme, methods=["POST"]),
+            Route("/api/doctor", setup.api_doctor, methods=["POST"]),
             Route("/settings", pages.settings_page),
             Route("/api/settings", settings.api_get_settings),
             Route("/api/settings", settings.api_set_settings, methods=["POST"]),

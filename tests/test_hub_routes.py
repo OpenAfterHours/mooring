@@ -20,6 +20,7 @@ EXPECTED_ROUTES = {
     ("/api/repo/switch", ("POST",), "api_repo_switch"),
     ("/api/repo/remove", ("POST",), "api_repo_remove"),
     ("/api/ui/theme", ("POST",), "api_set_theme"),
+    ("/api/doctor", ("POST",), "api_doctor"),  # the on-demand health check
     ("/settings", ("GET",), "settings_page"),
     ("/api/settings", ("GET",), "api_get_settings"),
     ("/api/settings", ("POST",), "api_set_settings"),

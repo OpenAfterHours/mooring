@@ -482,6 +482,15 @@ tr.folder-header b { font-weight: 600; }
 }
 .undo-toast-close { border: none; background: none; color: var(--muted); }
 
+/* Health check (footer): one row per probe, coloured by status. */
+.health-list { list-style: none; padding: 0; margin: 0.5rem 0 0; font-size: 0.9rem; }
+.health-list li { padding: 0.25rem 0 0.25rem 1.3rem; position: relative; }
+.health-list li::before { position: absolute; left: 0; }
+.health-pass::before { content: "✓"; color: var(--ok, #2da44e); }
+.health-warn::before { content: "!"; color: var(--warn); }
+.health-fail::before { content: "✗"; color: var(--bad); }
+.health-unknown::before { content: "?"; color: var(--muted); }
+
 /* Version-history panel: the read-only source/diff view stays bounded. */
 #history-view { max-height: 24rem; overflow: auto; }
 #history-table td.path { font-size: 0.85rem; }

@@ -1283,6 +1283,46 @@ window.addEventListener("storage", (event) => {
 // never momentarily out of sync; refresh() reconciles with the server value.
 $("theme-select").value = document.documentElement.dataset.theme || "system";
 
+// -- health check (mooring doctor in the footer) -----------------------------
+// On-demand only: nothing probes at startup or on refresh. The Copy report is
+// the server's redacted, paste-safe text (no tokens/hostnames/usernames).
+
+let healthReport = "";
+
+$("health-run").addEventListener("click", async () => {
+  const btn = $("health-run");
+  btn.disabled = true;
+  btn.textContent = "Checking…";
+  try {
+    const data = await api("/api/doctor", {});
+    if (data.error) return showError(data.error);
+    healthReport = data.report || "";
+    const list = $("health-results");
+    list.innerHTML = "";
+    for (const r of data.results || []) {
+      const li = document.createElement("li");
+      li.className = `health-${r.status}`;
+      let text = `${r.title}: ${r.detail}`;
+      if (r.fix && r.status !== "pass") text += ` Fix: ${r.fix}`;
+      li.textContent = text;
+      list.appendChild(li);
+    }
+    $("health-copy").classList.toggle("hidden", !healthReport);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Run health check";
+  }
+});
+$("health-copy").addEventListener("click", () => {
+  const btn = $("health-copy");
+  if (healthReport && navigator.clipboard) {
+    navigator.clipboard.writeText(healthReport).then(
+      () => { btn.textContent = "Copied"; setTimeout(() => { btn.textContent = "Copy report"; }, 1500); },
+      () => { /* clipboard blocked — nothing sensible to do */ },
+    );
+  }
+});
+
 // An idle tab heals itself: refresh when the tab regains focus and the last
 // check is older than the throttle, so the staleness dialog and banner decide
 // from reasonably fresh rows without riding a polling loop or the rate limit.

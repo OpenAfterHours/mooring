@@ -361,6 +361,16 @@ def _build_parser() -> argparse.ArgumentParser:
     cfg_sub.add_parser("list", help="print the effective merged configuration")
     cfg_sub.add_parser("path", help="print the path to your user config.toml")
 
+    doctor_cmd = sub.add_parser(
+        "doctor", help="diagnose the setup in plain English (network, login, config, deps)"
+    )
+    doctor_cmd.add_argument(
+        "--report",
+        action="store_true",
+        help="print only the paste-safe report (redacted; safe for a support ticket)",
+    )
+    doctor_cmd.add_argument("--repo", default=None, metavar="ALIAS", help=_REPO_ARG_HELP)
+
     sub.add_parser("selftest", help="verify the bundled environment")
     sub.add_parser("version", help="print the version")
     return parser
@@ -373,6 +383,66 @@ def _print_paths(cfg: config.Config) -> None:
     hints = (legacy_workspace_hint(cfg), paths.synced_folder_hint(cfg.workspace()))
     for hint in (h for h in hints if h):
         print(f"  note        : {hint}")
+
+
+def copilot_probe_for(app_cfg: config.AppConfig):
+    """The adapter-appended Copilot probe (ai/ sits above doctor.py, so the
+    engine can't run this itself). Force-checks the provider — slow (spawns the
+    Copilot CLI), which is fine for an on-demand health check."""
+    from mooring import doctor
+
+    def probe() -> doctor.ProbeResult:
+        try:
+            from mooring.ai import get_provider
+
+            st = get_provider(app_cfg).status(force=True)
+        except Exception:  # noqa: BLE001  # a probe never raises; unknown is honest
+            return doctor.ProbeResult(
+                "copilot", "AI copilot", doctor.UNKNOWN,
+                "Copilot could not be checked.",
+                "Run `mooring ai status` for details (needs the mooring[copilot] extra).",
+            )
+        if not st.available:
+            return doctor.ProbeResult(
+                "copilot", "AI copilot", doctor.WARN,
+                "Copilot isn't available in this build.",
+                "Install the mooring[copilot] extra, or ask your admin to include it.",
+            )
+        if not st.connected:
+            return doctor.ProbeResult(
+                "copilot", "AI copilot", doctor.WARN,
+                "Copilot is installed but not signed in.",
+                "Sign in with `mooring ai login` (or the hub's Copilot menu). "
+                "For the PII guard, see `mooring ai pii doctor`.",
+            )
+        detail = f"Connected as @{st.account}." if st.account else "Connected."
+        return doctor.ProbeResult("copilot", "AI copilot", doctor.PASS, detail)
+
+    return probe
+
+
+def cmd_doctor(app_cfg: config.AppConfig, cfg: config.Config, report_only: bool) -> int:
+    from mooring import doctor
+
+    extra = [copilot_probe_for(app_cfg)] if app_cfg.ai_enabled else []
+    results = doctor.run_probes(cfg, extra_probes=extra)
+    counts = {
+        s: sum(1 for r in results if r.status == s)
+        for s in (doctor.PASS, doctor.WARN, doctor.FAIL, doctor.UNKNOWN)
+    }
+    telemetry.log_event("doctor", **counts)
+    if report_only:
+        print(doctor.build_report(results, cfg), end="")
+    else:
+        print(f"mooring doctor (mooring {__version__}):\n")
+        for line in doctor.render_lines(results):
+            print(line)
+        print(
+            f"\n{counts['pass']} pass, {counts['warn']} warn, {counts['fail']} fail, "
+            f"{counts['unknown']} unknown."
+        )
+        print("Paste-safe report for a ticket: mooring doctor --report")
+    return 1 if counts[doctor.FAIL] else 0
 
 
 def cmd_selftest(app_cfg: config.AppConfig, cfg: config.Config) -> int:
@@ -1625,6 +1695,8 @@ def _dispatch(
         return cmd_ai(app_cfg, cfg, args)
     if command == "selftest":
         return cmd_selftest(app_cfg, cfg)
+    if command == "doctor":
+        return cmd_doctor(app_cfg, cfg, args.report)
     if command == "hub":
         from mooring.hub.server import run_hub
 

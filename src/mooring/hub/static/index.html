@@ -247,6 +247,15 @@
       <pre id="packages" class="pkglist"></pre>
       <div id="env-add-hint" class="muted env-add-hint"></div>
     </details>
+    <details><summary>Health check</summary>
+      <p class="muted">Checks your setup in plain English — network, login,
+        config files, notebook packages. Nothing runs until you click.</p>
+      <div class="toolbar">
+        <button id="health-run" class="small">Run health check</button>
+        <button id="health-copy" class="small hidden" title="A redacted report, safe to paste into a support ticket">Copy report</button>
+      </div>
+      <ul id="health-results" class="health-list"></ul>
+    </details>
   </footer>
 
   <!-- Pure helpers (ChatCore.parseDeviceLogin for the Copilot sign-in); loaded
