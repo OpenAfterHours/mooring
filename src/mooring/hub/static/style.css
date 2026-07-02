@@ -456,6 +456,39 @@ tr.folder-header b { font-weight: 600; }
   margin-bottom: 1rem;
 }
 
+/* Undo toasts: "x.py — local copy replaced. [Undo]" after an operation banked a
+   pre-image in the local trash. Fixed bottom-right so they never shift layout. */
+#undo-toasts {
+  position: fixed;
+  right: 1rem;
+  bottom: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  z-index: 20;
+}
+.undo-toast {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  background: var(--card);
+  color: var(--ink);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: 8px;
+  padding: 0.5rem 0.7rem;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.3);
+  font-size: 0.9rem;
+}
+.undo-toast-close { border: none; background: none; color: var(--muted); }
+
+/* Activity page: the ledger list + its per-entry relative time. */
+.activity-list { list-style: none; padding: 0; margin: 0.6rem 0 0; }
+.activity-list li { padding: 0.3rem 0; border-bottom: 1px solid var(--border); }
+.activity-list li:last-child { border-bottom: none; }
+.activity-time { display: inline-block; min-width: 8.5rem; }
+#activity-filter { flex: 1; min-width: 12rem; }
+
 /* Freshness: "Last checked N ago — M teammate update(s) waiting." Informational
    (amber, not an error); hidden unless updates wait or the view has aged. */
 #freshness-banner {

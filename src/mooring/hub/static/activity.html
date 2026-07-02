@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>mooring · Activity</title>
+  <!-- Apply the theme before first paint (mirrors the hub): last-used theme, else
+       the server's inlined default. -->
+  <script>
+    try {
+      document.documentElement.dataset.theme =
+        localStorage.getItem("mooring.ui.theme") || "__MOORING_DEFAULT_THEME__";
+    } catch {
+      // localStorage may be unavailable (private mode); the CSS default applies.
+    }
+  </script>
+  <link rel="stylesheet" href="/static/style.css">
+  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+</head>
+<body class="settings-body">
+  <header>
+    <h1><svg class="brand-mark" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 6v16M19 13l2-1a9 9 0 0 1-18 0l2 1M9 11h6"/><circle cx="12" cy="4" r="2"/></svg>Activity</h1>
+    <a class="header-link" href="/" title="Back to the hub">&#8592; Back to hub</a>
+  </header>
+
+  <main>
+    <p class="muted">
+      What mooring did in this workspace — pulls, pushes, deletes, reverts, and
+      copilot applies. This journal is saved <b>on this machine only</b> (in the
+      workspace's <code>.mooring</code> folder); it never syncs to the team repo
+      and is separate from any central logging your admin may have enabled.
+    </p>
+    <div id="error-banner" class="hidden"></div>
+
+    <section class="card">
+      <h2>Recent activity</h2>
+      <div class="toolbar">
+        <input id="activity-filter" placeholder="Filter by file path (e.g. notebooks/sales.py)">
+        <button id="activity-refresh" class="small">&#8635; Refresh</button>
+      </div>
+      <ul id="activity-list" class="activity-list"></ul>
+      <div id="activity-empty" class="muted hidden">Nothing recorded yet.</div>
+    </section>
+
+    <section class="card">
+      <h2>Trash</h2>
+      <p class="muted">
+        Before mooring overwrites or removes a local file (a conflict's "Use
+        remote", pull updates, delete, a data-file revert), the file's previous
+        bytes are saved here. Restore puts them back; if the file has changed
+        again since, the restore refuses rather than overwrite newer work.
+      </p>
+      <table id="trash-table" class="hidden">
+        <thead><tr><th>File</th><th>Saved</th><th>Why</th><th></th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <div id="trash-empty" class="muted hidden">The trash is empty.</div>
+    </section>
+  </main>
+
+  <!-- Pure helpers first (bare globals), then the page script. -->
+  <script src="/static/activity_fmt.js"></script>
+  <script src="/static/activity.js"></script>
+</body>
+</html>

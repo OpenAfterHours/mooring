@@ -40,6 +40,11 @@ EXPECTED_ROUTES = {
     ("/api/delete", ("POST",), "api_delete"),
     ("/api/rollback", ("POST",), "api_rollback"),
     ("/api/undo", ("POST",), "api_undo"),
+    # The local safety net: the trash + activity ledger (roadmap: local-safety-net).
+    ("/activity", ("GET",), "activity_page"),
+    ("/api/trash", ("GET",), "api_trash"),
+    ("/api/trash/restore", ("POST",), "api_trash_restore"),
+    ("/api/activity", ("GET",), "api_activity"),
     ("/ai/chat", ("GET",), "chat_page"),
     ("/api/ai/datasets", ("GET",), "api_chat_datasets"),
     ("/api/ai/models", ("GET",), "api_chat_models"),

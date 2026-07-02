@@ -10,7 +10,16 @@ import sys
 from collections.abc import Mapping
 from pathlib import Path
 
-from mooring import __version__, config, paths, pyproject_env, shadow, telemetry, workspace_config
+from mooring import (
+    __version__,
+    activity,
+    config,
+    paths,
+    pyproject_env,
+    shadow,
+    telemetry,
+    workspace_config,
+)
 
 # SELFTEST_PACKAGES, workspace_hint and legacy_workspace_hint now live in
 # mooring.runtime — a neutral module below both presentation adapters, so the web
@@ -177,6 +186,26 @@ def _build_parser() -> argparse.ArgumentParser:
         help="also discard your edit to a conflicted file (turns it into a clean pull)",
     )
 
+    trash_cmd = sub.add_parser(
+        "trash", help="list and restore local pre-images saved before destructive actions"
+    )
+    trash_sub = trash_cmd.add_subparsers(dest="trash_command", required=True)
+    trash_sub.add_parser("list", help="list saved pre-images, newest first")
+    trash_restore = trash_sub.add_parser(
+        "restore", help="restore one saved pre-image to its original path"
+    )
+    trash_restore.add_argument("token", help="the entry token (from `mooring trash list`)")
+
+    activity_cmd = sub.add_parser(
+        "activity", help="show what mooring did in this workspace (local journal)"
+    )
+    activity_cmd.add_argument(
+        "--path", default=None, help="only entries touching this workspace-relative path"
+    )
+    activity_cmd.add_argument(
+        "--limit", type=int, default=50, help="how many entries to show (default 50)"
+    )
+
     init_cmd = sub.add_parser(
         "init",
         help="create the repo's pyproject.toml (its notebook dependencies) and lock it",
@@ -209,6 +238,8 @@ def _build_parser() -> argparse.ArgumentParser:
         new,
         delete_cmd,
         rollback_cmd,
+        trash_cmd,
+        activity_cmd,
         init_cmd,
         deps,
         build_reqs,
@@ -480,9 +511,8 @@ def cmd_pull(cfg: config.Config, theirs: bool, keep_both: bool) -> int:
         lines=len(result.lines),
         strategy=strategy.value,
     )
-    for line in result.lines:
-        print(f"  {line}")
-    print(result.summary())
+    _record_activity(cfg, "pull", result)
+    _print_sync_result(result)
     return 0 if not result.skipped_conflicts else 1
 
 
@@ -496,9 +526,8 @@ def cmd_push(cfg: config.Config, only_paths: list[str], message: str | None) -> 
         conflicts=len(result.blocked_conflicts),
         lines=len(result.lines),
     )
-    for line in result.lines:
-        print(f"  {line}")
-    print(result.summary())
+    _record_activity(cfg, "push", result)
+    _print_sync_result(result)
     return 0 if not result.blocked_conflicts else 1
 
 
@@ -512,9 +541,8 @@ def cmd_propose(cfg: config.Config, only_paths: list[str], message: str | None) 
         conflicts=len(result.blocked_conflicts),
         review_branch=bool(result.review_branch),
     )
-    for line in result.lines:
-        print(f"  {line}")
-    print(result.summary())
+    _record_activity(cfg, "propose", result)
+    _print_sync_result(result)
     return 0 if not result.blocked_conflicts else 1
 
 
@@ -777,17 +805,89 @@ def cmd_delete(cfg: config.Config, rel_path: str, assume_yes: bool) -> int:
         if input(f"Delete {what} from the workspace? [y/N] ").strip().lower() not in ("y", "yes"):
             print("Cancelled.")
             return 0
+    trashed: list[dict] = []
     try:
-        removed = deletion.delete(workspace, rel_path, cfg.exclude, cfg.folders)
+        removed = deletion.delete(
+            workspace,
+            rel_path,
+            cfg.exclude,
+            cfg.folders,
+            trash_cap_mb=cfg.trash_max_file_mb,
+            on_trash=lambda rel, token: trashed.append({"path": rel, "token": token}),
+        )
     except FileNotFoundError:  # vanished between the prompt and the delete
         sys.exit(f"No such notebook: {workspace / rel_path}")
     telemetry.log_event("delete", count=len(removed))
+    _record_activity(cfg, "delete", path=rel_path, paths=removed, trashed=trashed)
     for r in removed:
         print(f"  deleted {r}")
+    if trashed:
+        print("  (saved to the trash — `mooring trash list` to restore)")
     print(
         f"Deleted {rel_path} locally. Run `mooring push` (or `propose`) to remove it "
         "from the team repo."
     )
+    return 0
+
+
+def _print_sync_result(result) -> None:
+    for line in result.lines:
+        print(f"  {line}")
+    if result.trashed:
+        print(
+            f"  ({len(result.trashed)} overwritten/removed local file(s) saved to the trash — "
+            "`mooring trash list` to see them)"
+        )
+    print(result.summary())
+
+
+def _record_activity(cfg: config.Config, op: str, result=None, **fields) -> None:
+    """Append to the workspace's LOCAL activity ledger (see mooring.activity) —
+    the same journal the hub writes; strictly local, distinct from telemetry."""
+    if result is not None:
+        fields.setdefault("summary", result.summary())
+        fields.setdefault("lines", result.lines[:20])
+        fields.setdefault("trashed", [{"path": p, "token": t} for p, t in result.trashed])
+    activity.record(cfg.workspace(), op, **fields)
+
+
+def cmd_trash(cfg: config.Config, args: argparse.Namespace) -> int:
+    from mooring import trash
+
+    workspace = cfg.workspace()
+    if args.trash_command == "list":
+        entries = trash.entries(workspace)
+        if not entries:
+            print("The trash is empty.")
+            return 0
+        for e in entries:
+            print(f"  {e['ts']}  {e['path']}  ({e['action']})")
+            print(f"    restore with: mooring trash restore {e['token']}")
+        return 0
+    # restore
+    try:
+        rel = trash.restore(workspace, args.token)
+    except KeyError:
+        sys.exit(f"Unknown or expired trash entry: {args.token}")
+    except trash.RestoreSuperseded as exc:
+        sys.exit(
+            f"Not restored: {exc} has changed since this copy was saved, so restoring "
+            "it would overwrite newer work."
+        )
+    telemetry.log_event("trash_restore")
+    _record_activity(cfg, "trash_restore", path=rel)
+    print(f"Restored {rel} from the trash.")
+    return 0
+
+
+def cmd_activity(cfg: config.Config, args: argparse.Namespace) -> int:
+    entries = activity.read(cfg.workspace(), limit=args.limit, path=args.path)
+    if not entries:
+        print("Nothing recorded yet.")
+        return 0
+    for e in entries:
+        detail = e.get("summary") or e.get("path") or ""
+        print(f"  {e['ts']}  {e['op']}  {detail}".rstrip())
     return 0
 
 
@@ -820,9 +920,8 @@ def cmd_rollback(
         client, cfg, rel_path, include_conflict=include_conflict, snapshot_fn=snapshot_fn
     )
     telemetry.log_event("rollback", reverted=result.reverted, lines=len(result.lines))
-    for line in result.lines:
-        print(f"  {line}")
-    print(result.summary())
+    _record_activity(cfg, "rollback", result, path=rel_path)
+    _print_sync_result(result)
     return 0
 
 
@@ -1371,6 +1470,10 @@ def _dispatch(
         return cmd_delete(cfg, args.path, args.yes)
     if command == "rollback":
         return cmd_rollback(cfg, args.path, args.yes, args.conflicts)
+    if command == "trash":
+        return cmd_trash(cfg, args)
+    if command == "activity":
+        return cmd_activity(cfg, args)
     parser.error(f"unknown command {command!r}")
     return 2
 

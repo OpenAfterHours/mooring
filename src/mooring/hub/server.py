@@ -26,6 +26,7 @@ from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
 from mooring import (
+    activity,
     auth,
     config,
     notebook_template,
@@ -34,6 +35,7 @@ from mooring import (
     shadow,
     sync,
     telemetry,
+    trash,
     workspace_config,
 )
 from mooring.app import notebooks as nb_ops
@@ -543,6 +545,12 @@ class Hub:
 
 
 
+    def _activity(self, op: str, **fields) -> None:
+        """Append to the workspace's LOCAL activity ledger (activity.py) — the
+        "what just happened?" journal, distinct from the opt-in central telemetry
+        (which never carries file paths). Best-effort by construction."""
+        activity.record(self.cfg.workspace(), op, **fields)
+
     def _sync_op(self, name: str, op) -> JSONResponse:
         try:
             result = op()
@@ -557,7 +565,17 @@ class Hub:
             conflicts=len(result.skipped_conflicts) + len(result.blocked_conflicts),
             lines=len(result.lines),
         )
+        self._activity(
+            name,
+            summary=result.summary(),
+            lines=result.lines[:20],
+            trashed=[{"path": p, "token": t} for p, t in result.trashed],
+        )
         body = {"lines": result.lines, "summary": result.summary()}
+        if result.trashed:
+            # The Undo affordance: local pre-images banked before this operation
+            # overwrote/removed files (the frontend shows a toast per entry).
+            body["trashed"] = [{"path": p, "token": t} for p, t in result.trashed]
         if result.review_branch:
             body["review_branch"] = result.review_branch
             body["compare_url"] = result.compare_url
@@ -846,6 +864,10 @@ def create_app(hub: Hub) -> Starlette:
             Route("/api/delete", files.api_delete, methods=["POST"]),
             Route("/api/rollback", files.api_rollback, methods=["POST"]),
             Route("/api/undo", files.api_undo, methods=["POST"]),
+            Route("/activity", pages.activity_page),
+            Route("/api/trash", files.api_trash),
+            Route("/api/trash/restore", files.api_trash_restore, methods=["POST"]),
+            Route("/api/activity", files.api_activity),
             Route("/ai/chat", pages.chat_page),
             Route("/api/ai/datasets", chat.api_chat_datasets),
             Route("/api/ai/models", chat.api_chat_models),
@@ -883,6 +905,20 @@ def run_hub(app_cfg: config.AppConfig, open_browser: bool = True, port: int | No
     port = port or free_port()
     url = f"http://127.0.0.1:{port}/"
     telemetry.log_event("hub_start")
+
+    # Trash retention runs at start, in the background and best-effort — a full
+    # or locked store must never delay or break the hub coming up.
+    def _prune_trash() -> None:
+        with contextlib.suppress(Exception):
+            cfg = app_cfg.config_for(None)
+            trash.prune(
+                cfg.workspace(),
+                keep_days=cfg.trash_keep_days,
+                keep_per_file=cfg.trash_keep_per_file,
+                max_total_mb=cfg.trash_max_total_mb,
+            )
+
+    threading.Thread(target=_prune_trash, name="trash-prune", daemon=True).start()
     print(f"mooring hub running at {url} (Ctrl+C to quit)")
     if open_browser:
         threading.Timer(0.8, webbrowser.open, args=(url,)).start()

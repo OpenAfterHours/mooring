@@ -189,6 +189,7 @@ async def api_chat_apply(request: Request) -> JSONResponse:
     except CellWriteError as exc:
         return JSONResponse({"error": str(exc)}, status_code=502)
     telemetry.log_event("ai_chat_apply")
+    hub._activity("ai_apply", path=notebook_rel)
     return JSONResponse({"ok": True, "can_undo": undo_depth > 0, "undo_depth": undo_depth})
 
 
@@ -221,6 +222,7 @@ async def api_chat_rollback(request: Request) -> JSONResponse:
     if remaining is None:
         return JSONResponse({"ok": False, "error": "Nothing to undo."}, status_code=400)
     telemetry.log_event("ai_chat_rollback")
+    hub._activity("ai_rollback", path=notebook_rel)
     return JSONResponse({"ok": True, "can_undo": remaining > 0, "undo_depth": remaining})
 
 

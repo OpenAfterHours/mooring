@@ -1136,3 +1136,95 @@ def test_pbip_bytes_are_faithful(cfg):
     (cfg.workspace() / "reports/S.SemanticModel/definition/model.tmdl").write_bytes(edited)
     sync.push(client, cfg, sleep=lambda s: None)
     assert client.blobs[client.tree["reports/S.SemanticModel/definition/model.tmdl"]] == edited
+
+
+# -- the local safety net: pre-images banked in the trash --------------------
+
+
+def test_resolve_theirs_banks_pre_image_in_trash(cfg):
+    from mooring import trash
+
+    client = FakeClient({"notebooks/a.py": b"v1\n"})
+    sync.pull(client, cfg)
+    write_local(cfg, "notebooks/a.py", "mine\n")
+    client.seed("notebooks/a.py", b"theirs\n")  # remote moves underneath -> CONFLICT
+    result = sync.resolve(client, cfg, "notebooks/a.py", ConflictStrategy.THEIRS)
+    assert read_local(cfg, "notebooks/a.py") == "theirs\n"
+    assert [p for p, _ in result.trashed] == ["notebooks/a.py"]
+    entry = trash.entries(cfg.workspace())[0]
+    assert entry["action"] == "resolve-theirs"
+    # One-click Undo: the restore puts the user's bytes back (the on-disk file
+    # still matches what THEIRS wrote, so it is not superseded).
+    assert trash.restore(cfg.workspace(), result.trashed[0][1]) == "notebooks/a.py"
+    assert read_local(cfg, "notebooks/a.py") == "mine\n"
+
+
+def test_pull_theirs_banks_pre_image(cfg):
+    from mooring import trash
+
+    client = FakeClient({"notebooks/a.py": b"v1\n"})
+    sync.pull(client, cfg)
+    write_local(cfg, "notebooks/a.py", "mine\n")
+    client.seed("notebooks/a.py", b"theirs\n")
+    result = sync.pull(client, cfg, strategy=ConflictStrategy.THEIRS)
+    assert [p for p, _ in result.trashed] == ["notebooks/a.py"]
+    assert trash.entries(cfg.workspace())[0]["action"] == "pull-theirs"
+
+
+def test_pull_overwrite_and_remove_bank_pre_images(cfg):
+    from mooring import trash
+
+    client = FakeClient({"notebooks/a.py": b"v1\n", "notebooks/b.py": b"v1\n"})
+    sync.pull(client, cfg)
+    client.seed("notebooks/a.py", b"v2\n")  # REMOTE_CHANGED for a clean local copy
+    client.remove("notebooks/b.py")  # DELETED_REMOTE
+    result = sync.pull(client, cfg)
+    banked = dict(result.trashed)
+    assert set(banked) == {"notebooks/a.py", "notebooks/b.py"}
+    actions = {e["path"]: e["action"] for e in trash.entries(cfg.workspace())}
+    assert actions["notebooks/a.py"] == "pull-overwrite"
+    assert actions["notebooks/b.py"] == "pull-remove"
+    # The removed file comes back with one restore.
+    assert not (cfg.workspace() / "notebooks/b.py").exists()
+    trash.restore(cfg.workspace(), banked["notebooks/b.py"])
+    assert read_local(cfg, "notebooks/b.py") == "v1\n"
+
+
+def test_revert_banks_data_file_pre_image(cfg):
+    from mooring import trash
+
+    client = FakeClient({"data/x.csv": b"a,b\n1,2\n"})
+    sync.pull(client, cfg)
+    write_local(cfg, "data/x.csv", "a,b\n9,9\n")
+    result = sync.revert(client, cfg, "data/x.csv")
+    assert read_local(cfg, "data/x.csv") == "a,b\n1,2\n"
+    assert [p for p, _ in result.trashed] == ["data/x.csv"]
+    assert trash.entries(cfg.workspace())[0]["action"] == "revert"
+    trash.restore(cfg.workspace(), result.trashed[0][1])
+    assert read_local(cfg, "data/x.csv") == "a,b\n9,9\n"
+
+
+def test_revert_of_notebook_does_not_double_bank(cfg):
+    # .py revert rides the notebook-undo stack (snapshot_fn); the trash must NOT
+    # also bank it, or the two undo stores would restore over each other.
+    client = FakeClient({"notebooks/a.py": b"v1\n"})
+    sync.pull(client, cfg)
+    write_local(cfg, "notebooks/a.py", "mine\n")
+    result = sync.revert(client, cfg, "notebooks/a.py")
+    assert result.reverted == 1
+    assert result.trashed == []
+
+
+def test_safety_net_files_never_reach_scan_local(cfg):
+    """Invariant pin: the trash and the activity ledger live in .mooring, which
+    sync excludes structurally — a workspace full of safety-net state yields
+    NOTHING new from scan_local, so it can never leak into a push."""
+    from mooring import activity, trash
+
+    client = FakeClient({"notebooks/a.py": b"v1\n"})
+    sync.pull(client, cfg)
+    before = sync.scan_local(cfg.workspace(), cfg.folders, cfg.exclude)
+    trash.deposit(cfg.workspace(), "notebooks/a.py", b"v1\n", "delete")
+    activity.record(cfg.workspace(), "pull", summary="1 pulled")
+    after = sync.scan_local(cfg.workspace(), cfg.folders, cfg.exclude)
+    assert before == after

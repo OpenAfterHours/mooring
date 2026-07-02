@@ -1,4 +1,5 @@
-"""File endpoints: new, open, reveal, delete, and the rollback/undo pair."""
+"""File endpoints: new, open, reveal, delete, the rollback/undo pair, and the
+local safety net (trash listing/restore + the activity ledger)."""
 
 from __future__ import annotations
 
@@ -8,7 +9,7 @@ from starlette.concurrency import run_in_threadpool
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from mooring import notebook_template, reveal, sync, telemetry
+from mooring import notebook_template, reveal, sync, telemetry, trash
 from mooring.github import GitHubError
 
 
@@ -67,19 +68,29 @@ async def api_delete(request: Request) -> JSONResponse:
     data = await request.json()
     rel_path = str(data.get("path", ""))
     cfg = hub.cfg
+    trashed: list[dict] = []
     try:
-        removed = deletion.delete(cfg.workspace(), rel_path, cfg.exclude, cfg.folders)
+        removed = deletion.delete(
+            cfg.workspace(),
+            rel_path,
+            cfg.exclude,
+            cfg.folders,
+            trash_cap_mb=cfg.trash_max_file_mb,
+            on_trash=lambda rel, token: trashed.append({"path": rel, "token": token}),
+        )
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
     except FileNotFoundError:
         return JSONResponse({"error": f"No such notebook: {rel_path}"}, status_code=404)
     telemetry.log_event("delete", count=len(removed))
+    hub._activity("delete", path=rel_path, paths=removed, trashed=trashed)
     name = rel_path.rsplit("/", 1)[-1]
     return JSONResponse(
         {
             "lines": [f"deleted {r}" for r in removed],
             "summary": f"Deleted {name}. If it was shared, push or propose to "
             "remove it for the team.",
+            **({"trashed": trashed} if trashed else {}),
         }
     )
 
@@ -118,9 +129,19 @@ async def api_rollback(request: Request) -> JSONResponse:
         telemetry.log_error(exc=exc, op="rollback")
         return JSONResponse({"error": str(exc)}, status_code=502)
     telemetry.log_event("rollback", reverted=result.reverted, lines=len(result.lines))
+    hub._activity(
+        "rollback",
+        path=rel_path,
+        summary=result.summary(),
+        trashed=[{"path": p, "token": t} for p, t in result.trashed],
+    )
     body = {"lines": result.lines, "summary": result.summary()}
     if "token" in captured:
         body["undo_token"] = captured["token"]
+    if result.trashed:
+        # A non-.py revert banks its pre-image in the trash (no notebook-undo
+        # stack for data files) — surface the token so the toast can offer Undo.
+        body["trashed"] = [{"path": p, "token": t} for p, t in result.trashed]
     return JSONResponse(body)
 
 
@@ -163,4 +184,67 @@ async def api_undo(request: Request) -> JSONResponse:
     if outcome is None:
         return JSONResponse({"ok": False, "error": "Nothing to undo."}, status_code=400)
     telemetry.log_event("undo")
+    hub._activity("undo", path=rel_path)
     return JSONResponse({"ok": True, "can_undo": outcome > 0, "undo_depth": outcome})
+
+
+async def api_trash(request: Request) -> JSONResponse:
+    """List the local trash — the pre-images banked before mooring overwrote or
+    removed local files (see mooring.trash). Value-local: nothing here touches
+    GitHub or the AI; the Activity page renders it as the Trash panel."""
+    hub = request.app.state.hub
+    return JSONResponse({"entries": trash.entries(hub.cfg.workspace())})
+
+
+async def api_trash_restore(request: Request) -> JSONResponse:
+    """Put one trash deposit's bytes back at its original path.
+
+    Token-exact, refusing with a 409 when a later write is on top (the file's
+    current blob no longer matches what the destructive action left) — the
+    same supersession posture as /api/undo. Held under the shared apply
+    guard's lock so a restore can't race an in-flight AI Apply on the same
+    notebook. The manifest is never touched: the three-way engine simply
+    reclassifies the file on the next status."""
+    hub = request.app.state.hub
+    data = await request.json()
+    token = str(data.get("token", ""))
+    workspace = hub.cfg.workspace()
+
+    def _restore() -> str:
+        with hub.apply.lock:
+            return trash.restore(workspace, token)
+
+    try:
+        rel = await asyncio.to_thread(_restore)
+    except KeyError:
+        return JSONResponse(
+            {"ok": False, "error": "Unknown or expired trash entry."}, status_code=404
+        )
+    except trash.RestoreSuperseded:
+        return JSONResponse(
+            {
+                "ok": False,
+                "error": "The file has changed since this copy was saved, so restoring "
+                "it would overwrite newer work.",
+            },
+            status_code=409,
+        )
+    except OSError as exc:
+        return JSONResponse({"error": f"Could not restore the file: {exc}"}, status_code=502)
+    telemetry.log_event("trash_restore")
+    hub._activity("trash_restore", path=rel)
+    return JSONResponse({"ok": True, "path": rel, "lines": [f"restored {rel} from the trash"]})
+
+
+async def api_activity(request: Request) -> JSONResponse:
+    """The workspace's local activity ledger, newest first (see mooring.activity).
+    Strictly local: this is the analyst's own journal, not telemetry."""
+    hub = request.app.state.hub
+    path = request.query_params.get("path") or None
+    try:
+        limit = min(int(request.query_params.get("limit", "200")), 1000)
+    except ValueError:
+        limit = 200
+    from mooring import activity
+
+    return JSONResponse({"entries": activity.read(hub.cfg.workspace(), limit=limit, path=path)})

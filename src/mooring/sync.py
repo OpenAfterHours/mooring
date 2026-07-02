@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 
-from mooring import gitsha, manifest as manifest_mod
+from mooring import gitsha, manifest as manifest_mod, trash
 from mooring.config import Config
 from mooring.github import (
     GitHubClientProtocol,
@@ -250,6 +250,9 @@ class SyncResult:
     compare_url: str = ""
     skipped_conflicts: list[str] = field(default_factory=list)
     blocked_conflicts: list[str] = field(default_factory=list)
+    # (rel_path, trash token) for every local pre-image this operation banked
+    # before overwriting/removing the file — the adapters' Undo affordance.
+    trashed: list[tuple[str, str]] = field(default_factory=list)
 
     def summary(self) -> str:
         parts = []
@@ -559,6 +562,35 @@ def _read_checked(workspace: Path, f: FileStatus, cfg: Config, result: SyncResul
     return data
 
 
+def _bank_pre_image(
+    workspace: Path,
+    rel_path: str,
+    action: str,
+    after_sha: str | None,
+    cap_mb: int,
+    result: SyncResult,
+    replacement: bytes | None = None,
+) -> None:
+    """Deposit the file's current bytes into the local trash before a destructive
+    write, recording ``(rel_path, token)`` on the result so the adapters can offer
+    Undo. Best-effort by design: a trash failure must never block the sync op, and
+    a byte-identical ``replacement`` (nothing is being lost) skips the deposit."""
+    target = workspace / rel_path
+    try:
+        if not target.is_file():
+            return
+        data = target.read_bytes()
+        if replacement is not None and data == replacement:
+            return
+        token = trash.deposit(
+            workspace, rel_path, data, action, after_sha=after_sha, max_file_mb=cap_mb
+        )
+    except OSError:
+        return
+    if token:
+        result.trashed.append((rel_path, token))
+
+
 def _apply_remote_or_keep_both(
     client: GitHubClientProtocol,
     workspace: Path,
@@ -567,20 +599,32 @@ def _apply_remote_or_keep_both(
     remote_sha: str | None,
     strategy: ConflictStrategy,
     result: SyncResult,
+    *,
+    origin: str = "resolve",
+    trash_cap_mb: int = trash.DEFAULT_MAX_FILE_MB,
 ) -> bool:
     """Apply the two conflict strategies pull and resolve share: THEIRS (take the
     remote, or delete locally when the remote is gone) and KEEP_BOTH while the
     remote still exists (save it as a .remote-<sha> copy, keep local pushable).
+
+    THEIRS destroys the user's local edits, so their pre-image is banked in the
+    local trash first (``origin`` labels the entry pull- vs resolve-initiated).
 
     Returns True when it handled the strategy; False leaves the caller to handle the
     cases that legitimately differ between pull and resolve — SKIP, KEEP_BOTH with
     the remote already deleted, and resolve's PUSH_COPY."""
     if strategy is ConflictStrategy.THEIRS:
         if remote_sha is None:
+            _bank_pre_image(workspace, rel_path, f"{origin}-theirs", None, trash_cap_mb, result)
             (workspace / rel_path).unlink(missing_ok=True)
             mft.files.pop(rel_path, None)
         else:
-            _write_blob(workspace, rel_path, client.get_blob(remote_sha))
+            data = client.get_blob(remote_sha)
+            _bank_pre_image(
+                workspace, rel_path, f"{origin}-theirs", remote_sha, trash_cap_mb, result,
+                replacement=data,
+            )
+            _write_blob(workspace, rel_path, data)
             mft.files[rel_path] = remote_sha
         result.pulled += 1
         result.lines.append(f"pulled   {rel_path} (overwrote local edits)")
@@ -606,11 +650,23 @@ def pull(
     for f in report.files:
         if f.state in (FileState.NEW_REMOTE, FileState.REMOTE_CHANGED):
             assert f.remote_sha is not None  # these states always carry a remote sha
-            _write_blob(workspace, f.path, client.get_blob(f.remote_sha))
+            data = client.get_blob(f.remote_sha)
+            # A REMOTE_CHANGED overwrite destroys only manifest-base-equal bytes
+            # (recoverable from GitHub via get_blob), but banking them makes the
+            # recovery one click — and it works offline. NEW_REMOTE has no local
+            # file, so _bank_pre_image no-ops for it.
+            _bank_pre_image(
+                workspace, f.path, "pull-overwrite", f.remote_sha,
+                cfg.trash_max_file_mb, result, replacement=data,
+            )
+            _write_blob(workspace, f.path, data)
             mft.files[f.path] = f.remote_sha
             result.pulled += 1
             result.lines.append(f"pulled   {f.path}")
         elif f.state is FileState.DELETED_REMOTE:
+            _bank_pre_image(
+                workspace, f.path, "pull-remove", None, cfg.trash_max_file_mb, result
+            )
             (workspace / f.path).unlink(missing_ok=True)
             mft.files.pop(f.path, None)
             result.pulled += 1
@@ -620,7 +676,8 @@ def pull(
                 mft.files[f.path] = f.local_sha  # same change on both sides
         elif f.state is FileState.CONFLICT:
             if not _apply_remote_or_keep_both(
-                client, workspace, mft, f.path, f.remote_sha, strategy, result
+                client, workspace, mft, f.path, f.remote_sha, strategy, result,
+                origin="pull", trash_cap_mb=cfg.trash_max_file_mb,
             ):
                 result.skipped_conflicts.append(f.path)
                 result.lines.append(f"conflict {f.path} (skipped — resolve in the hub)")
@@ -726,6 +783,14 @@ def revert(
     target = workspace / rel_path
     if snapshot_fn is not None and target.is_file():
         snapshot_fn(rel_path, target.read_bytes())
+    # Non-.py files have no notebook-undo stack (snapshot_fn only banks .py), so
+    # their pre-image goes to the local trash instead — the two stores stay
+    # separate: a .py Revert keeps its existing snapshot + /api/undo path.
+    if not rel_path.endswith(".py"):
+        _bank_pre_image(
+            workspace, rel_path, "revert", match.base_sha,
+            cfg.trash_max_file_mb, result, replacement=data,
+        )
     _write_blob(workspace, rel_path, data)
     result.reverted += 1
     if match.state is FileState.DELETED_LOCAL:
@@ -999,7 +1064,10 @@ def resolve(
     remote_sha = remote.get(rel_path)
     result = SyncResult()
 
-    if _apply_remote_or_keep_both(client, workspace, mft, rel_path, remote_sha, strategy, result):
+    if _apply_remote_or_keep_both(
+        client, workspace, mft, rel_path, remote_sha, strategy, result,
+        origin="resolve", trash_cap_mb=cfg.trash_max_file_mb,
+    ):
         pass  # THEIRS or KEEP_BOTH-with-remote-present handled by the shared helper
     elif strategy is ConflictStrategy.KEEP_BOTH:  # helper declined: the remote was deleted
         mft.files.pop(rel_path, None)  # remote deleted; local survives as new
@@ -1014,6 +1082,13 @@ def resolve(
             copy_path, data, f"Add {copy_path} via mooring (conflict copy)", cfg.branch
         )
         mft.files[copy_path] = response["content"]["sha"]
+        # The local bytes survive at copy_path (and were just pushed), so this
+        # deposit is redundancy — but if the copy is later deleted, it is the
+        # only pre-image left, and banking it costs one small blob.
+        _bank_pre_image(
+            workspace, rel_path, "resolve-push-copy", remote_sha,
+            cfg.trash_max_file_mb, result,
+        )
         if remote_sha is None:
             (workspace / rel_path).unlink(missing_ok=True)
             mft.files.pop(rel_path, None)

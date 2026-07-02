@@ -96,10 +96,50 @@ async function action(path, body, refreshAfter = true) {
     if (data.error) showError(data.error);
     showLog(data);
     if (data.url) window.open(data.url, "_blank");
+    if (data.trashed && data.trashed.length) showUndoToast(data.trashed);
     if (refreshAfter) await refresh();
     return data;
   } finally {
     setBusy(false);
+  }
+}
+
+// "Local copy replaced — Undo": a transient toast for every pre-image the last
+// operation banked in the local trash (a conflict's "Use remote", pull
+// updates/removals, delete, a data-file revert). Undo restores via the
+// token-exact /api/trash/restore, which refuses (409) if the file has since
+// changed again — so a stale toast can never clobber newer work. The full list
+// lives on the Activity page after the toast is gone.
+function showUndoToast(trashed) {
+  let box = $("undo-toasts");
+  if (!box) {
+    box = document.createElement("div");
+    box.id = "undo-toasts";
+    document.body.appendChild(box);
+  }
+  for (const entry of trashed) {
+    const toast = document.createElement("div");
+    toast.className = "undo-toast";
+    const name = entry.path.split("/").pop();
+    const label = document.createElement("span");
+    label.textContent = `${name} — local copy replaced.`;
+    const btn = document.createElement("button");
+    btn.className = "small";
+    btn.textContent = "Undo";
+    btn.addEventListener("click", async () => {
+      toast.remove();
+      const data = await api("/api/trash/restore", { token: entry.token });
+      if (data.error) showError(data.error);
+      await refresh();
+    });
+    const close = document.createElement("button");
+    close.className = "small undo-toast-close";
+    close.setAttribute("aria-label", "Dismiss");
+    close.textContent = "×";
+    close.addEventListener("click", () => toast.remove());
+    toast.append(label, btn, close);
+    box.appendChild(toast);
+    setTimeout(() => toast.remove(), 15000);
   }
 }
 

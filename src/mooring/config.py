@@ -50,6 +50,11 @@ class Config:
     max_file_mb: int = 45
     warn_shadowed_notebooks: bool = True
     workspace_path: str = ""
+    # Local trash retention (the pre-image safety net; see mooring.trash).
+    trash_keep_days: int = 14
+    trash_keep_per_file: int = 10
+    trash_max_file_mb: int = 45
+    trash_max_total_mb: int = 200
 
     @property
     def repo_slug(self) -> str:
@@ -89,6 +94,11 @@ class AppConfig:
     warn_file_mb: int = 10
     max_file_mb: int = 45
     warn_shadowed_notebooks: bool = True
+    # Local trash retention (the pre-image safety net; see mooring.trash).
+    trash_keep_days: int = 14
+    trash_keep_per_file: int = 10
+    trash_max_file_mb: int = 45
+    trash_max_total_mb: int = 200
     log_endpoint: str = ""
     log_level: str = "info"
     # Appearance shared by the hub, the chat, and the notebooks (see normalize_theme).
@@ -143,6 +153,10 @@ class AppConfig:
                     warn_file_mb=self.warn_file_mb,
                     max_file_mb=self.max_file_mb,
                     warn_shadowed_notebooks=self.warn_shadowed_notebooks,
+                    trash_keep_days=self.trash_keep_days,
+                    trash_keep_per_file=self.trash_keep_per_file,
+                    trash_max_file_mb=self.trash_max_file_mb,
+                    trash_max_total_mb=self.trash_max_total_mb,
                 )
             alias = self.active_alias
         s = self.spec(alias)
@@ -158,6 +172,10 @@ class AppConfig:
             max_file_mb=self.max_file_mb,
             warn_shadowed_notebooks=self.warn_shadowed_notebooks,
             workspace_path=s.workspace_path,
+            trash_keep_days=self.trash_keep_days,
+            trash_keep_per_file=self.trash_keep_per_file,
+            trash_max_file_mb=self.trash_max_file_mb,
+            trash_max_total_mb=self.trash_max_total_mb,
         )
 
     # -- flat AI/PII accessors -----------------------------------------------
@@ -361,6 +379,7 @@ def load_app_config(
     log = data.get("logging", {})
     ui = data.get("ui", {})
     ai = data.get("ai", {})
+    trash = data.get("trash", {})
 
     specs, active = repo_specs_from_data(data)
     if env.get("MOORING_ACTIVE_REPO") in {s.alias for s in specs}:
@@ -408,6 +427,10 @@ def load_app_config(
         warn_file_mb=int(sync.get("warn_file_mb", 10)),
         max_file_mb=int(sync.get("max_file_mb", 45)),
         warn_shadowed_notebooks=_as_bool(sync.get("warn_shadowed_notebooks"), True),
+        trash_keep_days=int(trash.get("keep_days", 14)),
+        trash_keep_per_file=int(trash.get("keep_per_file", 10)),
+        trash_max_file_mb=int(trash.get("max_file_mb", 45)),
+        trash_max_total_mb=int(trash.get("max_total_mb", 200)),
         log_endpoint=env.get("MOORING_LOG_ENDPOINT", str(log.get("endpoint", ""))),
         log_level=env.get("MOORING_LOG_LEVEL", str(log.get("level", "info"))),
         ui_theme=normalize_theme(env.get("MOORING_UI_THEME", ui.get("theme", DEFAULT_THEME))),

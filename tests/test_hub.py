@@ -2238,3 +2238,68 @@ def test_open_has_no_server_side_staleness_gate(configured, monkeypatch):
     resp = client.post("/api/open", json={"path": "notebooks/a.py"})
     assert resp.status_code == 200
     assert resp.json()["url"] == "http://editor/notebooks/a.py"
+
+
+# -- the local safety net: trash endpoints + the activity ledger -------------
+
+
+def test_resolve_theirs_response_carries_trash_token_and_restores(configured):
+    client, hub, fake, tmp_path = configured
+    _seed_and_pull(hub, fake, "notebooks/a.py")
+    (tmp_path / "ws1" / "notebooks/a.py").write_text("mine\n", "utf-8", newline="\n")
+    fake.seed("notebooks/a.py", b"theirs\n")  # -> CONFLICT
+    body = client.post(
+        "/api/resolve", json={"path": "notebooks/a.py", "strategy": "theirs"}
+    ).json()
+    assert body["trashed"][0]["path"] == "notebooks/a.py"
+    token = body["trashed"][0]["token"]
+    assert (tmp_path / "ws1" / "notebooks/a.py").read_text("utf-8") == "theirs\n"
+    # The trash lists it, and the token-exact restore puts the user's bytes back.
+    listed = client.get("/api/trash").json()["entries"]
+    assert any(e["token"] == token for e in listed)
+    resp = client.post("/api/trash/restore", json={"token": token})
+    assert resp.status_code == 200
+    assert (tmp_path / "ws1" / "notebooks/a.py").read_text("utf-8") == "mine\n"
+
+
+def test_trash_restore_refuses_superseded_with_409(configured):
+    client, hub, fake, tmp_path = configured
+    _seed_and_pull(hub, fake, "notebooks/a.py")
+    (tmp_path / "ws1" / "notebooks/a.py").write_text("mine\n", "utf-8", newline="\n")
+    fake.seed("notebooks/a.py", b"theirs\n")
+    body = client.post(
+        "/api/resolve", json={"path": "notebooks/a.py", "strategy": "theirs"}
+    ).json()
+    token = body["trashed"][0]["token"]
+    # A LATER write lands on top; the stale toast must refuse, not clobber it.
+    (tmp_path / "ws1" / "notebooks/a.py").write_text("newer work\n", "utf-8", newline="\n")
+    resp = client.post("/api/trash/restore", json={"token": token})
+    assert resp.status_code == 409
+    assert (tmp_path / "ws1" / "notebooks/a.py").read_text("utf-8") == "newer work\n"
+
+
+def test_trash_restore_unknown_token_404s(configured):
+    client, _, _, _ = configured
+    assert client.post("/api/trash/restore", json={"token": "nope"}).status_code == 404
+
+
+def test_delete_response_carries_trash_tokens(configured):
+    client, _, _, tmp_path = configured
+    write_ws(tmp_path, "ws1", "notebooks/a.py", "mine")
+    body = client.post("/api/delete", json={"path": "notebooks/a.py"}).json()
+    assert body["trashed"][0]["path"] == "notebooks/a.py"
+    resp = client.post("/api/trash/restore", json={"token": body["trashed"][0]["token"]})
+    assert resp.status_code == 200
+    assert (tmp_path / "ws1" / "notebooks/a.py").read_text("utf-8") == "mine"
+
+
+def test_activity_ledger_records_and_filters(configured):
+    client, _, fake, tmp_path = configured
+    write_ws(tmp_path, "ws1", "notebooks/a.py", "mine")
+    client.post("/api/delete", json={"path": "notebooks/a.py"})
+    client.post("/api/pull", json={})
+    entries = client.get("/api/activity").json()["entries"]
+    assert [e["op"] for e in entries][:2] == ["pull", "delete"]
+    only_a = client.get("/api/activity?path=notebooks/a.py").json()["entries"]
+    assert [e["op"] for e in only_a] == ["delete"]
+    assert only_a[0]["trashed"][0]["path"] == "notebooks/a.py"
