@@ -75,6 +75,17 @@ def api_state(request: Request) -> JSONResponse:
         report = sync.status(hub.client(), cfg)
         body["files"], body["artifacts"] = hub._files_artifacts(report, cfg.workspace())
         body["summary"] = report.summary()
+        # Remember which branch head this render was computed from, so a later
+        # /api/freshness can tell the client whether its cached rows are stale.
+        hub._state_heads[str(cfg.workspace())] = report.head_commit
+        # Whether "Recall last push" has anything to recall (a local manifest
+        # read — no extra API call), and WHICH files it would touch — the
+        # confirm dialog names them so the user can catch a stale record.
+        from mooring import manifest as manifest_mod
+
+        last_push = manifest_mod.load(cfg.workspace()).last_push
+        body["can_recall"] = bool(last_push)
+        body["recall_paths"] = sorted(last_push)
         if report.review_branch:
             body["review"] = {
                 "branch": report.review_branch,
@@ -91,6 +102,58 @@ def api_state(request: Request) -> JSONResponse:
         telemetry.log_error(exc=exc, op="state")
         body["error"] = str(exc)
     return JSONResponse(body)
+
+
+async def api_doctor(request: Request) -> JSONResponse:
+    """Run the diagnosis engine (mooring.doctor) — the hub's Health check.
+
+    On demand only, off the event loop; never part of startup or /api/state.
+    The Copilot probe is appended HERE (the engine sits below ai/ and cannot
+    import it): a slow force-check is fine for an explicit health click."""
+    import asyncio
+    from dataclasses import asdict
+
+    from mooring import doctor
+
+    hub = request.app.state.hub
+    cfg = hub.cfg
+
+    def copilot_probe() -> doctor.ProbeResult:
+        try:
+            st = hub._provider_for().status(force=True)
+        except Exception:  # noqa: BLE001  # a probe never raises; unknown is honest
+            return doctor.ProbeResult(
+                "copilot", "AI copilot", doctor.UNKNOWN,
+                "Copilot could not be checked.",
+                "Use the Copilot menu in the hub header to sign in / check status.",
+            )
+        if not st.available:
+            return doctor.ProbeResult(
+                "copilot", "AI copilot", doctor.WARN,
+                "Copilot isn't available in this build.",
+                "Install the mooring[copilot] extra, or ask your admin to include it.",
+            )
+        if not st.connected:
+            return doctor.ProbeResult(
+                "copilot", "AI copilot", doctor.WARN,
+                "Copilot is installed but not signed in.",
+                "Sign in from the Copilot menu in the hub header.",
+            )
+        detail = f"Connected as @{st.account}." if st.account else "Connected."
+        return doctor.ProbeResult("copilot", "AI copilot", doctor.PASS, detail)
+
+    extra = [copilot_probe] if hub.app_cfg.ai_enabled else []
+    results = await asyncio.to_thread(doctor.run_probes, cfg, extra)
+    telemetry.log_event(
+        "doctor",
+        **{s: sum(1 for r in results if r.status == s) for s in ("pass", "warn", "fail")},
+    )
+    return JSONResponse(
+        {
+            "results": [asdict(r) for r in results],
+            "report": doctor.build_report(results, cfg),
+        }
+    )
 
 
 async def api_setup(request: Request) -> JSONResponse:

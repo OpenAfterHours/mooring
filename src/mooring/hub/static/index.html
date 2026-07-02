@@ -128,6 +128,7 @@
       <option value="dark">&#9789; Dark</option>
       <option value="system">&#9881; System</option>
     </select>
+    <a id="activity-link" class="header-link" href="/activity" title="Recent activity &amp; trash (local to this machine)" aria-label="Activity">&#9201; Activity</a>
     <a id="settings-link" class="header-link" href="/settings" title="Settings &amp; preferences" aria-label="Settings">&#9881; Settings</a>
     <div id="user-info"></div>
   </header>
@@ -165,11 +166,13 @@
         <button id="btn-pull" class="primary">&#8595; Pull</button>
         <button id="btn-push" class="primary">&#8593; Push all</button>
         <button id="btn-propose" title="Upload changes to a review branch and open a pull request on GitHub">&#8599; Propose</button>
+        <button id="btn-recall" class="hidden" title="Undo your last push on GitHub (writes the previous versions back; history keeps the pushed commit)">&#8617; Recall push</button>
         <button id="btn-new">+ New notebook</button>
         <button id="btn-batch" class="hidden" title="Build several notebooks at once from a list of briefs (the AI copilot proposes each; you review and apply)">&#9889; Batch build&hellip;</button>
       </div>
       <div id="summary" class="muted"></div>
       <div id="review-banner" class="muted hidden"></div>
+      <div id="freshness-banner" class="hidden" role="status"></div>
       <div id="adopt-banner" class="hidden"></div>
       <table id="files-table">
         <thead><tr><th>File</th><th>Status</th><th>Actions</th></tr></thead>
@@ -187,7 +190,53 @@
       <div id="log-link" class="hidden"><a target="_blank" rel="noopener" aria-label="Create or view the pull request on GitHub">Create / view the pull request on GitHub</a></div>
     </section>
 
+    <!-- Version history: every pushed version of one file, from the repo's own
+         history (the git-free time machine). View/Diff are read-only; Restore
+         defaults to a sibling copy, and restore-over banks the current bytes
+         first (undo/trash) and flows through normal sync — never silent. -->
+    <section id="history-card" class="card hidden">
+      <h3 id="history-title">History</h3>
+      <div class="muted">Read-only: old versions are never opened in the editor or run.</div>
+      <table id="history-table">
+        <thead><tr><th>Version</th><th>Actions</th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <div class="toolbar">
+        <button id="history-older" class="small">Show older</button>
+        <button id="history-close" class="small">Close</button>
+      </div>
+      <pre id="history-view" class="hidden"></pre>
+    </section>
+
     <div id="error-banner" class="hidden"></div>
+
+    <!-- Open-time staleness confirm: shown only when the row's remote moved
+         (remote changed / deleted remotely / conflict). Three explicit buttons —
+         deliberately a <dialog>, not confirm(): the safe action gets focus and
+         no stray keypress can fire the destructive choice (the actionsMenu
+         lesson). Copy and button visibility are set per-state in app.js. -->
+    <dialog id="stale-dialog">
+      <p id="stale-message"></p>
+      <div class="toolbar">
+        <button id="stale-pull" class="primary">Pull latest and open</button>
+        <button id="stale-open">Open my copy anyway</button>
+        <button id="stale-cancel">Cancel</button>
+      </div>
+    </dialog>
+
+    <!-- Push-guard confirm: the scan found something that looks like a secret,
+         structured PII, or a bulk data export in files about to publish. The
+         flagged files were WITHHELD (clean files already went); "Push anyway"
+         re-sends with per-file confirm tokens. Hidden in block mode. -->
+    <dialog id="guard-dialog">
+      <p id="guard-message"></p>
+      <ul id="guard-findings" class="guard-findings"></ul>
+      <p id="guard-hint" class="muted"></p>
+      <div class="toolbar">
+        <button id="guard-anyway">Push anyway</button>
+        <button id="guard-cancel" class="primary">Go back and fix</button>
+      </div>
+    </dialog>
   </main>
 
   <footer>
@@ -198,12 +247,24 @@
       <pre id="packages" class="pkglist"></pre>
       <div id="env-add-hint" class="muted env-add-hint"></div>
     </details>
+    <details><summary>Health check</summary>
+      <p class="muted">Checks your setup in plain English — network, login,
+        config files, notebook packages. Nothing runs until you click.</p>
+      <div class="toolbar">
+        <button id="health-run" class="small">Run health check</button>
+        <button id="health-copy" class="small hidden" title="A redacted report, safe to paste into a support ticket">Copy report</button>
+      </div>
+      <ul id="health-results" class="health-list"></ul>
+    </details>
   </footer>
 
   <!-- Pure helpers (ChatCore.parseDeviceLogin for the Copilot sign-in); loaded
        before app.js so the global is ready. No DOM/side effects on load. -->
   <script src="/static/chat_core.js"></script>
   <script src="/static/files_tree.js"></script>
+  <script src="/static/freshness.js"></script>
+  <script src="/static/guard_fmt.js"></script>
+  <script src="/static/history_fmt.js"></script>
   <script src="/static/app.js"></script>
   <!-- Decorative backdrop: deterministic starfield + the one-time boat voyage.
        Last in <body> so the scene is already parsed; no DOM/side effects elsewhere. -->

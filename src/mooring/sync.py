@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 
-from mooring import gitsha, manifest as manifest_mod
+from mooring import gitsha, manifest as manifest_mod, trash
 from mooring.config import Config
 from mooring.github import (
     GitHubClientProtocol,
@@ -250,6 +250,13 @@ class SyncResult:
     compare_url: str = ""
     skipped_conflicts: list[str] = field(default_factory=list)
     blocked_conflicts: list[str] = field(default_factory=list)
+    # (rel_path, trash token) for every local pre-image this operation banked
+    # before overwriting/removing the file — the adapters' Undo affordance.
+    trashed: list[tuple[str, str]] = field(default_factory=list)
+    # (rel_path, value-free description) for every candidate the push guard
+    # withheld (see mooring.pushguard) — never pushed silently, never blocked
+    # silently. The adapters turn these into the warn-and-confirm flow.
+    withheld: list[tuple[str, str]] = field(default_factory=list)
 
     def summary(self) -> str:
         parts = []
@@ -559,6 +566,35 @@ def _read_checked(workspace: Path, f: FileStatus, cfg: Config, result: SyncResul
     return data
 
 
+def _bank_pre_image(
+    workspace: Path,
+    rel_path: str,
+    action: str,
+    after_sha: str | None,
+    cap_mb: int,
+    result: SyncResult,
+    replacement: bytes | None = None,
+) -> None:
+    """Deposit the file's current bytes into the local trash before a destructive
+    write, recording ``(rel_path, token)`` on the result so the adapters can offer
+    Undo. Best-effort by design: a trash failure must never block the sync op, and
+    a byte-identical ``replacement`` (nothing is being lost) skips the deposit."""
+    target = workspace / rel_path
+    try:
+        if not target.is_file():
+            return
+        data = target.read_bytes()
+        if replacement is not None and data == replacement:
+            return
+        token = trash.deposit(
+            workspace, rel_path, data, action, after_sha=after_sha, max_file_mb=cap_mb
+        )
+    except OSError:
+        return
+    if token:
+        result.trashed.append((rel_path, token))
+
+
 def _apply_remote_or_keep_both(
     client: GitHubClientProtocol,
     workspace: Path,
@@ -567,20 +603,32 @@ def _apply_remote_or_keep_both(
     remote_sha: str | None,
     strategy: ConflictStrategy,
     result: SyncResult,
+    *,
+    origin: str = "resolve",
+    trash_cap_mb: int = trash.DEFAULT_MAX_FILE_MB,
 ) -> bool:
     """Apply the two conflict strategies pull and resolve share: THEIRS (take the
     remote, or delete locally when the remote is gone) and KEEP_BOTH while the
     remote still exists (save it as a .remote-<sha> copy, keep local pushable).
+
+    THEIRS destroys the user's local edits, so their pre-image is banked in the
+    local trash first (``origin`` labels the entry pull- vs resolve-initiated).
 
     Returns True when it handled the strategy; False leaves the caller to handle the
     cases that legitimately differ between pull and resolve — SKIP, KEEP_BOTH with
     the remote already deleted, and resolve's PUSH_COPY."""
     if strategy is ConflictStrategy.THEIRS:
         if remote_sha is None:
+            _bank_pre_image(workspace, rel_path, f"{origin}-theirs", None, trash_cap_mb, result)
             (workspace / rel_path).unlink(missing_ok=True)
             mft.files.pop(rel_path, None)
         else:
-            _write_blob(workspace, rel_path, client.get_blob(remote_sha))
+            data = client.get_blob(remote_sha)
+            _bank_pre_image(
+                workspace, rel_path, f"{origin}-theirs", remote_sha, trash_cap_mb, result,
+                replacement=data,
+            )
+            _write_blob(workspace, rel_path, data)
             mft.files[rel_path] = remote_sha
         result.pulled += 1
         result.lines.append(f"pulled   {rel_path} (overwrote local edits)")
@@ -606,11 +654,23 @@ def pull(
     for f in report.files:
         if f.state in (FileState.NEW_REMOTE, FileState.REMOTE_CHANGED):
             assert f.remote_sha is not None  # these states always carry a remote sha
-            _write_blob(workspace, f.path, client.get_blob(f.remote_sha))
+            data = client.get_blob(f.remote_sha)
+            # A REMOTE_CHANGED overwrite destroys only manifest-base-equal bytes
+            # (recoverable from GitHub via get_blob), but banking them makes the
+            # recovery one click — and it works offline. NEW_REMOTE has no local
+            # file, so _bank_pre_image no-ops for it.
+            _bank_pre_image(
+                workspace, f.path, "pull-overwrite", f.remote_sha,
+                cfg.trash_max_file_mb, result, replacement=data,
+            )
+            _write_blob(workspace, f.path, data)
             mft.files[f.path] = f.remote_sha
             result.pulled += 1
             result.lines.append(f"pulled   {f.path}")
         elif f.state is FileState.DELETED_REMOTE:
+            _bank_pre_image(
+                workspace, f.path, "pull-remove", None, cfg.trash_max_file_mb, result
+            )
             (workspace / f.path).unlink(missing_ok=True)
             mft.files.pop(f.path, None)
             result.pulled += 1
@@ -620,7 +680,8 @@ def pull(
                 mft.files[f.path] = f.local_sha  # same change on both sides
         elif f.state is FileState.CONFLICT:
             if not _apply_remote_or_keep_both(
-                client, workspace, mft, f.path, f.remote_sha, strategy, result
+                client, workspace, mft, f.path, f.remote_sha, strategy, result,
+                origin="pull", trash_cap_mb=cfg.trash_max_file_mb,
             ):
                 result.skipped_conflicts.append(f.path)
                 result.lines.append(f"conflict {f.path} (skipped — resolve in the hub)")
@@ -726,6 +787,14 @@ def revert(
     target = workspace / rel_path
     if snapshot_fn is not None and target.is_file():
         snapshot_fn(rel_path, target.read_bytes())
+    # Non-.py files have no notebook-undo stack (snapshot_fn only banks .py), so
+    # their pre-image goes to the local trash instead — the two stores stay
+    # separate: a .py Revert keeps its existing snapshot + /api/undo path.
+    if not rel_path.endswith(".py"):
+        _bank_pre_image(
+            workspace, rel_path, "revert", match.base_sha,
+            cfg.trash_max_file_mb, result, replacement=data,
+        )
     _write_blob(workspace, rel_path, data)
     result.reverted += 1
     if match.state is FileState.DELETED_LOCAL:
@@ -737,6 +806,98 @@ def revert(
     return result
 
 
+def history(client: GitHubClientProtocol, cfg: Config, rel_path: str, page: int = 1) -> list[dict]:
+    """One page of ``rel_path``'s version history on cfg.branch, newest first,
+    shaped for humans: sha/short/message (first line)/author/date. The commits
+    API paginates and does not follow renames — history starts at a rename."""
+    rel_path = rel_path.replace("\\", "/")
+    out = []
+    for c in client.list_commits_for_path(rel_path, cfg.branch, page=page):
+        commit = c.get("commit") or {}
+        author = commit.get("author") or {}
+        message = str(commit.get("message") or "")
+        out.append(
+            {
+                "sha": c.get("sha", ""),
+                "short": str(c.get("sha", ""))[:7],
+                "message": message.splitlines()[0] if message else "",
+                "author": (c.get("author") or {}).get("login") or author.get("name") or "",
+                "date": author.get("date", ""),
+            }
+        )
+    return out
+
+
+def restore_version(
+    client: GitHubClientProtocol,
+    cfg: Config,
+    rel_path: str,
+    at: str,
+    *,
+    as_copy: bool = False,
+    snapshot_fn=None,
+) -> SyncResult:
+    """Bring back ``rel_path`` as it existed at commit ``at`` — the git-free
+    time machine (revert reaches only the last-synced checkpoint; this reaches
+    anything ever pushed).
+
+    A pure LOCAL write: no ``put_file``, no manifest mutation — the restored
+    file simply reclassifies on the next status (``new local`` for a copy,
+    ``modified``/``conflict`` for an overwrite) and rides standard sync, so a
+    restore can never silently overwrite the remote. ``as_copy`` writes
+    ``{stem}.restored-{sha7}{suffix}`` beside the file (always safe); an
+    overwrite banks the current bytes first — ``snapshot_fn`` for the ``.py``
+    undo stack (the revert idiom), the local trash for anything else.
+    """
+    rel_path = rel_path.replace("\\", "/")
+    workspace = cfg.workspace()
+    result = SyncResult()
+    try:
+        _, data = client.get_file_at(rel_path, at)
+    except NotFound:
+        result.lines.append(
+            f"{rel_path}: no version at {at[:7]} (the file may not have existed there)"
+        )
+        return result
+    short = at[:7]
+    if as_copy:
+        # "As copy" is the ALWAYS-SAFE path, so it must never overwrite anything:
+        # the name is deterministic, and a copy restored earlier may have been
+        # edited since — uniquify instead of clobbering (byte-identical is a no-op).
+        p = Path(rel_path)
+        copy_path = ""
+        for n in range(1, 100):
+            tail = "" if n == 1 else f"-{n}"
+            candidate = str(
+                p.with_name(f"{p.stem}.restored-{short}{tail}{p.suffix}")
+            ).replace("\\", "/")
+            target = workspace / candidate
+            if not target.is_file() or target.read_bytes() == data:
+                copy_path = candidate
+                break
+        if not copy_path:
+            result.lines.append(f"{rel_path}: too many restored copies of {short} — tidy up")
+            return result
+        _write_blob(workspace, copy_path, data)
+        result.reverted += 1
+        result.lines.append(f"restored {rel_path} @ {short} as {copy_path} (a new local file)")
+        return result
+    target = workspace / rel_path
+    if snapshot_fn is not None and target.is_file():
+        snapshot_fn(rel_path, target.read_bytes())
+    if not rel_path.endswith(".py"):
+        _bank_pre_image(
+            workspace, rel_path, "restore-version", gitsha.blob_sha(data),
+            cfg.trash_max_file_mb, result, replacement=data,
+        )
+    _write_blob(workspace, rel_path, data)
+    result.reverted += 1
+    result.lines.append(
+        f"restored {rel_path} to version {short} (local only — push to share it)"
+    )
+    return result
+
+
 def push(
     client: GitHubClientProtocol,
     cfg: Config,
@@ -744,7 +905,13 @@ def push(
     message: str | None = None,
     throttle: float = 0.8,
     sleep=time.sleep,
+    guard_fn=None,
 ) -> SyncResult:
+    """``guard_fn(rel_path, data) -> list[str]`` (optional) sees the exact bytes
+    about to upload; a non-empty return (value-free finding descriptions)
+    WITHHOLDS the file with a result line — never silently. Passed in rather
+    than imported (the ``snapshot_fn`` idiom), so the sync core stays free of
+    the scanners; see :mod:`mooring.pushguard`."""
     prep = _prepare(client, cfg)
     workspace, mft, report = prep.workspace, prep.mft, prep.report
     result = SyncResult()
@@ -769,10 +936,16 @@ def push(
     last_commit = ""
     touched_review = False
     stale_remote = False
+    # What this push wrote to cfg.branch — path -> {prev, new} blob shas — so
+    # "recall last push" can write the prior state back (see recall()).
+    recall_log: dict[str, dict] = {}
     for index, f in enumerate(candidates):
         if index > 0 and throttle:
             sleep(throttle)  # contents-API writes trip secondary rate limits if rapid
-        outcome = _push_candidate(client, cfg, workspace, mft, review_tree, f, message, result)
+        outcome = _push_candidate(
+            client, cfg, workspace, mft, review_tree, f, message, result,
+            guard_fn=guard_fn, recall_log=recall_log,
+        )
         stale_remote = stale_remote or outcome.stale_remote
         if not outcome.counted:
             continue
@@ -782,7 +955,10 @@ def push(
             last_commit = outcome.commit
         result.pushed += 1
 
-    _finalize_push(workspace, mft, cfg, result, last_commit, touched_review, stale_remote)
+    _finalize_push(
+        workspace, mft, cfg, result, last_commit, touched_review, stale_remote,
+        recall_log=recall_log,
+    )
     return result
 
 
@@ -796,7 +972,19 @@ class _PushOutcome:
     stale_remote: bool = False
 
 
-def _push_candidate(client, cfg, workspace, mft, review_tree, f, message, result) -> _PushOutcome:
+def _withhold(f, findings: list[str], result: SyncResult) -> _PushOutcome:
+    """Record a guard-withheld candidate — visible, never silent (the adapters
+    turn result.withheld into the warn-and-confirm flow)."""
+    result.withheld.extend((f.path, desc) for desc in findings)
+    noun = "finding" if len(findings) == 1 else "findings"
+    result.lines.append(f"withheld {f.path} ({len(findings)} {noun} — fix or acknowledge)")
+    return _PushOutcome()
+
+
+def _push_candidate(
+    client, cfg, workspace, mft, review_tree, f, message, result,
+    *, guard_fn=None, recall_log=None,
+) -> _PushOutcome:
     """Push or delete ONE candidate to its target branch (cfg.branch, or the open
     proposal's review branch). Mutates ``mft`` + ``result``; returns the per-file effects
     push() folds into its accumulators."""
@@ -806,10 +994,16 @@ def _push_candidate(client, cfg, workspace, mft, review_tree, f, message, result
     dest = " → review branch (PR)" if in_review else ""
     if f.state is FileState.DELETED_LOCAL:
         response = _push_delete(client, mft, f, target, base, in_review, dest, message, result)
+        if response is not None and not in_review and recall_log is not None:
+            recall_log[f.path] = {"prev": f.base_sha, "new": None}
     else:
         data = _read_checked(workspace, f, cfg, result)
         if data is None:
             return _PushOutcome()
+        if guard_fn is not None:
+            findings = guard_fn(f.path, data)
+            if findings:
+                return _withhold(f, findings, result)
         try:
             response = client.put_file(
                 f.path, data, message or f"Update {f.path} via mooring", target, base_sha=base
@@ -821,6 +1015,8 @@ def _push_candidate(client, cfg, workspace, mft, review_tree, f, message, result
         else:
             mft.files[f.path] = response["content"]["sha"]
             mft.review_files.pop(f.path, None)
+            if recall_log is not None:
+                recall_log[f.path] = {"prev": f.base_sha, "new": response["content"]["sha"]}
         result.lines.append(f"pushed   {f.path}{dest}")
     commit = "" if in_review else (response or {}).get("commit", {}).get("sha", "")
     return _PushOutcome(counted=True, commit=commit, touched_review=in_review)
@@ -867,9 +1063,14 @@ def _push_conflict(f, base, in_review, result) -> _PushOutcome:
     return _PushOutcome(stale_remote=stale_remote)
 
 
-def _finalize_push(workspace, mft, cfg, result, last_commit, touched_review, stale_remote) -> None:
+def _finalize_push(
+    workspace, mft, cfg, result, last_commit, touched_review, stale_remote,
+    *, recall_log=None,
+) -> None:
     """Persist the manifest after a push: clear an emptied review branch, surface the PR
-    compare URL, advance the sync base, and force a refetch when the remote went stale."""
+    compare URL, advance the sync base, and force a refetch when the remote went stale.
+    A push that wrote to cfg.branch also replaces the recallable ``last_push`` record
+    wholesale — only the LAST push is recallable; that is the promise in the name."""
     if not mft.review_files:
         mft.review_branch = ""
     if touched_review and mft.review_branch:
@@ -883,8 +1084,100 @@ def _finalize_push(workspace, mft, cfg, result, last_commit, touched_review, sta
         # Drop the head-commit short-circuit in _remote_entries so the next pull
         # refetches the live tree and rebuilds a consistent manifest.
         mft.head_commit = ""
+    if recall_log:
+        mft.last_push = dict(recall_log)
+        mft.last_push_branch = cfg.branch
+    elif result.pushed or result.withheld or result.blocked_conflicts:
+        # The push did SOMETHING (review-branch writes, withheld or conflicted
+        # candidates) but recorded nothing recallable — a stale record from an
+        # earlier push must not survive it, or "Recall last push" would revert
+        # an older push than the user's last action. A true no-op push (nothing
+        # to do) keeps the record: nothing new happened.
+        mft.last_push = {}
+        mft.last_push_branch = ""
     mft.branch = cfg.branch
     manifest_mod.save(workspace, mft)
+
+
+def recall(client: GitHubClientProtocol, cfg: Config) -> SyncResult:
+    """Write the pre-push state of the LAST push back to cfg.branch — "get it off
+    the branch, now" after a bad push.
+
+    Per file: a changed file gets its previous blob re-pushed with the pushed
+    sha as the optimistic base (``put_file(..., base_sha=<new>)``), so if a
+    teammate pushed on top since, GitHub rejects it and the conflict is loud —
+    exactly like any stale write. A file the push CREATED is deleted; a file
+    the push DELETED is re-created. Local files are untouched (they simply
+    reclassify on the next status), and the record is consumed — only the last
+    push is recallable, once.
+
+    Honest by design: **git history still retains the recalled commit** — a
+    leaked secret must still be rotated; recall only stops the bleeding on the
+    branch head.
+    """
+    workspace = cfg.workspace()
+    mft = manifest_mod.load(workspace)
+    result = SyncResult()
+    if not mft.last_push:
+        result.lines.append("nothing to recall (no recorded push)")
+        return result
+    if mft.last_push_branch and mft.last_push_branch != cfg.branch:
+        result.lines.append(
+            f"nothing to recall on {cfg.branch} (the last push went to "
+            f"{mft.last_push_branch})"
+        )
+        return result
+
+    done: list[str] = []
+    try:
+        for path, rec in sorted(mft.last_push.items()):
+            prev, new = rec.get("prev"), rec.get("new")
+            try:
+                if prev is None:
+                    # The push created it — recall removes it from the branch head.
+                    client.delete_file(path, f"Recall {path} via mooring", cfg.branch, new)
+                    mft.files.pop(path, None)
+                    result.lines.append(f"recalled {path} (removed from {cfg.branch})")
+                else:
+                    data = client.get_blob(prev)
+                    response = client.put_file(
+                        path, data, f"Recall {path} via mooring", cfg.branch, base_sha=new
+                    )
+                    mft.files[path] = response["content"]["sha"]
+                    result.lines.append(f"recalled {path} (previous version restored)")
+            except RemoteConflict:
+                result.blocked_conflicts.append(path)
+                result.lines.append(
+                    f"conflict {path} (cannot recall — a teammate pushed on top; pull first)"
+                )
+                continue
+            except NotFound:
+                result.lines.append(f"could not recall {path} (previous version unavailable)")
+                continue
+            done.append(path)
+            result.pushed += 1
+    except Exception:
+        # A mid-recall failure (rate limit, network) must not lose the files
+        # already recalled: persist their manifest updates, drop them from the
+        # record so a retry doesn't double-recall, keep the rest recallable,
+        # and force a live refetch. The error still propagates to the caller.
+        mft.last_push = {p: r for p, r in mft.last_push.items() if p not in done}
+        mft.head_commit = ""
+        manifest_mod.save(workspace, mft)
+        raise
+
+    if result.pushed:
+        result.lines.append(
+            "note: the recalled commit remains in the repo's history — if a secret "
+            "leaked, rotate it."
+        )
+    # Consumed either way: a recall is a one-shot on the recorded push. Force the
+    # next status/pull to refetch the live tree rather than trust the cache.
+    mft.last_push = {}
+    mft.last_push_branch = ""
+    mft.head_commit = ""
+    manifest_mod.save(workspace, mft)
+    return result
 
 
 def propose(
@@ -895,10 +1188,12 @@ def propose(
     throttle: float = 0.8,
     sleep=time.sleep,
     now=time.localtime,
+    guard_fn=None,
 ) -> SyncResult:
     """Upload push candidates to an auto-created review branch instead of
     cfg.branch, so the user can open a pull request on GitHub. The sync base
-    (manifest files/head_commit/branch) stays pointed at cfg.branch."""
+    (manifest files/head_commit/branch) stays pointed at cfg.branch.
+    ``guard_fn`` withholds flagged candidates exactly as in :func:`push`."""
     prep = _prepare(client, cfg)
     workspace, mft, report = prep.workspace, prep.mft, prep.report
     result = SyncResult()
@@ -948,6 +1243,11 @@ def propose(
             data = _read_checked(workspace, f, cfg, result)
             if data is None:
                 continue
+            if guard_fn is not None:
+                findings = guard_fn(f.path, data)
+                if findings:
+                    _withhold(f, findings, result)
+                    continue
             try:
                 response = client.put_file(
                     f.path,
@@ -990,8 +1290,12 @@ def resolve(
     rel_path: str,
     strategy: ConflictStrategy,
     username: str = "",
+    guard_fn=None,
 ) -> SyncResult:
-    """Resolve a single conflicted file (hub per-file actions)."""
+    """Resolve a single conflicted file (hub per-file actions). ``guard_fn``
+    (see :func:`push`) scans PUSH_COPY's upload — the one resolve strategy that
+    writes local bytes to the shared branch — so the push guard covers every
+    road into the repo, including this one."""
     workspace = cfg.workspace()
     mft = manifest_mod.load(workspace)
     head = client.get_branch_head(cfg.branch)
@@ -999,7 +1303,10 @@ def resolve(
     remote_sha = remote.get(rel_path)
     result = SyncResult()
 
-    if _apply_remote_or_keep_both(client, workspace, mft, rel_path, remote_sha, strategy, result):
+    if _apply_remote_or_keep_both(
+        client, workspace, mft, rel_path, remote_sha, strategy, result,
+        origin="resolve", trash_cap_mb=cfg.trash_max_file_mb,
+    ):
         pass  # THEIRS or KEEP_BOTH-with-remote-present handled by the shared helper
     elif strategy is ConflictStrategy.KEEP_BOTH:  # helper declined: the remote was deleted
         mft.files.pop(rel_path, None)  # remote deleted; local survives as new
@@ -1009,11 +1316,30 @@ def resolve(
         suffix = username or "copy"
         copy_path = str(p.with_name(f"{p.stem}-{suffix}{p.suffix}")).replace("\\", "/")
         data = gitsha.read_for_push(workspace / rel_path, rel_path)
+        if guard_fn is not None:
+            findings = guard_fn(copy_path, data)
+            if findings:
+                # Withheld, not resolved: the conflict stays visible and the
+                # adapters surface the findings exactly like a withheld push.
+                result.withheld.extend((copy_path, desc) for desc in findings)
+                noun = "finding" if len(findings) == 1 else "findings"
+                result.lines.append(
+                    f"withheld {copy_path} ({len(findings)} {noun} — fix or acknowledge)"
+                )
+                manifest_mod.save(workspace, mft)
+                return result
         _write_blob(workspace, copy_path, data)
         response = client.put_file(
             copy_path, data, f"Add {copy_path} via mooring (conflict copy)", cfg.branch
         )
         mft.files[copy_path] = response["content"]["sha"]
+        # The local bytes survive at copy_path (and were just pushed), so this
+        # deposit is redundancy — but if the copy is later deleted, it is the
+        # only pre-image left, and banking it costs one small blob.
+        _bank_pre_image(
+            workspace, rel_path, "resolve-push-copy", remote_sha,
+            cfg.trash_max_file_mb, result,
+        )
         if remote_sha is None:
             (workspace / rel_path).unlink(missing_ok=True)
             mft.files.pop(rel_path, None)

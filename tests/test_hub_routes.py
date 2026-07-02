@@ -20,6 +20,7 @@ EXPECTED_ROUTES = {
     ("/api/repo/switch", ("POST",), "api_repo_switch"),
     ("/api/repo/remove", ("POST",), "api_repo_remove"),
     ("/api/ui/theme", ("POST",), "api_set_theme"),
+    ("/api/doctor", ("POST",), "api_doctor"),  # the on-demand health check
     ("/settings", ("GET",), "settings_page"),
     ("/api/settings", ("GET",), "api_get_settings"),
     ("/api/settings", ("POST",), "api_set_settings"),
@@ -28,17 +29,28 @@ EXPECTED_ROUTES = {
     ("/api/login/poll", ("GET",), "api_login_poll"),
     ("/api/logout", ("POST",), "api_logout"),
     ("/api/discover", ("GET",), "api_discover"),
+    ("/api/freshness", ("GET",), "api_freshness"),  # staleness guard's near-open head check
     ("/api/adopt", ("POST",), "api_adopt"),
     ("/api/pull", ("POST",), "api_pull"),
     ("/api/push", ("POST",), "api_push"),
     ("/api/propose", ("POST",), "api_propose"),
     ("/api/resolve", ("POST",), "api_resolve"),
+    ("/api/recall", ("POST",), "api_recall"),  # push guard's "recall last push"
     ("/api/new", ("POST",), "api_new"),
     ("/api/open", ("POST",), "api_open"),
     ("/api/reveal", ("POST",), "api_reveal"),
     ("/api/delete", ("POST",), "api_delete"),
     ("/api/rollback", ("POST",), "api_rollback"),
     ("/api/undo", ("POST",), "api_undo"),
+    # The git-free time machine (roadmap: version-history).
+    ("/api/history", ("GET",), "api_history"),
+    ("/api/history/file", ("GET",), "api_history_file"),
+    ("/api/restore", ("POST",), "api_restore"),
+    # The local safety net: the trash + activity ledger (roadmap: local-safety-net).
+    ("/activity", ("GET",), "activity_page"),
+    ("/api/trash", ("GET",), "api_trash"),
+    ("/api/trash/restore", ("POST",), "api_trash_restore"),
+    ("/api/activity", ("GET",), "api_activity"),
     ("/ai/chat", ("GET",), "chat_page"),
     ("/api/ai/datasets", ("GET",), "api_chat_datasets"),
     ("/api/ai/models", ("GET",), "api_chat_models"),

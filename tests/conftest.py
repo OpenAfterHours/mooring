@@ -34,6 +34,11 @@ class FakeClient:
         self.trees: dict[str, dict[str, str]] = {DEFAULT_BRANCH: {}}
         self.commit_count = 0
         self.heads: dict[str, str] = {DEFAULT_BRANCH: "head-0"}
+        # Every commit ever made, oldest first: (sha, branch, tree snapshot,
+        # message) — what list_commits_for_path/get_file_at answer from.
+        self.commit_log: list[dict] = [
+            {"sha": "head-0", "branch": DEFAULT_BRANCH, "tree": {}, "message": "init"}
+        ]
         for path, data in (files or {}).items():
             self.seed(path, data)
 
@@ -52,7 +57,7 @@ class FakeClient:
         sha = gitsha.blob_sha(data)
         self.blobs[sha] = data
         self.tree[path] = sha
-        self._advance(DEFAULT_BRANCH)
+        self._advance(DEFAULT_BRANCH, message=f"Seed {path}")
 
     def remove(self, path: str) -> None:
         del self.tree[path]
@@ -68,9 +73,17 @@ class FakeClient:
         del self.trees[branch]
         del self.heads[branch]
 
-    def _advance(self, branch: str) -> str:
+    def _advance(self, branch: str, message: str = "update") -> str:
         self.commit_count += 1
         self.heads[branch] = f"head-{self.commit_count}"
+        self.commit_log.append(
+            {
+                "sha": self.heads[branch],
+                "branch": branch,
+                "tree": dict(self.trees[branch]),
+                "message": message,
+            }
+        )
         return self.heads[branch]
 
     # -- GitHubClient interface ------------------------------------------------
@@ -123,7 +136,38 @@ class FakeClient:
         sha = gitsha.blob_sha(content)
         self.blobs[sha] = content
         tree[path] = sha
-        return {"content": {"sha": sha}, "commit": {"sha": self._advance(branch)}}
+        return {"content": {"sha": sha}, "commit": {"sha": self._advance(branch, message)}}
+
+    def list_commits_for_path(self, path, branch, page=1, per_page=30):
+        """The commits (newest first) whose tree changed `path` on `branch` —
+        the FakeClient's answer to the GitHub commits-list API."""
+        entries = [c for c in self.commit_log if c["branch"] == branch]
+        entries.reverse()  # newest first; parent of entries[i] is entries[i+1]
+        touched = []
+        for i, c in enumerate(entries):
+            parent = entries[i + 1]["tree"] if i + 1 < len(entries) else {}
+            if c["tree"].get(path) != parent.get(path):
+                touched.append(
+                    {
+                        "sha": c["sha"],
+                        "commit": {
+                            "message": c["message"],
+                            "author": {"name": "phil", "date": "2026-07-02T09:00:00Z"},
+                        },
+                        "author": {"login": "phil"},
+                    }
+                )
+        start = (page - 1) * per_page
+        return touched[start : start + per_page]
+
+    def get_file_at(self, path, ref):
+        for c in self.commit_log:
+            if c["sha"] == ref:
+                sha = c["tree"].get(path)
+                if sha is None:
+                    raise NotFound(f"{path} at {ref}")
+                return sha, self.blobs[sha]
+        raise NotFound(f"ref {ref}")
 
     def delete_file(self, path, message, branch, base_sha):
         if branch not in self.trees:
@@ -132,7 +176,7 @@ class FakeClient:
         if tree.get(path) != base_sha:
             raise RemoteConflict("remote changed")
         del tree[path]
-        return {"commit": {"sha": self._advance(branch)}}
+        return {"commit": {"sha": self._advance(branch, message)}}
 
 
 @pytest.fixture

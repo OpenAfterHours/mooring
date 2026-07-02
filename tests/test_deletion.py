@@ -149,3 +149,47 @@ def test_delete_does_not_follow_symlink_out_of_workspace(tmp_path):
     assert victim.exists()  # a file outside the workspace is never touched
     assert "reports/Sales.SemanticModel/escape/victim.txt" not in removed
     assert "reports/Sales.SemanticModel/model.tmdl" in removed  # in-workspace file still deleted
+
+
+# -- the local safety net: every removed file is banked in the trash ---------
+
+
+def test_delete_banks_every_removed_file(tmp_path):
+    from mooring import trash
+
+    write(tmp_path, "notebooks/a.py", "mine")
+    collected = []
+    deletion.delete(tmp_path, "notebooks/a.py", on_trash=lambda rel, tok: collected.append((rel, tok)))
+    assert [rel for rel, _ in collected] == ["notebooks/a.py"]
+    assert trash.entries(tmp_path)[0]["action"] == "delete"
+    # One restore brings it back byte-for-byte.
+    assert trash.restore(tmp_path, collected[0][1]) == "notebooks/a.py"
+    assert (tmp_path / "notebooks/a.py").read_text("utf-8") == "mine"
+
+
+def test_delete_banks_all_pbip_members(tmp_path):
+    from mooring import trash
+
+    write(tmp_path, "reports/Sales.pbip", "{}")
+    write(tmp_path, "reports/Sales.SemanticModel/.platform", "{}")
+    write(tmp_path, "reports/Sales.SemanticModel/model.tmdl", "m")
+    collected = []
+    removed = deletion.delete(
+        tmp_path, "reports/Sales.pbip", on_trash=lambda rel, tok: collected.append((rel, tok))
+    )
+    assert sorted(rel for rel, _ in collected) == sorted(removed)
+    # Restoring every member reassembles the artifact.
+    for _, token in collected:
+        trash.restore(tmp_path, token)
+    assert (tmp_path / "reports/Sales.SemanticModel/model.tmdl").read_text("utf-8") == "m"
+
+
+def test_delete_over_cap_file_still_deletes_without_banking(tmp_path):
+    write(tmp_path, "notebooks/big.py", "x" * 64)
+    collected = []
+    deletion.delete(
+        tmp_path, "notebooks/big.py", trash_cap_mb=0,
+        on_trash=lambda rel, tok: collected.append((rel, tok)),
+    )
+    assert collected == []  # over the cap: not banked...
+    assert not (tmp_path / "notebooks/big.py").exists()  # ...but still deleted

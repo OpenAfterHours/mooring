@@ -41,3 +41,31 @@ def test_save_without_review_omits_key(tmp_path):
     manifest.save(tmp_path, manifest.Manifest(branch="main"))
     raw = manifest.manifest_path(tmp_path).read_text("utf-8")
     assert "review" not in raw
+
+
+def test_last_push_roundtrips(tmp_path):
+    from mooring import manifest
+
+    m = manifest.Manifest(
+        branch="main",
+        files={"notebooks/a.py": "sha-new"},
+        last_push={
+            "notebooks/a.py": {"prev": "sha-old", "new": "sha-new"},
+            "notebooks/new.py": {"prev": None, "new": "sha-n"},
+        },
+        last_push_branch="main",
+    )
+    manifest.save(tmp_path, m)
+    loaded = manifest.load(tmp_path)
+    assert loaded.last_push == m.last_push
+    assert loaded.last_push_branch == "main"
+
+
+def test_manifest_without_last_push_still_loads(tmp_path):
+    from mooring import manifest
+
+    m = manifest.Manifest(branch="main", files={"a.py": "s"})
+    manifest.save(tmp_path, m)  # writes no last_push section (empty)
+    loaded = manifest.load(tmp_path)
+    assert loaded.last_push == {}
+    assert loaded.last_push_branch == ""

@@ -26,6 +26,7 @@ from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
 from mooring import (
+    activity,
     auth,
     config,
     notebook_template,
@@ -34,6 +35,7 @@ from mooring import (
     shadow,
     sync,
     telemetry,
+    trash,
     workspace_config,
 )
 from mooring.app import notebooks as nb_ops
@@ -95,6 +97,10 @@ class Hub:
         # path → (mtime_ns, is_notebook). /api/state re-lists on every refresh, so this
         # avoids re-reading every .py off disk each time; a changed mtime invalidates it.
         self._notebook_cache: dict[str, tuple[int, bool]] = {}
+        # The branch head each workspace's last /api/state render was computed from,
+        # so /api/freshness can answer "has the remote moved since what you're looking
+        # at?" with one fast ref lookup (routes/sync.api_freshness). Keyed like editors.
+        self._state_heads: dict[str, str] = {}
 
     # -- helpers -------------------------------------------------------------
 
@@ -317,6 +323,9 @@ class Hub:
                     if f.remote_sha is not None and cfg.is_configured
                     else {}
                 ),
+                # The remote blob sha keys the staleness dialog's session dismissals
+                # ("Open my copy anyway" re-arms only when the remote moves AGAIN).
+                **({"remote_sha": f.remote_sha} if f.remote_sha is not None else {}),
             }
             for f in report.files
         ]
@@ -536,12 +545,21 @@ class Hub:
 
 
 
-    def _sync_op(self, name: str, op) -> JSONResponse:
+    def _activity(self, op: str, **fields) -> None:
+        """Append to the workspace's LOCAL activity ledger (activity.py) — the
+        "what just happened?" journal, distinct from the opt-in central telemetry
+        (which never carries file paths). Best-effort by construction."""
+        activity.record(self.cfg.workspace(), op, **fields)
+
+    def _sync_op_body(self, name: str, op) -> tuple[dict, int]:
+        """Run one sync operation and shape its JSON body + status. Split out of
+        :meth:`_sync_op` so the guarded push/propose endpoints can append their
+        warn-and-confirm fields before the response is sealed."""
         try:
             result = op()
         except (GitHubError, OSError) as exc:
             telemetry.log_error(exc=exc, op=name)
-            return JSONResponse({"error": str(exc)}, status_code=502)
+            return {"error": str(exc)}, 502
         telemetry.log_event(
             name,
             pulled=result.pulled,
@@ -550,11 +568,25 @@ class Hub:
             conflicts=len(result.skipped_conflicts) + len(result.blocked_conflicts),
             lines=len(result.lines),
         )
+        self._activity(
+            name,
+            summary=result.summary(),
+            lines=result.lines[:20],
+            trashed=[{"path": p, "token": t} for p, t in result.trashed],
+        )
         body = {"lines": result.lines, "summary": result.summary()}
+        if result.trashed:
+            # The Undo affordance: local pre-images banked before this operation
+            # overwrote/removed files (the frontend shows a toast per entry).
+            body["trashed"] = [{"path": p, "token": t} for p, t in result.trashed]
         if result.review_branch:
             body["review_branch"] = result.review_branch
             body["compare_url"] = result.compare_url
-        return JSONResponse(body)
+        return body, 200
+
+    def _sync_op(self, name: str, op) -> JSONResponse:
+        body, status = self._sync_op_body(name, op)
+        return JSONResponse(body, status_code=status)
 
 
 
@@ -819,6 +851,7 @@ def create_app(hub: Hub) -> Starlette:
             Route("/api/repo/switch", setup.api_repo_switch, methods=["POST"]),
             Route("/api/repo/remove", setup.api_repo_remove, methods=["POST"]),
             Route("/api/ui/theme", setup.api_set_theme, methods=["POST"]),
+            Route("/api/doctor", setup.api_doctor, methods=["POST"]),
             Route("/settings", pages.settings_page),
             Route("/api/settings", settings.api_get_settings),
             Route("/api/settings", settings.api_set_settings, methods=["POST"]),
@@ -827,17 +860,26 @@ def create_app(hub: Hub) -> Starlette:
             Route("/api/login/poll", setup.api_login_poll),
             Route("/api/logout", setup.api_logout, methods=["POST"]),
             Route("/api/discover", sync_routes.api_discover),
+            Route("/api/freshness", sync_routes.api_freshness),
             Route("/api/adopt", sync_routes.api_adopt, methods=["POST"]),
             Route("/api/pull", sync_routes.api_pull, methods=["POST"]),
             Route("/api/push", sync_routes.api_push, methods=["POST"]),
             Route("/api/propose", sync_routes.api_propose, methods=["POST"]),
             Route("/api/resolve", sync_routes.api_resolve, methods=["POST"]),
+            Route("/api/recall", sync_routes.api_recall, methods=["POST"]),
             Route("/api/new", files.api_new, methods=["POST"]),
             Route("/api/open", files.api_open, methods=["POST"]),
             Route("/api/reveal", files.api_reveal, methods=["POST"]),
             Route("/api/delete", files.api_delete, methods=["POST"]),
             Route("/api/rollback", files.api_rollback, methods=["POST"]),
             Route("/api/undo", files.api_undo, methods=["POST"]),
+            Route("/api/history", files.api_history),
+            Route("/api/history/file", files.api_history_file),
+            Route("/api/restore", files.api_restore, methods=["POST"]),
+            Route("/activity", pages.activity_page),
+            Route("/api/trash", files.api_trash),
+            Route("/api/trash/restore", files.api_trash_restore, methods=["POST"]),
+            Route("/api/activity", files.api_activity),
             Route("/ai/chat", pages.chat_page),
             Route("/api/ai/datasets", chat.api_chat_datasets),
             Route("/api/ai/models", chat.api_chat_models),
@@ -875,6 +917,20 @@ def run_hub(app_cfg: config.AppConfig, open_browser: bool = True, port: int | No
     port = port or free_port()
     url = f"http://127.0.0.1:{port}/"
     telemetry.log_event("hub_start")
+
+    # Trash retention runs at start, in the background and best-effort — a full
+    # or locked store must never delay or break the hub coming up.
+    def _prune_trash() -> None:
+        with contextlib.suppress(Exception):
+            cfg = app_cfg.config_for(None)
+            trash.prune(
+                cfg.workspace(),
+                keep_days=cfg.trash_keep_days,
+                keep_per_file=cfg.trash_keep_per_file,
+                max_total_mb=cfg.trash_max_total_mb,
+            )
+
+    threading.Thread(target=_prune_trash, name="trash-prune", daemon=True).start()
     print(f"mooring hub running at {url} (Ctrl+C to quit)")
     if open_browser:
         threading.Timer(0.8, webbrowser.open, args=(url,)).start()

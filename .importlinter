@@ -36,6 +36,8 @@ source_modules =
     mooring.gitsha
     mooring.shadow
     mooring.reveal
+    mooring.trash
+    mooring.activity
 forbidden_modules =
     mooring.config
     mooring.config_store
@@ -72,6 +74,7 @@ forbidden_modules =
     mooring.editor
     mooring.schema
     mooring.ai
+    mooring.pushguard
     mooring.app
     mooring.hub
     mooring.cli
@@ -86,6 +89,7 @@ source_modules =
     mooring.deletion
 forbidden_modules =
     mooring.ai
+    mooring.pushguard
     mooring.app
     mooring.editor
     mooring.hub
@@ -96,6 +100,7 @@ name = L3 AI orchestration sits below the adapters and never imports the web hub
 type = forbidden
 source_modules =
     mooring.ai
+    mooring.pushguard
 forbidden_modules =
     mooring.app
     mooring.hub
@@ -107,6 +112,18 @@ type = forbidden
 source_modules =
     mooring.app
 forbidden_modules =
+    mooring.hub
+    mooring.cli
+
+[importlinter:contract:doctor-below-adapters]
+name = The diagnosis engine (doctor.py) sits below ai/ and the adapters — the Copilot probe is appended BY the adapters (each may import both), never by the engine
+type = forbidden
+source_modules =
+    mooring.doctor
+forbidden_modules =
+    mooring.ai
+    mooring.pushguard
+    mooring.app
     mooring.hub
     mooring.cli
 
@@ -145,6 +162,8 @@ source_modules =
     mooring.gitsha
     mooring.shadow
     mooring.reveal
+    mooring.trash
+    mooring.activity
     mooring.config
     mooring.config_store
     mooring.ai_config
@@ -159,6 +178,10 @@ forbidden_modules =
     marimo
     copilot
     spacy
+# mooring.pushguard is deliberately NOT a source here: it imports ai/pii.py,
+# whose optional NER hooks give it a STATIC (function-local, lazily executed)
+# path to spaCy that this no-indirect contract would count. The guard is an
+# adapter-layer concern, not part of the frozen core's lean surface.
 # Deliberately NOT requests: sync -> github -> requests is the product's
 # legitimate GitHub HTTP path (requests is a core dep, not a heavy optional).
 # No allow_indirect_imports here, so a transitive route through a helper module
@@ -184,6 +207,7 @@ source_modules =
     mooring.ai.secrets
     mooring.ai.session
     mooring.ai.tools
+    mooring.pushguard
     mooring.app
     mooring.hub
     mooring.cli

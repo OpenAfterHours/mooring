@@ -33,6 +33,12 @@ class Manifest:
     # (this is what let a newly-added folder stay invisible to pull).
     scope_folders: tuple[str, ...] | None = None
     scope_exclude: tuple[str, ...] | None = None
+    # What the LAST push wrote to cfg.branch: path -> {"prev": sha|None,
+    # "new": sha|None}, replaced wholesale on every push. sync.recall() uses it
+    # to write the pre-push state back ("recall last push"); prev None = the
+    # push created the file, new None = the push deleted it.
+    last_push: dict[str, dict] = field(default_factory=dict)
+    last_push_branch: str = ""
 
 
 def manifest_path(workspace: Path) -> Path:
@@ -46,6 +52,7 @@ def load(workspace: Path) -> Manifest:
     data = json.loads(path.read_text("utf-8"))
     review = data.get("review") or {}
     scope = data.get("scope") or {}
+    last_push = data.get("last_push") or {}
     folders = scope.get("folders")
     exclude = scope.get("exclude")
     return Manifest(
@@ -57,6 +64,8 @@ def load(workspace: Path) -> Manifest:
         review_files=dict(review.get("files", {})),
         scope_folders=tuple(folders) if folders is not None else None,
         scope_exclude=tuple(exclude) if exclude is not None else None,
+        last_push=dict(last_push.get("files", {})),
+        last_push_branch=str(last_push.get("branch", "")),
     )
 
 
@@ -78,6 +87,11 @@ def save(workspace: Path, manifest: Manifest) -> None:
         payload["scope"] = {
             "folders": list(manifest.scope_folders or ()),
             "exclude": list(manifest.scope_exclude or ()),
+        }
+    if manifest.last_push:
+        payload["last_push"] = {
+            "branch": manifest.last_push_branch,
+            "files": dict(sorted(manifest.last_push.items())),
         }
     tmp = path.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(payload, indent=2), "utf-8")

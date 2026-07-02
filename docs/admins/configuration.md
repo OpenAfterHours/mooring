@@ -141,6 +141,45 @@ The same `exclude` applies to the local scan **and** the remote tree, so an
 excluded path stays invisible to both pull and push (it is never uploaded, and a
 teammate's matching file is never pulled or deleted).
 
+### `[trash]`
+
+Before mooring overwrites or removes a local file on the user's behalf (a
+conflict's "Use remote", pull updates/removals, delete, a data-file revert), the
+file's current bytes are saved to `<workspace>/.mooring/trash` so the action can
+be undone — a toast in the hub, the Trash panel on the **Activity** page, or
+`mooring trash list` / `restore`. **Strictly local**: the trash and the activity
+journal live in the `.mooring` state folder, never sync to the team repo, and
+are separate from [central logging](#central-logging) (which never carries file
+paths or contents).
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `keep_days` | `14` | Drop saved pre-images older than this. |
+| `keep_per_file` | `10` | Keep at most this many pre-images per file. |
+| `max_file_mb` | `45` | Don't bank files larger than this (the action still runs). |
+| `max_total_mb` | `200` | Total store cap; oldest entries evicted first. |
+
+### `[guard]` — in the synced `mooring.toml`, not here
+
+The **push guard** scans every outgoing file for things that look like secrets,
+structured PII, or bulk data exports, and withholds flagged files behind an
+explicit confirm (see [why the copilot can't see your data](ai-privacy.md) — the
+same best-effort detectors watch both channels). The default policy is
+`warn` (confirmable). To make findings a hard stop for the whole team, set, in
+the repo's **synced** `mooring.toml` (so the policy travels with the repo and is
+visible in its history):
+
+```toml
+[guard]
+push = "block"   # findings must be fixed or pragma-suppressed; no override
+```
+
+A reviewed false positive is retired per line with a `# mooring: push-ok`
+comment — visible in the diff, per finding. There is deliberately no global off
+switch. `mooring scan` runs the same scan without pushing, and `mooring recall`
+/ the hub's **Recall push** undoes the last push on the branch head (the pushed
+commit remains in git history — a leaked secret must still be rotated).
+
 ### `[workspace]`
 
 | Key | Default | Meaning |

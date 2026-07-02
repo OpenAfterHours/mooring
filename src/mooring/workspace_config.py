@@ -4,7 +4,7 @@ Unlike the user config (``config_store.py``, which is per-machine), this file
 lives at the workspace root and rides pull/push/propose like any tracked file —
 so a setting written here travels to every teammate who syncs the repo.
 
-It carries these, all PATHS only — never a value:
+It carries these — paths and policy tokens only, never a data value:
 
 - ``[ai] disabled_notebooks`` — the per-notebook AI opt-out, the off switch that
   stops the copilot being opened on a notebook by mistake (e.g. one that handles
@@ -15,6 +15,9 @@ It carries these, all PATHS only — never a value:
 - ``[sync] folders`` — extra synced sub-folders (e.g. a uv-workspace package's
   notebooks/) registered when a notebook is created there, so the folder rides
   pull/push for the whole team. ADDITIVE — see :func:`merge_extra_folders`.
+- ``[guard] push`` — the push guard's team policy: ``"warn"`` (the default;
+  findings need an explicit acknowledge) or ``"block"`` (findings must be fixed
+  or pragma-suppressed — no override). See :mod:`mooring.pushguard`.
 """
 
 from __future__ import annotations
@@ -206,6 +209,21 @@ def set_shadow_ignored(workspace: Path, notebook_rel: str, ignored: bool) -> boo
         else:
             config_path(workspace).unlink(missing_ok=True)
     return ignored
+
+
+# -- push-guard policy ----------------------------------------------------------
+
+
+def guard_mode(workspace: Path) -> str:
+    """The team's push-guard policy from ``[guard] push``: ``"warn"`` (default)
+    or ``"block"``. Fails open to ``"warn"`` like the rest of the read side — a
+    malformed shared file must never wedge the whole team's pushes, and any
+    unknown value is treated as the default rather than an error."""
+    guard = _read_data(workspace).get("guard")
+    if not isinstance(guard, dict):
+        return "warn"
+    value = str(guard.get("push", "warn")).strip().lower()
+    return value if value == "block" else "warn"
 
 
 # -- synced notebook folders --------------------------------------------------

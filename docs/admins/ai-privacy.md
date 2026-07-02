@@ -236,6 +236,18 @@ Configure it under `[ai.pii]`: `enabled` (master switch), `block_prompt`
 (hold-and-confirm vs. a warn-only advisory on the chat prompt), and
 `scan_notebook_source` (the source/schema banner).
 
+### The same scanners also watch the push channel
+
+Since v0.5 the **push guard** points these detectors (plus the secret scanner)
+at a second, always-on channel: files about to be **pushed to the team repo**.
+A flagged file is withheld with a value-free `path:line kind` finding and an
+explicit confirm ("Push anyway"), which the synced `mooring.toml` can escalate
+to a hard block (`[guard] push = "block"`). This changes **nothing** about the
+AI channel — same detectors, second consumer — and like them it is best-effort
+defence in depth, not a guarantee: a clean push scan does not mean a file is
+value-free. See the roadmap page
+[push guard](../developers/roadmap/push-guard.md) for the design.
+
 ## Name detection (opt-in, local NER)
 
 A person's name — `where name == "Jane Smith"` — has no checksum or fixed shape, so

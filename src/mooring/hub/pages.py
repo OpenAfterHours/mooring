@@ -43,3 +43,8 @@ def batch_page(request: Request) -> HTMLResponse | JSONResponse:
 def settings_page(request: Request) -> HTMLResponse:
     """The Settings page, served like chat/batch so it pre-paints the theme."""
     return _themed(request.app.state.hub, "settings.html")
+
+
+def activity_page(request: Request) -> HTMLResponse:
+    """The Activity page (the local ledger + the Trash panel), themed like the rest."""
+    return _themed(request.app.state.hub, "activity.html")

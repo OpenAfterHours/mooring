@@ -11,10 +11,11 @@ its sibling ``.SemanticModel/`` and ``.Report/`` folders (see :mod:`mooring.pbip
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+import contextlib
+from collections.abc import Callable, Iterable
 from pathlib import Path
 
-from mooring import pbip
+from mooring import pbip, trash
 from mooring.sync import is_synced_path
 
 
@@ -111,9 +112,17 @@ def delete(
     rel_path: str,
     exclude: Iterable[str] = (),
     folders: Iterable[str] | None = None,
+    *,
+    trash_cap_mb: int = trash.DEFAULT_MAX_FILE_MB,
+    on_trash: Callable[[str, str], None] | None = None,
 ) -> list[str]:
     """Delete one notebook — a single file, or a whole PBIP artifact for a
     ``.pbip`` pointer — from the workspace.
+
+    Every removed file's bytes are first banked in the local trash
+    (:mod:`mooring.trash`) so a misclicked delete is recoverable;
+    ``on_trash(rel, token)`` is called per deposit so callers can offer Undo.
+    The deposit is best-effort — a trash failure never blocks the delete.
 
     Returns the workspace-relative POSIX paths actually removed. Raises
     ``ValueError`` on a traversal/non-notebook path and ``FileNotFoundError``
@@ -123,8 +132,15 @@ def delete(
     for rel in target_paths(workspace, rel_path, exclude, folders):
         target = workspace / rel
         if target.is_file():
+            token = None
+            with contextlib.suppress(OSError):
+                token = trash.deposit(
+                    workspace, rel, target.read_bytes(), "delete", max_file_mb=trash_cap_mb
+                )
             target.unlink()
             removed.append(rel)
+            if token and on_trash is not None:
+                on_trash(rel, token)
             _prune_empty_dirs(workspace, target.parent)
     if not removed:
         raise FileNotFoundError(rel_path)

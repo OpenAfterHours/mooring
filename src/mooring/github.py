@@ -96,6 +96,12 @@ class GitHubClientProtocol(Protocol):
 
     def get_blob(self, sha: str) -> bytes: ...
 
+    def list_commits_for_path(
+        self, path: str, branch: str, page: int = 1, per_page: int = 30
+    ) -> list[dict]: ...
+
+    def get_file_at(self, path: str, ref: str) -> tuple[str, bytes]: ...
+
     def create_ref(self, branch: str, sha: str) -> dict: ...
 
     def put_file(
@@ -232,6 +238,43 @@ class GitHubClient:
         if data.get("encoding") == "base64":
             return base64.b64decode(data["content"])
         return data.get("content", "").encode()
+
+    def list_commits_for_path(
+        self, path: str, branch: str, page: int = 1, per_page: int = 30
+    ) -> list[dict]:
+        """One page of the commits that touched ``path`` on ``branch``, newest
+        first (the file's version history). The commits-list API paginates and
+        does not follow renames — history for a renamed file starts at the
+        rename. Returns the raw commit dicts; callers shape them."""
+        data = self._check(
+            self._session.get(
+                self._repo_url("commits"),
+                params={"path": path, "sha": branch, "per_page": per_page, "page": page},
+                timeout=30,
+            )
+        )
+        return data if isinstance(data, list) else []
+
+    def get_file_at(self, path: str, ref: str) -> tuple[str, bytes]:
+        """``(blob_sha, bytes)`` of ``path`` as it existed at ``ref``.
+
+        One request in the common case — the contents API inlines base64 content
+        up to ~1 MB — falling back to :meth:`get_blob` for larger files. Cheaper
+        than walking a full historic tree. Raises :class:`NotFound` when the
+        path did not exist at that ref."""
+        data = self._check(
+            self._session.get(
+                self._repo_url(f"contents/{quote(path, safe='/')}"),
+                params={"ref": ref},
+                timeout=60,
+            )
+        )
+        if isinstance(data, list):  # a directory, not a file
+            raise NotFound(f"{path} is a directory at {ref}")
+        sha = data.get("sha", "")
+        if data.get("encoding") == "base64" and data.get("content"):
+            return sha, base64.b64decode(data["content"])
+        return sha, self.get_blob(sha)
 
     # -- writes (Contents API, one commit per file) ---------------------------
 

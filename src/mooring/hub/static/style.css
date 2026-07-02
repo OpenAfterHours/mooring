@@ -456,6 +456,88 @@ tr.folder-header b { font-weight: 600; }
   margin-bottom: 1rem;
 }
 
+/* Undo toasts: "x.py — local copy replaced. [Undo]" after an operation banked a
+   pre-image in the local trash. Fixed bottom-right so they never shift layout. */
+#undo-toasts {
+  position: fixed;
+  right: 1rem;
+  bottom: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  z-index: 20;
+}
+.undo-toast {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  background: var(--card);
+  color: var(--ink);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: 8px;
+  padding: 0.5rem 0.7rem;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.3);
+  font-size: 0.9rem;
+}
+.undo-toast-close { border: none; background: none; color: var(--muted); }
+
+/* Health check (footer): one row per probe, coloured by status. */
+.health-list { list-style: none; padding: 0; margin: 0.5rem 0 0; font-size: 0.9rem; }
+.health-list li { padding: 0.25rem 0 0.25rem 1.3rem; position: relative; }
+.health-list li::before { position: absolute; left: 0; }
+.health-pass::before { content: "✓"; color: var(--ok, #2da44e); }
+.health-warn::before { content: "!"; color: var(--warn); }
+.health-fail::before { content: "✗"; color: var(--bad); }
+.health-unknown::before { content: "?"; color: var(--muted); }
+
+/* Version-history panel: the read-only source/diff view stays bounded. */
+#history-view { max-height: 24rem; overflow: auto; }
+#history-table td.path { font-size: 0.85rem; }
+
+/* Activity page: the ledger list + its per-entry relative time. */
+.activity-list { list-style: none; padding: 0; margin: 0.6rem 0 0; }
+.activity-list li { padding: 0.3rem 0; border-bottom: 1px solid var(--border); }
+.activity-list li:last-child { border-bottom: none; }
+.activity-time { display: inline-block; min-width: 8.5rem; }
+#activity-filter { flex: 1; min-width: 12rem; }
+
+/* Freshness: "Last checked N ago — M teammate update(s) waiting." Informational
+   (amber, not an error); hidden unless updates wait or the view has aged. */
+#freshness-banner {
+  border: 1px solid var(--warn);
+  color: var(--warn);
+  border-radius: 8px;
+  padding: 0.5rem 1rem;
+  margin: 0.4rem 0 0.8rem;
+  font-size: 0.9rem;
+}
+
+/* Hub confirm dialogs (staleness at Open, the push guard): native <dialog>s
+   with explicit buttons — the safe action gets focus, never the risky one. */
+#stale-dialog,
+#guard-dialog {
+  background: var(--card);
+  color: var(--ink);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 1.1rem 1.3rem;
+  max-width: 30rem;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
+}
+#stale-dialog::backdrop,
+#guard-dialog::backdrop { background: rgba(8, 12, 24, 0.45); }
+#stale-dialog p,
+#guard-dialog p { margin-top: 0; }
+.guard-findings {
+  margin: 0.4rem 0;
+  padding-left: 1.2rem;
+  font-family: Consolas, monospace;
+  font-size: 0.85rem;
+  max-height: 12rem;
+  overflow-y: auto;
+}
+
 /* Adopt prompt: notebook folders the repo keeps outside the synced folders. An
    informational accent banner (not an error), shown until the folders are adopted. */
 #adopt-banner {

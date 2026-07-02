@@ -4,9 +4,16 @@ icon: lucide/life-buoy
 
 # Local safety net: trash, universal Undo, activity ledger
 
-!!! note "Status: proposed"
-    Designed July 2026 from a multi-agent ideation review; not yet implemented.
-    Scope may change as the pieces land.
+!!! success "Status: implemented"
+    All three phases shipped 2026-07-02: the trash core (`src/mooring/trash.py`,
+    deposit hooks in `sync.py`/`deletion.py`, the `[trash]` config), the
+    universal Undo toast + Trash panel (`/api/trash`, token-exact
+    `/api/trash/restore` under the shared apply lock, `mooring trash
+    list|restore`), and the activity ledger (`src/mooring/activity.py`, the
+    `/activity` page, `/api/activity`, `mooring activity`). Since the hub's
+    route split the endpoints live in `hub/routes/files.py`. One adaptation:
+    `deletion.delete` reports tokens via an `on_trash` callback rather than a
+    changed return type, keeping every existing caller intact.
 
 ## Problem
 

@@ -37,6 +37,13 @@ let busy = false;
 let showAddRepo = false;
 let lastFiles = [];
 let aiChatEnabled = false;
+// When the last /api/state landed (client clock) and whether it was logged in —
+// the freshness banner's inputs. There is no server-side "last refreshed" time:
+// /api/state recomputes live against GitHub, so freshness is a property of this
+// open tab, not of the workspace.
+let lastStateAt = null;
+let lastLoggedIn = false;
+const FOCUS_REFRESH_THROTTLE_MS = 60_000;
 
 async function api(path, body) {
   const opts = body === undefined
@@ -84,15 +91,123 @@ async function action(path, body, refreshAfter = true) {
   if (busy) return;
   setBusy(true);
   showError("");
+  let guardData = null;
   try {
     const data = await api(path, body || {});
-    if (data.error) showError(data.error);
-    showLog(data);
+    // The push guard withheld file(s): not an error — the confirm dialog is
+    // the real UI (api() synthesized data.error from the 409). Opened AFTER
+    // setBusy(false) below, or its own buttons would be disabled.
+    if (GuardFmt.needsDialog(data)) {
+      delete data.error;
+      guardData = data;
+      showLog(data);
+    } else {
+      if (data.error) showError(data.error);
+      showLog(data);
+    }
     if (data.url) window.open(data.url, "_blank");
+    if (data.trashed && data.trashed.length) showUndoToast(data.trashed);
     if (refreshAfter) await refresh();
     return data;
   } finally {
     setBusy(false);
+    if (guardData) showGuardDialog(guardData, path, body || {});
+  }
+}
+
+// The push guard found something that looks like a secret / structured PII /
+// a bulk data export in files about to publish. Flagged files were WITHHELD
+// (clean files already went). Warn mode offers "Push anyway" carrying per-file
+// confirm tokens — each binds the exact findings to the exact bytes, so a
+// changed file or a new finding is never covered by an old confirm. Block mode
+// ([guard] push = "block" in the synced mooring.toml) offers no override.
+function showGuardDialog(data, apiPath, body) {
+  const dialog = $("guard-dialog");
+  const findings = data.guard_findings || [];
+  const files = findings.length;
+  $("guard-message").textContent =
+    `${files} file(s) were NOT ${apiPath.includes("propose") ? "proposed" : "pushed"} — ` +
+    "they contain something that looks sensitive:";
+  const list = $("guard-findings");
+  list.innerHTML = "";
+  for (const row of GuardFmt.rows(findings)) {
+    const li = document.createElement("li");
+    li.textContent = row;
+    list.appendChild(li);
+  }
+  const override = GuardFmt.canOverride(data);
+  $("guard-hint").textContent = override
+    ? "Remove the flagged content, or add a “mooring: push-ok” comment on a " +
+      "reviewed false-positive line. Pushing anyway publishes it to everyone " +
+      "with access to the repo."
+    : "Your team's policy blocks pushing flagged files ([guard] push = \"block\"). " +
+      "Remove the flagged content, or add a “mooring: push-ok” comment on a " +
+      "reviewed false-positive line, then push again.";
+  const anyway = $("guard-anyway");
+  anyway.classList.toggle("hidden", !override);
+  anyway.onclick = () => {
+    dialog.close();
+    const confirmed = Object.assign({}, body, {
+      confirm_tokens: GuardFmt.allTokens(findings),
+    });
+    action(apiPath, confirmed);
+  };
+  $("guard-cancel").onclick = () => dialog.close();
+  dialog.showModal();
+  $("guard-cancel").focus(); // the safe choice is the default
+}
+
+// "Local copy replaced — Undo": a transient toast for every pre-image the last
+// operation banked in the local trash (a conflict's "Use remote", pull
+// updates/removals, delete, a data-file revert). Undo restores via the
+// token-exact /api/trash/restore, which refuses (409) if the file has since
+// changed again — so a stale toast can never clobber newer work. The full list
+// lives on the Activity page after the toast is gone.
+function showUndoToast(trashed) {
+  let box = $("undo-toasts");
+  if (!box) {
+    box = document.createElement("div");
+    box.id = "undo-toasts";
+    document.body.appendChild(box);
+  }
+  // A big pull can bank dozens of pre-images; don't flood the viewport —
+  // show a few, then one summary pointing at the Trash panel (which has all).
+  if (trashed.length > 4) {
+    const summary = document.createElement("div");
+    summary.className = "undo-toast";
+    const label = document.createElement("span");
+    label.textContent = `${trashed.length} local copies replaced.`;
+    const link = document.createElement("a");
+    link.href = "/activity";
+    link.textContent = "Open Trash";
+    summary.append(label, link);
+    box.appendChild(summary);
+    setTimeout(() => summary.remove(), 15000);
+    trashed = trashed.slice(0, 3);
+  }
+  for (const entry of trashed) {
+    const toast = document.createElement("div");
+    toast.className = "undo-toast";
+    const name = entry.path.split("/").pop();
+    const label = document.createElement("span");
+    label.textContent = `${name} — local copy replaced.`;
+    const btn = document.createElement("button");
+    btn.className = "small";
+    btn.textContent = "Undo";
+    btn.addEventListener("click", async () => {
+      toast.remove();
+      const data = await api("/api/trash/restore", { token: entry.token });
+      if (data.error) showError(data.error);
+      await refresh();
+    });
+    const close = document.createElement("button");
+    close.className = "small undo-toast-close";
+    close.setAttribute("aria-label", "Dismiss");
+    close.textContent = "×";
+    close.addEventListener("click", () => toast.remove());
+    toast.append(label, btn, close);
+    box.appendChild(toast);
+    setTimeout(() => toast.remove(), 15000);
   }
 }
 
@@ -112,7 +227,7 @@ function openChatWindow(path) {
 // first time per workspace). The hub pre-warms it in the background at startup, so
 // this is usually instant — but show a progress hint in case it isn't, since the
 // whole toolbar is disabled while the open POST is in flight.
-async function openAction(path) {
+async function doOpen(path) {
   const summary = $("summary");
   const prev = summary.textContent;
   summary.textContent = "Starting the editor…";
@@ -121,6 +236,92 @@ async function openAction(path) {
   } finally {
     summary.textContent = prev;
   }
+}
+
+// Files the user chose to open stale this session ("Open my copy anyway"), mapped
+// to the remote marker at the time (Freshness.dismissKey). The dialog re-arms only
+// when the remote moves AGAIN — a user who decided to diverge isn't nagged per open.
+const staleDismissed = new Map();
+
+// Whether the branch head still matches the last-rendered /api/state. Timeboxed
+// and advisory: any error, timeout, or offline answers "fresh" so Open is NEVER
+// blocked by a slow or unreachable GitHub — the dialog is prevention, not a gate.
+async function isStateFresh() {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 2000);
+  try {
+    const resp = await fetch("/api/freshness", { signal: ctrl.signal });
+    const data = await resp.json();
+    return data.fresh !== false;
+  } catch {
+    return true;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// Per-state dialog copy. "pull" is the happy path (pull first, then open);
+// a remote DELETION must not offer "Pull latest and open" (pull would remove the
+// local copy); a conflict points at the row's resolve actions (pull skips it).
+const STALE_COPY = {
+  pull: (name) =>
+    `A teammate updated ${name} after your last pull. Editing your copy now ` +
+    "will end in a conflict at push time.",
+  deleted: (name) =>
+    `A teammate deleted ${name} from the team repo. Pulling would remove your ` +
+    "local copy; opening keeps your version (Push it to restore it for the team).",
+  conflict: (name) =>
+    `${name} is conflicted — your copy and a teammate's version both changed. ` +
+    "Resolve it from the row's actions (Use remote / Keep both / Push as copy); " +
+    "you can still open your copy to look.",
+};
+
+function showStaleDialog(file, kind) {
+  const dialog = $("stale-dialog");
+  const name = file.path.split("/").pop();
+  $("stale-message").textContent = STALE_COPY[kind](name);
+  const pullBtn = $("stale-pull");
+  pullBtn.classList.toggle("hidden", kind !== "pull");
+  pullBtn.onclick = async () => {
+    dialog.close();
+    const pulled = await action("/api/pull", {});
+    if (!pulled || pulled.error) return; // the pull failed — don't open a stale copy
+    // Re-evaluate against the refreshed rows: the pull may have skipped this
+    // file (it became conflicted meanwhile) — never open pretending it's fresh.
+    const fresh = lastFiles.find((f) => f.path === file.path);
+    if (!fresh || !fresh.has_local) return; // gone with the pull (deleted remotely)
+    const still = Freshness.warnState(fresh, staleDismissed);
+    if (still) return showStaleDialog(fresh, still);
+    doOpen(file.path);
+  };
+  $("stale-open").onclick = () => {
+    dialog.close();
+    staleDismissed.set(file.path, Freshness.dismissKey(file));
+    doOpen(file.path);
+  };
+  $("stale-cancel").onclick = () => dialog.close();
+  dialog.showModal();
+  // Safe default focus: never "Open my copy anyway" (the actionsMenu lesson —
+  // no control where a stray keypress fires the risky choice).
+  (kind === "pull" ? pullBtn : $("stale-cancel")).focus();
+}
+
+// Open, guarded: warn at the moment of choice when the remote moved under this
+// file (remote changed / deleted remotely / conflict) instead of letting the
+// user discover it as a blocked push two hours later. The check is advisory and
+// client-side only — /api/open itself gates nothing new.
+async function openAction(path) {
+  let file = lastFiles.find((f) => f.path === path);
+  // The dialog decision is only as good as the cached rows: if the branch head
+  // moved since the last /api/state, re-render first (timeboxed; see isStateFresh).
+  if (file && !(await isStateFresh())) {
+    await refresh();
+    file = lastFiles.find((f) => f.path === path);
+    if (!file) return; // the row vanished with the fresh state — nothing to open
+  }
+  const kind = Freshness.warnState(file, staleDismissed);
+  if (kind) return showStaleDialog(file, kind);
+  return doOpen(path);
 }
 
 // A plain helper module (a non-marimo .py) can't open in the marimo editor — that
@@ -203,6 +404,108 @@ function undoAction(path) {
   });
 }
 
+// -- version history (the git-free time machine) ----------------------------
+
+let historyPath = null;
+let historyPage = 1;
+
+async function historyAction(path, page) {
+  const target = page || 1;
+  const data = await api(
+    `/api/history?path=${encodeURIComponent(path)}&page=${target}`,
+  );
+  if (data.error) return showError(data.error);
+  // Commit the panel state only on success, so a failed "Show older" retries
+  // the SAME page instead of silently skipping one.
+  historyPath = path;
+  historyPage = target;
+  renderHistory(path, data.versions || [], target);
+}
+
+async function viewVersion(path, sha, mode) {
+  const data = await api(
+    `/api/history/file?path=${encodeURIComponent(path)}&at=${encodeURIComponent(sha)}`,
+  );
+  if (data.error) return showError(data.error);
+  const view = $("history-view");
+  view.textContent = mode === "diff"
+    ? (data.diff || "(no differences against your current copy)")
+    : data.source;
+  view.classList.remove("hidden");
+}
+
+async function restoreVersion(path, sha, asCopy) {
+  if (!asCopy) {
+    const ok = confirm(
+      `Replace your current ${path.split("/").pop()} with the version from ` +
+      `${sha.slice(0, 7)}?\n\n` +
+      "Your current bytes are saved first, so this is undoable. The restored " +
+      "file stays LOCAL until you push it — and pushing a version older than " +
+      "your last pull replaces newer team work on purpose. Old code may also " +
+      "not run under the repo's current packages."
+    );
+    if (!ok) return;
+  }
+  const data = await action("/api/restore", { path, at: sha, copy: !!asCopy });
+  if (data && !data.error && data.undo_token) {
+    recentlyReverted.set(path, data.undo_token);
+    refresh();
+  }
+}
+
+function renderHistory(path, versions, page) {
+  const card = $("history-card");
+  card.classList.remove("hidden");
+  $("history-title").textContent = `History — ${path}`;
+  $("history-view").classList.add("hidden");
+  const tbody = $("history-table").querySelector("tbody");
+  if (page === 1) tbody.innerHTML = "";
+  for (const v of versions) {
+    const tr = document.createElement("tr");
+    const label = document.createElement("td");
+    label.className = "path";
+    label.textContent = HistoryFmt.versionLabel(v);
+    const actionsTd = document.createElement("td");
+    const acts = [
+      ["View", () => viewVersion(path, v.sha)],
+      ["Diff", () => viewVersion(path, v.sha, "diff")],
+      ["Restore as copy", () => restoreVersion(path, v.sha, true)],
+    ];
+    if (HistoryFmt.canRestoreOver(path)) {
+      acts.push(["Restore over current", () => restoreVersion(path, v.sha, false)]);
+    }
+    for (const [text, handler] of acts) {
+      const btn = document.createElement("button");
+      btn.className = "small";
+      btn.textContent = text;
+      btn.addEventListener("click", handler);
+      actionsTd.append(btn, " ");
+    }
+    tr.append(label, actionsTd);
+    tbody.appendChild(tr);
+  }
+  if (!versions.length && page === 1) {
+    const tr = document.createElement("tr");
+    const td = document.createElement("td");
+    td.colSpan = 2;
+    td.className = "muted";
+    td.textContent = "No pushed versions found for this file.";
+    tr.appendChild(td);
+    tbody.appendChild(tr);
+  }
+  // No more pages when a page comes back short (the API pages by 30).
+  $("history-older").classList.toggle("hidden", versions.length < 30);
+  card.scrollIntoView({ block: "nearest" });
+}
+
+$("history-older").addEventListener("click", () => {
+  if (historyPath) historyAction(historyPath, historyPage + 1);
+});
+$("history-close").addEventListener("click", () => {
+  $("history-card").classList.add("hidden");
+  historyPath = null;
+});
+
 function fileActions(file, opts) {
   opts = opts || {};
   const actions = [];
@@ -217,13 +520,20 @@ function fileActions(file, opts) {
       ["Push", () => action("/api/push", { paths: [file.path] })],
       ["Propose", () => action("/api/propose", { paths: [file.path] })],
     );
-    // Revert restores the last synced version. Notebook-only: data files and Power BI
-    // members aren't snapshotted (so an Undo would be a dead promise) and a lone PBIP
-    // member can't be reverted without breaking the artifact — use the CLI for those.
-    // "new local" has no checkpoint to go back to (that's Delete).
+    // "Discard my changes" (né Revert) restores the last synced version.
+    // Notebook-only: data files and Power BI members aren't snapshotted (so an
+    // Undo would be a dead promise) and a lone PBIP member can't be reverted
+    // without breaking the artifact — use the CLI for those. "new local" has no
+    // checkpoint to go back to (that's Delete). Relabelled so it can't blur
+    // with History's "Restore" (the time machine vs the one-click discard).
     if (file.path.endsWith(".py") && (file.state === "modified" || file.state === "deleted locally")) {
-      actions.push(["Revert", () => revertAction(file.path, file.state)]);
+      actions.push(["Discard my changes", () => revertAction(file.path, file.state)]);
     }
+  }
+  // History: every pushed version of this file (the git-free time machine).
+  // Never-synced files have no history; PBIP members restore only whole.
+  if (HistoryFmt.hasHistory(file) && !opts.member) {
+    actions.push(["History…", () => historyAction(file.path)]);
   }
   // A one-shot Undo for a file just reverted this session (snapshot kept server-side).
   if (recentlyReverted.has(file.path)) {
@@ -411,7 +721,9 @@ function buildArtifactRows(artifact, files) {
   }
   const pointer = byPath.get(artifact.pointer);
   if (pointer?.has_local) {
-    actions.push(["Open", () => action("/api/open", { path: artifact.pointer }, false)]);
+    // Through openAction (not a bare /api/open) so the staleness guard covers
+    // the artifact header's Open exactly like every file row's.
+    actions.push(["Open", () => openAction(artifact.pointer)]);
     actions.push(["Delete", () => deleteAction(artifact.pointer, "project")]);
   }
 
@@ -493,6 +805,30 @@ function renderFiles(files, artifacts, declaredFolders) {
   for (const section of sections) {
     for (const row of buildFolderSection(section)) tbody.appendChild(row);
   }
+}
+
+// "Last checked 3 hours ago — 2 teammate update(s) waiting. Refresh". Quiet by
+// design: hidden unless updates are waiting or the view is old enough (>= 30 min)
+// that its numbers shouldn't be trusted. Re-rendered on an interval so the age
+// stays honest while the tab sits open (text only — no network).
+function renderFreshnessBanner() {
+  const banner = $("freshness-banner");
+  const waiting = Freshness.pullCount(lastFiles);
+  const age = lastStateAt == null ? null : Date.now() - lastStateAt;
+  const show = lastLoggedIn && age != null && (waiting > 0 || age >= 30 * 60_000);
+  banner.classList.toggle("hidden", !show);
+  if (!show) return;
+  banner.innerHTML = "";
+  banner.append(
+    waiting > 0
+      ? `Last checked ${Freshness.ageText(age)} — ${waiting} teammate update(s) waiting. `
+      : `Last checked ${Freshness.ageText(age)}. `,
+  );
+  const btn = document.createElement("button");
+  btn.className = "small";
+  btn.textContent = "Refresh";
+  btn.addEventListener("click", refresh);
+  banner.appendChild(btn);
 }
 
 function renderReviewBanner(review) {
@@ -598,6 +934,8 @@ function renderRepoSelect(state) {
 
 async function refresh() {
   const state = await api("/api/state");
+  lastStateAt = Date.now();
+  lastLoggedIn = !!state.logged_in;
   showError(state.error || "");
   if (state.ui_theme) {
     applyTheme(state.ui_theme);
@@ -660,6 +998,11 @@ async function refresh() {
   for (const id of ["btn-pull", "btn-push", "btn-propose"]) {
     $(id).classList.toggle("hidden", !state.logged_in);
   }
+  // Recall shows only while the manifest holds a recallable last push; the
+  // confirm names exactly which files it would revert (a stale record is the
+  // trap — this is how the user catches one).
+  recallPaths = state.recall_paths || [];
+  $("btn-recall").classList.toggle("hidden", !(state.logged_in && state.can_recall));
   // Workspace-level "Batch build" — only when the opt-in orchestrator is enabled.
   $("btn-batch").classList.toggle("hidden", !state.ai_batch);
   // No team Pull in local mode, so don't dangle it in the empty-state hint.
@@ -698,6 +1041,7 @@ async function refresh() {
   } else {
     lastFiles = [];  // no file surface (login wall) — don't leave stale push/propose targets
   }
+  renderFreshnessBanner();
   // Prompt to adopt any notebook folders the repo keeps outside the synced folders.
   // Runs once per repo-session (see maybeDiscover), so it never rides the refresh loop.
   await maybeDiscover(state);
@@ -886,6 +1230,21 @@ $("btn-propose").addEventListener("click", () => {
   const count = lastFiles.filter((f) => PUSH_STATES.has(f.state)).length;
   return proposeAction(null, count);
 });
+let recallPaths = [];
+
+$("btn-recall").addEventListener("click", () => {
+  const shown = recallPaths.slice(0, 8).join("\n  ");
+  const more = recallPaths.length > 8 ? `\n  …and ${recallPaths.length - 8} more` : "";
+  const ok = confirm(
+    "Undo your last push on GitHub?\n\n" +
+    (shown ? `This reverts:\n  ${shown}${more}\n\n` : "") +
+    "The previous version of each file is written back to the team branch. " +
+    "The pushed version stays in the repo's history — if you pushed a secret, you " +
+    "still need to rotate it. If a teammate has pushed since, the recall stops with " +
+    "a conflict instead of overwriting their work."
+  );
+  if (ok) action("/api/recall", {});
+});
 $("btn-new").addEventListener("click", () => {
   const name = prompt(
     "Notebook name or path\n(e.g. sales-analysis, or packages/finance/notebooks/sales):",
@@ -961,5 +1320,62 @@ window.addEventListener("storage", (event) => {
 // Match the toggle to the theme the pre-paint script already applied, so it's
 // never momentarily out of sync; refresh() reconciles with the server value.
 $("theme-select").value = document.documentElement.dataset.theme || "system";
+
+// -- health check (mooring doctor in the footer) -----------------------------
+// On-demand only: nothing probes at startup or on refresh. The Copy report is
+// the server's redacted, paste-safe text (no tokens/hostnames/usernames).
+
+let healthReport = "";
+
+$("health-run").addEventListener("click", async () => {
+  const btn = $("health-run");
+  btn.disabled = true;
+  btn.textContent = "Checking…";
+  try {
+    const data = await api("/api/doctor", {});
+    if (data.error) return showError(data.error);
+    healthReport = data.report || "";
+    const list = $("health-results");
+    list.innerHTML = "";
+    for (const r of data.results || []) {
+      const li = document.createElement("li");
+      li.className = `health-${r.status}`;
+      let text = `${r.title}: ${r.detail}`;
+      if (r.fix && r.status !== "pass") text += ` Fix: ${r.fix}`;
+      li.textContent = text;
+      list.appendChild(li);
+    }
+    $("health-copy").classList.toggle("hidden", !healthReport);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Run health check";
+  }
+});
+$("health-copy").addEventListener("click", () => {
+  const btn = $("health-copy");
+  if (healthReport && navigator.clipboard) {
+    navigator.clipboard.writeText(healthReport).then(
+      () => { btn.textContent = "Copied"; setTimeout(() => { btn.textContent = "Copy report"; }, 1500); },
+      () => { /* clipboard blocked — nothing sensible to do */ },
+    );
+  }
+});
+
+// An idle tab heals itself: refresh when the tab regains focus and the last
+// check is older than the throttle, so the staleness dialog and banner decide
+// from reasonably fresh rows without riding a polling loop or the rate limit.
+function maybeFocusRefresh() {
+  if (document.visibilityState !== "visible" || busy) return;
+  if (Freshness.shouldAutoRefresh(lastStateAt, Date.now(), FOCUS_REFRESH_THROTTLE_MS)) {
+    // Stamp BEFORE the fetch: returning to the tab fires both `focus` and
+    // `visibilitychange`, and without this both would start a refresh.
+    lastStateAt = Date.now();
+    refresh();
+  }
+}
+window.addEventListener("focus", maybeFocusRefresh);
+document.addEventListener("visibilitychange", maybeFocusRefresh);
+// Keep the banner's age text honest while the tab sits open (no network).
+setInterval(renderFreshnessBanner, 60_000);
 
 refresh();

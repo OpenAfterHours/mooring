@@ -45,6 +45,18 @@ warn_shadowed_notebooks = true
 [workspace]
 path = ""        # empty = ~/PythonProjects/mooring/<owner>/<repo>
 
+# Local trash: before mooring overwrites or removes a local file on your behalf
+# (conflict "Use remote", pull updates/removals, delete, a data-file revert),
+# the file's current bytes are saved under <workspace>/.mooring/trash so the
+# action can be undone with one click (hub toast / Trash panel, or
+# `mooring trash list` / `mooring trash restore`). Strictly local: the trash
+# lives in the .mooring state dir, which never syncs to the team repo.
+[trash]
+keep_days = 14       # drop entries older than this
+keep_per_file = 10   # keep at most this many pre-images per file
+max_file_mb = 45     # skip banking files larger than this (the action still runs)
+max_total_mb = 200   # total store cap; oldest entries are evicted first
+
 # Central logging. Set `endpoint` to collect usage events and errors from every
 # copy of the app in one place. The value is auto-detected:
 #   http(s)://...  -> each event is POSTed as JSON

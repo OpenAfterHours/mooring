@@ -10,7 +10,16 @@ import sys
 from collections.abc import Mapping
 from pathlib import Path
 
-from mooring import __version__, config, paths, pyproject_env, shadow, telemetry, workspace_config
+from mooring import (
+    __version__,
+    activity,
+    config,
+    paths,
+    pyproject_env,
+    shadow,
+    telemetry,
+    workspace_config,
+)
 
 # SELFTEST_PACKAGES, workspace_hint and legacy_workspace_hint now live in
 # mooring.runtime — a neutral module below both presentation adapters, so the web
@@ -122,6 +131,11 @@ def _build_parser() -> argparse.ArgumentParser:
     push = sub.add_parser("push", help="upload local changes to the team repo")
     push.add_argument("paths", nargs="*", help="specific files to push (default: all changes)")
     push.add_argument("-m", "--message", default=None, help="commit message")
+    push.add_argument(
+        "--acknowledge-findings",
+        action="store_true",
+        help="push files the guard flagged anyway (refused when the team policy is block)",
+    )
 
     propose = sub.add_parser(
         "propose", help="upload changes to a review branch (open a pull request on GitHub)"
@@ -130,6 +144,20 @@ def _build_parser() -> argparse.ArgumentParser:
         "paths", nargs="*", help="specific files to propose (default: all changes)"
     )
     propose.add_argument("-m", "--message", default=None, help="commit message")
+    propose.add_argument(
+        "--acknowledge-findings",
+        action="store_true",
+        help="propose files the guard flagged anyway (refused when the team policy is block)",
+    )
+
+    scan = sub.add_parser(
+        "scan", help="scan outgoing changes for secrets/PII/bulk data without pushing"
+    )
+
+    recall = sub.add_parser(
+        "recall", help="undo your last push on GitHub (history keeps the pushed commit)"
+    )
+    recall.add_argument("-y", "--yes", action="store_true", help="skip the confirmation prompt")
 
     adopt = sub.add_parser(
         "adopt",
@@ -177,6 +205,48 @@ def _build_parser() -> argparse.ArgumentParser:
         help="also discard your edit to a conflicted file (turns it into a clean pull)",
     )
 
+    history_cmd = sub.add_parser(
+        "history", help="list a file's pushed versions from the team repo (needs login)"
+    )
+    history_cmd.add_argument("path", help="workspace-relative file path")
+    history_cmd.add_argument("--page", type=int, default=1, help="older pages (30 per page)")
+
+    restore_cmd = sub.add_parser(
+        "restore", help="bring back a file as it was at a past version (needs login)"
+    )
+    restore_cmd.add_argument("path", help="workspace-relative file path")
+    restore_cmd.add_argument(
+        "--at", required=True, metavar="SHA", help="the version's commit sha (see `mooring history`)"
+    )
+    restore_cmd.add_argument(
+        "--copy",
+        action="store_true",
+        help="write it beside the file as {name}.restored-{sha7} instead of overwriting",
+    )
+    restore_cmd.add_argument(
+        "-y", "--yes", action="store_true", help="skip the confirmation prompt"
+    )
+
+    trash_cmd = sub.add_parser(
+        "trash", help="list and restore local pre-images saved before destructive actions"
+    )
+    trash_sub = trash_cmd.add_subparsers(dest="trash_command", required=True)
+    trash_sub.add_parser("list", help="list saved pre-images, newest first")
+    trash_restore = trash_sub.add_parser(
+        "restore", help="restore one saved pre-image to its original path"
+    )
+    trash_restore.add_argument("token", help="the entry token (from `mooring trash list`)")
+
+    activity_cmd = sub.add_parser(
+        "activity", help="show what mooring did in this workspace (local journal)"
+    )
+    activity_cmd.add_argument(
+        "--path", default=None, help="only entries touching this workspace-relative path"
+    )
+    activity_cmd.add_argument(
+        "--limit", type=int, default=50, help="how many entries to show (default 50)"
+    )
+
     init_cmd = sub.add_parser(
         "init",
         help="create the repo's pyproject.toml (its notebook dependencies) and lock it",
@@ -204,11 +274,17 @@ def _build_parser() -> argparse.ArgumentParser:
         pull,
         push,
         propose,
+        scan,
+        recall,
         adopt,
         open_cmd,
         new,
         delete_cmd,
         rollback_cmd,
+        history_cmd,
+        restore_cmd,
+        trash_cmd,
+        activity_cmd,
         init_cmd,
         deps,
         build_reqs,
@@ -285,6 +361,16 @@ def _build_parser() -> argparse.ArgumentParser:
     cfg_sub.add_parser("list", help="print the effective merged configuration")
     cfg_sub.add_parser("path", help="print the path to your user config.toml")
 
+    doctor_cmd = sub.add_parser(
+        "doctor", help="diagnose the setup in plain English (network, login, config, deps)"
+    )
+    doctor_cmd.add_argument(
+        "--report",
+        action="store_true",
+        help="print only the paste-safe report (redacted; safe for a support ticket)",
+    )
+    doctor_cmd.add_argument("--repo", default=None, metavar="ALIAS", help=_REPO_ARG_HELP)
+
     sub.add_parser("selftest", help="verify the bundled environment")
     sub.add_parser("version", help="print the version")
     return parser
@@ -297,6 +383,66 @@ def _print_paths(cfg: config.Config) -> None:
     hints = (legacy_workspace_hint(cfg), paths.synced_folder_hint(cfg.workspace()))
     for hint in (h for h in hints if h):
         print(f"  note        : {hint}")
+
+
+def copilot_probe_for(app_cfg: config.AppConfig):
+    """The adapter-appended Copilot probe (ai/ sits above doctor.py, so the
+    engine can't run this itself). Force-checks the provider — slow (spawns the
+    Copilot CLI), which is fine for an on-demand health check."""
+    from mooring import doctor
+
+    def probe() -> doctor.ProbeResult:
+        try:
+            from mooring.ai import get_provider
+
+            st = get_provider(app_cfg).status(force=True)
+        except Exception:  # noqa: BLE001  # a probe never raises; unknown is honest
+            return doctor.ProbeResult(
+                "copilot", "AI copilot", doctor.UNKNOWN,
+                "Copilot could not be checked.",
+                "Run `mooring ai status` for details (needs the mooring[copilot] extra).",
+            )
+        if not st.available:
+            return doctor.ProbeResult(
+                "copilot", "AI copilot", doctor.WARN,
+                "Copilot isn't available in this build.",
+                "Install the mooring[copilot] extra, or ask your admin to include it.",
+            )
+        if not st.connected:
+            return doctor.ProbeResult(
+                "copilot", "AI copilot", doctor.WARN,
+                "Copilot is installed but not signed in.",
+                "Sign in with `mooring ai login` (or the hub's Copilot menu). "
+                "For the PII guard, see `mooring ai pii doctor`.",
+            )
+        detail = f"Connected as @{st.account}." if st.account else "Connected."
+        return doctor.ProbeResult("copilot", "AI copilot", doctor.PASS, detail)
+
+    return probe
+
+
+def cmd_doctor(app_cfg: config.AppConfig, cfg: config.Config, report_only: bool) -> int:
+    from mooring import doctor
+
+    extra = [copilot_probe_for(app_cfg)] if app_cfg.ai_enabled else []
+    results = doctor.run_probes(cfg, extra_probes=extra)
+    counts = {
+        s: sum(1 for r in results if r.status == s)
+        for s in (doctor.PASS, doctor.WARN, doctor.FAIL, doctor.UNKNOWN)
+    }
+    telemetry.log_event("doctor", **counts)
+    if report_only:
+        print(doctor.build_report(results, cfg), end="")
+    else:
+        print(f"mooring doctor (mooring {__version__}):\n")
+        for line in doctor.render_lines(results):
+            print(line)
+        print(
+            f"\n{counts['pass']} pass, {counts['warn']} warn, {counts['fail']} fail, "
+            f"{counts['unknown']} unknown."
+        )
+        print("Paste-safe report for a ticket: mooring doctor --report")
+    return 1 if counts[doctor.FAIL] else 0
 
 
 def cmd_selftest(app_cfg: config.AppConfig, cfg: config.Config) -> int:
@@ -480,41 +626,163 @@ def cmd_pull(cfg: config.Config, theirs: bool, keep_both: bool) -> int:
         lines=len(result.lines),
         strategy=strategy.value,
     )
-    for line in result.lines:
-        print(f"  {line}")
-    print(result.summary())
+    _record_activity(cfg, "pull", result)
+    _print_sync_result(result)
     return 0 if not result.skipped_conflicts else 1
 
 
-def cmd_push(cfg: config.Config, only_paths: list[str], message: str | None) -> int:
+def _push_guard_fn(cfg: config.Config, acknowledge: bool):
+    """The push guard for a CLI push/propose. Returns
+    ``(guard_fn, collected, mode, acknowledged)``.
+
+    ``--acknowledge-findings`` does NOT turn the scan off: the guard still runs
+    and everything it would have flagged is collected into ``acknowledged`` and
+    printed after the push — so the user sees exactly what they let out AT PUSH
+    TIME, and a finding that appeared since the first run can't ride out unseen
+    (the hub's token flow gets the same guarantee by binding tokens to bytes).
+    In block mode ([guard] push = "block") the flag is refused entirely."""
+    from mooring import pushguard
+
+    mode = workspace_config.guard_mode(cfg.workspace())
+    if acknowledge and mode != "block":
+        acknowledged: dict = {}
+
+        def allow_fn(rel_path: str, data: bytes) -> list[str]:
+            findings = pushguard.scan_text(rel_path, data)
+            if findings:
+                acknowledged[rel_path] = {"findings": findings}
+            return []
+
+        return allow_fn, {}, mode, acknowledged
+    guard_fn, collected = pushguard.make_guard()
+    return guard_fn, collected, mode, {}
+
+
+def _print_guard_findings(collected: dict, mode: str, verb: str) -> None:
+    print(f"\n{len(collected)} file(s) withheld — they contain something that looks sensitive:")
+    for path, info in sorted(collected.items()):
+        for f in info["findings"]:
+            print(f"  {path}:{f.line}  {f.kind}")
+    if mode == "block":
+        print(
+            "Your team's policy blocks pushing flagged files ([guard] push = \"block\").\n"
+            "Remove the flagged content, or add a `mooring: push-ok` comment on a\n"
+            f"reviewed false-positive line, then {verb} again."
+        )
+    else:
+        print(
+            "Remove the flagged content, add a `mooring: push-ok` comment on a reviewed\n"
+            f"false-positive line, or re-run with --acknowledge-findings to {verb} anyway."
+        )
+
+
+def _print_acknowledged(acknowledged: dict) -> None:
+    total = sum(len(info["findings"]) for info in acknowledged.values())
+    print(f"\nPushed with {total} acknowledged finding(s) — now visible to everyone:")
+    for path, info in sorted(acknowledged.items()):
+        for f in info["findings"]:
+            print(f"  {path}:{f.line}  {f.kind}")
+
+
+def cmd_push(
+    cfg: config.Config, only_paths: list[str], message: str | None, acknowledge: bool = False
+) -> int:
     from mooring import sync
 
-    result = sync.push(_client(cfg), cfg, paths=only_paths or None, message=message)
+    guard_fn, collected, mode, acknowledged = _push_guard_fn(cfg, acknowledge)
+    result = sync.push(
+        _client(cfg), cfg, paths=only_paths or None, message=message, guard_fn=guard_fn
+    )
     telemetry.log_event(
         "push",
         pushed=result.pushed,
         conflicts=len(result.blocked_conflicts),
         lines=len(result.lines),
+        withheld=len(collected),
     )
-    for line in result.lines:
-        print(f"  {line}")
-    print(result.summary())
-    return 0 if not result.blocked_conflicts else 1
+    _record_activity(cfg, "push", result)
+    _print_sync_result(result)
+    if collected:
+        _print_guard_findings(collected, mode, "push")
+    if acknowledged:
+        _print_acknowledged(acknowledged)
+    return 0 if not (result.blocked_conflicts or collected) else 1
 
 
-def cmd_propose(cfg: config.Config, only_paths: list[str], message: str | None) -> int:
+def cmd_propose(
+    cfg: config.Config, only_paths: list[str], message: str | None, acknowledge: bool = False
+) -> int:
     from mooring import sync
 
-    result = sync.propose(_client(cfg), cfg, paths=only_paths or None, message=message)
+    guard_fn, collected, mode, acknowledged = _push_guard_fn(cfg, acknowledge)
+    result = sync.propose(
+        _client(cfg), cfg, paths=only_paths or None, message=message, guard_fn=guard_fn
+    )
     telemetry.log_event(
         "propose",
         proposed=result.proposed,
         conflicts=len(result.blocked_conflicts),
         review_branch=bool(result.review_branch),
+        withheld=len(collected),
     )
-    for line in result.lines:
-        print(f"  {line}")
-    print(result.summary())
+    _record_activity(cfg, "propose", result)
+    _print_sync_result(result)
+    if collected:
+        _print_guard_findings(collected, mode, "propose")
+    if acknowledged:
+        _print_acknowledged(acknowledged)
+    return 0 if not (result.blocked_conflicts or collected) else 1
+
+
+def cmd_scan(cfg: config.Config) -> int:
+    """Run the push guard over the current push candidates without pushing —
+    the push-scoped sibling of `mooring ai pii check`."""
+    from mooring import pushguard, sync
+
+    report = sync.status(_client(cfg), cfg)
+    workspace = cfg.workspace()
+    findings_total = 0
+    for f in report.by_state(*sync.PUSH_STATES):
+        target = workspace / f.path
+        if not target.is_file():
+            continue  # a deletion has no bytes to scan
+        findings = pushguard.scan_text(f.path, target.read_bytes())
+        for finding in findings:
+            print(f"  {f.path}:{finding.line}  {finding.kind}")
+        findings_total += len(findings)
+    if findings_total:
+        print(
+            f"{findings_total} finding(s). Fix them, or mark a reviewed false positive "
+            "with a `mooring: push-ok` comment on that line."
+        )
+        return 1
+    print("No findings in the current push candidates.")
+    return 0
+
+
+def cmd_recall(cfg: config.Config, assume_yes: bool) -> int:
+    from mooring import manifest as manifest_mod, sync
+
+    recorded = sorted(manifest_mod.load(cfg.workspace()).last_push)
+    if not assume_yes:
+        if not sys.stdin.isatty():
+            sys.exit("Refusing to recall the last push without confirmation. Re-run with --yes.")
+        # Name exactly what would be reverted — the way a stale record gets caught.
+        for rel in recorded[:12]:
+            print(f"  would revert {rel}")
+        if len(recorded) > 12:
+            print(f"  …and {len(recorded) - 12} more")
+        prompt = (
+            "Undo your last push on GitHub? The previous versions are written back; "
+            "the pushed commit stays in history. [y/N] "
+        )
+        if input(prompt).strip().lower() not in ("y", "yes"):
+            print("Cancelled.")
+            return 0
+    result = sync.recall(_client(cfg), cfg)
+    telemetry.log_event("recall", recalled=result.pushed, conflicts=len(result.blocked_conflicts))
+    _record_activity(cfg, "recall", result)
+    _print_sync_result(result)
     return 0 if not result.blocked_conflicts else 1
 
 
@@ -777,17 +1045,143 @@ def cmd_delete(cfg: config.Config, rel_path: str, assume_yes: bool) -> int:
         if input(f"Delete {what} from the workspace? [y/N] ").strip().lower() not in ("y", "yes"):
             print("Cancelled.")
             return 0
+    trashed: list[dict] = []
     try:
-        removed = deletion.delete(workspace, rel_path, cfg.exclude, cfg.folders)
+        removed = deletion.delete(
+            workspace,
+            rel_path,
+            cfg.exclude,
+            cfg.folders,
+            trash_cap_mb=cfg.trash_max_file_mb,
+            on_trash=lambda rel, token: trashed.append({"path": rel, "token": token}),
+        )
     except FileNotFoundError:  # vanished between the prompt and the delete
         sys.exit(f"No such notebook: {workspace / rel_path}")
     telemetry.log_event("delete", count=len(removed))
+    _record_activity(cfg, "delete", path=rel_path, paths=removed, trashed=trashed)
     for r in removed:
         print(f"  deleted {r}")
+    if trashed:
+        print("  (saved to the trash — `mooring trash list` to restore)")
     print(
         f"Deleted {rel_path} locally. Run `mooring push` (or `propose`) to remove it "
         "from the team repo."
     )
+    return 0
+
+
+def _print_sync_result(result) -> None:
+    for line in result.lines:
+        print(f"  {line}")
+    if result.trashed:
+        print(
+            f"  ({len(result.trashed)} overwritten/removed local file(s) saved to the trash — "
+            "`mooring trash list` to see them)"
+        )
+    print(result.summary())
+
+
+def _record_activity(cfg: config.Config, op: str, result=None, **fields) -> None:
+    """Append to the workspace's LOCAL activity ledger (see mooring.activity) —
+    the same journal the hub writes; strictly local, distinct from telemetry."""
+    if result is not None:
+        fields.setdefault("summary", result.summary())
+        fields.setdefault("lines", result.lines[:20])
+        fields.setdefault("trashed", [{"path": p, "token": t} for p, t in result.trashed])
+    activity.record(cfg.workspace(), op, **fields)
+
+
+def cmd_history(cfg: config.Config, rel_path: str, page: int) -> int:
+    from mooring import sync
+
+    versions = sync.history(_client(cfg), cfg, rel_path, page=max(1, page))
+    if not versions:
+        print(
+            f"No pushed versions found for {rel_path}"
+            + ("" if page <= 1 else f" on page {page}")
+            + "."
+        )
+        return 0
+    for v in versions:
+        who = f"  {v['author']}" if v["author"] else ""
+        print(f"  {v['short']}  {v['date']}{who}  {v['message']}")
+    if len(versions) == 30:
+        print(f"  (older versions: mooring history {rel_path} --page {page + 1})")
+    print(f"Restore one with: mooring restore {rel_path} --at <sha>  (add --copy to keep both)")
+    return 0
+
+
+def cmd_restore(
+    cfg: config.Config, rel_path: str, at: str, as_copy: bool, assume_yes: bool
+) -> int:
+    from mooring import notebook_undo, sync
+
+    client = _client(cfg)
+    workspace = cfg.workspace()
+    if not as_copy and not assume_yes:
+        if not sys.stdin.isatty():
+            sys.exit(
+                f"Refusing to overwrite {rel_path} without confirmation. "
+                "Re-run with --yes (or use --copy)."
+            )
+        prompt = (
+            f"Replace your current {rel_path} with the version at {at[:7]}? "
+            "Your current bytes are saved first. [y/N] "
+        )
+        if input(prompt).strip().lower() not in ("y", "yes"):
+            print("Cancelled.")
+            return 0
+
+    def snapshot_fn(rel: str, data: bytes) -> None:
+        if rel.endswith(".py"):
+            notebook_undo.snapshot(workspace, rel, data)
+
+    result = sync.restore_version(
+        client, cfg, rel_path, at, as_copy=as_copy, snapshot_fn=snapshot_fn
+    )
+    telemetry.log_event("restore", copy=int(as_copy), reverted=result.reverted)
+    _record_activity(cfg, "restore", result, path=rel_path)
+    _print_sync_result(result)
+    return 0 if result.reverted else 1
+
+
+def cmd_trash(cfg: config.Config, args: argparse.Namespace) -> int:
+    from mooring import trash
+
+    workspace = cfg.workspace()
+    if args.trash_command == "list":
+        entries = trash.entries(workspace)
+        if not entries:
+            print("The trash is empty.")
+            return 0
+        for e in entries:
+            print(f"  {e['ts']}  {e['path']}  ({e['action']})")
+            print(f"    restore with: mooring trash restore {e['token']}")
+        return 0
+    # restore
+    try:
+        rel = trash.restore(workspace, args.token)
+    except KeyError:
+        sys.exit(f"Unknown or expired trash entry: {args.token}")
+    except trash.RestoreSuperseded as exc:
+        sys.exit(
+            f"Not restored: {exc} has changed since this copy was saved, so restoring "
+            "it would overwrite newer work."
+        )
+    telemetry.log_event("trash_restore")
+    _record_activity(cfg, "trash_restore", path=rel)
+    print(f"Restored {rel} from the trash.")
+    return 0
+
+
+def cmd_activity(cfg: config.Config, args: argparse.Namespace) -> int:
+    entries = activity.read(cfg.workspace(), limit=args.limit, path=args.path)
+    if not entries:
+        print("Nothing recorded yet.")
+        return 0
+    for e in entries:
+        detail = e.get("summary") or e.get("path") or ""
+        print(f"  {e['ts']}  {e['op']}  {detail}".rstrip())
     return 0
 
 
@@ -820,9 +1214,8 @@ def cmd_rollback(
         client, cfg, rel_path, include_conflict=include_conflict, snapshot_fn=snapshot_fn
     )
     telemetry.log_event("rollback", reverted=result.reverted, lines=len(result.lines))
-    for line in result.lines:
-        print(f"  {line}")
-    print(result.summary())
+    _record_activity(cfg, "rollback", result, path=rel_path)
+    _print_sync_result(result)
     return 0
 
 
@@ -1333,6 +1726,8 @@ def _dispatch(
         return cmd_ai(app_cfg, cfg, args)
     if command == "selftest":
         return cmd_selftest(app_cfg, cfg)
+    if command == "doctor":
+        return cmd_doctor(app_cfg, cfg, args.report)
     if command == "hub":
         from mooring.hub.server import run_hub
 
@@ -1350,9 +1745,13 @@ def _dispatch(
     if command == "pull":
         return cmd_pull(cfg, args.theirs, args.keep_both)
     if command == "push":
-        return cmd_push(cfg, args.paths, args.message)
+        return cmd_push(cfg, args.paths, args.message, args.acknowledge_findings)
     if command == "propose":
-        return cmd_propose(cfg, args.paths, args.message)
+        return cmd_propose(cfg, args.paths, args.message, args.acknowledge_findings)
+    if command == "scan":
+        return cmd_scan(cfg)
+    if command == "recall":
+        return cmd_recall(cfg, args.yes)
     if command == "adopt":
         return cmd_adopt(cfg, args.folders, args.all_folders)
     if command == "open":
@@ -1371,6 +1770,14 @@ def _dispatch(
         return cmd_delete(cfg, args.path, args.yes)
     if command == "rollback":
         return cmd_rollback(cfg, args.path, args.yes, args.conflicts)
+    if command == "trash":
+        return cmd_trash(cfg, args)
+    if command == "activity":
+        return cmd_activity(cfg, args)
+    if command == "history":
+        return cmd_history(cfg, args.path, args.page)
+    if command == "restore":
+        return cmd_restore(cfg, args.path, args.at, args.copy, args.yes)
     parser.error(f"unknown command {command!r}")
     return 2
 
