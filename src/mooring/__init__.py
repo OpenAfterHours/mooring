@@ -1,3 +1,3 @@
 """Mooring: git-free marimo notebook sharing via GitHub."""
 
-__version__ = "0.4.18"
+__version__ = "0.4.19"
