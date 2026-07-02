@@ -981,6 +981,14 @@ button.ghost:hover { color: var(--ink); }
    band; lift main above the z-index:1 footer so its floating panels paint on top. Still
    above the fixed .hub-scene (z-index:0), so the backdrop layering is unaffected. */
 .has-scene main { z-index: 2; }
+/* Header popups (the Copilot sign-in menu) open DOWNWARD over the cards in main.
+   Sibling stacking contexts trump any z-index INSIDE them, so the panel's own
+   z-index:20 can't save it — the header itself must sit above main, or its menus
+   paint behind the notebooks card (the regression the main:2 lift introduced).
+   Nothing in main ever needs to paint over the header bar (row menus open
+   downward, toward the footer), so the ladder is
+   header(3) > main(2) > footer(1) > scene(0). */
+.has-scene header { z-index: 3; }
 
 .hub-scene {
   position: fixed;
