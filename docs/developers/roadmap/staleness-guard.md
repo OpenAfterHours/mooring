@@ -4,9 +4,13 @@ icon: lucide/clock
 
 # Staleness guard at Open and a workspace freshness banner
 
-!!! note "Status: proposed"
-    Designed 2026-07 from a multi-agent ideation review; not yet implemented.
-    Scope and details may change during implementation.
+!!! success "Status: implemented"
+    Phases 1–3 shipped 2026-07-02: the Open-time confirm (`#stale-dialog` +
+    `freshness.js`), the freshness banner with the focus-throttled auto-refresh,
+    and the `/api/freshness` near-open head check. Since the hub's route split,
+    the server pieces live in `hub/routes/sync.py` (`api_freshness`) and
+    `hub/routes/setup.py` (head recording) rather than `hub/server.py`. Phase 4
+    (the who/when commit enrichment) remains open, as planned.
 
 ## Problem
 

@@ -37,6 +37,13 @@ let busy = false;
 let showAddRepo = false;
 let lastFiles = [];
 let aiChatEnabled = false;
+// When the last /api/state landed (client clock) and whether it was logged in —
+// the freshness banner's inputs. There is no server-side "last refreshed" time:
+// /api/state recomputes live against GitHub, so freshness is a property of this
+// open tab, not of the workspace.
+let lastStateAt = null;
+let lastLoggedIn = false;
+const FOCUS_REFRESH_THROTTLE_MS = 60_000;
 
 async function api(path, body) {
   const opts = body === undefined
@@ -112,7 +119,7 @@ function openChatWindow(path) {
 // first time per workspace). The hub pre-warms it in the background at startup, so
 // this is usually instant — but show a progress hint in case it isn't, since the
 // whole toolbar is disabled while the open POST is in flight.
-async function openAction(path) {
+async function doOpen(path) {
   const summary = $("summary");
   const prev = summary.textContent;
   summary.textContent = "Starting the editor…";
@@ -121,6 +128,85 @@ async function openAction(path) {
   } finally {
     summary.textContent = prev;
   }
+}
+
+// Files the user chose to open stale this session ("Open my copy anyway"), mapped
+// to the remote marker at the time (Freshness.dismissKey). The dialog re-arms only
+// when the remote moves AGAIN — a user who decided to diverge isn't nagged per open.
+const staleDismissed = new Map();
+
+// Whether the branch head still matches the last-rendered /api/state. Timeboxed
+// and advisory: any error, timeout, or offline answers "fresh" so Open is NEVER
+// blocked by a slow or unreachable GitHub — the dialog is prevention, not a gate.
+async function isStateFresh() {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 2000);
+  try {
+    const resp = await fetch("/api/freshness", { signal: ctrl.signal });
+    const data = await resp.json();
+    return data.fresh !== false;
+  } catch {
+    return true;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// Per-state dialog copy. "pull" is the happy path (pull first, then open);
+// a remote DELETION must not offer "Pull latest and open" (pull would remove the
+// local copy); a conflict points at the row's resolve actions (pull skips it).
+const STALE_COPY = {
+  pull: (name) =>
+    `A teammate updated ${name} after your last pull. Editing your copy now ` +
+    "will end in a conflict at push time.",
+  deleted: (name) =>
+    `A teammate deleted ${name} from the team repo. Pulling would remove your ` +
+    "local copy; opening keeps your version (Push it to restore it for the team).",
+  conflict: (name) =>
+    `${name} is conflicted — your copy and a teammate's version both changed. ` +
+    "Resolve it from the row's actions (Use remote / Keep both / Push as copy); " +
+    "you can still open your copy to look.",
+};
+
+function showStaleDialog(file, kind) {
+  const dialog = $("stale-dialog");
+  const name = file.path.split("/").pop();
+  $("stale-message").textContent = STALE_COPY[kind](name);
+  const pullBtn = $("stale-pull");
+  pullBtn.classList.toggle("hidden", kind !== "pull");
+  pullBtn.onclick = async () => {
+    dialog.close();
+    await action("/api/pull", {});
+    doOpen(file.path);
+  };
+  $("stale-open").onclick = () => {
+    dialog.close();
+    staleDismissed.set(file.path, Freshness.dismissKey(file));
+    doOpen(file.path);
+  };
+  $("stale-cancel").onclick = () => dialog.close();
+  dialog.showModal();
+  // Safe default focus: never "Open my copy anyway" (the actionsMenu lesson —
+  // no control where a stray keypress fires the risky choice).
+  (kind === "pull" ? pullBtn : $("stale-cancel")).focus();
+}
+
+// Open, guarded: warn at the moment of choice when the remote moved under this
+// file (remote changed / deleted remotely / conflict) instead of letting the
+// user discover it as a blocked push two hours later. The check is advisory and
+// client-side only — /api/open itself gates nothing new.
+async function openAction(path) {
+  let file = lastFiles.find((f) => f.path === path);
+  // The dialog decision is only as good as the cached rows: if the branch head
+  // moved since the last /api/state, re-render first (timeboxed; see isStateFresh).
+  if (file && !(await isStateFresh())) {
+    await refresh();
+    file = lastFiles.find((f) => f.path === path);
+    if (!file) return; // the row vanished with the fresh state — nothing to open
+  }
+  const kind = Freshness.warnState(file, staleDismissed);
+  if (kind) return showStaleDialog(file, kind);
+  return doOpen(path);
 }
 
 // A plain helper module (a non-marimo .py) can't open in the marimo editor — that
@@ -495,6 +581,30 @@ function renderFiles(files, artifacts, declaredFolders) {
   }
 }
 
+// "Last checked 3 hours ago — 2 teammate update(s) waiting. Refresh". Quiet by
+// design: hidden unless updates are waiting or the view is old enough (>= 30 min)
+// that its numbers shouldn't be trusted. Re-rendered on an interval so the age
+// stays honest while the tab sits open (text only — no network).
+function renderFreshnessBanner() {
+  const banner = $("freshness-banner");
+  const waiting = Freshness.pullCount(lastFiles);
+  const age = lastStateAt == null ? null : Date.now() - lastStateAt;
+  const show = lastLoggedIn && age != null && (waiting > 0 || age >= 30 * 60_000);
+  banner.classList.toggle("hidden", !show);
+  if (!show) return;
+  banner.innerHTML = "";
+  banner.append(
+    waiting > 0
+      ? `Last checked ${Freshness.ageText(age)} — ${waiting} teammate update(s) waiting. `
+      : `Last checked ${Freshness.ageText(age)}. `,
+  );
+  const btn = document.createElement("button");
+  btn.className = "small";
+  btn.textContent = "Refresh";
+  btn.addEventListener("click", refresh);
+  banner.appendChild(btn);
+}
+
 function renderReviewBanner(review) {
   const banner = $("review-banner");
   banner.innerHTML = "";
@@ -598,6 +708,8 @@ function renderRepoSelect(state) {
 
 async function refresh() {
   const state = await api("/api/state");
+  lastStateAt = Date.now();
+  lastLoggedIn = !!state.logged_in;
   showError(state.error || "");
   if (state.ui_theme) {
     applyTheme(state.ui_theme);
@@ -698,6 +810,7 @@ async function refresh() {
   } else {
     lastFiles = [];  // no file surface (login wall) — don't leave stale push/propose targets
   }
+  renderFreshnessBanner();
   // Prompt to adopt any notebook folders the repo keeps outside the synced folders.
   // Runs once per repo-session (see maybeDiscover), so it never rides the refresh loop.
   await maybeDiscover(state);
@@ -961,5 +1074,17 @@ window.addEventListener("storage", (event) => {
 // Match the toggle to the theme the pre-paint script already applied, so it's
 // never momentarily out of sync; refresh() reconciles with the server value.
 $("theme-select").value = document.documentElement.dataset.theme || "system";
+
+// An idle tab heals itself: refresh when the tab regains focus and the last
+// check is older than the throttle, so the staleness dialog and banner decide
+// from reasonably fresh rows without riding a polling loop or the rate limit.
+function maybeFocusRefresh() {
+  if (document.visibilityState !== "visible" || busy) return;
+  if (Freshness.shouldAutoRefresh(lastStateAt, Date.now(), FOCUS_REFRESH_THROTTLE_MS)) refresh();
+}
+window.addEventListener("focus", maybeFocusRefresh);
+document.addEventListener("visibilitychange", maybeFocusRefresh);
+// Keep the banner's age text honest while the tab sits open (no network).
+setInterval(renderFreshnessBanner, 60_000);
 
 refresh();

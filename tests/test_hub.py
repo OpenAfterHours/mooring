@@ -2155,3 +2155,86 @@ def test_state_no_github_url_in_local_mode(unconfigured_client):
     (ws / "notebooks" / "helpers.py").write_text("x = 1\n", "utf-8")
     files = {f["path"]: f for f in client.get("/api/state").json()["files"]}
     assert "github_url" not in files["notebooks/helpers.py"]
+
+
+# -- staleness guard: remote_sha rows + the /api/freshness near-open check --------
+
+
+def test_state_adds_remote_sha_exactly_when_remote_exists(configured):
+    client, _, fake, tmp_path = configured
+    fake.seed("notebooks/shared.py", b"import marimo\napp = marimo.App()\n")
+    write_ws(tmp_path, "ws1", "notebooks/localonly.py", "x = 1\n")
+    files = {f["path"]: f for f in client.get("/api/state").json()["files"]}
+    # The remote-existing row carries the remote blob sha (the staleness dialog's
+    # dismissal key); a never-pushed local file has no remote blob, so no key.
+    assert files["notebooks/shared.py"]["remote_sha"] == fake.tree["notebooks/shared.py"]
+    assert "remote_sha" not in files["notebooks/localonly.py"]
+
+
+def test_freshness_fresh_after_state_and_stale_after_remote_moves(configured):
+    client, _, fake, _ = configured
+    client.get("/api/state")  # records the rendered head
+    data = client.get("/api/freshness").json()
+    assert data == {"fresh": True, "head": fake.head}
+    fake.seed("notebooks/new.py", b"x\n")  # a teammate pushes → the head moves
+    data = client.get("/api/freshness").json()
+    assert data["fresh"] is False
+    client.get("/api/state")  # re-render — the client caught up
+    assert client.get("/api/freshness").json()["fresh"] is True
+
+
+def test_freshness_before_any_state_render_reports_fresh(configured):
+    # Nothing rendered yet → nothing cached to be stale against.
+    client, _, _, _ = configured
+    assert client.get("/api/freshness").json()["fresh"] is True
+
+
+def test_freshness_github_error_maps_502(configured, monkeypatch):
+    from mooring.github import GitHubError
+
+    client, _, fake, _ = configured
+
+    def boom(branch):
+        raise GitHubError("rate limited")
+
+    monkeypatch.setattr(fake, "get_branch_head", boom)
+    resp = client.get("/api/freshness")
+    assert resp.status_code == 502
+    assert "rate limited" in resp.json()["error"]
+
+
+def test_freshness_local_mode_is_always_fresh(unconfigured_client):
+    # No repo → nothing can be stale; the endpoint must not try to reach GitHub.
+    client, _ = unconfigured_client
+    assert client.get("/api/freshness").json() == {"fresh": True, "head": ""}
+
+
+def test_open_has_no_server_side_staleness_gate(configured, monkeypatch):
+    """Invariant pin: the staleness guard is purely client-side and advisory —
+    a `remote changed` file still opens through /api/open with no new gate."""
+
+    class FakeEditor:
+        def __init__(self, workspace, theme="system"):
+            self.workspace = workspace
+
+        def ensure_started(self):
+            pass  # no-op editor double
+
+        def use_uv(self):
+            return True
+
+        def url_for(self, rel_path):
+            return f"http://editor/{rel_path}"
+
+        def shutdown(self):
+            pass  # no-op editor double
+
+    monkeypatch.setattr(server, "EditorServer", FakeEditor)
+    client, hub, fake, tmp_path = configured
+    _seed_and_pull(hub, fake, "notebooks/a.py", b"import marimo\napp = marimo.App()\n")
+    fake.seed("notebooks/a.py", b"import marimo\napp = marimo.App()\nx = 1\n")
+    files = {f["path"]: f for f in client.get("/api/state").json()["files"]}
+    assert files["notebooks/a.py"]["state"] == "remote changed"
+    resp = client.post("/api/open", json={"path": "notebooks/a.py"})
+    assert resp.status_code == 200
+    assert resp.json()["url"] == "http://editor/notebooks/a.py"

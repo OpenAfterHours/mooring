@@ -75,6 +75,9 @@ def api_state(request: Request) -> JSONResponse:
         report = sync.status(hub.client(), cfg)
         body["files"], body["artifacts"] = hub._files_artifacts(report, cfg.workspace())
         body["summary"] = report.summary()
+        # Remember which branch head this render was computed from, so a later
+        # /api/freshness can tell the client whether its cached rows are stale.
+        hub._state_heads[str(cfg.workspace())] = report.head_commit
         if report.review_branch:
             body["review"] = {
                 "branch": report.review_branch,

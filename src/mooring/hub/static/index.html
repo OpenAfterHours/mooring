@@ -170,6 +170,7 @@
       </div>
       <div id="summary" class="muted"></div>
       <div id="review-banner" class="muted hidden"></div>
+      <div id="freshness-banner" class="hidden" role="status"></div>
       <div id="adopt-banner" class="hidden"></div>
       <table id="files-table">
         <thead><tr><th>File</th><th>Status</th><th>Actions</th></tr></thead>
@@ -188,6 +189,20 @@
     </section>
 
     <div id="error-banner" class="hidden"></div>
+
+    <!-- Open-time staleness confirm: shown only when the row's remote moved
+         (remote changed / deleted remotely / conflict). Three explicit buttons —
+         deliberately a <dialog>, not confirm(): the safe action gets focus and
+         no stray keypress can fire the destructive choice (the actionsMenu
+         lesson). Copy and button visibility are set per-state in app.js. -->
+    <dialog id="stale-dialog">
+      <p id="stale-message"></p>
+      <div class="toolbar">
+        <button id="stale-pull" class="primary">Pull latest and open</button>
+        <button id="stale-open">Open my copy anyway</button>
+        <button id="stale-cancel">Cancel</button>
+      </div>
+    </dialog>
   </main>
 
   <footer>
@@ -204,6 +219,7 @@
        before app.js so the global is ready. No DOM/side effects on load. -->
   <script src="/static/chat_core.js"></script>
   <script src="/static/files_tree.js"></script>
+  <script src="/static/freshness.js"></script>
   <script src="/static/app.js"></script>
   <!-- Decorative backdrop: deterministic starfield + the one-time boat voyage.
        Last in <body> so the scene is already parsed; no DOM/side effects elsewhere. -->

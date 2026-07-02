@@ -28,6 +28,7 @@ EXPECTED_ROUTES = {
     ("/api/login/poll", ("GET",), "api_login_poll"),
     ("/api/logout", ("POST",), "api_logout"),
     ("/api/discover", ("GET",), "api_discover"),
+    ("/api/freshness", ("GET",), "api_freshness"),  # staleness guard's near-open head check
     ("/api/adopt", ("POST",), "api_adopt"),
     ("/api/pull", ("POST",), "api_pull"),
     ("/api/push", ("POST",), "api_push"),

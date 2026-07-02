@@ -95,6 +95,10 @@ class Hub:
         # path → (mtime_ns, is_notebook). /api/state re-lists on every refresh, so this
         # avoids re-reading every .py off disk each time; a changed mtime invalidates it.
         self._notebook_cache: dict[str, tuple[int, bool]] = {}
+        # The branch head each workspace's last /api/state render was computed from,
+        # so /api/freshness can answer "has the remote moved since what you're looking
+        # at?" with one fast ref lookup (routes/sync.api_freshness). Keyed like editors.
+        self._state_heads: dict[str, str] = {}
 
     # -- helpers -------------------------------------------------------------
 
@@ -317,6 +321,9 @@ class Hub:
                     if f.remote_sha is not None and cfg.is_configured
                     else {}
                 ),
+                # The remote blob sha keys the staleness dialog's session dismissals
+                # ("Open my copy anyway" re-arms only when the remote moves AGAIN).
+                **({"remote_sha": f.remote_sha} if f.remote_sha is not None else {}),
             }
             for f in report.files
         ]
@@ -827,6 +834,7 @@ def create_app(hub: Hub) -> Starlette:
             Route("/api/login/poll", setup.api_login_poll),
             Route("/api/logout", setup.api_logout, methods=["POST"]),
             Route("/api/discover", sync_routes.api_discover),
+            Route("/api/freshness", sync_routes.api_freshness),
             Route("/api/adopt", sync_routes.api_adopt, methods=["POST"]),
             Route("/api/pull", sync_routes.api_pull, methods=["POST"]),
             Route("/api/push", sync_routes.api_push, methods=["POST"]),

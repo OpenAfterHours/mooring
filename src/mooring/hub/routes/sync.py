@@ -44,6 +44,25 @@ async def api_resolve(request: Request) -> JSONResponse:
     )
 
 
+def api_freshness(request: Request) -> JSONResponse:
+    """Whether the branch head still matches the head the last /api/state render
+    was computed from — the staleness dialog's near-open check. One fast ref
+    lookup, no tree walk. Advisory by design: the client timeboxes the call and
+    opens anyway on error/timeout, so this must never gate anything server-side."""
+    hub = request.app.state.hub
+    cfg = hub.cfg
+    if not cfg.is_configured or not auth.get_token(host=cfg.host):
+        return JSONResponse({"fresh": True, "head": ""})
+    last = hub._state_heads.get(str(cfg.workspace()))
+    try:
+        head = hub.client().get_branch_head(cfg.branch)
+    except (GitHubError, OSError) as exc:
+        telemetry.log_error(exc=exc, op="freshness")
+        return JSONResponse({"error": str(exc)}, status_code=502)
+    # No state rendered yet this session → nothing cached to be stale against.
+    return JSONResponse({"fresh": last is None or head == last, "head": head})
+
+
 def api_discover(request: Request) -> JSONResponse:
     """Top-level repo folders that hold files outside the synced folders — the
     adopt candidates. Read-only; called on demand by the hub (not on every
