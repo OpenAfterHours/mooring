@@ -96,7 +96,9 @@ def api_chat_stream(request: Request) -> StreamingResponse | JSONResponse:
     session = hub.chat.get(sid)
     if session is None:
         return _unknown_session()
-    return sse_response(event_stream(session, chat_replay(session)))
+    # The replay is a callable: event_stream computes it AFTER subscribing, so a
+    # readiness flip can't fall between the snapshot and the subscription.
+    return sse_response(event_stream(session, lambda: chat_replay(session)))
 
 
 async def api_chat_send(request: Request) -> JSONResponse:

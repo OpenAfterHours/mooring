@@ -1,4 +1,5 @@
-"""The AI chat application service — the deferred P7, finally landed.
+"""The AI chat application service — the June review's deferred hub-thinning,
+finally landed (P3 of docs/developers/architecture-plan.md).
 
 Owns what used to live inside the web adapter: the chat-session registry (and
 its lock + lifecycle: close/reap/per-notebook teardown), the CONTEXT ASSEMBLY —

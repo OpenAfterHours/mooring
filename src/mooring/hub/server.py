@@ -65,7 +65,7 @@ class Hub:
         self._lock = threading.Lock()
         # The chat application service: the session registry + lifecycle, the
         # context assembly (the sole egress.build_system_context caller), and the
-        # live-schema pipeline (app/chat_service.py — the landed P7).
+        # live-schema pipeline (app/chat_service.py — plan phase P3).
         self.chat = ChatService()
         # THE per-notebook apply/undo write guard: chat Apply, batch Apply, Undo,
         # and the sync rollback all serialize on apply.lock (app/apply.py).
@@ -419,14 +419,9 @@ class Hub:
             "add_hint": add_hint,
         }
 
-    # -- settings / profile ----------------------------------------------------
-    # A per-machine Settings page reached from the header. The editable surface is
-    # the curated registry in settings_schema.py — which IS the allowlist the rest
-    # of the config write path lacks (config_store.set_value writes any key verbatim).
-    # Writes mirror api_set_theme: persist via config_store, then re-read the config
-    # in place (NOT the destructive reload()). Team/synced decisions (the per-notebook
-    # AI opt-out, sync folders) and the structural value-blindness guarantees are
-    # intentionally NOT here. See docs/admins/configuration.md.
+    # -- settings / profile helpers ---------------------------------------------
+    # The payload/confirm helpers behind the Settings page; the read/write/reset
+    # endpoints (and the full write-path story) live in routes/settings.py.
 
 
     @staticmethod
@@ -693,12 +688,6 @@ class Hub:
 
 
 
-
-    # -- AI copilot (Copilot sign-in) ------------------------------------------
-    # GitHub Copilot signs in SEPARATELY from mooring's GitHub login (auth.py): a
-    # different OAuth flow, a different credential store (~/.copilot), and possibly
-    # a different GitHub account. These endpoints expose that sign-in in the UI so a
-    # user never has to drop to `mooring ai login` in a terminal.
 
     def _ai_status_dict(self, st) -> dict:
         """Shape a ProviderStatus (or None = not probed yet) for the UI. Value-free:

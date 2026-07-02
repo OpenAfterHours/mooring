@@ -102,10 +102,15 @@ def to_error_result(message: str):
     """Mint a failed ``ToolResult``. Errors cross to the model too: exception
     text can quote user input (a path, a cell fragment, a rendered value), so the
     message is scrubbed here — the error channel gets the same checksum-PII floor
-    as every other egress fragment."""
+    as every other egress fragment. ``scrub_text`` drops whole lines, and the
+    typical exception message IS one line — so when the scrub empties it, a
+    value-free explanation is substituted rather than handing the model an
+    empty, unexplained failure it would just retry."""
     from copilot.tools import ToolResult
 
-    scrubbed, _ = scrub_text(message)
+    scrubbed, findings = scrub_text(message)
+    if findings and not scrubbed.strip():
+        scrubbed = "error message withheld: it contained a checksum-validated identifier"
     return ToolResult(
         text_result_for_llm="",
         # "error" is mooring's own result_type; the SDK's ToolResultType Literal

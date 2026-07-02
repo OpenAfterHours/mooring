@@ -184,6 +184,7 @@ source_modules =
     mooring.ai.secrets
     mooring.ai.session
     mooring.ai.tools
+    mooring.app
     mooring.hub
     mooring.cli
     mooring.editor
@@ -194,5 +195,6 @@ forbidden_modules =
 # (an indirect route to spaCy); the violation to catch is a new direct
 # `import spacy` outside the backend module. (import-linter has no "everything
 # except ner_spacy" source form, hence the explicit list — add new ai/ modules
-# here as they appear.)
+# here as they appear. Known gap: the mooring.ai package ROOT can't be listed
+# without also covering ner_spacy, its submodule.)
 allow_indirect_imports = True

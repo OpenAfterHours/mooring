@@ -241,7 +241,9 @@ async def api_batch_stream(request: Request) -> StreamingResponse | JSONResponse
     run = hub.batch.get(batch_id)
     if run is None:
         return JSONResponse({"error": "Unknown batch."}, status_code=404)
-    return sse_response(event_stream(run.broadcaster, batch_replay(run)))
+    # The replay is a callable: event_stream computes it AFTER subscribing, so a
+    # cancel/reap can't fall between the snapshot and the subscription.
+    return sse_response(event_stream(run.broadcaster, lambda: batch_replay(run)))
 
 
 async def api_batch_tray(request: Request) -> JSONResponse:

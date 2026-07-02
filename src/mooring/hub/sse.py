@@ -64,13 +64,23 @@ def batch_replay(run) -> list[str]:
     return [sse_event("closed", {})] if run.status == "closed" else []
 
 
-async def event_stream(broadcaster, replay: list[str]):
+async def event_stream(broadcaster, replay):
     """The shared SSE generator over a ChatBroadcaster-shaped object
-    (``subscribe()`` returning a queue, ``unsubscribe(q)``)."""
+    (``subscribe()`` returning a queue, ``unsubscribe(q)``).
+
+    ``replay`` is a CALLABLE returning the catch-up frames, and it runs strictly
+    AFTER ``subscribe()`` — the ordering the original per-stream generators had.
+    That order is load-bearing: a state transition (ready/fail/closed) can then
+    never fall through the gap, because it lands either in the replay snapshot
+    (fired before subscribe) or in the queue (fired after). Computing the replay
+    in the route handler, before this generator first runs, would silently drop
+    a transition landing in between — a chat stuck on "connecting…", or a
+    cancelled batch stream pinging forever.
+    """
     q = broadcaster.subscribe()
     try:
         yield ": connected\n\n"
-        for chunk in replay:
+        for chunk in replay():
             yield chunk
             if chunk.startswith("event: closed\n"):
                 return  # the replayed close ends the stream like a live one

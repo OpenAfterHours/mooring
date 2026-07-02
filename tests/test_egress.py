@@ -134,11 +134,21 @@ def test_to_tool_result_mints_without_reshaping():
 
 def test_to_error_result_scrubs_the_error_channel():
     # Exception text can quote user input; the error field crosses to the model
-    # too, so it gets the same checksum-PII floor as the text channel.
+    # too, so it gets the same checksum-PII floor as the text channel. A typical
+    # exception message is ONE line, and the scrub drops whole lines — so the
+    # withheld case must still EXPLAIN itself, never hand back an empty error
+    # the model would silently retry.
     res = egress.to_error_result(f"cannot read schema: bad value {VALID_CARD} in header")
     assert VALID_CARD not in (res.error or "")
+    assert res.error and "withheld" in res.error
     assert res.text_result_for_llm == ""
     assert res.result_type == "error"
+
+
+def test_to_error_result_keeps_clean_lines_of_a_multiline_message():
+    res = egress.to_error_result(f"cannot read schema\nbad value {VALID_CARD}\nin row 3")
+    assert VALID_CARD not in (res.error or "")
+    assert "cannot read schema" in res.error and "in row 3" in res.error
 
 
 def test_to_error_result_clean_message_unchanged():
