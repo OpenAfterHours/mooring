@@ -205,6 +205,28 @@ def _build_parser() -> argparse.ArgumentParser:
         help="also discard your edit to a conflicted file (turns it into a clean pull)",
     )
 
+    history_cmd = sub.add_parser(
+        "history", help="list a file's pushed versions from the team repo (needs login)"
+    )
+    history_cmd.add_argument("path", help="workspace-relative file path")
+    history_cmd.add_argument("--page", type=int, default=1, help="older pages (30 per page)")
+
+    restore_cmd = sub.add_parser(
+        "restore", help="bring back a file as it was at a past version (needs login)"
+    )
+    restore_cmd.add_argument("path", help="workspace-relative file path")
+    restore_cmd.add_argument(
+        "--at", required=True, metavar="SHA", help="the version's commit sha (see `mooring history`)"
+    )
+    restore_cmd.add_argument(
+        "--copy",
+        action="store_true",
+        help="write it beside the file as {name}.restored-{sha7} instead of overwriting",
+    )
+    restore_cmd.add_argument(
+        "-y", "--yes", action="store_true", help="skip the confirmation prompt"
+    )
+
     trash_cmd = sub.add_parser(
         "trash", help="list and restore local pre-images saved before destructive actions"
     )
@@ -259,6 +281,8 @@ def _build_parser() -> argparse.ArgumentParser:
         new,
         delete_cmd,
         rollback_cmd,
+        history_cmd,
+        restore_cmd,
         trash_cmd,
         activity_cmd,
         init_cmd,
@@ -966,6 +990,60 @@ def _record_activity(cfg: config.Config, op: str, result=None, **fields) -> None
     activity.record(cfg.workspace(), op, **fields)
 
 
+def cmd_history(cfg: config.Config, rel_path: str, page: int) -> int:
+    from mooring import sync
+
+    versions = sync.history(_client(cfg), cfg, rel_path, page=max(1, page))
+    if not versions:
+        print(
+            f"No pushed versions found for {rel_path}"
+            + ("" if page <= 1 else f" on page {page}")
+            + "."
+        )
+        return 0
+    for v in versions:
+        who = f"  {v['author']}" if v["author"] else ""
+        print(f"  {v['short']}  {v['date']}{who}  {v['message']}")
+    if len(versions) == 30:
+        print(f"  (older versions: mooring history {rel_path} --page {page + 1})")
+    print(f"Restore one with: mooring restore {rel_path} --at <sha>  (add --copy to keep both)")
+    return 0
+
+
+def cmd_restore(
+    cfg: config.Config, rel_path: str, at: str, as_copy: bool, assume_yes: bool
+) -> int:
+    from mooring import notebook_undo, sync
+
+    client = _client(cfg)
+    workspace = cfg.workspace()
+    if not as_copy and not assume_yes:
+        if not sys.stdin.isatty():
+            sys.exit(
+                f"Refusing to overwrite {rel_path} without confirmation. "
+                "Re-run with --yes (or use --copy)."
+            )
+        prompt = (
+            f"Replace your current {rel_path} with the version at {at[:7]}? "
+            "Your current bytes are saved first. [y/N] "
+        )
+        if input(prompt).strip().lower() not in ("y", "yes"):
+            print("Cancelled.")
+            return 0
+
+    def snapshot_fn(rel: str, data: bytes) -> None:
+        if rel.endswith(".py"):
+            notebook_undo.snapshot(workspace, rel, data)
+
+    result = sync.restore_version(
+        client, cfg, rel_path, at, as_copy=as_copy, snapshot_fn=snapshot_fn
+    )
+    telemetry.log_event("restore", copy=int(as_copy), reverted=result.reverted)
+    _record_activity(cfg, "restore", result, path=rel_path)
+    _print_sync_result(result)
+    return 0 if result.reverted else 1
+
+
 def cmd_trash(cfg: config.Config, args: argparse.Namespace) -> int:
     from mooring import trash
 
@@ -1593,6 +1671,10 @@ def _dispatch(
         return cmd_trash(cfg, args)
     if command == "activity":
         return cmd_activity(cfg, args)
+    if command == "history":
+        return cmd_history(cfg, args.path, args.page)
+    if command == "restore":
+        return cmd_restore(cfg, args.path, args.at, args.copy, args.yes)
     parser.error(f"unknown command {command!r}")
     return 2
 

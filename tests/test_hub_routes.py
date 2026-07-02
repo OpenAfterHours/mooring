@@ -41,6 +41,10 @@ EXPECTED_ROUTES = {
     ("/api/delete", ("POST",), "api_delete"),
     ("/api/rollback", ("POST",), "api_rollback"),
     ("/api/undo", ("POST",), "api_undo"),
+    # The git-free time machine (roadmap: version-history).
+    ("/api/history", ("GET",), "api_history"),
+    ("/api/history/file", ("GET",), "api_history_file"),
+    ("/api/restore", ("POST",), "api_restore"),
     # The local safety net: the trash + activity ledger (roadmap: local-safety-net).
     ("/activity", ("GET",), "activity_page"),
     ("/api/trash", ("GET",), "api_trash"),

@@ -4,9 +4,17 @@ icon: lucide/history
 
 # Per-file version history and restore
 
-!!! note "Status: proposed"
-    Designed July 2026 from a multi-agent ideation review; not yet implemented.
-    Scope may change — this page records the current plan and its reasoning.
+!!! success "Status: implemented (phases 1–3)"
+    Shipped 2026-07-02: `GitHubClient.list_commits_for_path()` /
+    `get_file_at()` (+ protocol + FakeClient commit log), `sync.history()` /
+    `sync.restore_version()` (restore-as-copy and restore-over, with the undo
+    snapshot for `.py` and the local trash for data files), `mooring history` /
+    `mooring restore` on the CLI, and the hub's History panel
+    (`/api/history`, read-only `/api/history/file` view+diff, `/api/restore`)
+    with the Revert action relabelled **Discard my changes**. Since the hub's
+    route split the endpoints live in `hub/routes/files.py`. Phase 4
+    ("Recently deleted") and phase 5 (cell-aware diffs, blocked on
+    [review my changes](review-my-changes.md)) remain open.
 
 ## Problem
 

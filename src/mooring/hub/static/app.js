@@ -379,6 +379,105 @@ function undoAction(path) {
   });
 }
 
+// -- version history (the git-free time machine) ----------------------------
+
+let historyPath = null;
+let historyPage = 1;
+
+async function historyAction(path, page) {
+  historyPath = path;
+  historyPage = page || 1;
+  const data = await api(
+    `/api/history?path=${encodeURIComponent(path)}&page=${historyPage}`,
+  );
+  if (data.error) return showError(data.error);
+  renderHistory(path, data.versions || [], historyPage);
+}
+
+async function viewVersion(path, sha, mode) {
+  const data = await api(
+    `/api/history/file?path=${encodeURIComponent(path)}&at=${encodeURIComponent(sha)}`,
+  );
+  if (data.error) return showError(data.error);
+  const view = $("history-view");
+  view.textContent = mode === "diff"
+    ? (data.diff || "(no differences against your current copy)")
+    : data.source;
+  view.classList.remove("hidden");
+}
+
+async function restoreVersion(path, sha, asCopy) {
+  if (!asCopy) {
+    const ok = confirm(
+      `Replace your current ${path.split("/").pop()} with the version from ` +
+      `${sha.slice(0, 7)}?\n\n` +
+      "Your current bytes are saved first, so this is undoable. The restored " +
+      "file stays LOCAL until you push it — and pushing a version older than " +
+      "your last pull replaces newer team work on purpose. Old code may also " +
+      "not run under the repo's current packages."
+    );
+    if (!ok) return;
+  }
+  const data = await action("/api/restore", { path, at: sha, copy: !!asCopy });
+  if (data && !data.error && data.undo_token) {
+    recentlyReverted.set(path, data.undo_token);
+    refresh();
+  }
+}
+
+function renderHistory(path, versions, page) {
+  const card = $("history-card");
+  card.classList.remove("hidden");
+  $("history-title").textContent = `History — ${path}`;
+  $("history-view").classList.add("hidden");
+  const tbody = $("history-table").querySelector("tbody");
+  if (page === 1) tbody.innerHTML = "";
+  for (const v of versions) {
+    const tr = document.createElement("tr");
+    const label = document.createElement("td");
+    label.className = "path";
+    label.textContent = HistoryFmt.versionLabel(v);
+    const actionsTd = document.createElement("td");
+    const acts = [
+      ["View", () => viewVersion(path, v.sha)],
+      ["Diff", () => viewVersion(path, v.sha, "diff")],
+      ["Restore as copy", () => restoreVersion(path, v.sha, true)],
+    ];
+    if (HistoryFmt.canRestoreOver(path)) {
+      acts.push(["Restore over current", () => restoreVersion(path, v.sha, false)]);
+    }
+    for (const [text, handler] of acts) {
+      const btn = document.createElement("button");
+      btn.className = "small";
+      btn.textContent = text;
+      btn.addEventListener("click", handler);
+      actionsTd.append(btn, " ");
+    }
+    tr.append(label, actionsTd);
+    tbody.appendChild(tr);
+  }
+  if (!versions.length && page === 1) {
+    const tr = document.createElement("tr");
+    const td = document.createElement("td");
+    td.colSpan = 2;
+    td.className = "muted";
+    td.textContent = "No pushed versions found for this file.";
+    tr.appendChild(td);
+    tbody.appendChild(tr);
+  }
+  // No more pages when a page comes back short (the API pages by 30).
+  $("history-older").classList.toggle("hidden", versions.length < 30);
+  card.scrollIntoView({ block: "nearest" });
+}
+
+$("history-older").addEventListener("click", () => {
+  if (historyPath) historyAction(historyPath, historyPage + 1);
+});
+$("history-close").addEventListener("click", () => {
+  $("history-card").classList.add("hidden");
+  historyPath = null;
+});
+
 function fileActions(file, opts) {
   opts = opts || {};
   const actions = [];
@@ -393,13 +492,20 @@ function fileActions(file, opts) {
       ["Push", () => action("/api/push", { paths: [file.path] })],
       ["Propose", () => action("/api/propose", { paths: [file.path] })],
     );
-    // Revert restores the last synced version. Notebook-only: data files and Power BI
-    // members aren't snapshotted (so an Undo would be a dead promise) and a lone PBIP
-    // member can't be reverted without breaking the artifact — use the CLI for those.
-    // "new local" has no checkpoint to go back to (that's Delete).
+    // "Discard my changes" (né Revert) restores the last synced version.
+    // Notebook-only: data files and Power BI members aren't snapshotted (so an
+    // Undo would be a dead promise) and a lone PBIP member can't be reverted
+    // without breaking the artifact — use the CLI for those. "new local" has no
+    // checkpoint to go back to (that's Delete). Relabelled so it can't blur
+    // with History's "Restore" (the time machine vs the one-click discard).
     if (file.path.endsWith(".py") && (file.state === "modified" || file.state === "deleted locally")) {
-      actions.push(["Revert", () => revertAction(file.path, file.state)]);
+      actions.push(["Discard my changes", () => revertAction(file.path, file.state)]);
     }
+  }
+  // History: every pushed version of this file (the git-free time machine).
+  // Never-synced files have no history; PBIP members restore only whole.
+  if (HistoryFmt.hasHistory(file) && !opts.member) {
+    actions.push(["History…", () => historyAction(file.path)]);
   }
   // A one-shot Undo for a file just reverted this session (snapshot kept server-side).
   if (recentlyReverted.has(file.path)) {

@@ -482,6 +482,10 @@ tr.folder-header b { font-weight: 600; }
 }
 .undo-toast-close { border: none; background: none; color: var(--muted); }
 
+/* Version-history panel: the read-only source/diff view stays bounded. */
+#history-view { max-height: 24rem; overflow: auto; }
+#history-table td.path { font-size: 0.85rem; }
+
 /* Activity page: the ledger list + its per-entry relative time. */
 .activity-list { list-style: none; padding: 0; margin: 0.6rem 0 0; }
 .activity-list li { padding: 0.3rem 0; border-bottom: 1px solid var(--border); }

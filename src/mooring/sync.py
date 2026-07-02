@@ -806,6 +806,83 @@ def revert(
     return result
 
 
+def history(client: GitHubClientProtocol, cfg: Config, rel_path: str, page: int = 1) -> list[dict]:
+    """One page of ``rel_path``'s version history on cfg.branch, newest first,
+    shaped for humans: sha/short/message (first line)/author/date. The commits
+    API paginates and does not follow renames — history starts at a rename."""
+    rel_path = rel_path.replace("\\", "/")
+    out = []
+    for c in client.list_commits_for_path(rel_path, cfg.branch, page=page):
+        commit = c.get("commit") or {}
+        author = commit.get("author") or {}
+        message = str(commit.get("message") or "")
+        out.append(
+            {
+                "sha": c.get("sha", ""),
+                "short": str(c.get("sha", ""))[:7],
+                "message": message.splitlines()[0] if message else "",
+                "author": (c.get("author") or {}).get("login") or author.get("name") or "",
+                "date": author.get("date", ""),
+            }
+        )
+    return out
+
+
+def restore_version(
+    client: GitHubClientProtocol,
+    cfg: Config,
+    rel_path: str,
+    at: str,
+    *,
+    as_copy: bool = False,
+    snapshot_fn=None,
+) -> SyncResult:
+    """Bring back ``rel_path`` as it existed at commit ``at`` — the git-free
+    time machine (revert reaches only the last-synced checkpoint; this reaches
+    anything ever pushed).
+
+    A pure LOCAL write: no ``put_file``, no manifest mutation — the restored
+    file simply reclassifies on the next status (``new local`` for a copy,
+    ``modified``/``conflict`` for an overwrite) and rides standard sync, so a
+    restore can never silently overwrite the remote. ``as_copy`` writes
+    ``{stem}.restored-{sha7}{suffix}`` beside the file (always safe); an
+    overwrite banks the current bytes first — ``snapshot_fn`` for the ``.py``
+    undo stack (the revert idiom), the local trash for anything else.
+    """
+    rel_path = rel_path.replace("\\", "/")
+    workspace = cfg.workspace()
+    result = SyncResult()
+    try:
+        _, data = client.get_file_at(rel_path, at)
+    except NotFound:
+        result.lines.append(
+            f"{rel_path}: no version at {at[:7]} (the file may not have existed there)"
+        )
+        return result
+    short = at[:7]
+    if as_copy:
+        p = Path(rel_path)
+        copy_path = str(p.with_name(f"{p.stem}.restored-{short}{p.suffix}")).replace("\\", "/")
+        _write_blob(workspace, copy_path, data)
+        result.reverted += 1
+        result.lines.append(f"restored {rel_path} @ {short} as {copy_path} (a new local file)")
+        return result
+    target = workspace / rel_path
+    if snapshot_fn is not None and target.is_file():
+        snapshot_fn(rel_path, target.read_bytes())
+    if not rel_path.endswith(".py"):
+        _bank_pre_image(
+            workspace, rel_path, "restore-version", gitsha.blob_sha(data),
+            cfg.trash_max_file_mb, result, replacement=data,
+        )
+    _write_blob(workspace, rel_path, data)
+    result.reverted += 1
+    result.lines.append(
+        f"restored {rel_path} to version {short} (local only — push to share it)"
+    )
+    return result
+
+
 def push(
     client: GitHubClientProtocol,
     cfg: Config,

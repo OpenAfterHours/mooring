@@ -227,3 +227,93 @@ def test_enterprise_host_routes_to_api_v3():
     responses.add(responses.GET, "https://ghe.service.group/api/v3/user", json={"login": "phil"})
     assert ghes.get_branch_head("main") == "c0ffee"
     assert ghes.get_user()["login"] == "phil"
+
+
+# -- version history reads (commits list + contents-at-ref) -------------------
+
+
+@responses.activate
+def test_list_commits_for_path_request_shape_and_parsing():
+    responses.add(
+        responses.GET,
+        f"{REPO}/commits",
+        json=[
+            {
+                "sha": "abc1234def",
+                "commit": {"message": "Update x", "author": {"name": "Maria", "date": "2026-06-30T09:00:00Z"}},
+                "author": {"login": "maria"},
+            }
+        ],
+    )
+    commits = client().list_commits_for_path("notebooks/a.py", "main", page=2, per_page=30)
+    assert commits[0]["sha"] == "abc1234def"
+    params = responses.calls[0].request.params
+    assert params["path"] == "notebooks/a.py"
+    assert params["sha"] == "main"
+    assert params["page"] == "2"
+    assert params["per_page"] == "30"
+
+
+@responses.activate
+def test_list_commits_for_path_empty_page():
+    responses.add(responses.GET, f"{REPO}/commits", json=[])
+    assert client().list_commits_for_path("notebooks/a.py", "main", page=9) == []
+
+
+@responses.activate
+def test_get_file_at_inline_content():
+    responses.add(
+        responses.GET,
+        f"{REPO}/contents/notebooks/a.py",
+        json={
+            "sha": "blob1",
+            "encoding": "base64",
+            "content": base64.b64encode(b"x = 1\n").decode(),
+        },
+    )
+    sha, data = client().get_file_at("notebooks/a.py", "abc1234")
+    assert (sha, data) == ("blob1", b"x = 1\n")
+    assert responses.calls[0].request.params["ref"] == "abc1234"
+
+
+@responses.activate
+def test_get_file_at_large_file_falls_back_to_blob():
+    # Past ~1 MB the contents API omits inline content; the blob API serves it.
+    responses.add(
+        responses.GET,
+        f"{REPO}/contents/data/big.csv",
+        json={"sha": "blob9", "encoding": "none", "content": ""},
+    )
+    responses.add(
+        responses.GET,
+        f"{REPO}/git/blobs/blob9",
+        json={"encoding": "base64", "content": base64.b64encode(b"a,b\n").decode()},
+    )
+    assert client().get_file_at("data/big.csv", "ref1") == ("blob9", b"a,b\n")
+
+
+@responses.activate
+def test_get_file_at_missing_raises_notfound():
+    from mooring.github import NotFound
+
+    responses.add(responses.GET, f"{REPO}/contents/notebooks/gone.py", status=404)
+    with pytest.raises(NotFound):
+        client().get_file_at("notebooks/gone.py", "ref1")
+
+
+@responses.activate
+def test_history_reads_surface_auth_and_rate_errors():
+    from mooring.github import RateLimited
+
+    responses.add(responses.GET, f"{REPO}/commits", status=401)
+    with pytest.raises(AuthFailed):
+        client().list_commits_for_path("a.py", "main")
+    responses.reset()
+    responses.add(
+        responses.GET,
+        f"{REPO}/commits",
+        status=403,
+        headers={"x-ratelimit-remaining": "0", "x-ratelimit-reset": "1"},
+    )
+    with pytest.raises(RateLimited):
+        client().list_commits_for_path("a.py", "main")

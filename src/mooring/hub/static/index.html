@@ -190,6 +190,24 @@
       <div id="log-link" class="hidden"><a target="_blank" rel="noopener" aria-label="Create or view the pull request on GitHub">Create / view the pull request on GitHub</a></div>
     </section>
 
+    <!-- Version history: every pushed version of one file, from the repo's own
+         history (the git-free time machine). View/Diff are read-only; Restore
+         defaults to a sibling copy, and restore-over banks the current bytes
+         first (undo/trash) and flows through normal sync — never silent. -->
+    <section id="history-card" class="card hidden">
+      <h3 id="history-title">History</h3>
+      <div class="muted">Read-only: old versions are never opened in the editor or run.</div>
+      <table id="history-table">
+        <thead><tr><th>Version</th><th>Actions</th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <div class="toolbar">
+        <button id="history-older" class="small">Show older</button>
+        <button id="history-close" class="small">Close</button>
+      </div>
+      <pre id="history-view" class="hidden"></pre>
+    </section>
+
     <div id="error-banner" class="hidden"></div>
 
     <!-- Open-time staleness confirm: shown only when the row's remote moved
@@ -237,6 +255,7 @@
   <script src="/static/files_tree.js"></script>
   <script src="/static/freshness.js"></script>
   <script src="/static/guard_fmt.js"></script>
+  <script src="/static/history_fmt.js"></script>
   <script src="/static/app.js"></script>
   <!-- Decorative backdrop: deterministic starfield + the one-time boat voyage.
        Last in <body> so the scene is already parsed; no DOM/side effects elsewhere. -->

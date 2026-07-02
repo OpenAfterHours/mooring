@@ -2383,3 +2383,65 @@ def test_state_reports_can_recall_and_api_recall_works(configured):
     assert any("history" in line for line in lines)
     assert fake.get_blob(fake.tree["notebooks/a.py"]) == b"v1\n"
     assert client.get("/api/state").json()["can_recall"] is False
+
+
+# -- version history: /api/history, /api/history/file, /api/restore ----------
+
+
+def _with_pushed_history(client, hub, fake, tmp_path):
+    _seed_and_pull(hub, fake, "notebooks/a.py")
+    old_head = fake.head
+    (tmp_path / "ws1" / "notebooks/a.py").write_text("v2\n", "utf-8", newline="\n")
+    assert client.post("/api/push", json={}).status_code == 200
+    return old_head
+
+
+def test_history_lists_versions(configured):
+    client, hub, fake, tmp_path = configured
+    _with_pushed_history(client, hub, fake, tmp_path)
+    body = client.get("/api/history?path=notebooks/a.py").json()
+    assert len(body["versions"]) == 2
+    assert body["versions"][0]["author"] == "phil"
+
+
+def test_history_rejects_traversal(configured):
+    client, _, _, _ = configured
+    assert client.get("/api/history?path=../evil.py").status_code == 400
+
+
+def test_history_file_is_read_only_view_and_diff(configured):
+    client, hub, fake, tmp_path = configured
+    old_head = _with_pushed_history(client, hub, fake, tmp_path)
+    body = client.get(
+        f"/api/history/file?path=notebooks/a.py&at={old_head}"
+    ).json()
+    assert body["source"] == "v1\n"
+    assert "-v1" in body["diff"] and "+v2" in body["diff"]
+    # Read-only pin: no editor spawned, workspace bytes untouched.
+    assert hub.editors == {}
+    assert (tmp_path / "ws1" / "notebooks/a.py").read_text("utf-8") == "v2\n"
+
+
+def test_restore_as_copy_endpoint(configured):
+    client, hub, fake, tmp_path = configured
+    old_head = _with_pushed_history(client, hub, fake, tmp_path)
+    resp = client.post(
+        "/api/restore", json={"path": "notebooks/a.py", "at": old_head, "copy": True}
+    )
+    assert resp.status_code == 200
+    copy = tmp_path / "ws1" / f"notebooks/a.restored-{old_head[:7]}.py"
+    assert copy.read_text("utf-8") == "v1\n"
+
+
+def test_restore_over_endpoint_returns_undo_token(configured):
+    client, hub, fake, tmp_path = configured
+    old_head = _with_pushed_history(client, hub, fake, tmp_path)
+    resp = client.post("/api/restore", json={"path": "notebooks/a.py", "at": old_head})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert (tmp_path / "ws1" / "notebooks/a.py").read_text("utf-8") == "v1\n"
+    token = body["undo_token"]
+    # The undo round-trip brings v2 back; a stale token would 409 (shared stack).
+    undo = client.post("/api/undo", json={"path": "notebooks/a.py", "token": token})
+    assert undo.status_code == 200
+    assert (tmp_path / "ws1" / "notebooks/a.py").read_text("utf-8") == "v2\n"

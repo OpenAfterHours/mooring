@@ -188,6 +188,125 @@ async def api_undo(request: Request) -> JSONResponse:
     return JSONResponse({"ok": True, "can_undo": outcome > 0, "undo_depth": outcome})
 
 
+def _resolve_within(workspace, rel_path: str):
+    """Resolve a workspace-relative path, rejecting anything that escapes it.
+    Unlike _ws_file this does NOT require the file to exist locally — history
+    and restore legitimately target files that are deleted or never local."""
+    rel = str(rel_path).replace("\\", "/").strip("/")
+    if not rel:
+        raise ValueError("No path given.")
+    target = (workspace / rel).resolve()
+    try:
+        target.relative_to(workspace.resolve())
+    except ValueError as exc:
+        raise ValueError("Path escapes the workspace.") from exc
+    return rel, target
+
+
+async def api_history(request: Request) -> JSONResponse:
+    """One page of a file's version history on the team branch (see sync.history)."""
+    hub = request.app.state.hub
+    path = request.query_params.get("path", "")
+    try:
+        rel, _ = _resolve_within(hub.cfg.workspace(), path)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    try:
+        page = max(1, int(request.query_params.get("page", "1")))
+    except ValueError:
+        page = 1
+    try:
+        versions = sync.history(hub.client(), hub.cfg, rel, page=page)
+    except (GitHubError, OSError) as exc:
+        telemetry.log_error(exc=exc, op="history")
+        return JSONResponse({"error": str(exc)}, status_code=502)
+    return JSONResponse({"path": rel, "page": page, "versions": versions})
+
+
+async def api_history_file(request: Request) -> JSONResponse:
+    """A file's source at one commit, plus a unified diff against the current
+    local copy. STRICTLY read-only: never opens an editor, never writes the
+    workspace — old code may not run under current dependencies, so it is
+    only ever displayed."""
+    import difflib
+
+    hub = request.app.state.hub
+    path = request.query_params.get("path", "")
+    at = request.query_params.get("at", "")
+    workspace = hub.cfg.workspace()
+    try:
+        rel, target = _resolve_within(workspace, path)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    if not at:
+        return JSONResponse({"error": "No version given."}, status_code=400)
+    try:
+        _, data = hub.client().get_file_at(rel, at)
+    except (GitHubError, OSError) as exc:
+        telemetry.log_error(exc=exc, op="history_file")
+        return JSONResponse({"error": str(exc)}, status_code=502)
+    old = data.decode("utf-8", "replace")
+    current = target.read_text("utf-8", errors="replace") if target.is_file() else ""
+    diff = "\n".join(
+        difflib.unified_diff(
+            old.splitlines(),
+            current.splitlines(),
+            fromfile=f"{rel} @ {at[:7]}",
+            tofile=f"{rel} (current)",
+            lineterm="",
+        )
+    )
+    return JSONResponse({"path": rel, "at": at, "source": old, "diff": diff})
+
+
+async def api_restore(request: Request) -> JSONResponse:
+    """Restore a historic version — as a sibling copy (safe default) or over the
+    current file. An overwrite banks the current bytes first (the .py undo
+    stack / the trash, exactly like Revert) and is held under the shared apply
+    lock so it can't race an in-flight AI Apply. Purely local: the restored
+    file rides normal three-way sync and is pushed explicitly, never silently."""
+    from mooring import notebook_undo
+
+    hub = request.app.state.hub
+    data = await request.json()
+    at = str(data.get("at", ""))
+    as_copy = bool(data.get("copy"))
+    workspace = hub.cfg.workspace()
+    try:
+        rel, _ = _resolve_within(workspace, str(data.get("path", "")))
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    if not at:
+        return JSONResponse({"error": "No version given."}, status_code=400)
+    captured: dict[str, str] = {}
+
+    def snapshot_fn(rel_path: str, content: bytes) -> None:
+        if rel_path.endswith(".py"):
+            captured["token"] = notebook_undo.snapshot(workspace, rel_path, content)
+
+    try:
+        with hub.apply.lock:
+            result = sync.restore_version(
+                hub.client(), hub.cfg, rel, at, as_copy=as_copy, snapshot_fn=snapshot_fn
+            )
+    except (GitHubError, OSError) as exc:
+        telemetry.log_error(exc=exc, op="restore")
+        return JSONResponse({"error": str(exc)}, status_code=502)
+    telemetry.log_event("restore", copy=int(as_copy), reverted=result.reverted)
+    hub._activity(
+        "restore",
+        path=rel,
+        summary=result.summary(),
+        trashed=[{"path": p, "token": t} for p, t in result.trashed],
+    )
+    body = {"lines": result.lines, "summary": result.summary()}
+    if "token" in captured:
+        body["undo_token"] = captured["token"]
+    if result.trashed:
+        body["trashed"] = [{"path": p, "token": t} for p, t in result.trashed]
+    return JSONResponse(body)
+
+
 async def api_trash(request: Request) -> JSONResponse:
     """List the local trash — the pre-images banked before mooring overwrote or
     removed local files (see mooring.trash). Value-local: nothing here touches
