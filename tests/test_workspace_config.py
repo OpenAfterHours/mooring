@@ -85,6 +85,62 @@ def test_corrupt_file_fails_open(tmp_path):
     assert wc.is_ai_disabled(tmp_path, "notebooks/a.py") is False
 
 
+# -- per-model AI opt-out (Power BI semantic models) ----------------------------
+
+
+def test_semantic_models_missing_file_is_empty(tmp_path):
+    assert wc.disabled_semantic_models(tmp_path) == set()
+    assert wc.is_semantic_model_disabled(tmp_path, "reports/Sales") is False
+
+
+def test_semantic_model_set_and_clear_round_trip(tmp_path):
+    assert wc.set_semantic_model_disabled(tmp_path, "reports/Sales", True) is True
+    assert wc.is_semantic_model_disabled(tmp_path, "reports/Sales") is True
+    data = tomllib.loads((tmp_path / "mooring.toml").read_text("utf-8"))
+    assert data["ai"]["disabled_semantic_models"] == ["reports/Sales"]
+
+    assert wc.set_semantic_model_disabled(tmp_path, "reports/Sales", False) is False
+    assert not (tmp_path / "mooring.toml").exists()  # pruned, nothing spurious to sync
+
+
+def test_semantic_model_normalization_sort_and_dedupe(tmp_path):
+    wc.set_semantic_model_disabled(tmp_path, "reports\\Zeta", True)  # backslash
+    wc.set_semantic_model_disabled(tmp_path, "/reports/Alpha/", True)  # surrounding slashes
+    wc.set_semantic_model_disabled(tmp_path, "reports/Zeta", True)  # duplicate of the first
+    data = tomllib.loads((tmp_path / "mooring.toml").read_text("utf-8"))
+    assert data["ai"]["disabled_semantic_models"] == ["reports/Alpha", "reports/Zeta"]
+
+
+def test_semantic_model_round_trip_preserves_other_keys(tmp_path):
+    (tmp_path / "mooring.toml").write_text(
+        '[other]\nkeep = "me"\n\n[ai]\ndisabled_notebooks = ["notebooks/a.py"]\n', "utf-8"
+    )
+    wc.set_semantic_model_disabled(tmp_path, "reports/Sales", True)
+    data = tomllib.loads((tmp_path / "mooring.toml").read_text("utf-8"))
+    assert data["other"] == {"keep": "me"}
+    assert data["ai"]["disabled_notebooks"] == ["notebooks/a.py"]  # sibling key untouched
+    assert data["ai"]["disabled_semantic_models"] == ["reports/Sales"]
+
+    # Removing the model opt-out prunes only its key; the notebook opt-out stays.
+    wc.set_semantic_model_disabled(tmp_path, "reports/Sales", False)
+    data = tomllib.loads((tmp_path / "mooring.toml").read_text("utf-8"))
+    assert data["ai"] == {"disabled_notebooks": ["notebooks/a.py"]}
+    assert data["other"] == {"keep": "me"}
+
+
+def test_semantic_model_write_does_not_clobber_corrupt_file(tmp_path):
+    original = "this is = not valid = toml"
+    (tmp_path / "mooring.toml").write_text(original, "utf-8")
+    with pytest.raises(tomllib.TOMLDecodeError):
+        wc.set_semantic_model_disabled(tmp_path, "reports/Sales", True)
+    assert (tmp_path / "mooring.toml").read_text("utf-8") == original  # untouched
+
+
+def test_semantic_model_read_fails_open_on_corrupt_file(tmp_path):
+    (tmp_path / "mooring.toml").write_text("this is = not valid = toml", "utf-8")
+    assert wc.disabled_semantic_models(tmp_path) == set()
+
+
 # -- synced extra folders -----------------------------------------------------
 
 

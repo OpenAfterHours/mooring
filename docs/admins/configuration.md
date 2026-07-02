@@ -176,6 +176,17 @@ paths or contents).
 | `max_file_mb` | `45` | Don't bank files larger than this (the action still runs). |
 | `max_total_mb` | `200` | Total store cap; oldest entries evicted first. |
 
+### `[ai]` — the copilot
+
+The `[ai]` / `[ai.pii]` settings are documented where their privacy story lives:
+[Why the copilot can't see your data](ai-privacy.md). Two knobs worth naming here
+because they gate what the copilot may *read*:
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `semantic_model` | `true` | Let the copilot read a synced **Power BI semantic model** (a PBIP's TMDL): tables, columns, relationships, and measure DAX — authored code, never data. Partition/source M expressions, RLS roles, annotations, and translations are never read. Env override: `MOORING_AI_SEMANTIC_MODEL`. Preview with `mooring ai model check`. See [the semantic model](ai-privacy.md#power-bi-semantic-model). |
+| `live_schema` | `true` | Read dataframe schemas (names + types only) live from the running kernel. See [live dataframe schemas](ai-privacy.md#live-dataframe-schemas-data-outside-the-workspace). |
+
 ### `[guard]` — in the synced `mooring.toml`, not here
 
 The **push guard** scans every outgoing file for things that look like secrets,
@@ -321,11 +332,13 @@ file); they do **not** reflect a one-run [environment-variable](#environment-var
 override. This works for any key, including the `[ai]` / `[ai.pii]` settings
 documented in [AI privacy](ai-privacy.md).
 
-!!! note "Per-notebook AI opt-out lives elsewhere"
-    Turning the copilot off for a single notebook is **not** a `mooring config`
-    setting — it is written to a synced `mooring.toml` at the workspace root so it
-    travels with the notebook. See
-    [Turning the copilot off for a notebook](ai-privacy.md#turning-the-copilot-off-for-a-notebook).
+!!! note "Per-notebook and per-model AI opt-outs live elsewhere"
+    Turning the copilot off for a single notebook — or for a single Power BI
+    semantic model (`[ai] disabled_semantic_models`) — is **not** a
+    `mooring config` setting: both are written to a synced `mooring.toml` at the
+    workspace root so the decision travels with the repo. See
+    [Turning the copilot off for a notebook](ai-privacy.md#turning-the-copilot-off-for-a-notebook)
+    and [the semantic model](ai-privacy.md#power-bi-semantic-model).
 
 ## Environment variables
 

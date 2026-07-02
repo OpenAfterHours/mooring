@@ -39,6 +39,9 @@ const TOOL_LABELS = {
   mooring_list_tables: "listing dictionary tables",
   mooring_describe_table: "describing a table",
   mooring_search_dictionary: "searching the dictionary",
+  mooring_get_semantic_model: "reading the semantic model",
+  mooring_describe_model_table: "describing a model table",
+  mooring_get_measure: "fetching a measure's DAX",
 };
 const STATE_LABEL = {
   idle: "ready",

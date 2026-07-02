@@ -39,7 +39,7 @@ what cloud notebook platforms do.
 | [Offline mode](offline-mode.md) | ✅ Shipped 2026-07 | M | Degrade gracefully when GitHub is unreachable instead of looking broken. |
 | [Handover explainer](handover-explainer.md) | ✅ Shipped 2026-07 | S | One-shot copilot walkthrough of an inherited notebook, cell by cell. |
 | [Traceback fixer](traceback-fixer.md) | ✅ Phases 1–4 shipped 2026-07 | M | Debug from a traceback without the model ever seeing the data values inside it. |
-| [Power BI semantic model](pbi-semantic-model.md) | Planned | M | Let the copilot read synced PBIP tables, relationships, and DAX — schema and authored code, never data. |
+| [Power BI semantic model](pbi-semantic-model.md) | ✅ Phases 1–3 shipped 2026-07 | M | Let the copilot read synced PBIP tables, relationships, and DAX — schema and authored code, never data. |
 
 The first five shipped plans were the review's consensus top five, with
 duplicate-as-draft following; each page's status admonition records exactly

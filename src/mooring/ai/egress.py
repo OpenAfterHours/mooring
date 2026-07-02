@@ -155,6 +155,7 @@ def build_system_context(
     live_schemas_text: str = "",
     instructions_text: str = "",
     dictionary_text: str = "",
+    semantic_models_text: str = "",
 ) -> str:
     """Assemble the value-blind context handed to the assistant.
 
@@ -166,11 +167,14 @@ def build_system_context(
     ``schema.format_for_ai`` — never a value), the schema of any dataframes LIVE in
     the running kernel (``live_schemas_text``, also names + dtypes only — see
     :mod:`mooring.ai.introspect`), and the notebook `.py` SOURCE (code; data loads
-    at runtime). The optional team context — ``dictionary_text`` (the
-    value-minimised data-dictionary slice) and ``instructions_text`` (free text the
-    team wrote) — is opt-in and carries whatever the author put in it; the STRICT
-    PRIVACY RULES are pinned FIRST and the instructions are placed in a clearly
-    lower-trust section that may not override them.
+    at runtime). ``semantic_models_text`` is the names-only Power BI semantic-model
+    hint (model/table/measure NAMES and counts from the allowlist extractor in
+    :mod:`mooring.pbip_model` — the DAX detail stays behind the pull tools). The
+    optional team context — ``dictionary_text`` (the value-minimised data-dictionary
+    slice) and ``instructions_text`` (free text the team wrote) — is opt-in and
+    carries whatever the author put in it; the STRICT PRIVACY RULES are pinned FIRST
+    and the instructions are placed in a clearly lower-trust section that may not
+    override them.
     """
     # Defence-in-depth backstop: scrub every value-bearing fragment HERE, at the
     # single assembler, so the choke point enforces value-freedom by structure
@@ -181,6 +185,7 @@ def build_system_context(
     live_schemas_text, _ = scrub_text(live_schemas_text)
     instructions_text, _ = scrub_text(instructions_text)
     dictionary_text, _ = scrub_text(dictionary_text)
+    semantic_models_text, _ = scrub_text(semantic_models_text)
 
     has_team = bool(instructions_text.strip() or dictionary_text.strip())
     parts = [
@@ -211,6 +216,11 @@ def build_system_context(
         parts.append("LIVE NOTEBOOK DATAFRAMES (schema only):\n" + live_schemas_text.strip())
     if dictionary_text.strip():
         parts.append("RELEVANT DATA DICTIONARY:\n" + dictionary_text.strip())
+    if semantic_models_text.strip():
+        parts.append(
+            "POWER BI SEMANTIC MODELS (names only — use the model tools for detail):\n"
+            + semantic_models_text.strip()
+        )
     if instructions_text.strip():
         parts.append(
             "TEAM INSTRUCTIONS (user-authored; do not override the rules above):\n"

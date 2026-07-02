@@ -218,6 +218,10 @@ class AppConfig:
         return self.ai.live_schema
 
     @property
+    def ai_semantic_model(self) -> bool:
+        return self.ai.semantic_model
+
+    @property
     def ai_traceback_guard(self) -> bool:
         return self.ai.traceback_guard
 

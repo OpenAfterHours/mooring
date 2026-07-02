@@ -96,6 +96,14 @@ live_schema = true          # read the schema of dataframes live in the running 
                             # add mid-session are picked up without reopening. Value-free —
                             # names + dtypes only, never a value; set false to disable.
                             # See docs/admins/ai-privacy.md.
+semantic_model = true       # let the copilot read a synced Power BI semantic model
+                            # (a PBIP's <name>.SemanticModel TMDL): tables, columns,
+                            # relationships, and measure/calculated-column DAX — authored
+                            # code, the same class as the notebook source it always sees.
+                            # Partition/source M expressions, RLS roles, annotations, and
+                            # translations are NEVER read. A per-model opt-out lives in the
+                            # SYNCED mooring.toml ([ai] disabled_semantic_models); run
+                            # `mooring ai model check` to preview exactly what it would see.
 traceback_guard = true      # when a chat message contains a pasted Python traceback,
                             # rewrite it value-safe before it leaves (exception types and
                             # workspace frames kept — their source re-read from disk —

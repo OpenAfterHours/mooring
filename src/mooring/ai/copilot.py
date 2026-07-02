@@ -297,6 +297,7 @@ class CopilotProvider:
         model: str | None = None,
         reasoning_effort: str | None = None,
         dictionary=None,
+        semantic_models=None,
         pii: PiiConfig | None = None,
         traceback_guard: bool = True,
         background: bool = False,
@@ -305,8 +306,9 @@ class CopilotProvider:
 
         The session reuses :func:`hardened_session_kwargs` (the audited privacy
         config) and adds mooring's safe tools (plus the dictionary tools when
-        ``dictionary`` is a non-empty index). ``model``/``reasoning_effort``
-        override the configured defaults when given. ``traceback_guard`` (default
+        ``dictionary`` is a non-empty index, and the Power BI semantic-model
+        tools when ``semantic_models`` carries pre-parsed models).
+        ``model``/``reasoning_effort`` override the configured defaults when given. ``traceback_guard`` (default
         ON, like the config key) arms the session's sanitise-and-hold valve for
         pasted tracebacks — it travels here like the ``pii`` config so a caller
         can't silently drop it.
@@ -344,6 +346,7 @@ class CopilotProvider:
             folders=folders,
             notebook_rel=notebook_rel,
             dictionary=dictionary,
+            semantic_models=semantic_models,
             pii_enabled=pii.enabled,
             pii_block=pii.block_prompt,
             # NER name detection only acts when the whole guard is on.

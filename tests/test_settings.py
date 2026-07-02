@@ -21,6 +21,7 @@ _AI_ENV = [
     "MOORING_AI_REASONING_EFFORT",
     "MOORING_AI_CHAT_IDLE_SEC",
     "MOORING_AI_LIVE_SCHEMA",
+    "MOORING_AI_SEMANTIC_MODEL",
     "MOORING_AI_TRACEBACK_GUARD",
     "MOORING_AI_CONTEXT",
     "MOORING_AI_CONTEXT_DIR",
@@ -59,10 +60,15 @@ def _config_data():
 # -- registry (pure) ---------------------------------------------------------
 
 
-def test_every_editable_key_roundtrips_through_the_loader():
+def test_every_editable_key_roundtrips_through_the_loader(tmp_path, monkeypatch):
     """The single most important invariant: each editable key is the TOML key the
     loader reads, so set_value(key) is observable on the live AppConfig via accessor.
     Catches the silent 'wrote ai.pii.names instead of ai.pii.detect_names' bug class."""
+    # Isolate like the client fixture does: without this, the writes below land in
+    # the DEVELOPER'S REAL config.toml (and a set env var would shadow the read-back).
+    monkeypatch.setattr(paths, "user_config_dir", lambda: tmp_path / "appdata")
+    for var in _AI_ENV:
+        monkeypatch.delenv(var, raising=False)
     samples = {
         "bool": lambda s: not bool(s.default),
         "int": lambda s: int(s.default) + 1,

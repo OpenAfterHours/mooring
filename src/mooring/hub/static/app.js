@@ -984,9 +984,16 @@ function buildArtifactRows(artifact, files) {
   if (artifact.to_push) counts.push(`${artifact.to_push} to push`);
   if (artifact.to_pull) counts.push(`${artifact.to_pull} to pull`);
   if (artifact.conflicts) counts.push(`${artifact.conflicts} conflicted`);
+  // The semantic-model summary (server-side, mtime-cached): what the copilot
+  // could read of this project — plus the synced per-model opt-out state.
+  const modelBits = artifact.model
+    ? ` · model: ${artifact.model.tables} tables, ${artifact.model.measures} measures` +
+      (artifact.ai_model_disabled ? " (AI off)" : "")
+    : "";
   detail.textContent =
     `— Power BI project, ${artifact.members.length} files` +
-    (counts.length ? ` (${counts.join(", ")})` : "");
+    (counts.length ? ` (${counts.join(", ")})` : "") +
+    modelBits;
 
   const actions = [];
   if (artifact.to_push) {
@@ -1005,6 +1012,15 @@ function buildArtifactRows(artifact, files) {
     // the artifact header's Open exactly like every file row's.
     actions.push(["Open", () => openAction(artifact.pointer)]);
     actions.push(["Delete", () => deleteAction(artifact.pointer, "project")]);
+  }
+  // Per-model AI opt-out (synced mooring.toml): shown whenever the project has a
+  // readable semantic model and the copilot is on. A plain menu button like every
+  // other action (the actionsMenu rule — never auto-run). Disabling applies to
+  // chats opened AFTER the toggle; tools are bound when a chat opens.
+  if (aiChatEnabled && artifact.model) {
+    const label = artifact.ai_model_disabled ? "Enable AI on model" : "Disable AI on model";
+    actions.push([label, () =>
+      action("/api/ai/model/toggle", { model: artifact.key, disabled: !artifact.ai_model_disabled })]);
   }
 
   const header = buildRow([caret, name, detail], artifact.state, actions, artifact.name);

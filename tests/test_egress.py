@@ -97,13 +97,29 @@ def test_build_system_context_scrubs_every_fragment():
         live_schemas_text=f"live_col Int64\nfr {VALID_IBAN} col",
         instructions_text=f"Report in GBP.\nleak {VALID_NHS}",
         dictionary_text=f"Table credit.loans\nrow {VALID_CARD}",
+        semantic_models_text=f"- `Sales` (reports/Sales)\n- `Bad {VALID_IBAN}`",
     )
     # No checksum-validated value survives, from ANY fragment.
     for value in (VALID_CARD, VALID_IBAN, VALID_NHS):
         assert value not in out
     # The clean content around each leak is preserved.
-    for marker in ("good_col", "import marimo", "print('ok')", "live_col", "GBP", "credit.loans"):
+    for marker in (
+        "good_col",
+        "import marimo",
+        "print('ok')",
+        "live_col",
+        "GBP",
+        "credit.loans",
+        "reports/Sales",
+    ):
         assert marker in out
+
+
+def test_build_system_context_semantic_models_section():
+    out = egress.build_system_context(**_BASE, semantic_models_text="- `Sales` (reports/Sales)")
+    assert "POWER BI SEMANTIC MODELS" in out and "reports/Sales" in out
+    # Absent when the hint is empty (the section never renders as a dangling header).
+    assert "POWER BI SEMANTIC MODELS" not in egress.build_system_context(**_BASE)
 
 
 def test_build_system_context_clean_assembly_unchanged():

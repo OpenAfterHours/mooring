@@ -149,6 +149,21 @@ EDITABLE: tuple[SettingSpec, ...] = (
         "more conservative choice.",
     ),
     SettingSpec(
+        key="ai.semantic_model",
+        accessor="ai_semantic_model",
+        label="Read Power BI semantic models",
+        group="ai",
+        type="bool",
+        control="toggle",
+        default=True,
+        sensitivity="needs_care",
+        env_var="MOORING_AI_SEMANTIC_MODEL",
+        help="Let the copilot read a synced Power BI semantic model: tables, columns, "
+        "relationships, and measure DAX — authored code, never data (partition/source "
+        "M expressions and RLS roles are never read). OFF is the more conservative "
+        "choice; a per-model opt-out also lives in the synced mooring.toml.",
+    ),
+    SettingSpec(
         key="ai.traceback_guard",
         accessor="ai_traceback_guard",
         label="Sanitise pasted tracebacks",

@@ -88,6 +88,7 @@ source_modules =
     mooring.sync
     mooring.manifest
     mooring.pbip
+    mooring.pbip_model
     mooring.deletion
     mooring.whatsnew
 forbidden_modules =
@@ -182,6 +183,7 @@ source_modules =
     mooring.sync
     mooring.manifest
     mooring.pbip
+    mooring.pbip_model
     mooring.deletion
     mooring.whatsnew
 forbidden_modules =

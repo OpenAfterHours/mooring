@@ -9,6 +9,9 @@ It carries these — paths and policy tokens only, never a data value:
 - ``[ai] disabled_notebooks`` — the per-notebook AI opt-out, the off switch that
   stops the copilot being opened on a notebook by mistake (e.g. one that handles
   PII). See docs/admins/ai-privacy.md.
+- ``[ai] disabled_semantic_models`` — the per-model AI opt-out for Power BI
+  semantic models (PBIP artifact keys, e.g. ``reports/Sales``), so a BI owner
+  can fence one model off from the copilot for the whole team.
 - ``[shadow] ignore`` — notebooks whose filename shadows an importable module
   (e.g. polars.py) that the team has acknowledged, so the guard stops warning.
   See :mod:`mooring.shadow`.
@@ -140,6 +143,69 @@ def set_ai_disabled(workspace: Path, notebook_rel: str, disabled: bool) -> bool:
             data["ai"] = ai
         else:
             ai.pop("disabled_notebooks", None)
+            if ai:
+                data["ai"] = ai
+            else:
+                data.pop("ai", None)
+        if data:
+            _write_data(workspace, data)
+        else:
+            config_path(workspace).unlink(missing_ok=True)
+    return disabled
+
+
+# -- per-model AI opt-out (Power BI semantic models) ----------------------------
+# The semantic-model analogue of the per-notebook opt-out above: a BI owner can
+# fence one model off from the copilot for the whole team. Keys are PBIP artifact
+# keys (the pointer path minus ".pbip", e.g. "reports/Sales") — PATHS only, never
+# a value — normalized like notebook paths so any caller's spelling compares equal.
+
+
+def _disabled_models_list(data: dict) -> set[str]:
+    """The normalized model opt-out set from already-parsed data (tolerant of a
+    bare string or a malformed value)."""
+    ai = data.get("ai")
+    if not isinstance(ai, dict):
+        return set()
+    raw = ai.get("disabled_semantic_models", [])
+    if isinstance(raw, str):  # tolerate a single bare string
+        raw = [raw]
+    if not isinstance(raw, list):
+        return set()
+    return {normalize_notebook(p) for p in raw if str(p).strip()}
+
+
+def disabled_semantic_models(workspace: Path) -> set[str]:
+    """The set of semantic-model keys the copilot is turned OFF for."""
+    return _disabled_models_list(_read_data(workspace))
+
+
+def is_semantic_model_disabled(workspace: Path, model_key: str) -> bool:
+    return normalize_notebook(model_key) in disabled_semantic_models(workspace)
+
+
+def set_semantic_model_disabled(workspace: Path, model_key: str, disabled: bool) -> bool:
+    """Add/remove a semantic model from the opt-out list, preserving every other
+    key and section in ``mooring.toml`` (the :func:`set_ai_disabled` idiom: strict
+    read, sorted+deduped write, prune-empty, atomic replace, serialized by
+    ``_WRITE_LOCK``). Returns the model's new disabled state. Raises
+    ``tomllib.TOMLDecodeError`` on a corrupt file rather than overwriting it."""
+    key = normalize_notebook(model_key)
+    with _WRITE_LOCK:
+        data = _read_data_strict(workspace)
+        names = _disabled_models_list(data)
+        if disabled:
+            names.add(key)
+        else:
+            names.discard(key)
+        ai = data.get("ai")
+        if not isinstance(ai, dict):
+            ai = {}
+        if names:
+            ai["disabled_semantic_models"] = sorted(names)
+            data["ai"] = ai
+        else:
+            ai.pop("disabled_semantic_models", None)
             if ai:
                 data["ai"] = ai
             else:

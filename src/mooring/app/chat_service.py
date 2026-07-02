@@ -104,14 +104,31 @@ class ChatService:
 
     # -- context assembly (the value-blindness choke point's ONE caller) --------
 
-    def build_context(self, app_cfg, workspace: Path, notebook_rel: str, dataset_rel: str):
-        """Return ``(system_context, dictionary_index, pii_banner, live_text)``.
+    def build_context(
+        self,
+        app_cfg,
+        workspace: Path,
+        notebook_rel: str,
+        dataset_rel: str,
+        folders: tuple[str, ...] = (),
+    ):
+        """Return ``(system_context, dictionary_index, pii_banner, live_text, models)``.
 
         The value-free core is the dataset SCHEMA + notebook SOURCE. When the
         opt-in context feature is on, it also folds in the team instructions and
         a locality-selected, value-minimised data-dictionary slice (with the
         selected dataset's schema enriched by matching dictionary entries), and
         returns the parsed index so the session can offer the pull tools.
+
+        When ``[ai] semantic_model`` is on (the default), synced Power BI
+        semantic models under ``folders`` are discovered and extracted through
+        the allowlist parser (:mod:`mooring.pbip_model`), models the team opted
+        out (synced ``mooring.toml`` ``[ai] disabled_semantic_models``) are
+        dropped, a names-only hint joins the system context, and the parsed
+        ``models`` ride as the 5th tuple element so the session can offer the
+        model tools. The models element is APPENDED so slice-consumers (the
+        batch planner takes ``[:2]``) are unaffected — batch builder sessions
+        therefore do not get model tools.
 
         When the opt-in PII guard is on, it additionally withholds any schema
         column whose NAME is itself a PII value (a pivot/transpose on a PII key)
@@ -121,7 +138,7 @@ class ChatService:
         """
         from dataclasses import replace
 
-        from mooring import schema
+        from mooring import pbip_model, schema
         from mooring.ai import context as ctxmod
         from mooring.ai import egress, locality, ner, pii
         from mooring.ai.datadictionary import DictionaryIndex
@@ -207,6 +224,21 @@ class ChatService:
             )
             dictionary_text = locality.seed_text(tables, reasons, n_more)
 
+        # Power BI semantic models: discovery + the allowlist extraction happen
+        # HERE (per open, off the event loop with the rest of this method), the
+        # per-model synced opt-out filters, and only a NAMES-ONLY hint enters the
+        # context — the DAX detail stays behind the pull tools, out of the window.
+        models: list = []
+        semantic_models_text = ""
+        if app_cfg.ai_semantic_model and folders:
+            models_off = workspace_config.disabled_semantic_models(workspace)
+            models = [
+                pbip_model.extract_model(ref.path, key=ref.key, name=ref.name)
+                for ref in pbip_model.find_models(workspace, tuple(folders))
+                if workspace_config.normalize_notebook(ref.key) not in models_off
+            ]
+            semantic_models_text = pbip_model.render_models_hint(models)
+
         context = egress.build_system_context(
             schema_text=schema_text,
             notebook_source=source,
@@ -214,8 +246,9 @@ class ChatService:
             live_schemas_text=live_text,
             instructions_text=repo_ctx.instructions,
             dictionary_text=dictionary_text,
+            semantic_models_text=semantic_models_text,
         )
-        return context, (index if has_dict else DictionaryIndex()), pii_banner, live_text
+        return context, (index if has_dict else DictionaryIndex()), pii_banner, live_text, models
 
     # -- live-kernel schema pipeline ---------------------------------------------
 

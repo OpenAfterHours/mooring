@@ -55,6 +55,19 @@ DICT_TOOL_NAMES = [
     "mooring_search_dictionary",
 ]
 
+# Added only when the workspace has a parsed Power BI semantic model (and the
+# feature is on — the caller applies the gates). Same shape as the dictionary
+# trio: name lookups in the pre-parsed in-memory SemanticModel objects (never a
+# caller path), serving the allowlist skeleton from mooring.pbip_model — tables,
+# columns+dataTypes, relationships, and measure DAX (authored code; every result
+# still passes egress.scrub_text). Partition M, RLS roles, annotations, and
+# translations were never parsed, so no tool can reach them.
+MODEL_TOOL_NAMES = [
+    "mooring_get_semantic_model",
+    "mooring_describe_model_table",
+    "mooring_get_measure",
+]
+
 
 def _safe(workspace: Path, rel: str) -> Path:
     target = (workspace / rel).resolve()
@@ -83,6 +96,7 @@ def build_tools(
     emit_proposal: Callable[[str, str], None],
     emit_proposal_patch: Callable[[dict], None] | None = None,
     dictionary=None,
+    semantic_models=None,
     pii_enabled: bool = False,
 ) -> list:
     """Build the safe tools, bound to one workspace + target notebook.
@@ -90,10 +104,13 @@ def build_tools(
     Handlers follow the SDK's ``ToolHandler`` contract: a single ``ToolInvocation``
     argument (``invocation.arguments`` is the parsed args), returning a ToolResult.
     When ``dictionary`` (a :class:`mooring.ai.datadictionary.DictionaryIndex`) is
-    non-empty, the three value-free dictionary tools are added. When ``pii_enabled``,
-    ``get_schema`` withholds any column whose NAME is itself a PII value (a pivot/
-    transpose on a PII key) — the second, dynamic schema egress (besides the system
-    context) that the agent can reach at any time.
+    non-empty, the three value-free dictionary tools are added. When
+    ``semantic_models`` (pre-parsed :class:`mooring.pbip_model.SemanticModel`
+    objects — the caller has already applied the config gate and the synced
+    per-model opt-out) is non-empty, the three model tools are added. When
+    ``pii_enabled``, ``get_schema`` withholds any column whose NAME is itself a PII
+    value (a pivot/transpose on a PII key) — the second, dynamic schema egress
+    (besides the system context) that the agent can reach at any time.
 
     ``emit_proposal_patch`` (supplied by the real chat session) enables the
     edit/rewrite tools: each captures the target cell's current source as an
@@ -104,7 +121,7 @@ def build_tools(
 
     from copilot.tools import Tool
 
-    from mooring import marimo_rt, schema
+    from mooring import marimo_rt, pbip_model, schema
     from mooring.ai import egress
 
     def _err(msg: str):
@@ -340,6 +357,84 @@ def build_tools(
         rendered, _ = egress.scrub_text("\n\n".join(render_table(t, max_cols=12) for t in hits))
         return egress.to_tool_result(rendered)
 
+    # The semantic-model tools serve the PRE-PARSED allowlist skeleton (tables,
+    # columns+dataTypes, relationships, measure DAX — mooring.pbip_model; partition
+    # M, roles, annotations, and translations were never parsed, so no tool can
+    # reach them). Lookups are by NAME in the in-memory objects — an argument is
+    # never treated as a filesystem path — and every rendered string passes the
+    # egress scrub, because authored DAX can embed literal values.
+
+    models = list(semantic_models or [])
+
+    def _find_model(name: str):
+        """By model name or artifact key, case-insensitive (in memory only)."""
+        key = name.strip().strip("'\"").lower()
+        for m in models:
+            if key in (m.name.lower(), m.key.lower()):
+                return m
+        return None
+
+    def get_semantic_model(invocation):
+        name = str(_args(invocation).get("model", "")).strip()
+        if name:
+            model = _find_model(name)
+            if model is None:
+                return egress.to_tool_result(
+                    f"No semantic model named {name!r} in this workspace."
+                )
+            picked = [model]
+        else:
+            picked = models
+        rendered, _ = egress.scrub_text(
+            "\n\n".join(pbip_model.render_summary(m) for m in picked)
+        )
+        return egress.to_tool_result(rendered)
+
+    def describe_model_table(invocation):
+        args = _args(invocation)
+        table_name = str(args.get("table", "")).strip()
+        if not table_name:
+            return _err("table required")
+        model_name = str(args.get("model", "")).strip()
+        if model_name:
+            model = _find_model(model_name)
+            if model is None:
+                return egress.to_tool_result(
+                    f"No semantic model named {model_name!r} in this workspace."
+                )
+            search = [model]
+        else:
+            search = models
+        for m in search:
+            table = m.get_table(table_name)
+            if table is not None:
+                rendered, _ = egress.scrub_text(pbip_model.render_table(m, table))
+                return egress.to_tool_result(rendered)
+        return egress.to_tool_result(f"No table named {table_name!r} in the semantic model.")
+
+    def get_measure(invocation):
+        args = _args(invocation)
+        measure_name = str(args.get("measure", "")).strip()
+        if not measure_name:
+            return _err("measure required")
+        model_name = str(args.get("model", "")).strip()
+        if model_name:
+            model = _find_model(model_name)
+            if model is None:
+                return egress.to_tool_result(
+                    f"No semantic model named {model_name!r} in this workspace."
+                )
+            search = [model]
+        else:
+            search = models
+        for m in search:
+            hit = m.find_measure(measure_name)
+            if hit is not None:
+                table, measure = hit
+                rendered, _ = egress.scrub_text(pbip_model.render_measure(m, table, measure))
+                return egress.to_tool_result(rendered)
+        return egress.to_tool_result(f"No measure named {measure_name!r} in the semantic model.")
+
     tools = [
         Tool(
             "mooring_list_datasets",
@@ -520,6 +615,54 @@ def build_tools(
                     "required": ["query"],
                 },
                 skip_permission=True,  # searches the value-minimised in-memory index
+            ),
+        ]
+
+    if models:
+        _MODEL_ARG = {
+            "type": "string",
+            "description": "the semantic model's name (only needed when several exist)",
+        }
+        tools += [
+            Tool(
+                "mooring_get_semantic_model",
+                "Summarise the workspace's Power BI semantic model(s): table names, "
+                "column counts, measure NAMES, and relationships — no DAX (cheap to "
+                "read; fetch detail per table or measure).",
+                handler=get_semantic_model,
+                parameters={"type": "object", "properties": {"model": _MODEL_ARG}},
+                skip_permission=True,  # names only, from the pre-parsed in-memory model
+            ),
+            Tool(
+                "mooring_describe_model_table",
+                "Describe one semantic-model table: columns with dataTypes, "
+                "calculated-column DAX, that table's measures with DAX, and its "
+                "relationships. Authored expressions only — never any data value.",
+                handler=describe_model_table,
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "table": {"type": "string", "description": "a table name"},
+                        "model": _MODEL_ARG,
+                    },
+                    "required": ["table"],
+                },
+                skip_permission=True,  # name lookup in-memory; never a path, never a value
+            ),
+            Tool(
+                "mooring_get_measure",
+                "Fetch one measure's full DAX expression (plus format string and "
+                "display folder) from the semantic model, by measure name.",
+                handler=get_measure,
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "measure": {"type": "string", "description": "a measure name"},
+                        "model": _MODEL_ARG,
+                    },
+                    "required": ["measure"],
+                },
+                skip_permission=True,  # name lookup in-memory; never a path, never a value
             ),
         ]
     return tools

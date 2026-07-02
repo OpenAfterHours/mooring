@@ -63,6 +63,17 @@ _DICT_TOOL_GUIDE = (
     "code; a relevant slice may already be in your context."
 )
 
+_MODEL_TOOL_GUIDE = (
+    "\n\nA POWER BI SEMANTIC MODEL is available (tables, columns+types, "
+    "relationships, and measure DAX — authored code, never any data value):\n"
+    "- mooring_get_semantic_model — table names + measure NAMES (no DAX; cheap)\n"
+    "- mooring_describe_model_table(table) — one table's columns and its measures' DAX\n"
+    "- mooring_get_measure(measure) — one measure's full DAX + format string.\n"
+    "Use these to translate business logic faithfully — e.g. recreate a measure in "
+    "polars from its real DAX instead of guessing. Fetch only the tables/measures "
+    "you need; never ask for the whole model at once."
+)
+
 
 class CopilotChatSession(ChatBroadcaster):
     def __init__(
@@ -75,6 +86,7 @@ class CopilotChatSession(ChatBroadcaster):
         notebook_rel: str,
         reasoning_effort: str | None = None,
         dictionary=None,
+        semantic_models=None,
         pii_enabled: bool = False,
         pii_block: bool = True,
         pii_names: bool = False,
@@ -105,11 +117,14 @@ class CopilotChatSession(ChatBroadcaster):
         guide = _TOOL_GUIDE
         if dictionary is not None and not dictionary.is_empty():
             guide += _DICT_TOOL_GUIDE
+        if semantic_models:
+            guide += _MODEL_TOOL_GUIDE
         self._system_context = system_context + guide
         self._workspace = Path(workspace)
         self._folders = tuple(folders)
         self._notebook_rel = notebook_rel
         self._dictionary = dictionary
+        self._semantic_models = list(semantic_models or [])
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
         self._client = None
@@ -230,6 +245,7 @@ class CopilotChatSession(ChatBroadcaster):
             emit_proposal=self._emit_proposal,
             emit_proposal_patch=self._emit_proposal_patch,
             dictionary=self._dictionary,
+            semantic_models=self._semantic_models,
             pii_enabled=self._pii_enabled,
         )
         extra: dict[str, Any] = {}

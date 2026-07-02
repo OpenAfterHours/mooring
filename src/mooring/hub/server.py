@@ -31,6 +31,7 @@ from mooring import (
     config,
     notebook_template,
     pbip,
+    pbip_model,
     pyproject_env,
     shadow,
     sync,
@@ -97,6 +98,12 @@ class Hub:
         # path → (mtime_ns, is_notebook). /api/state re-lists on every refresh, so this
         # avoids re-reading every .py off disk each time; a changed mtime invalidates it.
         self._notebook_cache: dict[str, tuple[int, bool]] = {}
+        # Cache of each PBIP semantic model's tables/measures summary (the artifact
+        # row's `model` field), keyed by model dir → (definition signature, summary).
+        # The same idiom as _notebook_cache: _files_artifacts runs on EVERY /api/state
+        # poll, and re-parsing a 200-file TMDL tree per poll is unacceptable — the
+        # stat-only signature (see pbip_model.definition_signature) invalidates it.
+        self._model_summary_cache: dict[str, tuple[tuple, dict | None]] = {}
         # The branch head each workspace's last /api/state render was computed from,
         # so /api/freshness can answer "has the remote moved since what you're looking
         # at?" with one fast ref lookup (routes/sync.api_freshness). Keyed like editors.
@@ -244,7 +251,11 @@ class Hub:
         return nb_ops.ws_file(workspace, rel, suffix=suffix)
 
     def _build_chat_context(self, workspace: Path, notebook_rel: str, dataset_rel: str):
-        return self.chat.build_context(self.app_cfg, workspace, notebook_rel, dataset_rel)
+        # cfg.folders (not app_cfg's raw list) so the synced mooring.toml extras are
+        # in scope — a semantic model in an adopted sub-folder is discovered too.
+        return self.chat.build_context(
+            self.app_cfg, workspace, notebook_rel, dataset_rel, folders=self.cfg.folders
+        )
 
     def _live_schema_for_sid(self, sid: str) -> tuple[str, list[dict]]:
         return self.chat.live_schema_for_sid(self.app_cfg, self.editors, sid)
@@ -334,6 +345,14 @@ class Hub:
             }
             for f in report.files
         ]
+        # Semantic models the team turned the copilot off for (synced mooring.toml),
+        # read once per render like the notebook opt-outs above.
+        models_off = workspace_config.disabled_semantic_models(workspace)
+        model_summaries = {
+            a.key: summary
+            for a in artifacts
+            if (summary := self._model_summary(workspace, a.key)) is not None
+        }
         arts = [
             {
                 "key": a.key,
@@ -348,10 +367,37 @@ class Hub:
                 "to_push": sum(1 for m in a.members if m.state in sync.PUSH_STATES),
                 "to_pull": sum(1 for m in a.members if m.state in sync.PULL_STATES),
                 "conflicts": sum(1 for m in a.members if m.state is sync.FileState.CONFLICT),
+                # The semantic-model summary (present only when a readable local
+                # definition exists) + the synced per-model AI opt-out flag.
+                **({"model": model_summaries[a.key]} if a.key in model_summaries else {}),
+                **(
+                    {"ai_model_disabled": True}
+                    if workspace_config.normalize_notebook(a.key) in models_off
+                    else {}
+                ),
             }
             for a in artifacts
         ]
         return files, arts
+
+    def _model_summary(self, workspace: Path, key: str) -> dict | None:
+        """The ``{tables, measures}`` counts for a PBIP artifact's semantic model,
+        or None when it has no readable local definition (a report-only PBIP, or
+        members not pulled yet). Cached by the definition's stat-only signature —
+        the _notebook_cache idiom — because /api/state calls this per poll and a
+        real model is a couple-hundred-file TMDL tree."""
+        model_dir = workspace / f"{key}{pbip_model.MODEL_DIR_SUFFIX}"
+        sig = pbip_model.definition_signature(model_dir)
+        if not sig:
+            return None
+        cache_key = str(model_dir)
+        cached = self._model_summary_cache.get(cache_key)
+        if cached is not None and cached[0] == sig:
+            return cached[1]
+        model = pbip_model.extract_model(model_dir, key=key)
+        summary = {"tables": len(model.tables), "measures": model.n_measures}
+        self._model_summary_cache[cache_key] = (sig, summary)
+        return summary
 
     def _is_notebook(self, workspace: Path, rel: str) -> bool:
         """Whether the local ``.py`` at ``rel`` is a marimo notebook (vs a plain helper
@@ -692,11 +738,14 @@ class Hub:
         model: str = "",
         reasoning_effort: str | None = None,
         dictionary=None,
+        semantic_models=None,
     ):
         """Open a streaming Copilot chat session bound to this notebook.
 
         ``model``/``reasoning_effort`` override the configured defaults;
-        ``dictionary`` (a parsed index) enables the value-free dictionary tools.
+        ``dictionary`` (a parsed index) enables the value-free dictionary tools;
+        ``semantic_models`` (pre-parsed, already-gated Power BI models from
+        build_context) enables the semantic-model tools.
         Raises AIError (-> 502) if Copilot isn't available/installed; a sign-in or
         handshake failure surfaces over the SSE stream instead (the session starts
         in the background — ``background=True`` — so the open response is immediate).
@@ -710,6 +759,7 @@ class Hub:
             model=model,
             reasoning_effort=reasoning_effort,
             dictionary=dictionary,
+            semantic_models=semantic_models,
             # The whole guard config travels as ONE object, so a field can't be
             # silently dropped on the way to the session (the session downloads any
             # NER model in the background and the prompt path skips it until ready).
@@ -916,6 +966,7 @@ def create_app(hub: Hub) -> Starlette:
             Route("/api/ai/chat/apply", chat.api_chat_apply, methods=["POST"]),
             Route("/api/ai/chat/rollback", chat.api_chat_rollback, methods=["POST"]),
             Route("/api/ai/notebook/toggle", chat.api_notebook_ai_toggle, methods=["POST"]),
+            Route("/api/ai/model/toggle", chat.api_model_ai_toggle, methods=["POST"]),
             Route("/ai/batch", pages.batch_page),
             Route("/api/ai/batch/state", batch.api_batch_state),
             Route("/api/ai/batch/open", batch.api_batch_open, methods=["POST"]),

@@ -4,9 +4,27 @@ icon: lucide/database
 
 # Copilot reads the Power BI semantic model
 
-!!! note "Status: proposed"
-    Designed 2026-07 from a multi-agent ideation review; not yet implemented.
-    Scope and tool shapes may change during implementation.
+!!! success "Status: phases 1–3 implemented"
+    Phases 1–3 shipped 2026-07-02: the L2 allowlist extractor
+    (`src/mooring/pbip_model.py`, covered by both `.importlinter` lean-core
+    contracts), the `mooring ai model check` transparency CLI, the three
+    copilot tools (`mooring_get_semantic_model` / `mooring_describe_model_table`
+    / `mooring_get_measure`, gated like the dictionary trio and scrubbed at
+    egress), the `semantic_models_text` fragment in
+    `egress.build_system_context`, the `[ai] semantic_model` switch +
+    `MOORING_AI_SEMANTIC_MODEL` + Settings-page entry, the synced per-model
+    opt-out (`[ai] disabled_semantic_models`, hub action + `/api/ai/model/toggle`),
+    and the artifact-row `model: {tables, measures}` summary (mtime-cached).
+    The [ai-privacy](../../admins/ai-privacy.md) headline widened to "schema +
+    authored expressions" in the same change.
+
+    **Open:** phase 4 (the legacy `model.bim`/TMSL reader, render caps for
+    100+-measure models, and the optional `mooring_search_semantic_model` tool)
+    is deliberately deferred. Two documented behaviours to know: the per-model
+    opt-out takes effect at the **next chat open** (tools are bound at session
+    creation; there is no per-model session teardown), and **batch builder
+    sessions do not get the model tools** (the batch planner consumes only the
+    first two context elements by design).
 
 ## Problem
 

@@ -330,6 +330,17 @@ def _build_parser() -> argparse.ArgumentParser:
         "check", help="parse context/ dictionaries and report tables, columns, and dropped keys"
     )
     ai_dict_check.add_argument("--repo", default=None, metavar="ALIAS", help=_REPO_ARG_HELP)
+    # `ai model check` (this Power BI semantic-model lint) is a DIFFERENT command
+    # from `ai pii model` below (the NER model download) — one level up the tree.
+    ai_model = ai_sub.add_parser(
+        "model", help="inspect what the copilot would see of a Power BI semantic model"
+    )
+    ai_model_sub = ai_model.add_subparsers(dest="ai_model_command", required=True)
+    ai_model_check = ai_model_sub.add_parser(
+        "check",
+        help="parse synced .SemanticModel folders and report what's kept, excluded, and flagged",
+    )
+    ai_model_check.add_argument("--repo", default=None, metavar="ALIAS", help=_REPO_ARG_HELP)
     ai_pii = ai_sub.add_parser(
         "pii", help="scan context/ and notebook source for structured-PII risks (offline)"
     )
@@ -1437,6 +1448,71 @@ def cmd_ai_dictionary_check(app_cfg: config.AppConfig, cfg: config.Config) -> in
     return 0
 
 
+def cmd_ai_model_check(app_cfg: config.AppConfig, cfg: config.Config) -> int:
+    """Show exactly what the copilot would see of each Power BI semantic model.
+
+    The `ai dictionary check` idiom, offline (no Copilot, no network): per model,
+    which definition files were read, which tables/measures were kept, what the
+    allowlist excluded (partition M bodies skipped uncaptured; roles/translations
+    never opened), plus the egress scrubber's value-free findings over everything
+    the model tools could render. Exit 1 on scrubber findings, so it doubles as a
+    pre-share lint and the TMDL-drift detector.
+    """
+    from mooring import pbip_model
+    from mooring.ai import egress
+
+    workspace = cfg.workspace()
+    refs = pbip_model.find_models(workspace, cfg.folders)
+    if not app_cfg.ai_semantic_model:
+        print("Note: [ai] semantic_model is OFF - the copilot will not see these models.\n")
+    if not refs:
+        print(
+            "No Power BI semantic models (<name>.SemanticModel/definition/) "
+            "under the synced folders."
+        )
+        return 0
+    exit_code = 0
+    for ref in refs:
+        model = pbip_model.extract_model(ref.path, key=ref.key, name=ref.name)
+        opted_out = workspace_config.is_semantic_model_disabled(workspace, ref.key)
+        print(f"{ref.key}{pbip_model.MODEL_DIR_SUFFIX}:")
+        if opted_out:
+            print("  AI access: OFF for this model (mooring.toml [ai] disabled_semantic_models)")
+        for rel in model.files_read:
+            print(f"  read {rel}")
+        for note in model.notes:
+            print(f"  note: {note}")
+        print(f"  kept: {len(model.tables)} tables, {model.n_measures} measures, "
+              f"{len(model.relationships)} relationships")
+        ex = model.excluded
+        excluded_bits = []
+        if ex.partitions:
+            excluded_bits.append(f"{ex.partitions} partition/source block(s) (never captured)")
+        if ex.roles_files:
+            excluded_bits.append(f"{ex.roles_files} roles file(s) (never opened)")
+        if ex.culture_files:
+            excluded_bits.append(f"{ex.culture_files} translation file(s) (never opened)")
+        if excluded_bits:
+            print(f"  excluded: {', '.join(excluded_bits)}")
+        if ex.dropped:
+            dropped = ", ".join(f"{k} x{n}" for k, n in ex.dropped)
+            print(f"  dropped constructs/properties: {dropped}")
+        # The scrubber pre-flight: everything the model tools could render, through
+        # the same egress.scrub_text the tools apply. Findings are value-free.
+        rendered = [pbip_model.render_summary(model)]
+        rendered += [pbip_model.render_table(model, t) for t in model.tables]
+        _, findings = egress.scrub_text("\n".join(rendered))
+        if findings:
+            exit_code = 1
+            print(f"  scrub: {len(findings)} finding(s) - these lines would be withheld:")
+            for f in findings:
+                print(f"    line {f.line}  {f.kind}")
+        else:
+            print("  scrub: clean (best-effort - not a guarantee; DAX is authored code)")
+        print("")
+    return exit_code
+
+
 _PII_FOOTER = (
     "\n(best-effort - detects well-formed cards, IBANs, NHS numbers, emails, and UK NINOs;\n"
     " never sort codes, account numbers, SSNs, or phones. Names need detect_names + the\n"
@@ -1747,6 +1823,11 @@ def cmd_ai(app_cfg: config.AppConfig, cfg: config.Config, args: argparse.Namespa
     if args.ai_command == "dictionary":
         if args.ai_dict_command == "check":
             return cmd_ai_dictionary_check(app_cfg, cfg)
+        return 2
+
+    if args.ai_command == "model":
+        if args.ai_model_command == "check":
+            return cmd_ai_model_check(app_cfg, cfg)
         return 2
 
     if args.ai_command == "pii":
