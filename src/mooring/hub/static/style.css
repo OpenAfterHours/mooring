@@ -441,6 +441,13 @@ button.caret:disabled { opacity: 0.4; cursor: default; }
 /* a helper module (non-notebook .py): imported by notebooks, not opened in the editor */
 .badge.module { color: var(--muted); border-color: var(--border); font-style: italic; }
 
+/* a watched file with a teammate change waiting (the What's-new promotion) */
+.badge.watched { color: var(--accent); border-color: var(--accent); font-style: italic; }
+
+/* What's-new: the window's collapsed "pushes" (author — message · when) above the table */
+.whatsnew-groups { margin: 0.35rem 0 0.5rem; }
+.whatsnew-groups div { padding: 0.1rem 0; }
+
 /* folder section header: groups files under a synced folder. An empty DECLARED folder
    still shows ("here's where notebooks go"), set a touch apart from its file rows. */
 tr.folder-header td { border-top: 1px solid var(--border); padding-top: 0.5rem; }

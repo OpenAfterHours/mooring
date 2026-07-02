@@ -100,6 +100,8 @@ class GitHubClientProtocol(Protocol):
         self, path: str, branch: str, page: int = 1, per_page: int = 30
     ) -> list[dict]: ...
 
+    def compare(self, base: str, head: str) -> dict: ...
+
     def get_file_at(self, path: str, ref: str) -> tuple[str, bytes]: ...
 
     def create_ref(self, branch: str, sha: str) -> dict: ...
@@ -254,6 +256,18 @@ class GitHubClient:
             )
         )
         return data if isinstance(data, list) else []
+
+    def compare(self, base: str, head: str) -> dict:
+        """The commits and changed files on ``base...head`` — the whole horizon
+        window in one request (the pull digest's primary read). Returns the raw
+        dict (``commits`` oldest-first, ``files``, ``total_commits``); callers
+        shape it. The API caps its answer (~250 commits listed, 300 files), so
+        callers must treat ``total_commits > len(commits)`` or a full ``files``
+        page as a truncated window and degrade. A GC'd or force-pushed ``base``
+        404s, which :meth:`_check` maps to :class:`NotFound` ("anchor lost")."""
+        return self._check(
+            self._session.get(self._repo_url(f"compare/{base}...{head}"), timeout=60)
+        )
 
     def get_file_at(self, path: str, ref: str) -> tuple[str, bytes]:
         """``(blob_sha, bytes)`` of ``path`` as it existed at ``ref``.

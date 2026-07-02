@@ -260,6 +260,77 @@ def test_list_commits_for_path_empty_page():
     assert client().list_commits_for_path("notebooks/a.py", "main", page=9) == []
 
 
+# -- compare (the pull digest's one-request horizon window) -------------------
+
+
+@responses.activate
+def test_compare_request_shape_and_raw_passthrough():
+    responses.add(
+        responses.GET,
+        f"{REPO}/compare/aaa111...bbb222",
+        json={
+            "total_commits": 2,
+            "commits": [
+                {
+                    "sha": "c1",
+                    "commit": {
+                        "message": "Update notebooks/a.py via mooring",
+                        "author": {"name": "Maria", "date": "2026-06-30T09:00:00Z"},
+                    },
+                    "author": {"login": "maria"},
+                },
+                {
+                    "sha": "c2",
+                    "commit": {
+                        "message": "Update notebooks/b.py via mooring",
+                        "author": {"name": "Maria", "date": "2026-06-30T09:00:05Z"},
+                    },
+                    "author": {"login": "maria"},
+                },
+            ],
+            "files": [
+                {"filename": "notebooks/a.py", "status": "modified"},
+                {"filename": "notebooks/b.py", "status": "added"},
+            ],
+        },
+    )
+    data = client().compare("aaa111", "bbb222")
+    # Raw dict passthrough — callers (mooring.whatsnew) shape it themselves.
+    assert data["total_commits"] == 2
+    assert [c["sha"] for c in data["commits"]] == ["c1", "c2"]
+    assert [f["filename"] for f in data["files"]] == ["notebooks/a.py", "notebooks/b.py"]
+    assert responses.calls[0].request.url.endswith("/compare/aaa111...bbb222")
+
+
+@responses.activate
+def test_compare_lost_anchor_raises_notfound():
+    # A GC'd or force-pushed-away base 404s — the "anchor lost" signal callers
+    # treat as "fall back to per-file commit lookups".
+    from mooring.github import NotFound
+
+    responses.add(responses.GET, f"{REPO}/compare/gone111...head222", status=404)
+    with pytest.raises(NotFound):
+        client().compare("gone111", "head222")
+
+
+@responses.activate
+def test_compare_surfaces_auth_and_rate_errors():
+    from mooring.github import RateLimited
+
+    responses.add(responses.GET, f"{REPO}/compare/a...b", status=401)
+    with pytest.raises(AuthFailed):
+        client().compare("a", "b")
+    responses.reset()
+    responses.add(
+        responses.GET,
+        f"{REPO}/compare/a...b",
+        status=403,
+        headers={"x-ratelimit-remaining": "0", "x-ratelimit-reset": "1"},
+    )
+    with pytest.raises(RateLimited):
+        client().compare("a", "b")
+
+
 @responses.activate
 def test_get_file_at_inline_content():
     responses.add(

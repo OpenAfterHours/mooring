@@ -177,6 +177,7 @@
       <div class="toolbar">
         <button id="btn-refresh">&#8635; Refresh</button>
         <button id="btn-pull" class="primary">&#8595; Pull</button>
+        <button id="btn-whatsnew" title="Who changed what on the team branch since your last sync">&#128240; What&#8217;s new</button>
         <button id="btn-push" class="primary">&#8593; Push all</button>
         <button id="btn-propose" title="Upload changes to a review branch and open a pull request on GitHub">&#8599; Propose</button>
         <button id="btn-recall" class="hidden" title="Undo your last push on GitHub (writes the previous versions back; history keeps the pushed commit)">&#8617; Recall push</button>
@@ -241,6 +242,25 @@
       </div>
     </section>
 
+    <!-- What's new: the pull digest — every synced file changed on the team
+         branch since YOUR last sync (the manifest horizon), with who/when/why.
+         Populated on demand from the toolbar button and automatically after a
+         Pull (the pull response carries the digest of what just landed).
+         Read-only by design: conflicts appear marked and are resolved from the
+         file row's actions, never from here. -->
+    <section id="whatsnew-card" class="card hidden">
+      <h3 id="whatsnew-title">What's new</h3>
+      <div id="whatsnew-note" class="muted"></div>
+      <div id="whatsnew-groups" class="muted whatsnew-groups"></div>
+      <table id="whatsnew-table">
+        <thead><tr><th>File</th><th>Status</th><th>Changed</th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <div class="toolbar">
+        <button id="whatsnew-close" class="small">Close</button>
+      </div>
+    </section>
+
     <div id="error-banner" class="hidden"></div>
 
     <!-- Open-time staleness confirm: shown only when the row's remote moved
@@ -299,6 +319,7 @@
   <script src="/static/guard_fmt.js"></script>
   <script src="/static/history_fmt.js"></script>
   <script src="/static/diff_fmt.js"></script>
+  <script src="/static/whatsnew_fmt.js"></script>
   <script src="/static/checklist.js"></script>
   <script src="/static/app.js"></script>
   <!-- Decorative backdrop: deterministic starfield + the one-time boat voyage.

@@ -34,7 +34,7 @@ what cloud notebook platforms do.
 | [mooring doctor](mooring-doctor.md) | ✅ Slice (a) shipped 2026-07 | S–L | Plain-English diagnostics for locked-down Windows machines; turns "it broke" tickets into copy-pasteable reports. |
 | [Version history](version-history.md) | ✅ Phases 1–3 shipped 2026-07 | M | The git-free time machine: browse and restore any past version of a file from the repo's own history. |
 | [Review my changes](review-my-changes.md) | ✅ Phases 1–2 shipped 2026-07 | M | Cell-aware pre-push diff plus an optional "What changed?" note that becomes the commit message. |
-| [Pull digest](pull-digest.md) | Planned | M | "What changed while you were away" — computed against each analyst's personal sync horizon. |
+| [Pull digest](pull-digest.md) | ✅ Phases 1–3 shipped 2026-07 | M | "What changed while you were away" — computed against each analyst's personal sync horizon. |
 | [Duplicate as draft](duplicate-as-draft.md) | ✅ Shipped 2026-07 | S | A fearless personal copy of any notebook, plus a first-run checklist for new teammates. |
 | [Offline mode](offline-mode.md) | Planned | M | Degrade gracefully when GitHub is unreachable instead of looking broken. |
 | [Handover explainer](handover-explainer.md) | Planned | S | One-shot copilot walkthrough of an inherited notebook, cell by cell. |

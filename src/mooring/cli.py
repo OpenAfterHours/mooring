@@ -217,6 +217,11 @@ def _build_parser() -> argparse.ArgumentParser:
     history_cmd.add_argument("path", help="workspace-relative file path")
     history_cmd.add_argument("--page", type=int, default=1, help="older pages (30 per page)")
 
+    sub.add_parser(
+        "whatsnew",
+        help="who changed what on the team branch since your last sync (needs login)",
+    )
+
     restore_cmd = sub.add_parser(
         "restore", help="bring back a file as it was at a past version (needs login)"
     )
@@ -1141,6 +1146,39 @@ def cmd_history(cfg: config.Config, rel_path: str, page: int) -> int:
     return 0
 
 
+def cmd_whatsnew(cfg: config.Config) -> int:
+    """Print the pull digest: every synced file changed on the team branch since
+    this machine's last sync (the manifest horizon), with best-effort who/when/
+    why (see mooring.whatsnew). Read-only — pull applies, this only reports."""
+    from mooring import sync, whatsnew
+
+    client = _client(cfg)
+    report = sync.status(client, cfg)
+    digest = whatsnew.pending_digest(client, cfg, report)
+    if not digest.entries:
+        print("Nothing new — no teammate changes waiting since your last sync.")
+        return 0
+    width = max(len(e.path) for e in digest.entries)
+    state_width = max(len(e.state) for e in digest.entries)
+    for e in digest.entries:
+        who = ", ".join(e.authors)
+        when = (e.date or "")[:10]
+        message = e.messages[0] if e.messages else ""
+        detail = " · ".join(part for part in (who, when, message) if part)
+        line = f"  {e.path:<{width}}  {e.state:<{state_width}}"
+        print(f"{line}  {detail}".rstrip())
+    if not digest.attributed:
+        print("(couldn't read the commit history — showing sync states only)")
+    if digest.truncated:
+        print("(a long window — GitHub truncated the commit list; attribution may be partial)")
+    print(f"{len(digest.entries)} file(s) changed on {cfg.branch} since your last sync.")
+    conflicts = sum(1 for e in digest.entries if e.state == sync.FileState.CONFLICT.value)
+    if conflicts:
+        print(f"{conflicts} conflicted file(s) need resolving (the hub, or mooring pull --theirs).")
+    print("Apply the changes with: mooring pull")
+    return 0
+
+
 def cmd_restore(
     cfg: config.Config, rel_path: str, at: str, as_copy: bool, assume_yes: bool
 ) -> int:
@@ -1808,6 +1846,8 @@ def _dispatch(
         return cmd_activity(cfg, args)
     if command == "history":
         return cmd_history(cfg, args.path, args.page)
+    if command == "whatsnew":
+        return cmd_whatsnew(cfg)
     if command == "restore":
         return cmd_restore(cfg, args.path, args.at, args.copy, args.yes)
     parser.error(f"unknown command {command!r}")

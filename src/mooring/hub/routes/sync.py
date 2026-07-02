@@ -1,22 +1,126 @@
-"""Sync endpoints: pull, push, propose, resolve, recall, and discover/adopt."""
+"""Sync endpoints: pull, push, propose, resolve, recall, discover/adopt, and
+the what's-new pull digest."""
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
+import dataclasses
 import tomllib
+from collections import Counter
 
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from mooring import auth, pushguard, sync, telemetry, workspace_config
+from mooring import auth, celldiff, manifest, pushguard, sync, telemetry, whatsnew
+from mooring import workspace_config
 from mooring.app import notebooks as nb_ops
 from mooring.github import GitHubError
+from mooring.hub.routes.files import _resolve_within
 
 
 async def api_pull(request: Request) -> JSONResponse:
     hub = request.app.state.hub
     data = await request.json() if await request.body() else {}
     strategy = sync.ConflictStrategy(data.get("strategy", "skip"))
-    return hub._sync_op("pull", lambda: sync.pull(hub.client(), hub.cfg, strategy=strategy))
+    # The digest of what this pull is about to land, computed BEFORE the pull
+    # runs — pull rewrites Manifest.head_commit, the digest's horizon. Strictly
+    # best-effort: a digest failure must never fail (or even color) the pull the
+    # user actually asked for; they simply get no "what's new" section.
+    digest = None
+    with contextlib.suppress(Exception):
+        report = sync.status(hub.client(), hub.cfg)
+        digest = whatsnew.pending_digest(hub.client(), hub.cfg, report)
+    body, status = hub._sync_op_body(
+        "pull", lambda: sync.pull(hub.client(), hub.cfg, strategy=strategy)
+    )
+    if status == 200 and digest is not None and digest.entries:
+        body["whatsnew"] = dataclasses.asdict(digest)
+    return JSONResponse(body, status_code=status)
+
+
+def api_whatsnew(request: Request) -> JSONResponse:
+    """The pull digest on demand: every synced file changed on the team branch
+    since this analyst's last sync (the manifest horizon), with best-effort
+    who/when/why (see mooring.whatsnew). Read-only, and kept off the /api/state
+    hot path — the hub calls it from the toolbar button (the /api/discover
+    posture), never on every refresh."""
+    hub = request.app.state.hub
+    cfg = hub.cfg
+    if not cfg.is_configured or not auth.get_token(host=cfg.host):
+        return JSONResponse({"entries": []})
+    try:
+        report = sync.status(hub.client(), cfg)
+        digest = whatsnew.pending_digest(hub.client(), cfg, report)
+    except (GitHubError, OSError) as exc:
+        telemetry.log_error(exc=exc, op="whatsnew")
+        return JSONResponse({"error": str(exc)}, status_code=502)
+    return JSONResponse(dataclasses.asdict(digest))
+
+
+def _detail_summary(base: bytes | None, remote: bytes | None, rel: str) -> dict:
+    """Cell counts for a marimo notebook ("2 cells changed, 1 added"), line
+    counts for everything else. The cell differ's own line/binary fallbacks
+    defer to whatsnew.summarize_diff so the response stays a compact summary
+    (counts), never a full diff body — /api/diff is the full-diff view."""
+    if rel.endswith(".py"):
+        result = celldiff.diff(base, remote, rel)
+        if result.kind == "cells":
+            counts = Counter(c.status for c in result.cells)
+            return {
+                "kind": "cells",
+                "changed": counts.get("changed", 0),
+                "added": counts.get("added", 0),
+                "removed": counts.get("removed", 0),
+                "unmatched": counts.get("unmatched", 0),
+                "note": result.note,
+            }
+    return whatsnew.summarize_diff(base, remote, rel)
+
+
+async def api_whatsnew_detail(request: Request) -> JSONResponse:
+    """A compact "what actually changed" summary for ONE digest entry: the
+    last-synced base blob diffed against the digest's remote blob. Read-only.
+    ``remote_sha`` comes from the digest entry itself (blank = deleted
+    remotely), so re-expanding the same digest is exact even if the branch has
+    moved since; results are cached on the Hub keyed (path, base_sha,
+    remote_sha) — blob content is immutable per sha."""
+    hub = request.app.state.hub
+    data = await request.json()
+    workspace = hub.cfg.workspace()
+    try:
+        rel, _ = _resolve_within(workspace, str(data.get("path", "")))
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    remote_sha = str(data.get("remote_sha") or "")
+
+    def _compute() -> dict:
+        base_sha = manifest.load(workspace).files.get(rel) or ""
+        key = (rel, base_sha, remote_sha)
+        cached = hub._whatsnew_detail.get(key)
+        if cached is not None:
+            return cached
+        base = hub.client().get_blob(base_sha) if base_sha else None
+        remote = hub.client().get_blob(remote_sha) if remote_sha else None
+        summary = _detail_summary(base, remote, rel)
+        hub._whatsnew_detail[key] = summary
+        return summary
+
+    try:
+        # The blob fetches are synchronous network calls and the cell parse is
+        # CPU-bound — keep both off the event loop (the /api/diff idiom).
+        body = await asyncio.to_thread(_compute)
+    except ValueError:
+        return JSONResponse(
+            {"error": f"Nothing to summarize for {rel}: no synced base and no remote blob."},
+            status_code=404,
+        )
+    except (GitHubError, OSError) as exc:
+        # Type only: a NotFound message embeds the request URL (the history
+        # endpoints' telemetry posture — paths never reach central telemetry).
+        telemetry.log_error(exc=type(exc)("whatsnew detail read failed"), op="whatsnew_detail")
+        return JSONResponse({"error": str(exc)}, status_code=502)
+    return JSONResponse({"path": rel, **body})
 
 
 def _guarded_sync_op(hub, name: str, data: dict, run) -> JSONResponse:

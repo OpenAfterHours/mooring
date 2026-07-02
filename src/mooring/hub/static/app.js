@@ -17,6 +17,7 @@ const STATE_BADGES = {
 };
 
 const PUSH_STATES = new Set(["modified", "new local", "deleted locally"]);
+const PULL_STATES = new Set(["remote changed", "new remote", "deleted remotely"]);
 
 // Appearance, shared with the chat window (same origin) via this localStorage
 // key; a `storage` event lets an open chat re-theme live. The server is the
@@ -36,6 +37,8 @@ function applyTheme(theme) {
 let busy = false;
 let showAddRepo = false;
 let lastFiles = [];
+let lastArtifacts = [];
+let lastFolders = [];
 let lastReview = null;
 let aiChatEnabled = false;
 // When the last /api/state landed (client clock) and whether it was logged in —
@@ -602,6 +605,146 @@ $("review-close").addEventListener("click", () => {
   reviewPath = null;
 });
 
+// -- what's new (the pull digest) + the per-file watch set -------------------
+// The digest answers "who changed what since MY last sync" (server-computed
+// against the manifest horizon); watching a file promotes it — a badge on its
+// row when teammate changes wait, and its digest entry sorts first. The watch
+// set is client-side only (localStorage per repo, the theme-mirror posture).
+
+let watchKey = null;
+let watchedPaths = new Set();
+let lastWhatsnew = null;
+let lastWhatsnewTitle = "What's new";
+
+function loadWatched(repo) {
+  watchKey = repo ? WhatsnewFmt.watchKey(repo) : null;
+  let raw = null;
+  try {
+    raw = watchKey ? localStorage.getItem(watchKey) : null;
+  } catch {
+    // localStorage unavailable (private mode) — watching quietly degrades.
+  }
+  watchedPaths = WhatsnewFmt.watchSet(raw);
+}
+
+function toggleWatch(path) {
+  if (watchedPaths.has(path)) watchedPaths.delete(path);
+  else watchedPaths.add(path);
+  try {
+    if (watchKey) localStorage.setItem(watchKey, WhatsnewFmt.watchSerialize(watchedPaths));
+  } catch {
+    // best-effort persistence; the in-memory set still drives this session
+  }
+  renderFiles(lastFiles, lastArtifacts, lastFolders); // re-badge + relabel the menus
+  if (lastWhatsnew && !$("whatsnew-card").classList.contains("hidden")) {
+    renderWhatsnew(lastWhatsnew, lastWhatsnewTitle); // re-sort watched-first
+  }
+}
+
+function watchBadge() {
+  const span = document.createElement("span");
+  span.className = "badge watched";
+  span.textContent = "watched";
+  span.title = "You watch this file — a teammate's change is waiting to pull.";
+  return span;
+}
+
+async function whatsnewAction() {
+  const data = await api("/api/whatsnew");
+  if (data.error) return showError(data.error);
+  renderWhatsnew(data, "What's new since your last sync");
+}
+
+// Expand one entry to a compact "what actually changed" summary (cell counts
+// for notebooks, line counts otherwise). remote_sha rides from the digest
+// entry so the summary matches what the panel shows even if the branch moved.
+async function whatsnewDetail(entry, slot, btn) {
+  btn.disabled = true;
+  btn.textContent = "…";
+  const data = await api("/api/whatsnew/detail", {
+    path: entry.path,
+    remote_sha: entry.remote_sha || "",
+  });
+  if (data.error) {
+    btn.disabled = false;
+    btn.textContent = "Details";
+    return showError(data.error);
+  }
+  btn.remove();
+  slot.textContent = WhatsnewFmt.detailSummary(data);
+}
+
+function renderWhatsnew(digest, title) {
+  lastWhatsnew = digest;
+  lastWhatsnewTitle = title || lastWhatsnewTitle;
+  const card = $("whatsnew-card");
+  card.classList.remove("hidden");
+  $("whatsnew-title").textContent = lastWhatsnewTitle;
+  const now = Date.now();
+  const note = $("whatsnew-note");
+  if (digest.attributed === false) {
+    note.textContent = "Couldn't read the commit history — showing sync states only.";
+  } else if (digest.truncated) {
+    note.textContent =
+      "A long time away — GitHub truncated the commit window, so attribution may be partial.";
+  } else {
+    note.textContent = "Read-only: Pull applies these; a conflict is resolved from its file row.";
+  }
+  const groupsBox = $("whatsnew-groups");
+  groupsBox.textContent = "";
+  for (const g of (digest.groups || []).slice(0, 5)) {
+    const div = document.createElement("div");
+    div.textContent = WhatsnewFmt.groupLabel(g, now);
+    groupsBox.appendChild(div);
+  }
+  const tbody = $("whatsnew-table").querySelector("tbody");
+  tbody.innerHTML = "";
+  const entries = WhatsnewFmt.sortEntries(digest.entries || [], watchedPaths);
+  if (!entries.length) {
+    const tr = document.createElement("tr");
+    const td = document.createElement("td");
+    td.colSpan = 3;
+    td.className = "muted";
+    td.textContent = "Nothing new — you're up to date.";
+    tr.appendChild(td);
+    tbody.appendChild(tr);
+  }
+  for (const entry of entries) {
+    const tr = document.createElement("tr");
+    const pathTd = document.createElement("td");
+    pathTd.className = "path";
+    pathTd.textContent = entry.path;
+    if (watchedPaths.has(entry.path)) pathTd.append(" ", watchBadge());
+    const stateTd = document.createElement("td");
+    const badge = document.createElement("span");
+    badge.className = `badge ${STATE_BADGES[entry.state] || ""}`;
+    badge.textContent = entry.state;
+    stateTd.appendChild(badge);
+    const whoTd = document.createElement("td");
+    const label = document.createElement("span");
+    label.textContent = WhatsnewFmt.entryLabel(entry, now) || "—";
+    whoTd.appendChild(label);
+    // Details needs at least one blob to diff; the endpoint 404s otherwise.
+    if (entry.remote_sha || entry.base_sha) {
+      const slot = document.createElement("span");
+      slot.className = "muted";
+      const btn = document.createElement("button");
+      btn.className = "small";
+      btn.textContent = "Details";
+      btn.addEventListener("click", () => whatsnewDetail(entry, slot, btn));
+      whoTd.append(" ", btn, " ", slot);
+    }
+    tr.append(pathTd, stateTd, whoTd);
+    tbody.appendChild(tr);
+  }
+  card.scrollIntoView({ block: "nearest" });
+}
+
+$("btn-whatsnew").addEventListener("click", whatsnewAction);
+$("whatsnew-close").addEventListener("click", () => {
+  $("whatsnew-card").classList.add("hidden");
+});
+
 function fileActions(file, opts) {
   opts = opts || {};
   const actions = [];
@@ -682,6 +825,15 @@ function fileActions(file, opts) {
   // structurally broken artifact.
   if (file.has_local && !opts.member) {
     actions.push(["Delete", () => deleteAction(file.path)]);
+  }
+  // Watch: promote this file — its row badges when a teammate change waits and
+  // its What's-new entry sorts first. Per-repo and client-side only; a plain
+  // menu button like every other action, never auto-run (the actionsMenu rule).
+  if (watchKey && file.state !== "local") {
+    actions.push([
+      watchedPaths.has(file.path) ? "Unwatch" : "Watch",
+      () => toggleWatch(file.path),
+    ]);
   }
   return actions;
 }
@@ -776,6 +928,11 @@ function buildFileRow(file, opts) {
   const extras = [];
   if (file.shadows) extras.push(" ", shadowBadge(file.shadows));
   if (file.is_module) extras.push(" ", moduleBadge());
+  // A watched file with a teammate change waiting gets its promotion badge —
+  // quiet otherwise (watching an in-sync file must not add row noise).
+  if (watchedPaths.has(file.path) && PULL_STATES.has(file.state)) {
+    extras.push(" ", watchBadge());
+  }
   const pathCell = extras.length ? [display, ...extras] : display;
   return buildRow(pathCell, file.state, fileActions(file, opts), file.path);
 }
@@ -1153,12 +1310,16 @@ async function refresh() {
     copilotMenu.open = false; // don't leave the dropdown open when it's hidden
   }
 
-  // Pull / Push all / Propose only make sense against a connected, logged-in repo.
-  // In local mode the notebooks are usable but there's nothing to sync to, so hide
-  // those controls (the per-file rows already omit Push/Propose for "local" files).
-  for (const id of ["btn-pull", "btn-push", "btn-propose"]) {
+  // Pull / Push all / Propose (and the pull digest) only make sense against a
+  // connected, logged-in repo. In local mode the notebooks are usable but there's
+  // nothing to sync to, so hide those controls (the per-file rows already omit
+  // Push/Propose for "local" files).
+  for (const id of ["btn-pull", "btn-whatsnew", "btn-push", "btn-propose"]) {
     $(id).classList.toggle("hidden", !state.logged_in);
   }
+  if (!state.logged_in) $("whatsnew-card").classList.add("hidden");
+  // The per-file watch set is keyed by repo; local mode has no digest to watch.
+  loadWatched(state.mode === "repo" && state.logged_in ? state.repo : null);
   // Recall shows only while the manifest holds a recallable last push; the
   // confirm names exactly which files it would revert (a stale record is the
   // trap — this is how the user catches one).
@@ -1205,9 +1366,13 @@ async function refresh() {
   }
   if (showFiles) {
     lastFiles = state.files || [];
-    renderFiles(lastFiles, state.artifacts || [], state.folders || []);
+    lastArtifacts = state.artifacts || [];
+    lastFolders = state.folders || [];
+    renderFiles(lastFiles, lastArtifacts, lastFolders);
   } else {
     lastFiles = [];  // no file surface (login wall) — don't leave stale push/propose targets
+    lastArtifacts = [];
+    lastFolders = [];
   }
   renderChecklist();  // after lastFiles lands: two of the items derive from the rows
   renderFreshnessBanner();
@@ -1402,7 +1567,15 @@ function confirmDraftShare(candidates) {
 
 $("login-start").addEventListener("click", startLogin);
 $("btn-refresh").addEventListener("click", refresh);
-$("btn-pull").addEventListener("click", () => action("/api/pull", {}));
+$("btn-pull").addEventListener("click", async () => {
+  const data = await action("/api/pull", {});
+  // The pull response carries the digest of what just landed, computed against
+  // the PRE-pull horizon — so a pull is never a black box. States shown are the
+  // pre-pull ones ("remote changed" = what the pull just applied).
+  if (data && !data.error && data.whatsnew && (data.whatsnew.entries || []).length) {
+    renderWhatsnew(data.whatsnew, "What just landed");
+  }
+});
 $("btn-push").addEventListener("click", () => {
   const candidates = lastFiles.filter((f) => PUSH_STATES.has(f.state));
   if (!confirmDraftShare(candidates)) return;

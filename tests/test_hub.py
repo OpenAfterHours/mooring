@@ -2669,6 +2669,121 @@ def test_push_note_survives_the_guard_confirm_re_post(configured):
     assert fake.commit_log[-1]["message"] == "adds the token loader"
 
 
+# -- pull digest: /api/whatsnew + the pre-pull digest on /api/pull ------------
+
+
+def test_whatsnew_unconfigured_returns_empty(unconfigured_client):
+    client, _ = unconfigured_client
+    # The api_discover-style guard: no repo/login means no digest, not an error.
+    assert client.get("/api/whatsnew").json() == {"entries": []}
+
+
+def test_whatsnew_endpoint_shape(configured):
+    client, hub, fake, _ = configured
+    _seed_and_pull(hub, fake, "notebooks/a.py")
+    fake.seed("notebooks/a.py", b"v2\n")  # a teammate pushes
+    resp = client.get("/api/whatsnew")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["source"] == "compare"
+    assert body["attributed"] is True
+    assert body["anchor"] and body["head"] and body["anchor"] != body["head"]
+    [entry] = body["entries"]
+    assert entry["path"] == "notebooks/a.py"
+    assert entry["state"] == "remote changed"
+    assert entry["authors"] == ["phil"]
+    assert entry["remote_sha"]
+    assert body["groups"]  # the window's collapsed pushes
+
+
+def test_pull_response_carries_the_pre_pull_digest(configured):
+    client, hub, fake, tmp_path = configured
+    _seed_and_pull(hub, fake, "notebooks/a.py")
+    fake.seed("notebooks/a.py", b"v2\n")
+    resp = client.post("/api/pull", json={})
+    assert resp.status_code == 200
+    body = resp.json()
+    # The digest reflects the PRE-pull state (what the pull just applied) —
+    # api_pull computes it before sync.pull rewrites the horizon.
+    [entry] = body["whatsnew"]["entries"]
+    assert entry["path"] == "notebooks/a.py"
+    assert entry["state"] == "remote changed"
+    # ...and the pull itself really ran.
+    assert (tmp_path / "ws1" / "notebooks/a.py").read_text("utf-8") == "v2\n"
+
+
+def test_pull_still_succeeds_when_the_digest_fails(configured, monkeypatch):
+    from mooring import whatsnew as whatsnew_mod
+
+    client, hub, fake, tmp_path = configured
+    _seed_and_pull(hub, fake, "notebooks/a.py")
+    fake.seed("notebooks/a.py", b"v2\n")
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("digest exploded")
+
+    monkeypatch.setattr(whatsnew_mod, "pending_digest", boom)
+    resp = client.post("/api/pull", json={})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert "whatsnew" not in body  # best-effort: no digest, no error
+    assert (tmp_path / "ws1" / "notebooks/a.py").read_text("utf-8") == "v2\n"
+
+
+def test_whatsnew_detail_cell_counts_and_sha_keyed_cache(configured, monkeypatch):
+    client, hub, fake, _ = configured
+    _seed_and_pull(hub, fake, "notebooks/a.py", _NB_V1.encode("utf-8"))
+    fake.seed("notebooks/a.py", _NB_V1.replace("x = 1", "x = 2").encode("utf-8"))
+    remote_sha = fake.tree["notebooks/a.py"]
+
+    calls = {"n": 0}
+    orig = fake.get_blob
+
+    def counting(sha):
+        calls["n"] += 1
+        return orig(sha)
+
+    monkeypatch.setattr(fake, "get_blob", counting)
+    resp = client.post(
+        "/api/whatsnew/detail", json={"path": "notebooks/a.py", "remote_sha": remote_sha}
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["kind"] == "cells"
+    assert body["changed"] == 1 and body["added"] == 0 and body["removed"] == 0
+    fetched = calls["n"]
+    assert fetched == 2  # base + remote, once each
+    # Second expand of the same (path, base, remote) serves from the Hub cache.
+    again = client.post(
+        "/api/whatsnew/detail", json={"path": "notebooks/a.py", "remote_sha": remote_sha}
+    )
+    assert again.json() == body
+    assert calls["n"] == fetched  # no further blob fetches
+
+
+def test_whatsnew_detail_line_counts_for_data_files(configured):
+    client, hub, fake, _ = configured
+    _seed_and_pull(hub, fake, "data/x.csv", b"a,b\n1,2\n")
+    fake.seed("data/x.csv", b"a,b\n1,2\n3,4\n")
+    resp = client.post(
+        "/api/whatsnew/detail",
+        json={"path": "data/x.csv", "remote_sha": fake.tree["data/x.csv"]},
+    )
+    assert resp.status_code == 200
+    assert resp.json() == {"path": "data/x.csv", "kind": "lines", "added": 1, "removed": 0}
+
+
+def test_whatsnew_detail_rejects_traversal_and_nothing_to_diff(configured):
+    client, _, _, _ = configured
+    assert (
+        client.post("/api/whatsnew/detail", json={"path": "../evil.py"}).status_code == 400
+    )
+    assert client.post("/api/whatsnew/detail", json={"path": ""}).status_code == 400
+    # No synced base and no remote sha: nothing to summarize.
+    resp = client.post("/api/whatsnew/detail", json={"path": "notebooks/nope.py"})
+    assert resp.status_code == 404
+
+
 # -- the health check endpoint (mooring doctor) --------------------------------
 
 

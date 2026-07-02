@@ -101,6 +101,11 @@ class Hub:
         # so /api/freshness can answer "has the remote moved since what you're looking
         # at?" with one fast ref lookup (routes/sync.api_freshness). Keyed like editors.
         self._state_heads: dict[str, str] = {}
+        # Cache of the What's-new per-entry detail summaries, keyed (path, base_sha,
+        # remote_sha) — blob content is immutable per sha, so re-expanding an entry
+        # never re-fetches its blobs (routes/sync.api_whatsnew_detail). Tiny values
+        # (count dicts), so no eviction beyond process life.
+        self._whatsnew_detail: dict[tuple[str, str, str], dict] = {}
 
     # -- helpers -------------------------------------------------------------
 
@@ -860,6 +865,8 @@ def create_app(hub: Hub) -> Starlette:
             Route("/api/login/poll", setup.api_login_poll),
             Route("/api/logout", setup.api_logout, methods=["POST"]),
             Route("/api/discover", sync_routes.api_discover),
+            Route("/api/whatsnew", sync_routes.api_whatsnew),
+            Route("/api/whatsnew/detail", sync_routes.api_whatsnew_detail, methods=["POST"]),
             Route("/api/freshness", sync_routes.api_freshness),
             Route("/api/adopt", sync_routes.api_adopt, methods=["POST"]),
             Route("/api/pull", sync_routes.api_pull, methods=["POST"]),

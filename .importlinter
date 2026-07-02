@@ -89,6 +89,7 @@ source_modules =
     mooring.manifest
     mooring.pbip
     mooring.deletion
+    mooring.whatsnew
 forbidden_modules =
     mooring.ai
     mooring.pushguard
@@ -182,6 +183,7 @@ source_modules =
     mooring.manifest
     mooring.pbip
     mooring.deletion
+    mooring.whatsnew
 forbidden_modules =
     marimo
     copilot

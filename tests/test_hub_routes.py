@@ -29,6 +29,9 @@ EXPECTED_ROUTES = {
     ("/api/login/poll", ("GET",), "api_login_poll"),
     ("/api/logout", ("POST",), "api_logout"),
     ("/api/discover", ("GET",), "api_discover"),
+    # The pull digest — "what changed while you were away" (roadmap: pull-digest).
+    ("/api/whatsnew", ("GET",), "api_whatsnew"),
+    ("/api/whatsnew/detail", ("POST",), "api_whatsnew_detail"),
     ("/api/freshness", ("GET",), "api_freshness"),  # staleness guard's near-open head check
     ("/api/adopt", ("POST",), "api_adopt"),
     ("/api/pull", ("POST",), "api_pull"),
