@@ -511,6 +511,31 @@ def test_push_specific_paths_only(cfg):
     assert "notebooks/b.py" not in client.tree
 
 
+def test_draft_copy_is_new_local_and_pushes_without_touching_the_original(cfg):
+    # "Duplicate as draft" safety invariant: the copy has no manifest base and no
+    # remote path, so it classifies NEW_LOCAL beside the MODIFIED original — it can
+    # never conflict with the team file — and pushing only the draft leaves the
+    # original's manifest entry, remote bytes, and pushable state all untouched.
+    client = FakeClient({"notebooks/sales.py": b"v1\n"})
+    sync.pull(client, cfg)
+    write_local(cfg, "notebooks/sales.py", "mine\n")  # MODIFIED original
+    write_local(cfg, "notebooks/sales-phil-draft.py", "mine\n")  # the draft sibling
+    states = {f.path: f.state for f in sync.status(client, cfg).files}
+    assert states["notebooks/sales.py"] is FileState.MODIFIED
+    assert states["notebooks/sales-phil-draft.py"] is FileState.NEW_LOCAL
+
+    base_before = manifest.load(cfg.workspace()).files["notebooks/sales.py"]
+    result = sync.push(
+        client, cfg, paths=["notebooks/sales-phil-draft.py"], sleep=lambda s: None
+    )
+    assert result.pushed == 1
+    assert client.blobs[client.tree["notebooks/sales.py"]] == b"v1\n"  # remote untouched
+    assert manifest.load(cfg.workspace()).files["notebooks/sales.py"] == base_before
+    states = {f.path: f.state for f in sync.status(client, cfg).files}
+    assert states["notebooks/sales.py"] is FileState.MODIFIED  # still mine to push
+    assert states["notebooks/sales-phil-draft.py"] is FileState.SYNCED
+
+
 # -- propose (push to a review branch) -------------------------------------------
 
 

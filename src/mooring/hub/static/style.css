@@ -447,6 +447,17 @@ tr.folder-header td { border-top: 1px solid var(--border); padding-top: 0.5rem; 
 tr.folder-header td.path { font-family: inherit; }
 tr.folder-header b { font-weight: 600; }
 
+/* first-run checklist: the self-ticking ramp (pull → open → duplicate → push).
+   Done items dim + strike through; the tick keeps the ok color (it's an
+   inline-block, so the parent's line-through never crosses it). */
+.checklist-head { display: flex; justify-content: space-between; align-items: baseline; }
+.checklist-head h3 { margin: 0; }
+.checklist { list-style: none; margin: 0.5rem 0 0; padding: 0; }
+.checklist li { padding: 0.15rem 0; }
+.checklist li .tick { display: inline-block; width: 1.4rem; color: var(--muted); }
+.checklist li.done { color: var(--muted); text-decoration: line-through; }
+.checklist li.done .tick { color: var(--ok); }
+
 #error-banner {
   background: var(--banner-bad-bg);
   border: 1px solid var(--bad);

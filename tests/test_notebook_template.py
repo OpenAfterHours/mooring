@@ -211,3 +211,130 @@ def test_opens_as_notebook_handles_windows_separators():
 def test_opens_as_notebook_non_dunder_double_trailing_underscore_stays_stub():
     # Only true dunder names (__<name>__.py) are carved out; "foo__.py" is not a marker.
     assert notebook_template.opens_as_notebook("notebooks/foo__.py", "") is True
+
+
+# -- duplicate_as_draft: the fearless personal copy ---------------------------
+
+NB_SOURCE = "import marimo\napp = marimo.App()\n"
+
+
+def _seed(workspace, rel, text=NB_SOURCE):
+    target = workspace / rel
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(text, "utf-8")
+    return rel
+
+
+def test_duplicate_names_the_draft_after_the_owner(tmp_path):
+    _seed(tmp_path, "notebooks/sales.py")
+    rel = notebook_template.duplicate_as_draft(tmp_path, "notebooks/sales.py", owner="phil")
+    assert rel == "notebooks/sales-phil-draft.py"
+    assert (tmp_path / rel).is_file()
+    # The original is untouched.
+    assert (tmp_path / "notebooks/sales.py").read_text("utf-8") == NB_SOURCE
+
+
+def test_duplicate_without_owner_uses_plain_draft_suffix(tmp_path):
+    # Local mode (or an offline hub) has no login: the suffix is just "-draft".
+    _seed(tmp_path, "notebooks/sales.py")
+    rel = notebook_template.duplicate_as_draft(tmp_path, "notebooks/sales.py", owner="")
+    assert rel == "notebooks/sales-draft.py"
+
+
+def test_duplicate_collision_appends_counter(tmp_path):
+    _seed(tmp_path, "notebooks/sales.py")
+    first = notebook_template.duplicate_as_draft(tmp_path, "notebooks/sales.py", owner="phil")
+    second = notebook_template.duplicate_as_draft(tmp_path, "notebooks/sales.py", owner="phil")
+    third = notebook_template.duplicate_as_draft(tmp_path, "notebooks/sales.py", owner="phil")
+    assert first == "notebooks/sales-phil-draft.py"
+    assert second == "notebooks/sales-phil-draft-2.py"
+    assert third == "notebooks/sales-phil-draft-3.py"
+
+
+def test_duplicate_of_a_draft_collapses_its_own_suffix(tmp_path):
+    # A draft-of-a-draft numbers up (sales-phil-draft-2), never stacks
+    # (…-draft-phil-draft) — the collapse strips the suffix this feature minted.
+    _seed(tmp_path, "notebooks/sales-phil-draft.py")
+    rel = notebook_template.duplicate_as_draft(
+        tmp_path, "notebooks/sales-phil-draft.py", owner="phil"
+    )
+    assert rel == "notebooks/sales-phil-draft-2.py"
+
+
+def test_duplicate_collapse_is_scoped_to_minted_suffixes(tmp_path):
+    # The pin from the design review: the collapse regex must only strip suffixes
+    # THIS feature mints. A notebook literally named first-draft.py loses only the
+    # ownerless "-draft" tail; a stem that merely ENDS in another word before
+    # "-draft" ("annual-report-draft") keeps that word — never "annual".
+    _seed(tmp_path, "notebooks/first-draft.py")
+    rel = notebook_template.duplicate_as_draft(tmp_path, "notebooks/first-draft.py", owner="phil")
+    assert rel == "notebooks/first-phil-draft.py"
+
+    _seed(tmp_path, "notebooks/annual-report-draft.py")
+    rel = notebook_template.duplicate_as_draft(
+        tmp_path, "notebooks/annual-report-draft.py", owner="phil"
+    )
+    assert rel == "notebooks/annual-report-phil-draft.py"
+
+
+def test_duplicate_of_a_teammates_draft_keeps_their_name(tmp_path):
+    # Duplicating maria's draft as phil strips only the bare "-draft" tail, so the
+    # copy reads sales-maria-phil-draft.py — the provenance survives in the name.
+    _seed(tmp_path, "notebooks/sales-maria-draft.py")
+    rel = notebook_template.duplicate_as_draft(
+        tmp_path, "notebooks/sales-maria-draft.py", owner="phil"
+    )
+    assert rel == "notebooks/sales-maria-phil-draft.py"
+
+
+def test_duplicate_copies_bytes_verbatim(tmp_path):
+    # Byte-for-byte, no decode/re-encode: odd encodings (here invalid UTF-8) survive
+    # exactly, and no BOM can appear. The sniff decodes with errors="ignore" only.
+    data = NB_SOURCE.encode("utf-8") + b"# caf\xe9 latin-1 comment\n"
+    target = tmp_path / "notebooks/odd.py"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(data)
+    rel = notebook_template.duplicate_as_draft(tmp_path, "notebooks/odd.py", owner="phil")
+    assert (tmp_path / rel).read_bytes() == data
+
+
+def test_duplicate_refuses_a_helper_module(tmp_path):
+    _seed(tmp_path, "notebooks/helpers.py", "def clean(df):\n    return df\n")
+    with pytest.raises(ValueError, match="not a marimo notebook"):
+        notebook_template.duplicate_as_draft(tmp_path, "notebooks/helpers.py", owner="phil")
+
+
+def test_duplicate_refuses_a_dunder_package_marker(tmp_path):
+    _seed(tmp_path, "pkg/__init__.py", "")
+    with pytest.raises(ValueError, match="not a marimo notebook"):
+        notebook_template.duplicate_as_draft(tmp_path, "pkg/__init__.py", owner="phil")
+
+
+def test_duplicate_rejects_workspace_escape(tmp_path):
+    with pytest.raises(ValueError, match="outside the workspace"):
+        notebook_template.duplicate_as_draft(tmp_path, "../evil.py", owner="phil")
+
+
+def test_duplicate_refuses_an_exclude_hidden_target(tmp_path):
+    # A team [sync] exclude like *-draft.py yields a clear error instead of
+    # minting a file the hub listing (sync-scoped) would never show.
+    _seed(tmp_path, "notebooks/sales.py")
+    with pytest.raises(ValueError, match="not a syncable location"):
+        notebook_template.duplicate_as_draft(
+            tmp_path, "notebooks/sales.py", owner="phil", exclude=("*-draft.py",)
+        )
+
+
+def test_duplicate_missing_source_raises_file_not_found(tmp_path):
+    with pytest.raises(FileNotFoundError):
+        notebook_template.duplicate_as_draft(tmp_path, "notebooks/missing.py", owner="phil")
+
+
+def test_draft_stem_is_never_an_identifier(tmp_path):
+    # The shadow immunity: the always-present hyphen makes every minted stem a
+    # non-identifier, so shadow.scan structurally cannot flag a draft.
+    _seed(tmp_path, "notebooks/polars.py")
+    for owner in ("phil", ""):
+        rel = notebook_template.duplicate_as_draft(tmp_path, "notebooks/polars.py", owner=owner)
+        stem = rel.rsplit("/", 1)[-1].removesuffix(".py")
+        assert not stem.isidentifier()

@@ -35,14 +35,15 @@ what cloud notebook platforms do.
 | [Version history](version-history.md) | ✅ Phases 1–3 shipped 2026-07 | M | The git-free time machine: browse and restore any past version of a file from the repo's own history. |
 | [Review my changes](review-my-changes.md) | Planned | M | Cell-aware pre-push diff plus an optional "What changed?" note that becomes the commit message. |
 | [Pull digest](pull-digest.md) | Planned | M | "What changed while you were away" — computed against each analyst's personal sync horizon. |
-| [Duplicate as draft](duplicate-as-draft.md) | Planned | S | A fearless personal copy of any notebook, plus a first-run checklist for new teammates. |
+| [Duplicate as draft](duplicate-as-draft.md) | ✅ Shipped 2026-07 | S | A fearless personal copy of any notebook, plus a first-run checklist for new teammates. |
 | [Offline mode](offline-mode.md) | Planned | M | Degrade gracefully when GitHub is unreachable instead of looking broken. |
 | [Handover explainer](handover-explainer.md) | Planned | S | One-shot copilot walkthrough of an inherited notebook, cell by cell. |
 | [Traceback fixer](traceback-fixer.md) | Planned | M | Debug from a traceback without the model ever seeing the data values inside it. |
 | [Power BI semantic model](pbi-semantic-model.md) | Planned | M | Let the copilot read synced PBIP tables, relationships, and DAX — schema and authored code, never data. |
 
-The five shipped plans are the review's consensus top five; each page's status
-admonition records exactly what landed and what remains open.
+The first five shipped plans were the review's consensus top five, with
+duplicate-as-draft following; each page's status admonition records exactly
+what landed and what remains open.
 
 ## Suggested sequencing
 

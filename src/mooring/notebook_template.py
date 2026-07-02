@@ -195,3 +195,78 @@ def create_from_input(
     if not sync.within_folders(folder, folders):
         workspace_config.add_extra_folder(workspace, folder)
     return created
+
+
+def duplicate_as_draft(
+    workspace: Path,
+    rel_path: str,
+    *,
+    owner: str,
+    exclude: tuple[str, ...] = (),
+) -> str:
+    """Byte-copy the notebook at ``rel_path`` to a personal draft sibling —
+    ``{stem}-{owner}-draft.py`` (or plain ``-draft`` when ``owner`` is empty, e.g.
+    local mode) — and return the copy's workspace-relative path.
+
+    The copy is a safe playground: to the three-way sync engine it is just a new
+    local file (no manifest base, no remote path), so it can never conflict with
+    the team file and reaches the repo only on an explicit push. The bytes are
+    copied verbatim (no parse, no re-encoding — so no UTF-8 BOM risk), and the
+    always-present hyphen makes the stem a non-identifier, so the shadow guard
+    structurally cannot fire on a draft. Duplicating a draft collapses its own
+    suffix first (``sales-phil-draft`` → ``sales-phil-draft-2``, never
+    ``…-draft-phil-draft``); the collapse is scoped to the exact suffixes this
+    function mints, so a notebook that merely *ends* in another word keeps it.
+    On a name collision the suffix gains a counter, the :func:`create_unique`
+    idiom. The source must open as a notebook (:func:`opens_as_notebook` — a
+    helper module or ``__init__.py`` is refused) and the target must pass
+    ``sync.is_synced_path``, so a team ``[sync] exclude`` pattern like
+    ``*-draft.py`` produces a clear error instead of an invisible file.
+    """
+    rel = str(rel_path).replace("\\", "/").strip().strip("/")
+    if not rel:
+        raise ValueError("No path given.")
+
+    # Path-escape guard (the _open idiom): resolve and confirm the source is under
+    # the workspace, so a "../" or absolute path can't read or write outside it.
+    target = (workspace / rel).resolve()
+    try:
+        target.relative_to(workspace.resolve())
+    except ValueError as exc:
+        raise ValueError("That path is outside the workspace.") from exc
+    if not target.is_file():
+        raise FileNotFoundError(f"No such notebook: {rel}")
+
+    source = target.read_bytes()
+    folder, _, name = rel.rpartition("/")
+    if not name.endswith(".py") or not opens_as_notebook(rel, source.decode("utf-8", "ignore")):
+        raise ValueError(f"{rel} is not a marimo notebook.")
+
+    # Collapse a suffix THIS feature minted (-draft / -{owner}-draft, with an
+    # optional counter) so a draft-of-a-draft numbers up instead of stacking.
+    # Deliberately narrow: "annual-report-draft" only loses "-draft" — the
+    # pattern never swallows words that aren't the caller's own suffix.
+    stem = name.removesuffix(".py")
+    own = f"{re.escape(owner)}-" if owner else ""
+    stem = re.sub(rf"-(?:{own})?draft(?:-\d+)?$", "", stem) or stem
+
+    from mooring import sync
+
+    base = f"{stem}-{owner + '-' if owner else ''}draft"
+    prefix = f"{folder}/" if folder else ""
+    candidate = f"{prefix}{base}.py"
+    if not sync.is_synced_path(candidate, exclude):
+        raise ValueError(f"{candidate} is not a syncable location.")
+    n = 1
+    while True:
+        # Exclusive create ("xb"), the create() idiom: the loser of a race gets
+        # FileExistsError and takes the next numbered name. Bytes, not text —
+        # the copy must be identical whatever the source encoding.
+        try:
+            with open(workspace / candidate, "xb") as fh:
+                fh.write(source)
+        except FileExistsError:
+            n += 1
+            candidate = f"{prefix}{base}-{n}.py"
+        else:
+            return candidate

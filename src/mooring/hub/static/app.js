@@ -36,6 +36,7 @@ function applyTheme(theme) {
 let busy = false;
 let showAddRepo = false;
 let lastFiles = [];
+let lastReview = null;
 let aiChatEnabled = false;
 // When the last /api/state landed (client clock) and whether it was logged in —
 // the freshness banner's inputs. There is no server-side "last refreshed" time:
@@ -232,7 +233,8 @@ async function doOpen(path) {
   const prev = summary.textContent;
   summary.textContent = "Starting the editor…";
   try {
-    await action("/api/open", { path }, false);
+    const data = await action("/api/open", { path }, false);
+    if (data && !data.error) checklistSet("opened");
   } finally {
     summary.textContent = prev;
   }
@@ -331,6 +333,17 @@ function revealAction(path) {
   return action("/api/reveal", { path });
 }
 
+// A safe playground: byte-copy this notebook to a personal {stem}-{login}-draft.py
+// sibling. To the three-way engine the draft is just a new local file — it can never
+// conflict with the team file and is only shared by an explicit push. The response's
+// url auto-opens the copy in the editor (action() handles it).
+function duplicateAction(path) {
+  return action("/api/duplicate", { path }).then((data) => {
+    if (data && !data.error) checklistSet("duplicated");
+    return data;
+  });
+}
+
 // Open an external URL (e.g. GitHub) in a new tab, severing window.opener so the
 // opened page can't navigate this hub tab (external-site hygiene).
 function openExternal(url) {
@@ -339,14 +352,22 @@ function openExternal(url) {
 }
 
 // The contents API is throttled to ~1 file/s; tell the user a long push is alive.
+// A push guard 409 (needs_confirm) means nothing sensitive went yet, so it never
+// ticks the checklist's push item — only a clean success does.
 function pushAction(paths, count) {
   if (count > 3) $("summary").textContent = `Pushing ${count} file(s)… (~${Math.ceil(count * 0.8)}s)`;
-  return action("/api/push", paths ? { paths } : {});
+  return action("/api/push", paths ? { paths } : {}).then((data) => {
+    if (data && !data.error && !data.needs_confirm) checklistSet("pushed");
+    return data;
+  });
 }
 
 function proposeAction(paths, count) {
   if (count > 3) $("summary").textContent = `Proposing ${count} file(s)… (~${Math.ceil(count * 0.8)}s)`;
-  return action("/api/propose", paths ? { paths } : {});
+  return action("/api/propose", paths ? { paths } : {}).then((data) => {
+    if (data && !data.error && !data.needs_confirm) checklistSet("pushed");
+    return data;
+  });
 }
 
 function deleteAction(path, kind) {
@@ -517,8 +538,8 @@ function fileActions(file, opts) {
     );
   } else if (PUSH_STATES.has(file.state)) {
     actions.push(
-      ["Push", () => action("/api/push", { paths: [file.path] })],
-      ["Propose", () => action("/api/propose", { paths: [file.path] })],
+      ["Push", () => pushAction([file.path], 1)],
+      ["Propose", () => proposeAction([file.path], 1)],
     );
     // "Discard my changes" (né Revert) restores the last synced version.
     // Notebook-only: data files and Power BI members aren't snapshotted (so an
@@ -548,6 +569,12 @@ function fileActions(file, opts) {
   const openable = isNotebook || file.path.endsWith(".pbip");
   if (openable && file.has_local) {
     actions.push(["Open", () => openAction(file.path)]);
+  }
+  // A fearless personal copy: {stem}-{login}-draft.py in the same folder, opened
+  // at once. Notebooks only (a PBIP member never satisfies isNotebook) — a draft
+  // never flows back into the original automatically; fold work back by hand.
+  if (isNotebook && file.has_local) {
+    actions.push(["Duplicate as draft", () => duplicateAction(file.path)]);
   }
   // A plain helper module (non-marimo .py) can't open in marimo (it would be rewritten
   // into notebook form), so instead of Open it gets Reveal — open it in the file manager
@@ -845,6 +872,63 @@ function renderReviewBanner(review) {
   banner.appendChild(a);
 }
 
+// -- first-run checklist (the self-ticking ramp; pure derivation in checklist.js) --
+// Progress lives in localStorage under a per-repo key (the LS_THEME posture:
+// best-effort, private mode just means the checklist re-derives what it can from
+// the /api/state rows). Repo mode only — it teaches the pull→push rhythm, which
+// needs a connected repo. Null key = no checklist surface (local mode/login wall).
+
+let checklistKey = null;
+
+function checklistStored() {
+  if (!checklistKey) return {};
+  try {
+    return JSON.parse(localStorage.getItem(checklistKey)) || {};
+  } catch {
+    return {};
+  }
+}
+
+function checklistSet(flag) {
+  if (!checklistKey) return;
+  try {
+    const stored = checklistStored();
+    if (!stored[flag]) {
+      stored[flag] = true;
+      localStorage.setItem(checklistKey, JSON.stringify(stored));
+    }
+  } catch {
+    // localStorage unavailable — the derivable items still tick from the rows.
+  }
+  renderChecklist(); // tick immediately; the next refresh() re-derives anyway
+}
+
+function renderChecklist() {
+  const card = $("checklist-card");
+  if (!checklistKey) {
+    card.classList.add("hidden");
+    return;
+  }
+  const stored = checklistStored();
+  const items = Checklist.derive(lastFiles, lastReview, stored);
+  const hide = !!stored.dismissed || Checklist.isDone(items);
+  card.classList.toggle("hidden", hide);
+  if (hide) return;
+  const list = $("checklist-items");
+  list.innerHTML = "";
+  for (const item of items) {
+    const li = document.createElement("li");
+    if (item.done) li.classList.add("done");
+    const tick = document.createElement("span");
+    tick.className = "tick";
+    tick.textContent = item.done ? "✓" : "○";
+    li.append(tick, item.label);
+    list.appendChild(li);
+  }
+}
+
+$("checklist-dismiss").addEventListener("click", () => checklistSet("dismissed"));
+
 // The repo identity discovery last ran for. Discovery costs a full-tree fetch on
 // the server, so we run it once per repo-session (on login / repo switch), NOT on
 // every refresh() — and force a re-check (null) after an adopt so the banner clears.
@@ -1011,6 +1095,13 @@ async function refresh() {
     : "No notebooks yet &mdash; click <b>New notebook</b> to create one, or <b>Pull</b> to " +
       "fetch your team's notebooks.";
 
+  // First-run checklist: keyed per repo so a second repo ramps afresh. The key
+  // gates every checklist surface, so local mode and the login wall show nothing.
+  checklistKey = state.mode === "repo" && state.logged_in
+    ? Checklist.storageKey(state.repo)
+    : null;
+  lastReview = (state.logged_in && state.review) || null;
+
   if (state.logged_in) {
     const userInfo = $("user-info");
     userInfo.innerHTML = "";
@@ -1041,6 +1132,7 @@ async function refresh() {
   } else {
     lastFiles = [];  // no file surface (login wall) — don't leave stale push/propose targets
   }
+  renderChecklist();  // after lastFiles lands: two of the items derive from the rows
   renderFreshnessBanner();
   // Prompt to adopt any notebook folders the repo keeps outside the synced folders.
   // Runs once per repo-session (see maybeDiscover), so it never rides the refresh loop.
@@ -1219,16 +1311,30 @@ $("copilot-check").addEventListener("click", () => {
   });
 });
 
+// Bulk Push/Propose sweeps up personal -draft.py copies with everything else; ask
+// first, so a draft is only ever shared on purpose. A filename-shape check only —
+// the push guard's server-side content scan still runs and its dialog fires
+// independently afterwards. Pushing a draft from its own row stays unprompted:
+// that click is already explicit. Consistent with deleteAction's confirm idiom.
+function confirmDraftShare(candidates) {
+  const drafts = candidates.filter((f) => Checklist.DRAFT_RE.test(f.path));
+  if (!drafts.length) return true;
+  const names = drafts.map((f) => "  " + f.path).join("\n");
+  return confirm(`Include your ${drafts.length} draft(s)?\n\n${names}`);
+}
+
 $("login-start").addEventListener("click", startLogin);
 $("btn-refresh").addEventListener("click", refresh);
 $("btn-pull").addEventListener("click", () => action("/api/pull", {}));
 $("btn-push").addEventListener("click", () => {
-  const count = lastFiles.filter((f) => PUSH_STATES.has(f.state)).length;
-  return pushAction(null, count);
+  const candidates = lastFiles.filter((f) => PUSH_STATES.has(f.state));
+  if (!confirmDraftShare(candidates)) return;
+  return pushAction(null, candidates.length);
 });
 $("btn-propose").addEventListener("click", () => {
-  const count = lastFiles.filter((f) => PUSH_STATES.has(f.state)).length;
-  return proposeAction(null, count);
+  const candidates = lastFiles.filter((f) => PUSH_STATES.has(f.state));
+  if (!confirmDraftShare(candidates)) return;
+  return proposeAction(null, candidates.length);
 });
 let recallPaths = [];
 

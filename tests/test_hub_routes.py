@@ -37,6 +37,7 @@ EXPECTED_ROUTES = {
     ("/api/resolve", ("POST",), "api_resolve"),
     ("/api/recall", ("POST",), "api_recall"),  # push guard's "recall last push"
     ("/api/new", ("POST",), "api_new"),
+    ("/api/duplicate", ("POST",), "api_duplicate"),  # the fearless personal draft copy
     ("/api/open", ("POST",), "api_open"),
     ("/api/reveal", ("POST",), "api_reveal"),
     ("/api/delete", ("POST",), "api_delete"),

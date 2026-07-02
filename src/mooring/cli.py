@@ -182,6 +182,12 @@ def _build_parser() -> argparse.ArgumentParser:
         "packages/finance/notebooks/sales)",
     )
 
+    dup = sub.add_parser(
+        "duplicate",
+        help="copy a notebook to a personal -draft sibling and open it",
+    )
+    dup.add_argument("path", help="workspace-relative notebook path to duplicate")
+
     delete_cmd = sub.add_parser(
         "delete",
         help="delete a notebook from the workspace (push afterwards to remove it remotely)",
@@ -956,6 +962,30 @@ def cmd_new(cfg: config.Config, name: str) -> int:
     telemetry.log_event("new")
     print(f"Created {rel_path}")
     return cmd_open(cfg, rel_path)
+
+
+def cmd_duplicate(cfg: config.Config, rel_path: str) -> int:
+    from mooring import notebook_template
+    from mooring.app import notebooks
+    from mooring.github import AuthFailed, GitHubError
+
+    # The owner suffix is the GitHub login; no repo (NotConfigured subclasses
+    # AuthFailed), no login, or an offline machine degrades to plain "-draft"
+    # rather than failing the copy — the draft is a purely local file.
+    try:
+        owner = notebooks.client_for(cfg).get_user()["login"]
+    except (AuthFailed, GitHubError, OSError):
+        owner = ""
+    try:
+        new_rel = notebook_template.duplicate_as_draft(
+            cfg.workspace(), rel_path, owner=owner, exclude=cfg.exclude
+        )
+    except (ValueError, FileNotFoundError, FileExistsError) as exc:
+        sys.exit(str(exc))
+    telemetry.log_event("duplicate")
+    _record_activity(cfg, "duplicate", path=rel_path, draft=new_rel)
+    print(f"Created {new_rel}")
+    return cmd_open(cfg, new_rel)
 
 
 def cmd_init(cfg: config.Config) -> int:
@@ -1758,6 +1788,8 @@ def _dispatch(
         return cmd_open(cfg, args.path)
     if command == "new":
         return cmd_new(cfg, args.name)
+    if command == "duplicate":
+        return cmd_duplicate(cfg, args.path)
     if command == "init":
         return cmd_init(cfg)
     if command == "deps":

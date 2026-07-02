@@ -293,6 +293,94 @@ def test_new_rejects_a_path_outside_the_workspace(unconfigured_client):
     assert "workspace" in resp.json()["error"]
 
 
+# -- duplicate as draft: the fearless personal copy ---------------------------
+
+
+NB_SOURCE = "import marimo\napp = marimo.App()\n"
+
+
+class DuplicateFakeEditor:
+    def __init__(self, workspace, theme="system"):
+        self.workspace = workspace
+
+    def ensure_started(self):
+        pass  # no-op: in-memory editor double, nothing to launch
+
+    def use_uv(self):
+        return False
+
+    def url_for(self, rel_path):
+        return f"http://editor/{rel_path}"
+
+    def shutdown(self):
+        pass  # no-op: in-memory editor double, nothing to tear down
+
+
+def test_local_mode_duplicate_mints_plain_draft_lists_and_opens(unconfigured_client, monkeypatch):
+    # No repo, no login: the owner lookup falls through (NotConfigured is an
+    # AuthFailed), so the suffix is plain "-draft" — and the copy lists as "local"
+    # and opens like any notebook.
+    client, hub = unconfigured_client
+    monkeypatch.setattr(server, "EditorServer", DuplicateFakeEditor)
+    ws = hub.cfg.workspace()
+    (ws / "notebooks").mkdir(parents=True, exist_ok=True)
+    (ws / "notebooks" / "sales.py").write_text(NB_SOURCE, "utf-8")
+
+    resp = client.post("/api/duplicate", json={"path": "notebooks/sales.py"})
+    assert resp.status_code == 200
+    assert resp.json()["url"] == "http://editor/notebooks/sales-draft.py"
+    assert (ws / "notebooks" / "sales-draft.py").read_text("utf-8") == NB_SOURCE
+
+    files = {f["path"]: f for f in client.get("/api/state").json()["files"]}
+    assert files["notebooks/sales-draft.py"]["state"] == "local"
+
+
+def test_configured_duplicate_uses_the_login_suffix(configured, monkeypatch):
+    # Logged in: the draft carries the GitHub login (FakeClient reports "phil"),
+    # classifies "new local" beside the original, and lands in the activity ledger.
+    client, _hub, _fake, tmp_path = configured
+    monkeypatch.setattr(server, "EditorServer", DuplicateFakeEditor)
+    write_ws(tmp_path, "ws1", "notebooks/sales.py", NB_SOURCE)
+
+    resp = client.post("/api/duplicate", json={"path": "notebooks/sales.py"})
+    assert resp.status_code == 200
+    assert resp.json()["url"] == "http://editor/notebooks/sales-phil-draft.py"
+
+    files = {f["path"]: f for f in client.get("/api/state").json()["files"]}
+    assert files["notebooks/sales-phil-draft.py"]["state"] == "new local"
+
+    entries = client.get("/api/activity").json()["entries"]
+    assert entries[0]["op"] == "duplicate"
+    assert entries[0]["path"] == "notebooks/sales.py"
+    assert entries[0]["draft"] == "notebooks/sales-phil-draft.py"
+
+
+def test_duplicate_rejects_a_path_outside_the_workspace(unconfigured_client):
+    client, _ = unconfigured_client
+    resp = client.post("/api/duplicate", json={"path": "../escape.py"})
+    assert resp.status_code == 400
+    assert "workspace" in resp.json()["error"]
+
+
+def test_duplicate_refuses_a_helper_module(unconfigured_client):
+    # The hub only offers the action on is_notebook rows; the server backstops a
+    # direct call — duplicating a module would just spread the un-openable file.
+    client, hub = unconfigured_client
+    ws = hub.cfg.workspace()
+    (ws / "notebooks").mkdir(parents=True, exist_ok=True)
+    (ws / "notebooks" / "helpers.py").write_text("def clean(df):\n    return df\n", "utf-8")
+    resp = client.post("/api/duplicate", json={"path": "notebooks/helpers.py"})
+    assert resp.status_code == 400
+    assert "not a marimo notebook" in resp.json()["error"]
+
+
+def test_duplicate_404s_when_the_source_is_missing(unconfigured_client):
+    client, _ = unconfigured_client
+    resp = client.post("/api/duplicate", json={"path": "notebooks/missing.py"})
+    assert resp.status_code == 404
+    assert "missing.py" in resp.json()["error"]
+
+
 def test_state_env_no_project_lists_top_level_env_packages(unconfigured_client, monkeypatch):
     # No notebook pyproject (uvx/pip): the footer shows the env's top-level packages
     # (e.g. what `uvx --with` added), so an added package actually appears.

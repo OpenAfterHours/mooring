@@ -10,7 +10,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from mooring import notebook_template, reveal, sync, telemetry, trash
-from mooring.github import GitHubError
+from mooring.github import AuthFailed, GitHubError
 
 
 async def api_new(request: Request) -> JSONResponse:
@@ -25,6 +25,34 @@ async def api_new(request: Request) -> JSONResponse:
         return JSONResponse({"error": str(exc)}, status_code=400)
     telemetry.log_event("new")
     return hub._open(rel_path)
+
+
+async def api_duplicate(request: Request) -> JSONResponse:
+    """Byte-copy a notebook to a personal ``{stem}-{login}-draft.py`` sibling and
+    open it — a safe playground the three-way engine classifies as a new local
+    file, so it can never conflict with the team file and is only shared by an
+    explicit push. The owner suffix is the GitHub login; local mode (AuthFailed,
+    which NotConfigured subclasses) and an offline hub degrade to plain
+    ``-draft`` rather than failing the copy."""
+    hub = request.app.state.hub
+    data = await request.json()
+    rel_path = str(data.get("path", ""))
+    cfg = hub.cfg
+    try:
+        owner = hub.username()
+    except (AuthFailed, GitHubError, OSError):
+        owner = ""
+    try:
+        new_rel = notebook_template.duplicate_as_draft(
+            cfg.workspace(), rel_path, owner=owner, exclude=cfg.exclude
+        )
+    except (ValueError, FileExistsError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    except FileNotFoundError:
+        return JSONResponse({"error": f"No such notebook: {rel_path}"}, status_code=404)
+    telemetry.log_event("duplicate")
+    hub._activity("duplicate", path=rel_path, draft=new_rel)
+    return hub._open(new_rel)
 
 
 async def api_open(request: Request) -> JSONResponse:

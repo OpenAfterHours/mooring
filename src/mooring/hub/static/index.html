@@ -160,6 +160,19 @@
       </div>
     </section>
 
+    <!-- First-run checklist: teaches the working rhythm (pull → open → duplicate a
+         draft → push/propose) by ticking itself off as each step happens. Client-side
+         only: progress lives in localStorage per repo; two items re-derive from the
+         /api/state rows. Hidden once complete or dismissed, in local (no-repo) mode,
+         and behind the login wall. Rendered by renderChecklist in app.js. -->
+    <section id="checklist-card" class="card hidden">
+      <div class="checklist-head">
+        <h3>Getting started</h3>
+        <button id="checklist-dismiss" class="small" title="Hide this checklist for this repo">Dismiss</button>
+      </div>
+      <ul id="checklist-items" class="checklist"></ul>
+    </section>
+
     <section id="files-card" class="card hidden">
       <div class="toolbar">
         <button id="btn-refresh">&#8635; Refresh</button>
@@ -265,6 +278,7 @@
   <script src="/static/freshness.js"></script>
   <script src="/static/guard_fmt.js"></script>
   <script src="/static/history_fmt.js"></script>
+  <script src="/static/checklist.js"></script>
   <script src="/static/app.js"></script>
   <!-- Decorative backdrop: deterministic starfield + the one-time boat voyage.
        Last in <body> so the scene is already parsed; no DOM/side effects elsewhere. -->

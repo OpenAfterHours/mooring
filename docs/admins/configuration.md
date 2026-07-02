@@ -141,6 +141,23 @@ The same `exclude` applies to the local scan **and** the remote tree, so an
 excluded path stays invisible to both pull and push (it is never uploaded, and a
 teammate's matching file is never pulled or deleted).
 
+!!! note "Keeping personal drafts out of the repo"
+
+    **Duplicate as draft** copies notebooks to `{name}-{login}-draft.py`
+    siblings. Teams that never want drafts in the shared repo can exclude them:
+
+    ```toml
+    [sync]
+    exclude = ["*-draft.py"]
+    ```
+
+    Mooring then refuses to *create* a new draft with a clear error instead of
+    minting a file sync would never carry. The caveat: excluded files disappear
+    from the hub listing **entirely** (the listing is sync-scoped), so a pattern
+    added *after* drafts exist hides those local files — including any numbered
+    `-draft-2.py` copies, which the bare pattern above does not match — rather
+    than deleting them. Have the team clean up existing drafts before adding it.
+
 ### `[trash]`
 
 Before mooring overwrites or removes a local file on the user's behalf (a

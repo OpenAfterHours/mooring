@@ -97,6 +97,14 @@ def test_mixed_case_not_flagged(tmp_path):
     assert shadow.scan([rel], workspace=tmp_path) == {}
 
 
+def test_draft_copy_of_a_danger_name_not_flagged(tmp_path):
+    # "Duplicate as draft" mints {stem}-{login}-draft.py: the always-present hyphen
+    # makes the stem a non-identifier, so even a draft of polars.py (which IS badged)
+    # is structurally immune — pinned here so the naming guarantee can't rot.
+    rel = _w(tmp_path, "notebooks/polars-phil-draft.py")
+    assert shadow.scan([rel], workspace=tmp_path) == {}
+
+
 def test_exact_case_flagged(tmp_path):
     rel = _w(tmp_path, "polars.py")
     assert shadow.scan([rel], workspace=tmp_path) == {rel: "polars"}
