@@ -83,6 +83,47 @@ def test_search_is_value_free(tmp_path):
     assert "fact_loans" in out and SECRET not in out
 
 
+def test_dictionary_output_gets_the_checksum_scrub(tmp_path):
+    # Defence-in-depth: the dictionary is team-authored, allowlisted, and
+    # secret-scanned at sync — but its rendered slice must still pass the same
+    # checksum-PII floor as every other egress fragment (this was the one tool
+    # channel that used to reach the model without an egress scrub).
+    card = "4012888888881881"  # Luhn-valid, not on any test-PAN list
+    d = tmp_path / "context" / "dictionaries"
+    d.mkdir(parents=True)
+    (d / "leak.yaml").write_text(
+        f"""
+models:
+  - name: fact_cards
+    description: sample card {card} left in a description
+    columns:
+      - name: pan
+        data_type: varchar
+""",
+        "utf-8",
+    )
+    (tmp_path / "nb.py").write_text("import marimo\n", "utf-8")
+    tools = {
+        t.name: t
+        for t in build_tools(
+            workspace=tmp_path,
+            folders=("data",),
+            notebook_rel="nb.py",
+            emit_proposal=lambda *a, **k: None,
+            dictionary=load_index(tmp_path, "context"),
+        )
+    }
+    described = (
+        tools["mooring_describe_table"].handler(_invocation(table="fact_cards")).text_result_for_llm
+    )
+    assert card not in described
+    assert "pan" in described  # the clean column line still renders
+    searched = (
+        tools["mooring_search_dictionary"].handler(_invocation(query="pan")).text_result_for_llm
+    )
+    assert card not in searched
+
+
 def test_describe_path_like_name_finds_nothing(tmp_path):
     # The tool looks up a NAME in the parsed index; a path argument matches nothing
     # and touches no filesystem.

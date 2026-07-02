@@ -9,9 +9,11 @@ gateway) rather than by convention (every caller remembering to scrub).
 
 The rule, enforced by ``tests/test_egress.py``:
 
-    Nothing outside this module calls ``pii.scrub_columns`` directly, and
+    Nothing outside this module calls ``pii.scrub_columns`` directly,
     :func:`build_system_context` — the only assembler of the system context — is
-    defined only here. A new egress path that forgets to scrub is therefore a
+    defined only here, and nothing outside this module constructs the SDK's
+    ``ToolResult`` (:func:`to_tool_result` / :func:`to_error_result` are the only
+    minters). A new egress path that forgets to scrub is therefore a
     review-visible change to *this* file, not a silent leak somewhere else.
 
 The scrubbers are *defence in depth, never a guarantee* — see :mod:`mooring.ai.pii`
@@ -34,6 +36,8 @@ __all__ = [
     "scrub_columns",
     "scrub_text",
     "build_system_context",
+    "to_tool_result",
+    "to_error_result",
 ]
 
 
@@ -72,6 +76,48 @@ def scrub_text(text: str) -> tuple[str, list[Finding]]:
     drop = {f.line for f in findings}
     kept = [ln for i, ln in enumerate(text.splitlines(), start=1) if i not in drop]
     return "\n".join(kept), findings
+
+
+def to_tool_result(text: str):
+    """Mint the SDK ``ToolResult`` that carries ``text`` to the model.
+
+    The ONLY place mooring constructs a ``ToolResult`` (enforced by
+    ``tests/test_egress.py``), so every tool's outbound text passes through this
+    module *by construction* — a new tool cannot hand the SDK a string without a
+    review-visible call into egress. Mints only; it does NOT re-scrub, because
+    each channel owns its scrub semantics (``get_schema`` withholds PII column
+    names only when the PII guard is enabled — re-scrubbing here would silently
+    change that contract).
+
+    The SDK import is function-local on purpose: ``copilot`` is the optional
+    ``mooring[copilot]`` extra, and this module is imported on non-AI paths too
+    (it re-exports :func:`guard_prompt` / :class:`Finding`).
+    """
+    from copilot.tools import ToolResult
+
+    return ToolResult(text_result_for_llm=text)
+
+
+def to_error_result(message: str):
+    """Mint a failed ``ToolResult``. Errors cross to the model too: exception
+    text can quote user input (a path, a cell fragment, a rendered value), so the
+    message is scrubbed here — the error channel gets the same checksum-PII floor
+    as every other egress fragment. ``scrub_text`` drops whole lines, and the
+    typical exception message IS one line — so when the scrub empties it, a
+    value-free explanation is substituted rather than handing the model an
+    empty, unexplained failure it would just retry."""
+    from copilot.tools import ToolResult
+
+    scrubbed, findings = scrub_text(message)
+    if findings and not scrubbed.strip():
+        scrubbed = "error message withheld: it contained a checksum-validated identifier"
+    return ToolResult(
+        text_result_for_llm="",
+        # "error" is mooring's own result_type; the SDK's ToolResultType Literal
+        # omits it, but the dataclass stores the string as-is at runtime.
+        result_type="error",  # ty: ignore[invalid-argument-type]
+        error=scrubbed,
+    )
 
 
 def build_system_context(

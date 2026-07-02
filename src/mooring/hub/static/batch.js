@@ -22,6 +22,20 @@
     return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   }
 
+  // Appearance follows the hub, exactly like chat.js: applied from
+  // /api/ai/batch/state (which carries ui_theme) and live via a same-origin
+  // `storage` event when the hub's toggle changes it.
+  const LS_THEME = "mooring.ui.theme"; // shared with the hub (same origin)
+  function applyTheme(theme) {
+    if (!theme) return;
+    document.documentElement.dataset.theme = theme;
+    try {
+      if (localStorage.getItem(LS_THEME) !== theme) localStorage.setItem(LS_THEME, theme);
+    } catch {
+      // localStorage may be unavailable (private mode); theming is best-effort.
+    }
+  }
+
   async function fetchJSON(url, opts) {
     let r;
     try {
@@ -116,6 +130,7 @@
       return;
     }
     state = body;
+    applyTheme(state.ui_theme); // follow the hub's appearance
     $("caps").textContent = `up to ${state.max_jobs} per queue · ${state.max_concurrency} built at a time`;
     if (!$("jobs-form").querySelector(".job-form-card")) addJobCard(); // start with one card
     if (!state.enabled) {
@@ -499,6 +514,10 @@
   }
 
   document.addEventListener("DOMContentLoaded", () => {
+    // The hub changed the appearance (same origin) — re-theme this window live.
+    window.addEventListener("storage", (event) => {
+      if (event.key === LS_THEME) applyTheme(event.newValue);
+    });
     $("build-btn").addEventListener("click", submitJobs);
     $("add-job").addEventListener("click", () => addJobCard());
     $("batch-model").addEventListener("change", () => {

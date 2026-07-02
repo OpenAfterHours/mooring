@@ -347,14 +347,19 @@ def _require_token(cfg: config.Config) -> str:
 
 
 def _client(cfg: config.Config):
-    from mooring.github import GitHubClient
+    # Shared construction (app/notebooks) RAISES; the CLI owns the exit + guidance.
+    from mooring.app import notebooks
+    from mooring.github import AuthFailed
 
-    if not cfg.is_configured:
+    try:
+        return notebooks.client_for(cfg)
+    except notebooks.NotConfigured:
         sys.exit(
             "No team repo configured. Set [github] owner/repo/client_id in "
             f"{paths.user_config_file()} (or run the hub for guided setup)."
         )
-    return GitHubClient(_require_token(cfg), cfg.owner, cfg.repo, host=cfg.host)
+    except AuthFailed:
+        sys.exit("Not logged in. Run `mooring login` first.")
 
 
 def cmd_login(cfg: config.Config, host: str | None = None) -> int:
@@ -523,8 +528,6 @@ def cmd_adopt(cfg: config.Config, folders: list[str], all_folders: bool) -> int:
     SYNCED ``mooring.toml`` (via :func:`mooring.workspace_config.add_extra_folder`), so
     pushing it shares the new scope with the whole team.
     """
-    from dataclasses import replace
-
     from mooring import sync
     from mooring.github import GitHubError
 
@@ -548,14 +551,14 @@ def cmd_adopt(cfg: config.Config, folders: list[str], all_folders: bool) -> int:
         )
         return 0
 
-    known = {c.folder for c in candidates}
+    from mooring.app import notebooks
+
     if all_folders:
-        chosen = sorted(known)
+        chosen = sorted(c.folder for c in candidates)
     else:
-        chosen, unknown = [], []
-        for raw in folders:
-            norm = workspace_config.normalize_notebook(raw)
-            (chosen if norm in known else unknown).append(norm)
+        # Unlike the hub (which silently adopts the valid subset), the CLI refuses
+        # the whole command when any requested folder isn't adoptable.
+        chosen, unknown = notebooks.resolve_adoptable(candidates, folders)
         if unknown:
             sys.exit(
                 f"Not adoptable: {', '.join(unknown)}. "
@@ -564,16 +567,13 @@ def cmd_adopt(cfg: config.Config, folders: list[str], all_folders: bool) -> int:
 
     import tomllib
 
-    workspace = cfg.workspace()
     try:
-        workspace_config.add_extra_folders(workspace, chosen)
+        result = notebooks.adopt_folders(client, cfg, chosen)
     except tomllib.TOMLDecodeError as exc:
         sys.exit(
             f"Can't update {workspace_config.WORKSPACE_CONFIG_NAME}: it is not valid TOML "
             f"({exc}). Fix it (pull a teammate's version, or repair it) and retry."
         )
-    new_folders = workspace_config.merge_extra_folders(cfg.folders, workspace)
-    result = sync.pull(client, replace(cfg, folders=new_folders))
     telemetry.log_event("adopt", folders=len(chosen), pulled=result.pulled)
     print(f"Adopted: {', '.join(chosen)} (saved to {workspace_config.WORKSPACE_CONFIG_NAME}).")
     for line in result.lines:
@@ -595,7 +595,14 @@ def cmd_open(cfg: config.Config, rel_path: str) -> int:
     target = workspace / rel_path
     if not target.is_file():
         sys.exit(f"No such notebook: {target}")
-    if rel_path.endswith(".pbip"):
+    # The gate (pbip / .py-only / module-refusal) is shared policy in app/notebooks.
+    from mooring.app import notebooks
+
+    try:
+        kind = notebooks.openable_kind(target, rel_path, display=rel_path)
+    except notebooks.OpenRefused as exc:
+        sys.exit(str(exc))
+    if kind == "pbip":
         from mooring import pbip
 
         try:
@@ -605,37 +612,13 @@ def cmd_open(cfg: config.Config, rel_path: str) -> int:
         telemetry.log_event("open", kind="pbip")
         print(f"Opened {rel_path} in Power BI Desktop.")
         return 0
-    if not rel_path.endswith(".py"):
-        sys.exit("Only .py notebooks and .pbip projects can be opened.")
-    # Refuse to open a plain Python module as a notebook: the marimo editor would
-    # rewrite it into notebook form on save. A blank stub is allowed (it becomes a new
-    # notebook); a non-empty module without the marimo.App marker — and a dunder package
-    # marker like __init__.py even when empty — is not (see opens_as_notebook). The whole
-    # file is read — a large leading header can push the `app = marimo.App(` marker past
-    # the first few KB.
-    from mooring import notebook_template
-
-    source = target.read_bytes().decode("utf-8", "ignore")
-    if not notebook_template.opens_as_notebook(rel_path, source):
-        sys.exit(
-            f"{rel_path} is a Python module, not a marimo notebook — opening it in the "
-            "editor could overwrite it. Import it from a notebook instead."
-        )
     server = EditorServer(workspace)
     # Ungated by the launch backend: the sys.path[0] shadow trap is plain Python
     # import resolution and bites uv and frozen runs alike, unlike the missing-deps
     # note below (which is a bundle-only concern). Scans the whole folder, so opening
     # an innocent notebook still warns when a sibling poisons the directory.
     if cfg.warn_shadowed_notebooks:
-        extra, ignore = _shadow_policy(workspace)
-        # The notebook's own folder AND the workspace root are both on the kernel's
-        # sys.path (the latter via runtime.pythonpath — see editor.py), so a shadowing
-        # .py in either breaks imports. Merged by path; notebooks never live at the root.
-        findings = {
-            **shadow.root_shadows(workspace, extra=extra, ignore=ignore),
-            **shadow.folder_shadows(rel_path, workspace=workspace, extra=extra, ignore=ignore),
-        }
-        for line in shadow.warning_lines(findings):
+        for line in shadow.warning_lines(notebooks.open_shadow_findings(workspace, rel_path)):
             print(line)
     if not server.use_uv():
         for line in _missing_deps_lines(pyproject_env.missing_deps(workspace)):
@@ -663,20 +646,13 @@ def _missing_deps_lines(missing: list[str]) -> list[str]:
     ]
 
 
-def _shadow_policy(workspace: Path) -> tuple[frozenset[str], frozenset[str]]:
-    """The (extra, ignore) sets that parameterise the shadow guard — the single
-    place the policy is assembled, so the surfacing call sites stay uniform."""
-    return (
-        pyproject_env.importable_names(workspace),
-        frozenset(workspace_config.shadow_ignored(workspace)),
-    )
-
-
 def _shadow_warning_lines(cfg: config.Config, rel_paths: list[str]) -> list[str]:
+    from mooring.app import notebooks
+
     if not cfg.warn_shadowed_notebooks:
         return []
     workspace = cfg.workspace()
-    extra, ignore = _shadow_policy(workspace)
+    extra, ignore = notebooks.shadow_policy(workspace)
     # Include the workspace-root .py files: the root is on every notebook's sys.path
     # (runtime.pythonpath), so a root-level shadow is globally dangerous, but root files
     # aren't in the synced `rel_paths` list. Merged by path.

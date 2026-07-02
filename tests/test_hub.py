@@ -4,7 +4,7 @@ import pytest
 from conftest import FakeClient
 from starlette.testclient import TestClient
 
-from mooring import config, paths, workspace_config
+from mooring import config, paths, reveal, workspace_config
 from mooring.hub import server
 from mooring.hub.server import Hub, create_app
 
@@ -728,6 +728,58 @@ def test_undo_rejects_traversal(configured):
     (tmp_path / "evil.py").write_text("x", "utf-8")
     resp = client.post("/api/undo", json={"path": "../evil.py"})
     assert resp.status_code == 400
+
+
+class _RecordingLock:
+    """A threading.Lock stand-in that counts acquisitions (deterministic — no timing)."""
+
+    def __init__(self):
+        import threading
+
+        self._inner = threading.Lock()
+        self.acquisitions = 0
+
+    def __enter__(self):
+        self._inner.acquire()
+        self.acquisitions += 1
+        return self
+
+    def __exit__(self, *exc):
+        self._inner.release()
+        return False
+
+
+def test_rollback_apply_and_undo_serialize_on_the_same_lock(configured):
+    """The per-notebook undo stack is shared by THREE write paths — sync rollback
+    (/api/rollback), AI Apply (apply_with_undo, called by BOTH the chat and the
+    batch Apply), and Undo/restore (restore_undo, behind /api/undo and the chat
+    rollback). All three must serialize on the SAME lock — hub.apply.lock, owned
+    by the app/apply.py guard — or a concurrent pair can race the snapshot stack.
+    Pinned deterministically by swapping in a counting lock and driving each path
+    once — if a refactor moves any path onto its own lock, its acquisition lands
+    on the wrong object and the count here stops adding up."""
+    from mooring import notebook_template
+
+    client, hub, fake, tmp_path = configured
+    rec = _RecordingLock()
+    hub.apply.lock = rec
+
+    # 1. the sync rollback endpoint
+    _seed_and_pull(hub, fake, "notebooks/a.py")
+    (tmp_path / "ws1" / "notebooks/a.py").write_text("mine\n", "utf-8", newline="\n")
+    assert client.post("/api/rollback", json={"path": "notebooks/a.py"}).status_code == 200
+    assert rec.acquisitions == 1
+
+    # 2. the shared Apply path (chat Apply and batch Apply both call apply_with_undo)
+    ws = hub.cfg.workspace()
+    rel = notebook_template.create(ws, "lock guard")
+    nb = ws / rel
+    hub.apply.apply_with_undo(nb, ws, rel, [{"op": "append", "code": "x = 1"}])
+    assert rec.acquisitions == 2
+
+    # 3. the undo/restore path (/api/undo and the chat rollback)
+    assert hub.apply.restore_undo(nb, ws, rel) == 0  # consumed the one snapshot from (2)
+    assert rec.acquisitions == 3
 
 
 def test_state_reports_has_local_flag(configured):
@@ -1810,6 +1862,28 @@ def test_batch_apply_is_idempotent(batch_client):
     assert nb.count("df.describe()") == 1  # applied exactly once
 
 
+def test_batch_cancel_stops_the_run_and_keeps_the_tray(batch_client):
+    # First-class cancel (P4): stops the run without switching repos. The registry
+    # entry is kept, so the tray answers "closed" rather than a confusing 404, and
+    # further work on the run is refused like any finished batch.
+    client, _hub = batch_client
+    bid, _tray = _run_batch(client, [{"name": "c", "brief": "chart revenue"}])
+    resp = client.post("/api/ai/batch/cancel", json={"batch_id": bid})
+    assert resp.status_code == 200 and resp.json()["ok"] is True
+    assert client.get(f"/api/ai/batch/tray/{bid}").json()["status"] == "closed"
+    add = client.post("/api/ai/batch/add", json={"batch_id": bid, "jobs": [{"brief": "x"}]})
+    assert add.status_code == 409
+    # And the SSE stream of a cancelled run says "closed" instead of pinging forever.
+    with client.stream("GET", f"/api/ai/batch/stream/{bid}") as stream:
+        head = next(stream.iter_lines())
+        assert head.startswith(": connected")
+
+
+def test_batch_cancel_unknown_batch_404(batch_client):
+    client, _hub = batch_client
+    assert client.post("/api/ai/batch/cancel", json={"batch_id": "nope"}).status_code == 404
+
+
 def test_batch_open_rejects_more_than_max_jobs(batch_client):
     client, _ = batch_client  # max_jobs = 5
     jobs = [{"brief": f"job {i}"} for i in range(6)]
@@ -2015,7 +2089,7 @@ def test_reveal_calls_launcher(unconfigured_client, monkeypatch):
     (ws / "notebooks").mkdir(parents=True, exist_ok=True)
     (ws / "notebooks" / "helpers.py").write_text("def f():\n    return 1\n", "utf-8")
     revealed = []
-    monkeypatch.setattr(server.reveal, "reveal", revealed.append)
+    monkeypatch.setattr(reveal, "reveal", revealed.append)
     resp = client.post("/api/reveal", json={"path": "notebooks/helpers.py"})
     assert resp.status_code == 200
     assert "url" not in resp.json()  # nothing for the browser to open
@@ -2052,9 +2126,9 @@ def test_reveal_surfaces_launcher_error(unconfigured_client, monkeypatch):
     (ws / "notebooks" / "helpers.py").write_text("x = 1\n", "utf-8")
 
     def boom(_path):
-        raise server.reveal.RevealError("needs Windows")
+        raise reveal.RevealError("needs Windows")
 
-    monkeypatch.setattr(server.reveal, "reveal", boom)
+    monkeypatch.setattr(reveal, "reveal", boom)
     resp = client.post("/api/reveal", json={"path": "notebooks/helpers.py"})
     assert resp.status_code == 400
     assert "windows" in resp.json()["error"].lower()

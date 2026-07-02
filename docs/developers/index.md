@@ -75,9 +75,18 @@ src/mooring/
   editor.py              marimo subprocess manager (frozen bundle or uv project)
   pyproject_env.py       per-repo notebook deps (pyproject.toml + uv.lock)
   notebook_template.py   template for `new`
+  app/                   application services shared by the CLI and the hub
+    notebooks.py         open gate, client construction, shadow policy, adopt
+    chat_service.py      chat sessions + context assembly (the egress caller)
+    apply.py             THE per-notebook apply/undo write guard (one lock)
+    batch_service.py     typed batch runs around ai/batch's pure planner
   hub/
-    server.py            Starlette app + endpoints
+    server.py            the Hub state-holder + create_app/run_hub
+    routes/              one handler module per concern (setup, sync, files,
+                         settings, chat, batch)
+    pages.py, sse.py     themed HTML pages; the one SSE transport
     static/              index.html, app.js, style.css
+
   ai/                    opt-in copilot (schema-only)
     egress.py            single context assembler — the one place context is built
     copilot.py           GitHub Copilot provider + chat session

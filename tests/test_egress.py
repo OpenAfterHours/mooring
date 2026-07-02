@@ -120,7 +120,71 @@ def test_build_system_context_reexported_from_chat_for_backcompat():
     assert via_chat is egress.build_system_context
 
 
+# -- the ToolResult mint gateway -------------------------------------------------
+
+
+def test_to_tool_result_mints_without_reshaping():
+    # Mints only — no re-scrub: each channel owns its scrub semantics (get_schema's
+    # column withholding is gated on the PII setting; re-scrubbing here would
+    # silently change that contract).
+    res = egress.to_tool_result("col_a: Int64\ncol_b: Utf8")
+    assert res.text_result_for_llm == "col_a: Int64\ncol_b: Utf8"
+    assert res.error is None
+
+
+def test_to_error_result_scrubs_the_error_channel():
+    # Exception text can quote user input; the error field crosses to the model
+    # too, so it gets the same checksum-PII floor as the text channel. A typical
+    # exception message is ONE line, and the scrub drops whole lines — so the
+    # withheld case must still EXPLAIN itself, never hand back an empty error
+    # the model would silently retry.
+    res = egress.to_error_result(f"cannot read schema: bad value {VALID_CARD} in header")
+    assert VALID_CARD not in (res.error or "")
+    assert res.error and "withheld" in res.error
+    assert res.text_result_for_llm == ""
+    assert res.result_type == "error"
+
+
+def test_to_error_result_keeps_clean_lines_of_a_multiline_message():
+    res = egress.to_error_result(f"cannot read schema\nbad value {VALID_CARD}\nin row 3")
+    assert VALID_CARD not in (res.error or "")
+    assert "cannot read schema" in res.error and "in row 3" in res.error
+
+
+def test_to_error_result_clean_message_unchanged():
+    res = egress.to_error_result("dataset required")
+    assert res.error == "dataset required"
+
+
+def test_egress_imports_without_the_copilot_sdk():
+    """``copilot`` is the optional ``mooring[copilot]`` extra, and egress is
+    imported on non-AI paths (the guard_prompt / Finding re-exports) — so its SDK
+    import must stay function-local. Run in a subprocess so this test env's own
+    imports can't mask an accidental module-level import."""
+    import subprocess
+    import sys
+
+    code = "import sys; import mooring.ai.egress; sys.exit(1 if 'copilot' in sys.modules else 0)"
+    proc = subprocess.run([sys.executable, "-c", code], capture_output=True)
+    assert proc.returncode == 0, proc.stderr.decode()
+
+
 # -- structural guard: the choke point cannot be bypassed -----------------------
+
+
+def test_only_egress_constructs_the_sdk_tool_result():
+    """The mint gateway: nothing outside egress.py constructs a ``ToolResult`` or
+    sets its ``text_result_for_llm`` field, so every tool's outbound text passes
+    through egress BY CONSTRUCTION — a new tool cannot hand the SDK a bare string
+    without a review-visible call into egress.py."""
+    offenders = []
+    for path in _SRC_ROOT.rglob("*.py"):
+        if path.name == "egress.py":
+            continue
+        text = path.read_text("utf-8")
+        if re.search(r"\bToolResult\s*\(", text) or re.search(r"\btext_result_for_llm\s*=", text):
+            offenders.append(path.relative_to(_SRC_ROOT).as_posix())
+    assert offenders == [], f"ToolResult minted outside egress.py: {offenders}"
 
 
 def test_no_module_bypasses_the_egress_scrub():

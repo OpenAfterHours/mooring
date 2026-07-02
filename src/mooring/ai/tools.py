@@ -102,23 +102,19 @@ def build_tools(
     """
     from dataclasses import replace
 
-    from copilot.tools import Tool, ToolResult
+    from copilot.tools import Tool
 
     from mooring import marimo_rt, schema
     from mooring.ai import egress
 
     def _err(msg: str):
-        return ToolResult(
-            text_result_for_llm="",
-            # "error" is mooring's own result_type; the SDK's ToolResultType Literal
-            # omits it, but the dataclass stores the string as-is at runtime.
-            result_type="error",  # ty: ignore[invalid-argument-type]
-            error=msg,
-        )
+        # egress mints (and scrubs) the error channel — exception text can quote
+        # user input, so it gets the same checksum-PII floor as the text channel.
+        return egress.to_error_result(msg)
 
     def list_datasets(_invocation):
         found = schema.list_datasets(workspace, folders)
-        return ToolResult(text_result_for_llm="\n".join(found) or "(no datasets found)")
+        return egress.to_tool_result("\n".join(found) or "(no datasets found)")
 
     def get_schema(invocation):
         rel = str(_args(invocation).get("dataset", "")).strip()
@@ -134,7 +130,7 @@ def build_tools(
             text = schema.format_for_ai(ds, source=rel)
         except (ValueError, OSError) as exc:
             return _err(f"cannot read schema: {exc}")
-        return ToolResult(text_result_for_llm=text)
+        return egress.to_tool_result(text)
 
     _NB_READ_ERRORS = (
         ValueError,
@@ -172,7 +168,7 @@ def build_tools(
         else:  # not a parseable marimo notebook — show the raw source instead
             rendered = raw
         scrubbed, _ = egress.scrub_text(rendered)
-        return ToolResult(text_result_for_llm=scrubbed)
+        return egress.to_tool_result(scrubbed)
 
     def propose_cell(invocation):
         args = _args(invocation)
@@ -181,8 +177,8 @@ def build_tools(
         if not code.strip():
             return _err("code required")
         emit_proposal(code, rationale)
-        return ToolResult(
-            text_result_for_llm="Proposed the cell to the analyst, who will review and apply it."
+        return egress.to_tool_result(
+            "Proposed the cell to the analyst, who will review and apply it."
         )
 
     def _coerce_index(value):
@@ -216,8 +212,8 @@ def build_tools(
                 "diffs": [{"label": f"cell {idx}", "before": anchor, "after": code}],
             }
         )
-        return ToolResult(
-            text_result_for_llm=f"Proposed an edit to cell {idx} for the analyst to review and apply."
+        return egress.to_tool_result(
+            f"Proposed an edit to cell {idx} for the analyst to review and apply."
         )
 
     def propose_notebook_edit(invocation):
@@ -272,10 +268,8 @@ def build_tools(
             return _err("provide at least one of edits, appends, or deletes")
         assert emit_proposal_patch is not None  # tool only registered when the callback exists
         emit_proposal_patch({"kind": "patch", "rationale": rationale, "ops": ops, "diffs": diffs})
-        return ToolResult(
-            text_result_for_llm=(
-                f"Proposed {len(ops)} change(s) to the notebook for the analyst to review and apply."
-            )
+        return egress.to_tool_result(
+            f"Proposed {len(ops)} change(s) to the notebook for the analyst to review and apply."
         )
 
     def propose_notebook_rewrite(invocation):
@@ -303,19 +297,22 @@ def build_tools(
                 ],
             }
         )
-        return ToolResult(
-            text_result_for_llm=(
-                f"Proposed a full rewrite ({len(new_cells)} cells) for the analyst to review and apply."
-            )
+        return egress.to_tool_result(
+            f"Proposed a full rewrite ({len(new_cells)} cells) for the analyst to review and apply."
         )
+
+    # The dictionary tools render TEAM-AUTHORED content (already value-minimised by
+    # the five-slot allowlist and secret-scanned at sync), so scrubbing here is
+    # defence-in-depth: the rendered slice gets the same checksum-PII floor
+    # build_system_context gives the dictionary fragment, closing the one tool
+    # channel that used to reach the model without an egress scrub.
 
     def list_tables(_invocation):
         from mooring.ai.datadictionary import render_listing
 
         assert dictionary is not None  # dictionary tools only registered when it is present
-        return ToolResult(
-            text_result_for_llm=render_listing(dictionary) or "(the data dictionary is empty)"
-        )
+        listing, _ = egress.scrub_text(render_listing(dictionary))
+        return egress.to_tool_result(listing or "(the data dictionary is empty)")
 
     def describe_table(invocation):
         from mooring.ai.datadictionary import render_table
@@ -326,10 +323,9 @@ def build_tools(
         assert dictionary is not None  # dictionary tools only registered when it is present
         table = dictionary.get(name)
         if table is None:
-            return ToolResult(
-                text_result_for_llm=f"No table named {name!r} in the data dictionary."
-            )
-        return ToolResult(text_result_for_llm=render_table(table))
+            return egress.to_tool_result(f"No table named {name!r} in the data dictionary.")
+        rendered, _ = egress.scrub_text(render_table(table))
+        return egress.to_tool_result(rendered)
 
     def search_dictionary(invocation):
         from mooring.ai.datadictionary import render_table
@@ -340,10 +336,9 @@ def build_tools(
         assert dictionary is not None  # dictionary tools only registered when it is present
         hits = dictionary.search(query, limit=8)
         if not hits:
-            return ToolResult(text_result_for_llm=f"No dictionary tables match {query!r}.")
-        return ToolResult(
-            text_result_for_llm="\n\n".join(render_table(t, max_cols=12) for t in hits)
-        )
+            return egress.to_tool_result(f"No dictionary tables match {query!r}.")
+        rendered, _ = egress.scrub_text("\n\n".join(render_table(t, max_cols=12) for t in hits))
+        return egress.to_tool_result(rendered)
 
     tools = [
         Tool(

@@ -113,6 +113,14 @@ class ChatBroadcaster:
     def touch(self) -> None:
         self._last_active = time.monotonic()
 
+    def emit_job(self, data) -> None:
+        """Publish one value-free batch-job lifecycle event — the batch planner's
+        progress channel. The PUBLIC entry point for the app layer (it used to
+        reach into ``_broadcast`` directly); also touches the activity clock so a
+        still-building run is never idle-reaped mid-build."""
+        self.touch()
+        self._broadcast(ChatEvent("job", data))
+
     def idle_seconds(self) -> float:
         return time.monotonic() - self._last_active
 
