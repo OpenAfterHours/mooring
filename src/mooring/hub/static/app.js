@@ -527,6 +527,81 @@ $("history-close").addEventListener("click", () => {
   historyPath = null;
 });
 
+// -- review changes (the cell-aware pre-push diff + the optional push note) --
+// Read-only by design: the only inputs are the note field and the footer's
+// per-file Push/Propose — resolving hunks in place would be a merge tool.
+
+let reviewPath = null;
+
+async function reviewAction(path) {
+  const data = await api("/api/diff", { path });
+  if (data.error) return showError(data.error);
+  reviewPath = path;
+  renderReview(path, data);
+}
+
+function renderReview(path, result) {
+  const card = $("review-card");
+  card.classList.remove("hidden");
+  $("review-title").textContent = `Review changes — ${path}`;
+  $("review-summary").textContent = DiffFmt.summary(result);
+  const cellsBox = $("review-cells");
+  cellsBox.textContent = ""; // clear children — diff text is untrusted, plain text only
+  const view = $("review-view");
+  view.textContent = "";
+  view.classList.add("hidden");
+  if (result.kind === "cells") {
+    for (const block of DiffFmt.buildBlocks(result.cells)) {
+      const cell = document.createElement("div");
+      cell.className = "review-cell";
+      const label = document.createElement("div");
+      label.className = `review-cell-label review-${block.status}`;
+      label.textContent = block.label;
+      cell.appendChild(label);
+      if (block.diff) {
+        const pre = document.createElement("pre");
+        pre.className = "review-cell-diff";
+        pre.textContent = block.diff;
+        cell.appendChild(pre);
+      }
+      cellsBox.appendChild(cell);
+    }
+  } else if (result.kind === "lines") {
+    view.textContent = result.line_diff || "(no differences against the last-synced version)";
+    view.classList.remove("hidden");
+  }
+  // kind "binary": the summary line (sizes only) is the whole story.
+  $("review-note").value = "";
+  card.scrollIntoView({ block: "nearest" });
+}
+
+// Per-file Push/Propose with the optional note as the commit message. Through
+// the shared action() helper so the push-guard 409 dialog (whose confirm
+// re-POST re-sends this body, note included), busy state, and undo toasts all
+// keep working. Ticks the checklist exactly like pushAction: only a clean
+// success (a guard 409 means nothing sensitive went yet). The panel stays open
+// on a 409 so the note survives the user's "Push anyway" decision visibly.
+function reviewSend(apiPath) {
+  if (!reviewPath) return;
+  const body = { paths: [reviewPath] };
+  const note = $("review-note").value.trim();
+  if (note) body.message = note;
+  action(apiPath, body).then((data) => {
+    if (data && !data.error && !data.needs_confirm) {
+      checklistSet("pushed");
+      $("review-card").classList.add("hidden");
+      reviewPath = null;
+    }
+  });
+}
+
+$("review-push").addEventListener("click", () => reviewSend("/api/push"));
+$("review-propose").addEventListener("click", () => reviewSend("/api/propose"));
+$("review-close").addEventListener("click", () => {
+  $("review-card").classList.add("hidden");
+  reviewPath = null;
+});
+
 function fileActions(file, opts) {
   opts = opts || {};
   const actions = [];
@@ -538,6 +613,8 @@ function fileActions(file, opts) {
     );
   } else if (PUSH_STATES.has(file.state)) {
     actions.push(
+      // First, above Push: see what a push would publish before publishing it.
+      ["Review changes…", () => reviewAction(file.path)],
       ["Push", () => pushAction([file.path], 1)],
       ["Propose", () => proposeAction([file.path], 1)],
     );

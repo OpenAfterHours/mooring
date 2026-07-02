@@ -47,6 +47,7 @@ forbidden_modules =
     mooring.manifest
     mooring.pbip
     mooring.deletion
+    mooring.celldiff
     mooring.editor
     mooring.pyproject_env
     mooring.schema
@@ -71,6 +72,7 @@ forbidden_modules =
     mooring.manifest
     mooring.pbip
     mooring.deletion
+    mooring.celldiff
     mooring.editor
     mooring.schema
     mooring.ai
@@ -92,8 +94,14 @@ forbidden_modules =
     mooring.pushguard
     mooring.app
     mooring.editor
+    mooring.celldiff
     mooring.hub
     mooring.cli
+# mooring.celldiff is forbidden for the same reason as mooring.editor: it sits
+# on the marimo side of L2 (celldiff -> marimo_rt -> marimo), so a sync import
+# would give the frozen core a path to marimo and break frozen-core-is-lean
+# below (which counts function-local imports). Diff orchestration lives in the
+# hub route, never in the sync domain.
 
 [importlinter:contract:ai-below-adapters]
 name = L3 AI orchestration sits below the adapters and never imports the web hub, the CLI, or the app layer above it

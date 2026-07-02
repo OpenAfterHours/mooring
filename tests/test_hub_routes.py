@@ -47,6 +47,8 @@ EXPECTED_ROUTES = {
     ("/api/history", ("GET",), "api_history"),
     ("/api/history/file", ("GET",), "api_history_file"),
     ("/api/restore", ("POST",), "api_restore"),
+    # The cell-aware pre-push diff (roadmap: review-my-changes).
+    ("/api/diff", ("POST",), "api_diff"),
     # The local safety net: the trash + activity ledger (roadmap: local-safety-net).
     ("/activity", ("GET",), "activity_page"),
     ("/api/trash", ("GET",), "api_trash"),

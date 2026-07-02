@@ -323,6 +323,26 @@ def read_cells(source: str) -> list[tuple[int, str]]:
     return [(i, cell.code) for i, cell in enumerate(ir.cells)]
 
 
+def read_cells_checked(source: str) -> list[tuple[int, str]]:
+    """:func:`read_cells`, but LOUD when marimo could not fully parse the source.
+
+    marimo's converter never fails on bad input — it swallows what it cannot
+    parse into the IR's "header" and records a violation, returning ZERO cells
+    (verified against marimo 0.23.9: a syntax-error file yields ``cells == []``
+    with ``violations == ['Only able to extract header.']``). For an edit
+    target that lenience is fine; for a DIFF it silently drops content, so this
+    variant raises ``ValueError`` whenever the IR carries violations. Callers
+    degrade to a whole-file view instead of lying per cell (see celldiff).
+    """
+    _require_marimo_floor()
+    _, MarimoConvert = _codegen_api()
+    ir = _parse_ir(MarimoConvert, source)
+    violations = list(getattr(ir, "violations", None) or ())
+    if violations:
+        raise ValueError(f"marimo could not fully parse the notebook source: {violations[0]}")
+    return [(i, cell.code) for i, cell in enumerate(ir.cells)]
+
+
 def apply_cell_patch(source: str, ops) -> str:
     """Apply a list of :class:`CellOp` to notebook ``.py`` ``source``, returning the
     new source. PURE — no file IO; the private marimo IR object never escapes here.

@@ -877,6 +877,7 @@ def create_app(hub: Hub) -> Starlette:
             Route("/api/history", files.api_history),
             Route("/api/history/file", files.api_history_file),
             Route("/api/restore", files.api_restore, methods=["POST"]),
+            Route("/api/diff", files.api_diff, methods=["POST"]),
             Route("/activity", pages.activity_page),
             Route("/api/trash", files.api_trash),
             Route("/api/trash/restore", files.api_trash_restore, methods=["POST"]),

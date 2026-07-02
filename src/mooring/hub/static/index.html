@@ -221,6 +221,26 @@
       <pre id="history-view" class="hidden"></pre>
     </section>
 
+    <!-- Review changes: a read-only, cell-aware diff of your local copy against
+         the last-synced version — "what exactly am I about to push?" — plus an
+         optional one-line note that becomes the commit message for THIS file's
+         Push/Propose. Local-only display on 127.0.0.1; nothing here reaches the
+         AI. Read-only by design: the note field and the footer buttons are the
+         only inputs (resolving hunks in place would be a merge tool). -->
+    <section id="review-card" class="card hidden">
+      <h3 id="review-title">Review changes</h3>
+      <div id="review-summary" class="muted"></div>
+      <div id="review-cells"></div>
+      <pre id="review-view" class="hidden"></pre>
+      <div class="toolbar review-note-row">
+        <input id="review-note" type="text" maxlength="200"
+               placeholder="What changed? (optional — becomes the commit message)">
+        <button id="review-push" class="primary small">Push this file</button>
+        <button id="review-propose" class="small" title="Upload to a review branch and open a pull request instead of pushing directly">Propose this file</button>
+        <button id="review-close" class="small">Close</button>
+      </div>
+    </section>
+
     <div id="error-banner" class="hidden"></div>
 
     <!-- Open-time staleness confirm: shown only when the row's remote moved
@@ -278,6 +298,7 @@
   <script src="/static/freshness.js"></script>
   <script src="/static/guard_fmt.js"></script>
   <script src="/static/history_fmt.js"></script>
+  <script src="/static/diff_fmt.js"></script>
   <script src="/static/checklist.js"></script>
   <script src="/static/app.js"></script>
   <!-- Decorative backdrop: deterministic starfield + the one-time boat voyage.

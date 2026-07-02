@@ -2535,6 +2535,140 @@ def test_restore_over_endpoint_returns_undo_token(configured):
     assert (tmp_path / "ws1" / "notebooks/a.py").read_text("utf-8") == "v2\n"
 
 
+# -- review my changes: /api/diff + the optional push note --------------------
+
+
+_NB_V1 = (
+    "import marimo\n\n"
+    '__generated_with = "0.23.9"\n'
+    "app = marimo.App()\n\n\n"
+    "@app.cell\n"
+    "def _():\n"
+    "    x = 1\n"
+    "    return\n\n\n"
+    'if __name__ == "__main__":\n'
+    "    app.run()\n"
+)
+
+
+def test_diff_endpoint_cell_aware_happy_path(configured):
+    client, hub, fake, tmp_path = configured
+    _seed_and_pull(hub, fake, "notebooks/a.py", _NB_V1.encode("utf-8"))
+    (tmp_path / "ws1" / "notebooks/a.py").write_text(
+        _NB_V1.replace("x = 1", "x = 2"), "utf-8", newline="\n"
+    )
+    resp = client.post("/api/diff", json={"path": "notebooks/a.py"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["path"] == "notebooks/a.py"
+    assert body["kind"] == "cells"
+    changed = [c for c in body["cells"] if c["status"] == "changed"]
+    assert len(changed) == 1
+    assert "-x = 1" in changed[0]["diff"] and "+x = 2" in changed[0]["diff"]
+    # Read-only pin: no editor spawned, workspace bytes untouched.
+    assert hub.editors == {}
+    assert "x = 2" in (tmp_path / "ws1" / "notebooks/a.py").read_text("utf-8")
+
+
+def test_diff_new_local_skips_the_blob_fetch(configured, monkeypatch):
+    client, _, fake, tmp_path = configured
+
+    def boom(sha):  # a new-local file has no manifest base — never fetch
+        raise AssertionError("blob fetched for a new-local diff")
+
+    monkeypatch.setattr(fake, "get_blob", boom)
+    write_ws(tmp_path, "ws1", "notebooks/new.py", "x = 1\n")
+    body = client.post("/api/diff", json={"path": "notebooks/new.py"}).json()
+    assert body["kind"] == "lines"  # a plain .py is not marimo-parseable
+    assert "+x = 1" in body["line_diff"]
+
+
+def test_diff_deleted_locally_works_without_a_local_file(configured):
+    client, hub, fake, tmp_path = configured
+    _seed_and_pull(hub, fake, "notebooks/a.py")  # b"v1\n"
+    (tmp_path / "ws1" / "notebooks/a.py").unlink()
+    resp = client.post("/api/diff", json={"path": "notebooks/a.py"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["kind"] == "lines"
+    assert "-v1" in body["line_diff"]
+
+
+def test_diff_gcd_base_blob_degrades_to_full_file(configured, monkeypatch):
+    from mooring.github import NotFound
+
+    client, hub, fake, tmp_path = configured
+    _seed_and_pull(hub, fake, "notebooks/a.py")
+    (tmp_path / "ws1" / "notebooks/a.py").write_text("v2\n", "utf-8", newline="\n")
+
+    def gone(sha):
+        raise NotFound("blob was garbage-collected")
+
+    monkeypatch.setattr(fake, "get_blob", gone)
+    resp = client.post("/api/diff", json={"path": "notebooks/a.py"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["note"] == "no base available — showing the full file"
+    assert "+v2" in body["line_diff"]
+
+
+def test_diff_rejects_traversal_and_missing(configured):
+    client, _, _, _ = configured
+    assert client.post("/api/diff", json={"path": "../evil.py"}).status_code == 400
+    assert client.post("/api/diff", json={"path": ""}).status_code == 400
+    # No local file and no synced base: nothing to compare.
+    assert client.post("/api/diff", json={"path": "notebooks/nope.py"}).status_code == 404
+
+
+def test_push_note_becomes_the_commit_message(configured):
+    client, hub, fake, tmp_path = configured
+    _seed_and_pull(hub, fake, "notebooks/a.py")
+    (tmp_path / "ws1" / "notebooks/a.py").write_text("v2\n", "utf-8", newline="\n")
+    resp = client.post(
+        "/api/push", json={"paths": ["notebooks/a.py"], "message": "fix the June totals"}
+    )
+    assert resp.status_code == 200
+    assert fake.commit_log[-1]["message"] == "fix the June totals"
+
+
+def test_push_without_note_keeps_the_machine_default_message(configured):
+    client, hub, fake, tmp_path = configured
+    _seed_and_pull(hub, fake, "notebooks/a.py")
+    (tmp_path / "ws1" / "notebooks/a.py").write_text("v2\n", "utf-8", newline="\n")
+    assert client.post("/api/push", json={}).status_code == 200
+    assert fake.commit_log[-1]["message"] == "Update notebooks/a.py via mooring"
+
+
+def test_propose_note_and_default_message(configured):
+    client, hub, fake, tmp_path = configured
+    _seed_and_pull(hub, fake, "notebooks/a.py")
+    (tmp_path / "ws1" / "notebooks/a.py").write_text("v2\n", "utf-8", newline="\n")
+    resp = client.post(
+        "/api/propose", json={"paths": ["notebooks/a.py"], "message": "swap the data source"}
+    )
+    assert resp.status_code == 200
+    assert fake.commit_log[-1]["message"] == "swap the data source"
+    # A later note-free propose of another file keeps the machine default.
+    write_ws(tmp_path, "ws1", "notebooks/b.py", "v1\n")
+    assert client.post("/api/propose", json={"paths": ["notebooks/b.py"]}).status_code == 200
+    assert fake.commit_log[-1]["message"] == "Propose notebooks/b.py via mooring"
+
+
+def test_push_note_survives_the_guard_confirm_re_post(configured):
+    client, _, fake, tmp_path = configured
+    write_ws(tmp_path, "ws1", "notebooks/leaky.py", _SECRETY)
+    body = client.post("/api/push", json={"message": "adds the token loader"}).json()
+    tokens = [f["token"] for f in body["guard_findings"]]
+    # showGuardDialog re-POSTs Object.assign({}, body, {confirm_tokens}) — the
+    # note rides the original body, so the confirmed push must still carry it.
+    resp = client.post(
+        "/api/push", json={"message": "adds the token loader", "confirm_tokens": tokens}
+    )
+    assert resp.status_code == 200
+    assert "notebooks/leaky.py" in fake.tree
+    assert fake.commit_log[-1]["message"] == "adds the token loader"
+
+
 # -- the health check endpoint (mooring doctor) --------------------------------
 
 

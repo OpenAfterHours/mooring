@@ -54,13 +54,24 @@ def _guarded_sync_op(hub, name: str, data: dict, run) -> JSONResponse:
     return JSONResponse(body, status_code=status)
 
 
+def _note(data: dict) -> str | None:
+    """The optional "What changed?" note from the review panel — the commit
+    message for this push/propose (sync already threads ``message`` through to
+    the Contents API; absent means the machine default "Update {path} via
+    mooring"). Read from the request body so the push guard's confirm re-POST,
+    which re-sends the whole body, carries the note through a 409 round trip."""
+    return str(data.get("message") or "").strip() or None
+
+
 async def api_push(request: Request) -> JSONResponse:
     hub = request.app.state.hub
     data = await request.json() if await request.body() else {}
     paths_arg = data.get("paths") or None
     return _guarded_sync_op(
         hub, "push", data,
-        lambda guard_fn: sync.push(hub.client(), hub.cfg, paths=paths_arg, guard_fn=guard_fn),
+        lambda guard_fn: sync.push(
+            hub.client(), hub.cfg, paths=paths_arg, message=_note(data), guard_fn=guard_fn
+        ),
     )
 
 
@@ -70,7 +81,9 @@ async def api_propose(request: Request) -> JSONResponse:
     paths_arg = data.get("paths") or None
     return _guarded_sync_op(
         hub, "propose", data,
-        lambda guard_fn: sync.propose(hub.client(), hub.cfg, paths=paths_arg, guard_fn=guard_fn),
+        lambda guard_fn: sync.propose(
+            hub.client(), hub.cfg, paths=paths_arg, message=_note(data), guard_fn=guard_fn
+        ),
     )
 
 
