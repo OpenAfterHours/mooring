@@ -8,16 +8,24 @@ egress:
 
 * the **exception type** is kept (a code identifier, not data);
 * **frames that resolve into the workspace** keep their (workspace-relative)
-  path, line number, and function, and their source line is RE-READ FROM DISK —
-  the pasted "source" is never trusted, and the re-read is restricted to paths
-  that resolve UNDER the workspace AND end in ``.py`` (so a crafted frame can
-  never make the sanitiser read a data file — see :func:`_frame_target`);
+  path, line number, and function; when the paste itself carried a source line
+  for the frame (indented under it, the way CPython prints one), that line is
+  never trusted — it is REPLACED by the line
+  RE-READ FROM DISK, and only when the frame's line number exists in the file
+  and the disk line looks like code (:data:`_CODE_LINE_RE`). A frame the paste
+  showed WITHOUT a source line gets none inserted — the sanitiser must never
+  ADD text the paste didn't contain (that would be a read channel over any
+  workspace ``.py``). The re-read is restricted to paths that resolve UNDER
+  the workspace AND end in ``.py`` (so a crafted frame can never make the
+  sanitiser read a data file — see :func:`_frame_target`);
 * **frames outside the workspace** keep only a code-shaped file basename, the
   line number, and the function name; their source lines are dropped;
 * the **exception message** becomes a shape-preserving placeholder
   (``<redacted: N chars>``) unless it is provably value-free: it matches a
   fixed allowlist of known interpreter messages, or every quoted token in it is
-  already in ``known_tokens`` (text the model has been shown this session);
+  already in ``known_tokens`` (text the model has been shown this session) AND
+  the unquoted remainder carries no value-bearing residue (no long or
+  thousands-grouped digit runs, no unknown word of 4+ characters);
 * **anything inside a detected block that matches no known shape** becomes
   ``<redacted line>`` — parser gaps fail closed, never pass through.
 
@@ -131,11 +139,19 @@ _SAFE_MESSAGES = frozenset(
 
 _QUOTED_RE = re.compile(r"'([^']*)'|\"([^\"]*)\"")
 _WORD_RE = re.compile(r"\w+")
+# Thousands-grouped digits (1,234,567 / 1.234.567): each run is <= 3 digits so
+# the long-run check misses them, but together they are a value, not a template.
+_GROUPED_DIGITS_RE = re.compile(r"\d{1,3}(?:[,.]\d{3})+")
 # A code-shaped filename / function: identifier characters only (no spaces, no
 # quotes), so a value pasted into a crafted frame cannot ride out on either.
 _SAFE_BASENAME_RE = re.compile(r"[\w.\-]+\.pyw?")
 _ANGLE_BASENAME_RE = re.compile(r"<[\w. \-]+>")
 _SAFE_FUNC_RE = re.compile(r"[\w.<>]+")
+# A re-read disk line is emitted only when it LOOKS like a Python statement —
+# starting with an identifier/keyword, decorator, comment, bracket, or string
+# quote. Data embedded in a .py (a row inside a literal block, a bare number
+# line) stays out even though the file itself passed the .py gate.
+_CODE_LINE_RE = re.compile(r"""^[A-Za-z_@#("'\[{)\]}]""")
 
 
 @dataclass(frozen=True)
@@ -261,10 +277,14 @@ def _rewrite_block(
 ) -> tuple[list[str], list[Finding]]:
     out: list[str] = []
     findings: list[Finding] = []
-    # After a frame line, the next unclassified line is the pasted "source" slot:
-    # "consume" = replaced by the disk re-read already emitted (workspace frame);
-    # "drop" = removed with a finding (non-workspace frame). Never passed through.
-    source_slot: str | None = None
+    # After a frame line, the next unclassified line — IF it is indented deeper
+    # than the frame line, the way CPython prints source under a frame — is the
+    # pasted "source" slot: ("reread", target, line, margin) = replaced by the
+    # disk re-read (workspace frame — emitted ONLY here, so a paste that showed
+    # no source line never has one inserted); ("drop", ...) = removed with a
+    # finding (non-workspace frame). Never passed through either way; a
+    # non-indented unclassified line is not a source line and fails closed.
+    source_slot: tuple[str, Path | None, int, str] | None = None
     for i in range(start, end + 1):
         raw = lines[i]
         lineno = i + 1
@@ -301,9 +321,23 @@ def _rewrite_block(
             continue
         if source_slot is not None:
             slot, source_slot = source_slot, None
-            if slot == "drop":
-                findings.append(Finding(lineno, SOURCE))
-            continue  # "consume": the disk re-read already replaced this line
+            slot_kind, target, frame_line, frame_margin = slot
+            if len(margin) > len(frame_margin):  # indented under the frame = pasted source
+                if slot_kind == "drop":
+                    findings.append(Finding(lineno, SOURCE))
+                    continue
+                # Workspace frame: the paste DID claim a source line here, so
+                # replace it with the disk truth — but only when the frame's line
+                # number really exists in the file and the disk line is
+                # code-shaped; otherwise the pasted line is dropped (visibly).
+                assert target is not None
+                source = _read_source_line(target, frame_line)
+                if source and _CODE_LINE_RE.match(source):
+                    out.append(f"{frame_margin}  {source}")
+                else:
+                    findings.append(Finding(lineno, SOURCE))
+                continue
+            # Not indented → not a source line; fall through to fail-closed.
         out.append(margin + REDACTED_LINE)  # fail closed: unknown shapes never pass
         findings.append(Finding(lineno, LINE))
     return out, findings
@@ -311,12 +345,15 @@ def _rewrite_block(
 
 def _rewrite_frame(
     frame: re.Match, margin: str, lineno: int, workspace: Path | None
-) -> tuple[list[str], list[Finding], str]:
+) -> tuple[list[str], list[Finding], tuple[str, Path | None, int, str]]:
     """Rewrite one ``File "…", line N[, in f]`` line.
 
-    Returns ``(lines, findings, source_slot)`` — the frame line (plus, for a
-    workspace frame, the source line re-read from disk), any redaction findings,
-    and how to treat the pasted source line that may follow ("consume"/"drop").
+    Returns ``(lines, findings, source_slot)`` — the frame line, any redaction
+    findings, and how to treat the pasted source line that may follow:
+    ``("reread", target, line, margin)`` (workspace frame — replace the pasted
+    line with the disk re-read, IF one follows) or ``("drop", None, 0, margin)``
+    (non-workspace frame). The re-read itself happens at the slot, never here:
+    a frame the paste showed without a source line must not have one inserted.
     """
     findings: list[Finding] = []
     path_text = frame.group("path")
@@ -334,15 +371,16 @@ def _rewrite_frame(
         assert workspace is not None  # _frame_target returned a workspace-bound path
         rel = target.relative_to(workspace.resolve()).as_posix()
         out = [f'{margin}File "{rel}", line {frame_line}{func_out}']
-        source = _read_source_line(target, frame_line)
-        if source:
-            out.append(f"{margin}  {source}")
-        return out, findings, "consume"
+        return out, findings, ("reread", target, frame_line, margin)
     basename = re.split(r"[\\/]", path_text)[-1]
     if not (_SAFE_BASENAME_RE.fullmatch(basename) or _ANGLE_BASENAME_RE.fullmatch(basename)):
         basename = "<redacted>"
         findings.append(Finding(lineno, FILENAME))
-    return [f'{margin}File "{basename}", line {frame_line}{func_out}'], findings, "drop"
+    return (
+        [f'{margin}File "{basename}", line {frame_line}{func_out}'],
+        findings,
+        ("drop", None, 0, margin),
+    )
 
 
 def _frame_target(path_text: str, workspace: Path | None) -> Path | None:
@@ -411,7 +449,11 @@ def _rewrite_exception(
 def _message_is_safe(message: str, known_tokens: frozenset[str]) -> bool:
     """Provably value-free: a fixed interpreter message, or a message whose every
     quoted token is already in ``known_tokens`` and whose unquoted remainder is a
-    library template (no long digit runs that could be an identifier/value)."""
+    library template. "Template" is checked, not assumed: the residue may carry
+    no long or thousands-grouped digit run and no unknown word of 4+ characters —
+    a library template's words are already in-channel (the system context and
+    notebook source feed ``known_tokens``), while an f-string's interpolated
+    value ("customer Jane Doe exceeds …", "balance 1,234,567 …") is not."""
     if message in _SAFE_MESSAGES:
         return True
     quoted = [single or double for single, double in _QUOTED_RE.findall(message)]
@@ -420,4 +462,6 @@ def _message_is_safe(message: str, known_tokens: frozenset[str]) -> bool:
     if not all(token == "" or token in known_tokens for token in quoted):
         return False
     residue = _QUOTED_RE.sub("", message)
-    return re.search(r"\d{4,}", residue) is None
+    if re.search(r"\d{4,}", residue) or _GROUPED_DIGITS_RE.search(residue):
+        return False
+    return all(len(token) < 4 or token in known_tokens for token in _WORD_RE.findall(residue))

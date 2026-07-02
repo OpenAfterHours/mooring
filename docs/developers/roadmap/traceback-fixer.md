@@ -18,15 +18,22 @@ icon: lucide/bug
     **not** armed from a hub route as this page originally sketched); the
     `[ai] traceback_guard` default-ON key (+ `MOORING_AI_TRACEBACK_GUARD`, flat
     accessor, weakening-confirm SettingSpec); the batch worker auto-confirming a
-    `traceback` hold (safe unattended — only sanitised text is ever held — and
-    without it a traceback-bearing brief would hang to timeout), recording
+    `traceback` hold ONLY when the PII scan of the sanitised text did not itself
+    hold — the sanitiser rewrites just the traceback block, so block-mode PII in
+    the brief's surrounding prose blocks the job (`pii_blocked`) exactly like a
+    plain `pii` hold unless the analyst forces it ("Build anyway"); without the
+    auto-confirm a traceback-bearing brief would hang to timeout — recording
     value-free redaction counts on the job result; the "Send sanitised" hold card
     (`chat.js` + a pure `ChatCore.tracebackHoldSummary` formatter, deliberately
     with no send-raw button); the phase-3 known-token rescue (live schema +
     system context + on-disk notebook source); and the offline
     `mooring ai traceback check` CLI. The workspace source re-read is restricted
-    to paths resolving UNDER the workspace that end in `.py` — a crafted frame
-    naming a workspace CSV cannot turn the sanitiser into a value channel
+    to paths resolving UNDER the workspace that end in `.py`, replaces only a
+    source line the paste itself showed (a frame pasted without one gets none
+    inserted — the sanitiser never ADDS text), and emits the disk line only when
+    the frame's line number exists and the line is code-shaped — a crafted frame
+    naming a workspace CSV (or any un-shown `.py` line) cannot turn the sanitiser
+    into a value channel
     (pinned with a `SECRET_VALUE_DO_NOT_LEAK` fixture in `tests/test_traceback.py`).
     `docs/admins/ai-privacy.md` now documents the sanitised-traceback channel
     honestly in place of the old "never receives tracebacks" claim.

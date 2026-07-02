@@ -599,9 +599,24 @@ def test_traceback_hold_carries_prose_pii_findings_on_the_same_card():
     data = events[0].data
     assert any(f["kind"] == pii.CARD for f in data["pii_findings"])
     assert VALID_CARD not in json.dumps(data["pii_findings"])
+    # The block verdict rides the hold, so an UNATTENDED consumer (the batch
+    # worker) can honour it — an interactive confirm has the analyst looking.
+    assert data["pii_hold"] is True
     sess.send_confirmed(data["token"])
     assert TB_SECRET not in sess.last_sent
     assert VALID_CARD in sess.last_sent  # prose is untouched — the analyst confirmed it
+
+
+def test_traceback_hold_pii_verdict_reflects_warn_mode():
+    # Warn mode: the findings still ride the card, but pii_hold is False — the
+    # guard would not have held the prose on its own, so an unattended consumer
+    # may auto-confirm exactly as warn mode allows a plain send to proceed.
+    sess = StubChatSession(traceback_guard=True, pii_enabled=True, pii_block=False)
+    q = sess.subscribe()
+    sess.send(f"card {VALID_CARD} keeps failing\n\n{_TB_PASTE}")
+    data = _drain(q)[0].data
+    assert any(f["kind"] == pii.CARD for f in data["pii_findings"])
+    assert data["pii_hold"] is False
 
 
 def test_traceback_guard_off_is_passthrough():
@@ -654,6 +669,19 @@ def test_traceback_known_tokens_rescue_from_notebook_on_disk(tmp_path):
     )
     preview = _drain(q)[0].data["preview"]
     assert "KeyError: 'net revenue'" in preview
+
+
+def test_traceback_guard_survives_a_non_utf8_notebook(tmp_path):
+    # A stray latin-1 byte in the notebook (hand-edit in a wrong-encoding editor)
+    # must not break EVERY send while the default-on guard is armed: the
+    # known-token rescue just gets fewer tokens and the turn goes through.
+    (tmp_path / "nb.py").write_bytes(b"# caf\xe9\nrevenue = 1\n")
+    sess = StubChatSession(traceback_guard=True, workspace=tmp_path, notebook_rel="nb.py")
+    q = sess.subscribe()
+    sess.send("plain question, no traceback")
+    kinds_seen = [e.kind for e in _drain(q)]
+    assert "idle" in kinds_seen  # the turn was answered, not a decode crash
+    assert sess.last_sent == "plain question, no traceback"
 
 
 def test_traceback_workspace_frame_rereads_source_from_disk(tmp_path):

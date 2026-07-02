@@ -217,7 +217,7 @@ def _build_parser() -> argparse.ArgumentParser:
     history_cmd.add_argument("path", help="workspace-relative file path")
     history_cmd.add_argument("--page", type=int, default=1, help="older pages (30 per page)")
 
-    sub.add_parser(
+    whatsnew_cmd = sub.add_parser(
         "whatsnew",
         help="who changed what on the team branch since your last sync (needs login)",
     )
@@ -290,9 +290,11 @@ def _build_parser() -> argparse.ArgumentParser:
         adopt,
         open_cmd,
         new,
+        dup,
         delete_cmd,
         rollback_cmd,
         history_cmd,
+        whatsnew_cmd,
         restore_cmd,
         trash_cmd,
         activity_cmd,
@@ -1599,10 +1601,22 @@ def cmd_ai_traceback_check(
 
     if getattr(args, "file", None):
         try:
-            text = Path(args.file).read_text("utf-8")
+            raw = Path(args.file).read_bytes()
         except OSError as exc:
             print(f"Could not read {args.file}: {exc}")
             return 1
+        # PowerShell 5.1's `2> file` / `Out-File` write UTF-16 (and BOM'd UTF-8)
+        # by default on Windows — the very files this command is pointed at. A
+        # decode failure must degrade to a friendly line, never a raw traceback
+        # from the no-raw-tracebacks command itself.
+        try:
+            text = raw.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            try:
+                text = raw.decode("utf-16")
+            except UnicodeDecodeError:
+                print(f"Could not read {args.file}: not UTF-8 or UTF-16 text.")
+                return 1
     else:
         text = sys.stdin.read()
     if not text.strip():

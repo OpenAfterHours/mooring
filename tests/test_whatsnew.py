@@ -133,6 +133,29 @@ def test_scope_filtering_matches_sync_visibility(cfg):
     assert [e.path for e in digest.entries] == ["notebooks/a.py"]
 
 
+def test_attribution_does_not_leak_across_path_prefix_collisions(cfg):
+    # "Update data/x.csv.bak via mooring" CONTAINS "data/x.csv" as a raw
+    # substring — the shorter path must not inherit the longer path's commits
+    # (wrong author/date/count is exactly the who/when the digest exists for).
+    client = FakeClient({"data/x.csv": b"a\n", "data/x.csv.bak": b"a\n"})
+    sync.pull(client, cfg)
+    client.put_file(
+        "data/x.csv", b"b\n", "Update data/x.csv via mooring", "main",
+        base_sha=client.tree["data/x.csv"],
+    )
+    client.put_file(
+        "data/x.csv.bak", b"c\n", "Update data/x.csv.bak via mooring", "main",
+        base_sha=client.tree["data/x.csv.bak"],
+    )
+    digest = _digest(client, cfg)
+    assert digest.source == "compare"
+    by_path = {e.path: e for e in digest.entries}
+    assert by_path["data/x.csv"].commits == 1
+    assert by_path["data/x.csv"].messages == ["Update data/x.csv via mooring"]
+    assert by_path["data/x.csv.bak"].commits == 1
+    assert by_path["data/x.csv.bak"].messages == ["Update data/x.csv.bak via mooring"]
+
+
 def test_digest_never_writes_anything(cfg):
     client = FakeClient({"notebooks/a.py": b"v1\n"})
     sync.pull(client, cfg)
@@ -226,3 +249,13 @@ def test_summarize_diff_binary_degrades_to_sizes():
 def test_summarize_diff_both_sides_missing_raises():
     with pytest.raises(ValueError):
         whatsnew.summarize_diff(None, None, "x.txt")
+
+
+def test_summarize_diff_reports_sizes_only_above_the_cap():
+    # difflib on multi-MB blobs is quadratic-ish CPU; over the cap the summary
+    # degrades to sizes — the same posture (and value) as celldiff.MAX_TEXT_BYTES,
+    # so a 40 MB CSV never pins a hub worker for minutes.
+    big = b"x,y\n" * (whatsnew.MAX_TEXT_BYTES // 4 + 1)
+    out = whatsnew.summarize_diff(big, b"x,y\n", "data/big.csv")
+    assert out["kind"] == "binary"
+    assert (out["base_size"], out["head_size"]) == (len(big), 4)

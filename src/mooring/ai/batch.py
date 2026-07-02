@@ -718,16 +718,32 @@ class BatchPlanner:
                     )
             elif kind == "traceback":
                 # The session's traceback guard sanitised a traceback in the brief and
-                # HELD the turn. Unlike a "pii" hold — where confirming forwards the RAW
-                # brief and is therefore gated on the analyst's explicit force_pii —
-                # this hold only ever stores the SANITISED rewrite (ai/chat.py drops
-                # the raw paste before storing), so auto-confirming unattended forwards
-                # nothing the guard withheld. Without this branch a traceback-bearing
-                # brief would hang the job to its timeout. The value-free redaction
-                # report is kept on the result so the tray can show the rewrite.
+                # HELD the turn. The hold stores only the SANITISED rewrite (ai/chat.py
+                # drops the raw paste before storing), so confirming forwards nothing
+                # the TRACEBACK guard withheld — but the sanitiser rewrites only the
+                # traceback block itself: PII in the surrounding PROSE survives the
+                # rewrite, and the session's PII verdict on the sanitised text rides
+                # the hold as pii_findings/pii_hold. That verdict gets exactly the
+                # "pii" branch's policy: under block mode it stops the job unless the
+                # analyst chose "Build anyway" (force_pii), which records the
+                # overridden findings on the result so the tray shows what crossed.
+                # Only a PII-clean (or forced) hold is auto-confirmed — without that
+                # a traceback-bearing brief would hang the job to its timeout. The
+                # value-free redaction report is kept for the tray either way.
                 token = data.get("token")
                 if token:
                     tb_redactions = list(data.get("redactions", []))
+                    pii_findings = list(data.get("pii_findings", []))
+                    if data.get("pii_hold"):
+                        if not force_pii:
+                            return self._make_result(
+                                job,
+                                notebook_rel,
+                                "pii_blocked",
+                                pii=pii_findings,
+                                traceback_redactions=tb_redactions,
+                            )
+                        forced_pii = pii_findings
                     try:
                         session.send_confirmed(token, "")
                     except Exception as exc:  # noqa: BLE001

@@ -13,9 +13,14 @@ const Checklist = (function () {
   // the two features can't disagree about what counts as a draft.
   const DRAFT_RE = /-draft(?:-\d+)?\.py$/;
 
-  // Row states that exist without any remote tracking; anything else on a row
-  // proves a pull has happened (so the "pulled" item self-heals from /api/state).
-  const LOCAL_STATES = new Set(["local", "new local"]);
+  // Row states that PROVE a pull has happened: each needs a synced manifest base
+  // (so the "pulled" item self-heals from /api/state). "local"/"new local" exist
+  // without any remote tracking, and "new remote"/"deleted remotely" come straight
+  // from the remote diff BEFORE any pull — a brand-new joiner sees the whole team
+  // repo as "new remote", which proves the opposite of a pull.
+  const PULLED_STATES = new Set([
+    "synced", "modified", "deleted locally", "remote changed", "conflict", "mixed", "in review",
+  ]);
 
   const ITEMS = [
     { id: "pulled", label: "Pull the team's notebooks" },
@@ -32,7 +37,7 @@ const Checklist = (function () {
     const rows = files || [];
     const s = stored || {};
     const done = {
-      pulled: rows.some((f) => f.state && !LOCAL_STATES.has(f.state)),
+      pulled: rows.some((f) => PULLED_STATES.has(f.state)),
       opened: !!s.opened,
       duplicated: !!s.duplicated || rows.some((f) => DRAFT_RE.test(f.path || "")),
       pushed: !!s.pushed || !!review,

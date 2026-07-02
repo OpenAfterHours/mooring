@@ -23,19 +23,28 @@ async def api_pull(request: Request) -> JSONResponse:
     hub = request.app.state.hub
     data = await request.json() if await request.body() else {}
     strategy = sync.ConflictStrategy(data.get("strategy", "skip"))
-    # The digest of what this pull is about to land, computed BEFORE the pull
-    # runs — pull rewrites Manifest.head_commit, the digest's horizon. Strictly
-    # best-effort: a digest failure must never fail (or even color) the pull the
-    # user actually asked for; they simply get no "what's new" section.
-    digest = None
-    with contextlib.suppress(Exception):
-        report = sync.status(hub.client(), hub.cfg)
-        digest = whatsnew.pending_digest(hub.client(), hub.cfg, report)
-    body, status = hub._sync_op_body(
-        "pull", lambda: sync.pull(hub.client(), hub.cfg, strategy=strategy)
-    )
-    if status == 200 and digest is not None and digest.entries:
-        body["whatsnew"] = dataclasses.asdict(digest)
+
+    def _run() -> tuple[dict, int]:
+        # The digest of what this pull is about to land, computed BEFORE the pull
+        # runs — pull rewrites Manifest.head_commit, the digest's horizon. Strictly
+        # best-effort: a digest failure must never fail (or even color) the pull the
+        # user actually asked for; they simply get no "what's new" section.
+        digest = None
+        with contextlib.suppress(Exception):
+            report = sync.status(hub.client(), hub.cfg)
+            digest = whatsnew.pending_digest(hub.client(), hub.cfg, report)
+        body, status = hub._sync_op_body(
+            "pull", lambda: sync.pull(hub.client(), hub.cfg, strategy=strategy)
+        )
+        if status == 200 and digest is not None and digest.entries:
+            body["whatsnew"] = dataclasses.asdict(digest)
+        return body, status
+
+    # The pre-pull digest is a second full status walk (plus, with a blank
+    # anchor, up to FALLBACK_MAX_LOOKUPS commits-API calls) and the pull itself
+    # is a network drain — keep the whole thing off the event loop so /api/state
+    # polls and open SSE streams stay alive during a slow (or offline) pull.
+    body, status = await asyncio.to_thread(_run)
     return JSONResponse(body, status_code=status)
 
 
@@ -60,9 +69,11 @@ def api_whatsnew(request: Request) -> JSONResponse:
 
 def _detail_summary(base: bytes | None, remote: bytes | None, rel: str) -> dict:
     """Cell counts for a marimo notebook ("2 cells changed, 1 added"), line
-    counts for everything else. The cell differ's own line/binary fallbacks
-    defer to whatsnew.summarize_diff so the response stays a compact summary
-    (counts), never a full diff body — /api/diff is the full-diff view."""
+    counts for everything else. The cell differ's line/binary results are kept
+    (not recomputed): its "binary" answer includes the 4 MB size cap, and
+    re-running the same blobs through whatsnew.summarize_diff would silently
+    UN-cap exactly the work celldiff refused. The response stays a compact
+    summary (counts/sizes), never a full diff body — /api/diff is the full view."""
     if rel.endswith(".py"):
         result = celldiff.diff(base, remote, rel)
         if result.kind == "cells":
@@ -75,16 +86,32 @@ def _detail_summary(base: bytes | None, remote: bytes | None, rel: str) -> dict:
                 "unmatched": counts.get("unmatched", 0),
                 "note": result.note,
             }
+        if result.kind == "binary":
+            return {
+                "kind": "binary",
+                "added": 0,
+                "removed": 0,
+                "base_size": len(base or b""),
+                "head_size": len(remote or b""),
+            }
+        added = removed = 0
+        for line in result.line_diff.splitlines():
+            if line.startswith("+") and not line.startswith("+++"):
+                added += 1
+            elif line.startswith("-") and not line.startswith("---"):
+                removed += 1
+        return {"kind": "lines", "added": added, "removed": removed}
     return whatsnew.summarize_diff(base, remote, rel)
 
 
 async def api_whatsnew_detail(request: Request) -> JSONResponse:
     """A compact "what actually changed" summary for ONE digest entry: the
     last-synced base blob diffed against the digest's remote blob. Read-only.
-    ``remote_sha`` comes from the digest entry itself (blank = deleted
-    remotely), so re-expanding the same digest is exact even if the branch has
-    moved since; results are cached on the Hub keyed (path, base_sha,
-    remote_sha) — blob content is immutable per sha."""
+    ``remote_sha`` and ``base_sha`` come from the digest entry itself (blank =
+    deleted remotely / new remote), so re-expanding the same digest is exact
+    even if the branch — or the manifest, after the pull that rendered the
+    digest — has moved since; results are cached on the Hub keyed (path,
+    base_sha, remote_sha) — blob content is immutable per sha."""
     hub = request.app.state.hub
     data = await request.json()
     workspace = hub.cfg.workspace()
@@ -93,9 +120,17 @@ async def api_whatsnew_detail(request: Request) -> JSONResponse:
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
     remote_sha = str(data.get("remote_sha") or "")
+    # The entry's own PRE-pull base rides with the request when the client has
+    # it. It must win over a manifest read: the pull handler renders the digest
+    # AFTER sync.pull rewrote the manifest entry to the remote sha, so deriving
+    # the base here would diff the pulled blob against itself — "no cell
+    # changes" for a file a teammate just rewrote. Absent the key (an older
+    # client), fall back to the manifest, which is exact for the pre-pull panel.
+    has_base = "base_sha" in data
+    base_override = str(data.get("base_sha") or "")
 
     def _compute() -> dict:
-        base_sha = manifest.load(workspace).files.get(rel) or ""
+        base_sha = base_override if has_base else (manifest.load(workspace).files.get(rel) or "")
         key = (rel, base_sha, remote_sha)
         cached = hub._whatsnew_detail.get(key)
         if cached is not None:

@@ -1838,6 +1838,34 @@ def test_batch_open_disabled_by_default_403(unconfigured_client):
     assert resp.json()["reason"] == "batch_disabled"
 
 
+def test_batch_context_carries_no_semantic_model_hint(batch_client):
+    # Batch builder sessions get NO model tools (_make_batch_session passes no
+    # models), so their context must not carry the "use the model tools" hint —
+    # inviting the model to call tools that don't exist burns follow-up turns on
+    # unknown-tool failures. The interactive chat context DOES fold the hint in
+    # for the same workspace, proving the model is otherwise discoverable.
+    import threading
+
+    from mooring.ai.chat import ChatBroadcaster
+
+    _client, hub = batch_client
+    ws = hub.cfg.workspace()
+    (ws / "nb.py").write_text("import marimo\n", "utf-8")
+    tables = ws / "reports" / "Sales.SemanticModel" / "definition" / "tables"
+    tables.mkdir(parents=True)
+    (tables / "Sales.tmdl").write_text(
+        "table Sales\n\tcolumn Amount\n\t\tdataType: decimal\n", "utf-8"
+    )
+    chat_ctx = hub._build_chat_context(ws, "nb.py", "")[0]
+    assert "POWER BI SEMANTIC MODELS" in chat_ctx  # the chat path offers the tools
+    planner = hub._new_batch_planner(ws, ChatBroadcaster(), threading.Event())
+    try:
+        batch_ctx, _dictionary = planner._build_context("nb.py", "")
+    finally:
+        planner.close(cancel=True)
+    assert "POWER BI SEMANTIC MODELS" not in batch_ctx
+
+
 def test_batch_builds_notebooks_and_tray_lists_them(batch_client):
     client, hub = batch_client
     _bid, tray = _run_batch(
@@ -2924,6 +2952,85 @@ def test_whatsnew_detail_line_counts_for_data_files(configured):
     )
     assert resp.status_code == 200
     assert resp.json() == {"path": "data/x.csv", "kind": "lines", "added": 1, "removed": 0}
+
+
+def test_whatsnew_detail_summary_respects_the_cell_differs_size_cap():
+    # A >4 MB .py used to fall out of celldiff's "binary" (too-large) answer into
+    # whatsnew.summarize_diff, silently UN-capping exactly the difflib work the
+    # cap refused. The celldiff result is now kept as-is.
+    from mooring.hub.routes.sync import _detail_summary
+
+    big = b"# c\n" * (4 * 1024 * 1024 // 4 + 1)
+    out = _detail_summary(big, b"import marimo\n", "notebooks/big.py")
+    assert out["kind"] == "binary"
+    assert out["base_size"] == len(big)
+
+
+def test_whatsnew_detail_summary_line_counts_for_a_helper_module():
+    # A non-notebook .py takes celldiff's "lines" answer (counted here), keeping
+    # one code path — and one size cap — for every .py detail.
+    from mooring.hub.routes.sync import _detail_summary
+
+    out = _detail_summary(b"a = 1\n", b"a = 1\nb = 2\n", "notebooks/helper.py")
+    assert out == {"kind": "lines", "added": 1, "removed": 0}
+
+
+def test_whatsnew_detail_uses_the_entrys_pre_pull_base_sha(configured):
+    # After a Pull the manifest already points at the remote sha, so the "What
+    # just landed" panel's Details must diff the PRE-pull pair the digest entry
+    # carries (the client sends both shas) — a manifest-derived base would diff
+    # the pulled blob against itself and say "no cell changes" for a file a
+    # teammate just rewrote.
+    client, hub, fake, _ = configured
+    _seed_and_pull(hub, fake, "notebooks/a.py", _NB_V1.encode("utf-8"))
+    base_sha = fake.tree["notebooks/a.py"]
+    fake.seed("notebooks/a.py", _NB_V1.replace("x = 1", "x = 2").encode("utf-8"))
+    remote_sha = fake.tree["notebooks/a.py"]
+    pulled = client.post("/api/pull", json={})
+    assert pulled.status_code == 200
+    [entry] = pulled.json()["whatsnew"]["entries"]
+    assert (entry["base_sha"], entry["remote_sha"]) == (base_sha, remote_sha)
+    resp = client.post(
+        "/api/whatsnew/detail",
+        json={
+            "path": entry["path"],
+            "remote_sha": entry["remote_sha"] or "",
+            "base_sha": entry["base_sha"] or "",
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["kind"] == "cells"
+    assert body["changed"] == 1  # the real pre-pull change, not "no cell changes"
+    # Sanity: an old-style request (no base_sha key) falls back to the POST-pull
+    # manifest — the very self-diff the entry shas exist to avoid.
+    stale = client.post(
+        "/api/whatsnew/detail",
+        json={"path": entry["path"], "remote_sha": entry["remote_sha"]},
+    ).json()
+    assert stale["changed"] == 0
+
+
+def test_whatsnew_detail_deleted_remotely_still_works_after_the_pull(configured):
+    # A deleted-remotely entry has remote_sha None; post-pull the manifest entry
+    # is gone too, so without the entry's base_sha the endpoint used to 404.
+    client, hub, fake, _ = configured
+    _seed_and_pull(hub, fake, "data/x.csv", b"a,b\n1,2\n")
+    fake.remove("data/x.csv")
+    pulled = client.post("/api/pull", json={})
+    assert pulled.status_code == 200
+    [entry] = pulled.json()["whatsnew"]["entries"]
+    assert entry["state"] == "deleted remotely" and entry["remote_sha"] is None
+    resp = client.post(
+        "/api/whatsnew/detail",
+        json={
+            "path": entry["path"],
+            "remote_sha": entry["remote_sha"] or "",
+            "base_sha": entry["base_sha"] or "",
+        },
+    )
+    assert resp.status_code == 200
+    assert resp.json() == {"path": "data/x.csv", "kind": "lines", "added": 0, "removed": 2}
 
 
 def test_whatsnew_detail_rejects_traversal_and_nothing_to_diff(configured):

@@ -104,7 +104,10 @@ class RemoteCache:
     """The last remote tree we OBSERVED: cfg.branch's head plus the in-scope
     ``path -> blob sha`` map, with the sync scope it was captured under and a
     timezone-aware UTC ISO timestamp. Written on every successful sync preamble
-    (sync._prepare) and read only by the offline fallback (sync.cached_status).
+    (sync._prepare), updated in place after mooring's own remote writes
+    (push/recall/PUSH_COPY fold their write responses in via sync._update_cache,
+    so the offline view never calls the user's own push a teammate change), and
+    read only by the offline fallback (sync.cached_status).
 
     Deliberately NOT the manifest: ``Manifest.files`` is the last-SYNCED base,
     and after a pull that skipped a conflict the manifest blanks ``head_commit``

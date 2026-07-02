@@ -159,7 +159,19 @@ function showGuardDialog(data, apiPath, body) {
     const confirmed = Object.assign({}, body, {
       confirm_tokens: GuardFmt.allTokens(findings),
     });
-    action(apiPath, confirmed);
+    action(apiPath, confirmed).then((data) => {
+      if (!data || data.error || data.needs_confirm) return;
+      // The confirmed re-POST bypasses the ORIGINAL caller's .then continuation
+      // (pushAction/proposeAction/reviewSend attached theirs to the first,
+      // 409'd request) — re-run the success effects here, or a push completed
+      // via "Push anyway" never ticks the checklist and leaves the Review panel
+      // open showing a stale diff with a live "Push this file" button.
+      if (apiPath === "/api/push" || apiPath === "/api/propose") checklistSet("pushed");
+      if (reviewPath && (body.paths || []).includes(reviewPath)) {
+        $("review-card").classList.add("hidden");
+        reviewPath = null;
+      }
+    });
   };
   $("guard-cancel").onclick = () => dialog.close();
   dialog.showModal();
@@ -665,14 +677,18 @@ async function whatsnewAction() {
 }
 
 // Expand one entry to a compact "what actually changed" summary (cell counts
-// for notebooks, line counts otherwise). remote_sha rides from the digest
-// entry so the summary matches what the panel shows even if the branch moved.
+// for notebooks, line counts otherwise). BOTH shas ride from the digest entry:
+// remote_sha so the summary matches the panel even if the branch moved, and
+// base_sha because after a pull the manifest already points at the remote sha —
+// a server-derived base would diff the pulled blob against itself and report
+// "no cell changes" for the very change the panel is describing.
 async function whatsnewDetail(entry, slot, btn) {
   btn.disabled = true;
   btn.textContent = "…";
   const data = await api("/api/whatsnew/detail", {
     path: entry.path,
     remote_sha: entry.remote_sha || "",
+    base_sha: entry.base_sha || "",
   });
   if (data.error) {
     btn.disabled = false;
@@ -996,7 +1012,10 @@ function buildArtifactRows(artifact, files) {
     modelBits;
 
   const actions = [];
-  if (artifact.to_push) {
+  // Offline the header's Push/Propose hide exactly like a file row's (see
+  // fileActions) — the cached report still computes to_push, but the network
+  // actions live behind the amber banner.
+  if (artifact.to_push && !offlineMode) {
     const paths = artifact.members.filter((p) => {
       const f = byPath.get(p);
       return f && PUSH_STATES.has(f.state);
@@ -1229,6 +1248,14 @@ async function maybeDiscover(state) {
     lastDiscoverRepo = null;
     return;
   }
+  if (offlineMode) {
+    // Offline mode keeps logged_in true, so without this the one-per-repo-session
+    // shot would be burnt on a discovery that cannot succeed — and the adopt
+    // banner would then never appear after connectivity returns. Re-arm instead.
+    banner.classList.add("hidden");
+    lastDiscoverRepo = null;
+    return;
+  }
   if (state.repo === lastDiscoverRepo) return;  // already checked this repo this session
   lastDiscoverRepo = state.repo;
   try {
@@ -1374,7 +1401,16 @@ async function refresh() {
   for (const id of ["btn-pull", "btn-whatsnew", "btn-push", "btn-propose"]) {
     $(id).classList.toggle("hidden", !state.logged_in || offlineMode);
   }
-  if (!state.logged_in || offlineMode) $("whatsnew-card").classList.add("hidden");
+  if (!state.logged_in || offlineMode) {
+    $("whatsnew-card").classList.add("hidden");
+    // An already-open Review/History panel keeps live "Push this file"/"Restore"
+    // buttons, each of which needs GitHub — close them too, like the rows that
+    // stop offering Review/History while the amber banner shows.
+    $("review-card").classList.add("hidden");
+    reviewPath = null;
+    $("history-card").classList.add("hidden");
+    historyPath = null;
+  }
   // The per-file watch set is keyed by repo; local mode has no digest to watch.
   loadWatched(state.mode === "repo" && state.logged_in ? state.repo : null);
   // Recall shows only while the manifest holds a recallable last push; the
@@ -1613,15 +1649,26 @@ $("copilot-check").addEventListener("click", () => {
 });
 
 // Bulk Push/Propose sweeps up personal -draft.py copies with everything else; ask
-// first, so a draft is only ever shared on purpose. A filename-shape check only —
-// the push guard's server-side content scan still runs and its dialog fires
-// independently afterwards. Pushing a draft from its own row stays unprompted:
-// that click is already explicit. Consistent with deleteAction's confirm idiom.
-function confirmDraftShare(candidates) {
-  const drafts = candidates.filter((f) => Checklist.DRAFT_RE.test(f.path));
-  if (!drafts.length) return true;
+// first, so a draft is only ever shared on purpose. The question is about the
+// DRAFTS, so Cancel answers it: the drafts are EXCLUDED and everything else still
+// goes (never a silent abort of the whole push — the old behaviour, where Cancel
+// quietly sent nothing, read as "5 team files pushed" to the analyst). Returns
+// { paths, count }: paths null = push everything, [] = nothing left to send.
+// A filename-shape check only — the push guard's server-side content scan still
+// runs and its dialog fires independently afterwards. Pushing a draft from its
+// own row stays unprompted: that click is already explicit.
+function draftShareSelection(candidates) {
+  const isDraft = (f) => Checklist.DRAFT_RE.test(f.path);
+  const drafts = candidates.filter(isDraft);
+  if (!drafts.length) return { paths: null, count: candidates.length };
   const names = drafts.map((f) => "  " + f.path).join("\n");
-  return confirm(`Include your ${drafts.length} draft(s)?\n\n${names}`);
+  const include = confirm(
+    `Include your ${drafts.length} draft(s)?\n\n${names}\n\n` +
+    "OK sends everything; Cancel sends everything EXCEPT the draft(s)."
+  );
+  if (include) return { paths: null, count: candidates.length };
+  const rest = candidates.filter((f) => !isDraft(f));
+  return { paths: rest.map((f) => f.path), count: rest.length };
 }
 
 $("login-start").addEventListener("click", startLogin);
@@ -1637,13 +1684,23 @@ $("btn-pull").addEventListener("click", async () => {
 });
 $("btn-push").addEventListener("click", () => {
   const candidates = lastFiles.filter((f) => PUSH_STATES.has(f.state));
-  if (!confirmDraftShare(candidates)) return;
-  return pushAction(null, candidates.length);
+  const sel = draftShareSelection(candidates);
+  if (!sel.count) {
+    // Everything pending was a draft and the user excluded them — say so
+    // rather than silently doing nothing.
+    $("summary").textContent = "Nothing pushed — only drafts were pending.";
+    return;
+  }
+  return pushAction(sel.paths, sel.count);
 });
 $("btn-propose").addEventListener("click", () => {
   const candidates = lastFiles.filter((f) => PUSH_STATES.has(f.state));
-  if (!confirmDraftShare(candidates)) return;
-  return proposeAction(null, candidates.length);
+  const sel = draftShareSelection(candidates);
+  if (!sel.count) {
+    $("summary").textContent = "Nothing proposed — only drafts were pending.";
+    return;
+  }
+  return proposeAction(sel.paths, sel.count);
 });
 let recallPaths = [];
 

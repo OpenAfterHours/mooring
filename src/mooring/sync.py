@@ -571,6 +571,38 @@ def _prepare(client: GitHubClientProtocol, cfg: Config, *, make_workspace: bool 
     return _Prepared(workspace, mft, head, local, remote, report, review_changed)
 
 
+def _update_cache(
+    workspace: Path, cfg: Config, updates: dict[str, str | None], head: str = ""
+) -> None:
+    """Fold a successful remote WRITE into the offline view (manifest.RemoteCache).
+
+    _prepare captures the cache BEFORE the operation's Contents-API writes, so
+    without this a push/recall/PUSH_COPY would leave the cache holding the
+    pre-write tree — and cached_status would show a file the user just pushed as
+    "remote changed" (or, after an offline edit on top, a phantom CONFLICT). The
+    write responses ARE an observed remote view, so folding them in keeps the
+    cache's "last remote view we observed" contract. Same best-effort posture as
+    the save in _prepare (a cache failure never fails the sync op); a cache
+    captured under a different scope is already unusable and is left alone.
+    ``None`` in ``updates`` means the path was deleted on the branch."""
+    if not updates:
+        return
+    cache = manifest_mod.load_cache(workspace)
+    if cache is None:
+        return
+    if cache.scope_folders != tuple(cfg.folders) or cache.scope_exclude != tuple(cfg.exclude):
+        return
+    for path, sha in updates.items():
+        if sha is None:
+            cache.files.pop(path, None)
+        else:
+            cache.files[path] = sha
+    if head:
+        cache.head_commit = head
+    with contextlib.suppress(OSError):
+        manifest_mod.save_cache(workspace, cache)
+
+
 def _gather_candidates(
     report: StatusReport,
     paths: list[str] | None,
@@ -1131,6 +1163,13 @@ def _finalize_push(
     if recall_log:
         mft.last_push = dict(recall_log)
         mft.last_push_branch = cfg.branch
+        # The offline cache still holds the PRE-push tree _prepare observed; fold
+        # the writes in so cached_status doesn't call our own push a teammate change.
+        _update_cache(
+            workspace, cfg,
+            {path: rec["new"] for path, rec in recall_log.items()},
+            head=last_commit,
+        )
     elif result.pushed or result.withheld or result.blocked_conflicts:
         # The push did SOMETHING (review-branch writes, withheld or conflicted
         # candidates) but recorded nothing recallable — a stale record from an
@@ -1173,6 +1212,7 @@ def recall(client: GitHubClientProtocol, cfg: Config) -> SyncResult:
         return result
 
     done: list[str] = []
+    cache_updates: dict[str, str | None] = {}  # the recall's own writes, for the offline cache
     try:
         for path, rec in sorted(mft.last_push.items()):
             prev, new = rec.get("prev"), rec.get("new")
@@ -1181,6 +1221,7 @@ def recall(client: GitHubClientProtocol, cfg: Config) -> SyncResult:
                     # The push created it — recall removes it from the branch head.
                     client.delete_file(path, f"Recall {path} via mooring", cfg.branch, new)
                     mft.files.pop(path, None)
+                    cache_updates[path] = None
                     result.lines.append(f"recalled {path} (removed from {cfg.branch})")
                 else:
                     data = client.get_blob(prev)
@@ -1188,6 +1229,7 @@ def recall(client: GitHubClientProtocol, cfg: Config) -> SyncResult:
                         path, data, f"Recall {path} via mooring", cfg.branch, base_sha=new
                     )
                     mft.files[path] = response["content"]["sha"]
+                    cache_updates[path] = response["content"]["sha"]
                     result.lines.append(f"recalled {path} (previous version restored)")
             except RemoteConflict:
                 result.blocked_conflicts.append(path)
@@ -1208,6 +1250,7 @@ def recall(client: GitHubClientProtocol, cfg: Config) -> SyncResult:
         mft.last_push = {p: r for p, r in mft.last_push.items() if p not in done}
         mft.head_commit = ""
         manifest_mod.save(workspace, mft)
+        _update_cache(workspace, cfg, cache_updates)  # the files already recalled
         raise
 
     if result.pushed:
@@ -1221,6 +1264,7 @@ def recall(client: GitHubClientProtocol, cfg: Config) -> SyncResult:
     mft.last_push_branch = ""
     mft.head_commit = ""
     manifest_mod.save(workspace, mft)
+    _update_cache(workspace, cfg, cache_updates)
     return result
 
 
@@ -1377,6 +1421,9 @@ def resolve(
             copy_path, data, f"Add {copy_path} via mooring (conflict copy)", cfg.branch
         )
         mft.files[copy_path] = response["content"]["sha"]
+        # PUSH_COPY skips _prepare, so the cache predates this write — fold the
+        # new copy in or the offline view shows it as a phantom "deleted remotely".
+        _update_cache(workspace, cfg, {copy_path: response["content"]["sha"]})
         # The local bytes survive at copy_path (and were just pushed), so this
         # deposit is redundancy — but if the copy is later deleted, it is the
         # only pre-image left, and banking it costs one small blob.

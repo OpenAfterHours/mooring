@@ -300,8 +300,12 @@ class ChatBroadcaster:
         if self._tb_workspace is not None and self._tb_notebook_rel:
             try:
                 parts.append((self._tb_workspace / self._tb_notebook_rel).read_text("utf-8"))
-            except OSError:
-                pass  # the notebook may be gone; the rescue just gets fewer tokens
+            except (OSError, UnicodeDecodeError):
+                # The notebook may be gone — or hold a stray non-UTF-8 byte (a
+                # hand-edit in a latin-1 editor). Either way the rescue just gets
+                # fewer tokens; it must never break EVERY send while the
+                # (default-on) guard is armed.
+                pass
         return "\n".join(part for part in parts if part)
 
     def _traceback_hold(self, text: str) -> bool:
@@ -320,13 +324,19 @@ class ChatBroadcaster:
         )
         if not result.detected:
             return False
-        _hold, findings, scan_error = self._scan_prompt(result.text)
+        pii_hold, findings, scan_error = self._scan_prompt(result.text)
         token = _secrets.token_urlsafe(9)
         self._pending[token] = result.text  # ONLY the sanitised rewrite, by construction
         data = {
             "preview": result.text,
             "redactions": _finding_dicts(result.findings),
             "pii_findings": _finding_dicts(findings),
+            # Whether the PII guard (as configured) would have HELD this text on its
+            # own — the sanitiser rewrites only the traceback block, so block-mode
+            # PII in the surrounding prose must not be auto-confirmable by an
+            # unattended consumer (the batch worker keys off this; an interactive
+            # confirm already has the analyst looking at the same card).
+            "pii_hold": bool(pii_hold),
             "token": token,
         }
         if scan_error:

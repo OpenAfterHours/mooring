@@ -1500,6 +1500,65 @@ def test_cached_status_refuses_a_scope_mismatch(cfg):
     assert sync.cached_status(cfg) is None  # ...and the old scope now refuses
 
 
+def test_cached_status_after_a_push_shows_the_pushed_file_synced(cfg):
+    # The cache is written by _prepare BEFORE the push's Contents-API writes;
+    # _finalize_push must fold the writes in, or the offline view calls the
+    # user's own push a teammate change ("remote changed") — and an offline
+    # edit on top upgrades it to a phantom CONFLICT nobody can explain.
+    client = FakeClient({"notebooks/a.py": b"v1\n"})
+    sync.pull(client, cfg)
+    write_local(cfg, "notebooks/a.py", "v2 mine\n")
+    result = sync.push(client, cfg)
+    assert result.pushed == 1
+    offline = sync.cached_status(cfg)
+    assert offline is not None
+    report, _ = offline
+    assert [(f.path, f.state) for f in report.files] == [("notebooks/a.py", FileState.SYNCED)]
+    # Editing after the push (say, on the train) is honestly MODIFIED offline.
+    write_local(cfg, "notebooks/a.py", "v3 offline\n")
+    report2, _ = sync.cached_status(cfg)
+    assert [(f.path, f.state) for f in report2.files] == [
+        ("notebooks/a.py", FileState.MODIFIED)
+    ]
+
+
+def test_cached_status_after_a_recall_matches_the_recalled_branch(cfg):
+    client = FakeClient({"notebooks/a.py": b"v1\n"})
+    sync.pull(client, cfg)
+    write_local(cfg, "notebooks/a.py", "v2 mine\n")
+    sync.push(client, cfg)
+    result = sync.recall(client, cfg)
+    assert result.pushed == 1
+    offline = sync.cached_status(cfg)
+    assert offline is not None
+    report, _ = offline
+    # The recall put v1 back on the branch; the local file still holds v2 —
+    # an honest MODIFIED offline, not a REMOTE_CHANGED claim about a teammate.
+    assert [(f.path, f.state) for f in report.files] == [
+        ("notebooks/a.py", FileState.MODIFIED)
+    ]
+
+
+def test_cached_status_after_push_copy_shows_the_copy_synced(cfg):
+    # resolve() never runs _prepare, so without the fold-in the pushed copy
+    # would be missing from the cache — a phantom "deleted remotely" offline.
+    client = FakeClient({"notebooks/a.py": b"v1\n"})
+    sync.pull(client, cfg)
+    write_local(cfg, "notebooks/a.py", "mine\n")
+    client.seed("notebooks/a.py", b"theirs\n")
+    sync.status(client, cfg)  # observe the conflicting view (refreshes the cache)
+    result = sync.resolve(
+        client, cfg, "notebooks/a.py", ConflictStrategy.PUSH_COPY, username="phil"
+    )
+    assert result.pushed == 1
+    offline = sync.cached_status(cfg)
+    assert offline is not None
+    report, _ = offline
+    states = {f.path: f.state for f in report.files}
+    assert states["notebooks/a-phil.py"] is FileState.SYNCED
+    assert states["notebooks/a.py"] is FileState.SYNCED
+
+
 def test_cached_status_preserves_a_conflict_with_no_client(cfg):
     # THE key pin: the cache is the last OBSERVED remote tree, not the manifest
     # base — a skipped conflict blanks Manifest.head_commit precisely so the

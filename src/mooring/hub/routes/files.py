@@ -18,14 +18,21 @@ async def api_new(request: Request) -> JSONResponse:
     hub = request.app.state.hub
     data = await request.json()
     cfg = hub.cfg
-    try:
-        rel_path = notebook_template.create_from_input(
-            cfg.workspace(), data.get("name", ""), folders=cfg.folders, exclude=cfg.exclude
-        )
-    except (ValueError, FileExistsError) as exc:
-        return JSONResponse({"error": str(exc)}, status_code=400)
-    telemetry.log_event("new")
-    return hub._open(rel_path)
+
+    def _run() -> JSONResponse:
+        try:
+            rel_path = notebook_template.create_from_input(
+                cfg.workspace(), data.get("name", ""), folders=cfg.folders, exclude=cfg.exclude
+            )
+        except (ValueError, FileExistsError) as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        telemetry.log_event("new")
+        return hub._open(rel_path)
+
+    # _open may spawn the marimo subprocess and block on its readiness poll —
+    # off the event loop, exactly like api_open below (it had the same latent
+    # first-open freeze before the api_duplicate review caught it).
+    return await run_in_threadpool(_run)
 
 
 async def api_duplicate(request: Request) -> JSONResponse:
@@ -39,21 +46,29 @@ async def api_duplicate(request: Request) -> JSONResponse:
     data = await request.json()
     rel_path = str(data.get("path", ""))
     cfg = hub.cfg
-    try:
-        owner = hub.username()
-    except (AuthFailed, GitHubError, OSError):
-        owner = ""
-    try:
-        new_rel = notebook_template.duplicate_as_draft(
-            cfg.workspace(), rel_path, owner=owner, exclude=cfg.exclude
-        )
-    except (ValueError, FileExistsError) as exc:
-        return JSONResponse({"error": str(exc)}, status_code=400)
-    except FileNotFoundError:
-        return JSONResponse({"error": f"No such notebook: {rel_path}"}, status_code=404)
-    telemetry.log_event("duplicate")
-    hub._activity("duplicate", path=rel_path, draft=new_rel)
-    return hub._open(new_rel)
+
+    def _run() -> JSONResponse:
+        # username() is a blocking GET /user (a full transport timeout when
+        # offline — the very flow this endpoint supports) and _open may spawn
+        # marimo; both stay off the event loop so a Duplicate click can never
+        # freeze /api/state polls and the open chat SSE streams.
+        try:
+            owner = hub.username()
+        except (AuthFailed, GitHubError, OSError):
+            owner = ""
+        try:
+            new_rel = notebook_template.duplicate_as_draft(
+                cfg.workspace(), rel_path, owner=owner, exclude=cfg.exclude
+            )
+        except (ValueError, FileExistsError) as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        except FileNotFoundError:
+            return JSONResponse({"error": f"No such notebook: {rel_path}"}, status_code=404)
+        telemetry.log_event("duplicate")
+        hub._activity("duplicate", path=rel_path, draft=new_rel)
+        return hub._open(new_rel)
+
+    return await run_in_threadpool(_run)
 
 
 async def api_open(request: Request) -> JSONResponse:

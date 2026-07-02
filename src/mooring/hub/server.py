@@ -844,8 +844,10 @@ class Hub:
             reasoning_effort=reasoning_effort,
             dictionary=dictionary,
             pii=replace(self.app_cfg.ai.pii, block_prompt=True),
-            # The traceback guard holds only SANITISED text, so the batch worker can
-            # auto-confirm it unattended (unlike a PII hold) — see ai/batch.py.
+            # The traceback guard holds only SANITISED text; the batch worker
+            # auto-confirms it unattended ONLY when the PII scan of that sanitised
+            # text (prose around the traceback is untouched by design) did not
+            # itself hold — otherwise the forced block above applies — see ai/batch.py.
             traceback_guard=self.app_cfg.ai.traceback_guard,
             background=True,
         )
@@ -863,7 +865,14 @@ class Hub:
             config=self.app_cfg.ai.batch,
             pii=self.app_cfg.ai.pii,
             make_notebook=lambda name: notebook_template.create_unique(workspace, name),
-            build_context=lambda nb, ds: self._build_chat_context(workspace, nb, ds)[:2],
+            # Deliberately NOT _build_chat_context (which passes cfg.folders): batch
+            # builder sessions get no semantic-model tools (_make_batch_session passes
+            # no models), so their context must not carry the "use the model tools"
+            # hint either — and skipping folders also skips the per-job TMDL
+            # extraction whose result the [:2] slice would throw away anyway.
+            build_context=lambda nb, ds: self.chat.build_context(
+                self.app_cfg, workspace, nb, ds
+            )[:2],
             open_session=lambda ctx, nb, model, effort, dic: self._make_batch_session(
                 ctx, nb, model=model, reasoning_effort=(effort or None), dictionary=dic
             ),

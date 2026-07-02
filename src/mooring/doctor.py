@@ -34,7 +34,7 @@ from pathlib import Path
 import requests
 
 from mooring import __version__, auth, config, githost, manifest, pyproject_env, runtime
-from mooring.github import AuthFailed, GitHubClient, NotFound, RateLimited
+from mooring.github import AuthFailed, GitHubClient, NotFound, RateLimited, Unreachable
 
 PASS, WARN, FAIL, UNKNOWN = "pass", "warn", "fail", "unknown"
 _ICONS = {PASS: "ok  ", WARN: "warn", FAIL: "FAIL", UNKNOWN: "?   "}
@@ -186,7 +186,12 @@ def _probe_github_auth(cfg: config.Config) -> ProbeResult:
             "GitHub is rate-limiting this account right now.",
             "Wait a few minutes and try again.",
         )
-    except requests.exceptions.RequestException:
+    except (Unreachable, requests.exceptions.RequestException):
+        # GitHubClient._send re-raises every transport failure as Unreachable
+        # (github.py), so that is the arm that actually fires when the network
+        # drops mid-check; the raw RequestException arm stays as a backstop.
+        # Without this the exception would escape to run_probes' blanket
+        # handler and mislabel the row "Diagnostic probe — could not run".
         return ProbeResult(
             "auth", "GitHub login & repo access", UNKNOWN,
             "Could not complete the check (network hiccup).",

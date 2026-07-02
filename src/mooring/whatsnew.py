@@ -42,6 +42,12 @@ COMPARE_MAX_FILES = 300
 # beyond the cap still appear — as plain state entries without attribution.
 FALLBACK_MAX_LOOKUPS = 20
 
+# summarize_diff's difflib pass is quadratic-ish CPU work; above this cap it
+# reports sizes only. Deliberately the same value as celldiff.MAX_TEXT_BYTES
+# (which this module must NOT import — see the module docstring) so a >4 MB
+# blob gets the same honest "too big" answer on every diff surface.
+MAX_TEXT_BYTES = 4 * 1024 * 1024
+
 
 @dataclass
 class CommitGroup:
@@ -186,6 +192,21 @@ def _from_compare(digest: Digest, data: dict, candidates: dict, cfg: Config) -> 
     return True
 
 
+def _mentions_path(message: str, path: str) -> bool:
+    """Whether ``message`` names ``path`` as a WHOLE path token — a raw substring
+    check would hand data/x.csv the commits of data/x.csv.bak ("Update
+    data/x.csv.bak via mooring" contains "data/x.csv"). A mention only counts
+    when the next character cannot extend the path (end of message, whitespace,
+    or non-path punctuation)."""
+    start = 0
+    while (found := message.find(path, start)) != -1:
+        end = found + len(path)
+        if end == len(message) or not (message[end].isalnum() or message[end] in "._/-"):
+            return True
+        start = found + 1
+    return False
+
+
 def _attribute(entry: DigestEntry, commits: list[dict]) -> None:
     """Best-effort per-file attribution from the window's commits. The compare
     API does not say which commits touched which files, but mooring's machine
@@ -193,7 +214,7 @@ def _attribute(entry: DigestEntry, commits: list[dict]) -> None:
     attributes those exactly; failing that, a single-author window still names
     the author (everything in it is theirs) without claiming which messages
     were about this file."""
-    mine = [c for c in commits if entry.path in c["message"]]
+    mine = [c for c in commits if _mentions_path(c["message"], entry.path)]
     if mine:
         mine.reverse()  # newest first
         entry.authors = _dedupe(c["author"] for c in mine if c["author"])
@@ -263,6 +284,16 @@ def summarize_diff(base: bytes | None, head: bytes | None, path: str) -> dict:
     """
     if base is None and head is None:
         raise ValueError("nothing to summarize: no base and no remote content")
+    if max(len(base or b""), len(head or b"")) > MAX_TEXT_BYTES:
+        # A 40 MB CSV (max_file_mb allows 45) would pin a worker on difflib for
+        # minutes; over the cap the summary degrades to sizes, like celldiff.
+        return {
+            "kind": "binary",
+            "added": 0,
+            "removed": 0,
+            "base_size": len(base or b""),
+            "head_size": len(head or b""),
+        }
     if path.endswith(".py"):  # repo bytes are LF for .py (gitsha normalizes on push)
         base = base.replace(b"\r\n", b"\n") if base is not None else None
         head = head.replace(b"\r\n", b"\n") if head is not None else None

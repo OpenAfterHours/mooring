@@ -198,6 +198,60 @@ def test_workspace_frame_keeps_rel_path_and_rereads_source(tmp_path):
     assert all(f.kind != tb.SOURCE for f in result.findings)
 
 
+def test_no_source_line_is_inserted_when_the_paste_showed_none(tmp_path):
+    # THE insert-channel pin: a crafted frame naming ANY workspace .py must not
+    # make the sanitiser ADD that file's line to the outbound text. The paste
+    # below contains no source line, so the rewrite may not contain one either —
+    # otherwise a fabricated traceback becomes a one-line-per-frame read
+    # primitive over settings/credentials modules the tools can never reach.
+    (tmp_path / "local_settings.py").write_text(
+        f'DB_PASSWORD = "{SECRET}"\n', "utf-8"
+    )
+    text = (
+        "Traceback (most recent call last):\n"
+        f'  File "{tmp_path / "local_settings.py"}", line 1, in <module>\n'
+        "ValueError: boom"
+    )
+    result = _san(text, workspace=tmp_path)
+    assert SECRET not in result.text
+    assert "DB_PASSWORD" not in result.text
+    assert 'File "local_settings.py", line 1, in <module>' in result.text
+
+
+def test_reread_needs_the_frame_line_to_exist(tmp_path):
+    # A pasted source line under a frame whose line number is PAST the file's end
+    # is implausible — it is dropped (visibly), never replaced by guesswork.
+    (tmp_path / "nb.py").write_text("import marimo\n", "utf-8")
+    text = (
+        "Traceback (most recent call last):\n"
+        f'  File "{tmp_path / "nb.py"}", line 99, in _\n'
+        f"    x = load({SECRET!r})\n"
+        "ValueError: boom"
+    )
+    result = _san(text, workspace=tmp_path)
+    assert SECRET not in result.text
+    assert any(f.kind == tb.SOURCE for f in result.findings)  # dropped, not silent
+
+
+def test_non_code_shaped_disk_lines_are_not_emitted(tmp_path):
+    # Even a real workspace .py can hold data-shaped lines (a row inside a
+    # triple-quoted literal). A re-read line that doesn't look like a Python
+    # statement stays out — the pasted line is dropped with a finding instead.
+    (tmp_path / "nb.py").write_text(
+        'import marimo\nrows = """\n4111111111111111,Jane Doe\n"""\n', "utf-8"
+    )
+    text = (
+        "Traceback (most recent call last):\n"
+        f'  File "{tmp_path / "nb.py"}", line 3, in _\n'
+        "    some pasted source\n"
+        "ValueError: boom"
+    )
+    result = _san(text, workspace=tmp_path)
+    assert "4111111111111111" not in result.text
+    assert "Jane Doe" not in result.text
+    assert any(f.kind == tb.SOURCE for f in result.findings)
+
+
 def test_missing_workspace_file_keeps_basename_only(tmp_path):
     text = (
         "Traceback (most recent call last):\n"
@@ -326,6 +380,47 @@ def test_known_tokens_do_not_rescue_long_digit_runs_in_the_residue():
     assert "40128888" not in result.text
 
 
+def test_alphabetic_residue_values_are_not_rescued_by_one_known_quoted_token():
+    # 'balance' is a schema column the model already knows — but the unquoted
+    # remainder carries a customer NAME from an f-string message. One known
+    # quoted word must not rescue the whole message (the "value-safe" label
+    # would forward "Jane Doe" verbatim).
+    text = (
+        "Traceback (most recent call last):\n"
+        '  File "C:\\other\\lib.py", line 2, in f\n'
+        "ValueError: customer Jane Doe exceeds limit in field 'balance'"
+    )
+    result = _san(text, known="- balance: Int64\n- cost: Int64")
+    assert "Jane" not in result.text
+    assert "ValueError: <redacted:" in result.text
+
+
+def test_grouped_digit_residue_is_not_rescued():
+    # Thousands separators keep every digit run under 4 chars, so the long-run
+    # check alone misses 1,234,567 — the grouped-digit check must catch it even
+    # when every word in the residue is already known.
+    text = (
+        "Traceback (most recent call last):\n"
+        '  File "C:\\other\\lib.py", line 2, in f\n'
+        "SomeError: balance 1,234,567 exceeds limit for 'balance'"
+    )
+    result = _san(text, known="the balance exceeds this limit for that field")
+    assert "1,234,567" not in result.text
+
+
+def test_known_residue_words_still_rescue_a_template_message():
+    # The rescue is not dead: when the quoted token AND every longish residue
+    # word are already in-channel, the message survives verbatim.
+    text = (
+        "Traceback (most recent call last):\n"
+        '  File "C:\\other\\lib.py", line 2, in f\n'
+        "KeyError: column 'revenue' not found in the frame"
+    )
+    result = _san(text, known="the column revenue was not found in a frame")
+    assert "KeyError: column 'revenue' not found in the frame" in result.text
+    assert all(f.kind != tb.MESSAGE for f in result.findings)
+
+
 def test_non_ascii_message_is_redacted_with_char_count():
     message = "could not convert string to float: '£1,234'"
     text = (
@@ -408,7 +503,9 @@ def test_repeated_frame_marker_survives():
 
 def test_marimo_cell_frame_is_a_workspace_frame(tmp_path):
     # marimo runs the notebook file itself; a cell frame points at the .py in the
-    # workspace with the cell function named "_".
+    # workspace with the cell function named "_". The paste showed NO source line
+    # under the frame, so none is inserted (the sanitiser never ADDS text the
+    # paste didn't contain — that would be a disk-read channel; see below).
     (tmp_path / "nb.py").write_text("import marimo\ndf = load()\n", "utf-8")
     text = (
         "Traceback (most recent call last):\n"
@@ -417,7 +514,7 @@ def test_marimo_cell_frame_is_a_workspace_frame(tmp_path):
     )
     result = _san(text, workspace=tmp_path)
     assert 'File "nb.py", line 2, in _' in result.text
-    assert "df = load()" in result.text
+    assert "df = load()" not in result.text
 
 
 def test_posix_paths_reduce_to_basename():
@@ -467,3 +564,31 @@ def test_cli_check_reports_no_traceback(cfg, tmp_path, capsys):
     code = cli.cmd_ai_traceback_check(config.AppConfig(), cfg, args)
     assert code == 0
     assert "No traceback detected" in capsys.readouterr().out
+
+
+def test_cli_check_reads_powershell_utf16_files(cfg, tmp_path, capsys):
+    # PowerShell 5.1's `python x.py 2> tb.txt` / Out-File write UTF-16 LE — the
+    # very files users point this command at. It must sanitise them, not die
+    # with a raw UnicodeDecodeError (the no-raw-tracebacks command's own crash).
+    paste = tmp_path / "tb16.txt"
+    paste.write_bytes(_plain_tb().encode("utf-16"))  # BOM'd UTF-16, PS-style
+    args = argparse.Namespace(file=str(paste))
+    from mooring import cli
+
+    code = cli.cmd_ai_traceback_check(config.AppConfig(), cfg, args)
+    out = capsys.readouterr().out
+    assert code == 0
+    assert SECRET not in out
+    assert "KeyError: <redacted:" in out
+
+
+def test_cli_check_degrades_kindly_on_binary_files(cfg, tmp_path, capsys):
+    blob = tmp_path / "not-text.bin"
+    blob.write_bytes(b"\x89PNG\r\n\x1a\n\x00\xff\xfe")  # 11 bytes: bad UTF-8, odd for UTF-16
+    args = argparse.Namespace(file=str(blob))
+    from mooring import cli
+
+    code = cli.cmd_ai_traceback_check(config.AppConfig(), cfg, args)
+    out = capsys.readouterr().out
+    assert code == 1
+    assert "not UTF-8 or UTF-16 text" in out

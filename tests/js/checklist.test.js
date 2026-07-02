@@ -24,13 +24,17 @@ test("derive: a fresh repo-mode workspace has nothing ticked", () => {
   assert.deepEqual(done, { pulled: false, opened: false, duplicated: false, pushed: false });
 });
 
-test("derive: any remote-tracked row state proves a pull", () => {
-  for (const state of ["synced", "modified", "new remote", "conflict", "in review"]) {
+test("derive: only states that need a synced base prove a pull", () => {
+  for (const state of ["synced", "modified", "deleted locally", "remote changed",
+    "conflict", "mixed", "in review"]) {
     const items = CL.derive([f("notebooks/a.py", state)], null, {});
     assert.equal(byId(items).pulled, true, `state "${state}" should tick pulled`);
   }
-  // local-only states never do — they exist without any remote tracking.
-  for (const state of ["local", "new local"]) {
+  // Local-only states never do — they exist without any remote tracking — and
+  // neither do "new remote"/"deleted remotely": those come straight from the
+  // remote diff BEFORE any pull, so a new joiner (whole repo showing as
+  // "new remote") must still see step 1 unticked.
+  for (const state of ["local", "new local", "new remote", "deleted remotely"]) {
     const items = CL.derive([f("notebooks/a.py", state)], null, {});
     assert.equal(byId(items).pulled, false, `state "${state}" must not tick pulled`);
   }

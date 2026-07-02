@@ -184,7 +184,7 @@ because they gate what the copilot may *read*:
 
 | Key | Default | Meaning |
 |-----|---------|---------|
-| `semantic_model` | `true` | Let the copilot read a synced **Power BI semantic model** (a PBIP's TMDL): tables, columns, relationships, and measure DAX — authored code, never data. Partition/source M expressions, RLS roles, annotations, and translations are never read. Env override: `MOORING_AI_SEMANTIC_MODEL`. Preview with `mooring ai model check`. See [the semantic model](ai-privacy.md#power-bi-semantic-model). |
+| `semantic_model` | `true` | Let the copilot read a synced **Power BI semantic model** (a PBIP's TMDL): tables, columns, relationships, and measure DAX — authored code, never data. Partition/source M expressions and annotations are dropped at parse time (the table `.tmdl` is read; those parts are never captured); RLS role and translation files are never even opened. Env override: `MOORING_AI_SEMANTIC_MODEL`. Preview with `mooring ai model check`. See [the semantic model](ai-privacy.md#power-bi-semantic-model). |
 | `live_schema` | `true` | Read dataframe schemas (names + types only) live from the running kernel. See [live dataframe schemas](ai-privacy.md#live-dataframe-schemas-data-outside-the-workspace). |
 
 ### `[guard]` — in the synced `mooring.toml`, not here
