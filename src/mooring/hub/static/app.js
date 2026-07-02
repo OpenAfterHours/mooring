@@ -91,14 +91,16 @@ async function action(path, body, refreshAfter = true) {
   if (busy) return;
   setBusy(true);
   showError("");
+  let guardData = null;
   try {
     const data = await api(path, body || {});
-    // The push guard withheld file(s): not an error — open the confirm dialog
-    // (api() synthesized data.error from the 409; the dialog is the real UI).
+    // The push guard withheld file(s): not an error — the confirm dialog is
+    // the real UI (api() synthesized data.error from the 409). Opened AFTER
+    // setBusy(false) below, or its own buttons would be disabled.
     if (GuardFmt.needsDialog(data)) {
       delete data.error;
+      guardData = data;
       showLog(data);
-      showGuardDialog(data, path, body || {});
     } else {
       if (data.error) showError(data.error);
       showLog(data);
@@ -109,6 +111,7 @@ async function action(path, body, refreshAfter = true) {
     return data;
   } finally {
     setBusy(false);
+    if (guardData) showGuardDialog(guardData, path, body || {});
   }
 }
 
@@ -166,6 +169,21 @@ function showUndoToast(trashed) {
     box = document.createElement("div");
     box.id = "undo-toasts";
     document.body.appendChild(box);
+  }
+  // A big pull can bank dozens of pre-images; don't flood the viewport —
+  // show a few, then one summary pointing at the Trash panel (which has all).
+  if (trashed.length > 4) {
+    const summary = document.createElement("div");
+    summary.className = "undo-toast";
+    const label = document.createElement("span");
+    label.textContent = `${trashed.length} local copies replaced.`;
+    const link = document.createElement("a");
+    link.href = "/activity";
+    link.textContent = "Open Trash";
+    summary.append(label, link);
+    box.appendChild(summary);
+    setTimeout(() => summary.remove(), 15000);
+    trashed = trashed.slice(0, 3);
   }
   for (const entry of trashed) {
     const toast = document.createElement("div");
@@ -266,7 +284,14 @@ function showStaleDialog(file, kind) {
   pullBtn.classList.toggle("hidden", kind !== "pull");
   pullBtn.onclick = async () => {
     dialog.close();
-    await action("/api/pull", {});
+    const pulled = await action("/api/pull", {});
+    if (!pulled || pulled.error) return; // the pull failed — don't open a stale copy
+    // Re-evaluate against the refreshed rows: the pull may have skipped this
+    // file (it became conflicted meanwhile) — never open pretending it's fresh.
+    const fresh = lastFiles.find((f) => f.path === file.path);
+    if (!fresh || !fresh.has_local) return; // gone with the pull (deleted remotely)
+    const still = Freshness.warnState(fresh, staleDismissed);
+    if (still) return showStaleDialog(fresh, still);
     doOpen(file.path);
   };
   $("stale-open").onclick = () => {
@@ -385,13 +410,16 @@ let historyPath = null;
 let historyPage = 1;
 
 async function historyAction(path, page) {
-  historyPath = path;
-  historyPage = page || 1;
+  const target = page || 1;
   const data = await api(
-    `/api/history?path=${encodeURIComponent(path)}&page=${historyPage}`,
+    `/api/history?path=${encodeURIComponent(path)}&page=${target}`,
   );
   if (data.error) return showError(data.error);
-  renderHistory(path, data.versions || [], historyPage);
+  // Commit the panel state only on success, so a failed "Show older" retries
+  // the SAME page instead of silently skipping one.
+  historyPath = path;
+  historyPage = target;
+  renderHistory(path, data.versions || [], target);
 }
 
 async function viewVersion(path, sha, mode) {
@@ -693,7 +721,9 @@ function buildArtifactRows(artifact, files) {
   }
   const pointer = byPath.get(artifact.pointer);
   if (pointer?.has_local) {
-    actions.push(["Open", () => action("/api/open", { path: artifact.pointer }, false)]);
+    // Through openAction (not a bare /api/open) so the staleness guard covers
+    // the artifact header's Open exactly like every file row's.
+    actions.push(["Open", () => openAction(artifact.pointer)]);
     actions.push(["Delete", () => deleteAction(artifact.pointer, "project")]);
   }
 
@@ -968,7 +998,10 @@ async function refresh() {
   for (const id of ["btn-pull", "btn-push", "btn-propose"]) {
     $(id).classList.toggle("hidden", !state.logged_in);
   }
-  // Recall shows only while the manifest holds a recallable last push.
+  // Recall shows only while the manifest holds a recallable last push; the
+  // confirm names exactly which files it would revert (a stale record is the
+  // trap — this is how the user catches one).
+  recallPaths = state.recall_paths || [];
   $("btn-recall").classList.toggle("hidden", !(state.logged_in && state.can_recall));
   // Workspace-level "Batch build" — only when the opt-in orchestrator is enabled.
   $("btn-batch").classList.toggle("hidden", !state.ai_batch);
@@ -1197,10 +1230,15 @@ $("btn-propose").addEventListener("click", () => {
   const count = lastFiles.filter((f) => PUSH_STATES.has(f.state)).length;
   return proposeAction(null, count);
 });
+let recallPaths = [];
+
 $("btn-recall").addEventListener("click", () => {
+  const shown = recallPaths.slice(0, 8).join("\n  ");
+  const more = recallPaths.length > 8 ? `\n  …and ${recallPaths.length - 8} more` : "";
   const ok = confirm(
     "Undo your last push on GitHub?\n\n" +
-    "The previous version of each pushed file is written back to the team branch. " +
+    (shown ? `This reverts:\n  ${shown}${more}\n\n` : "") +
+    "The previous version of each file is written back to the team branch. " +
     "The pushed version stays in the repo's history — if you pushed a secret, you " +
     "still need to rotate it. If a teammate has pushed since, the recall stops with " +
     "a conflict instead of overwriting their work."
@@ -1328,7 +1366,12 @@ $("health-copy").addEventListener("click", () => {
 // from reasonably fresh rows without riding a polling loop or the rate limit.
 function maybeFocusRefresh() {
   if (document.visibilityState !== "visible" || busy) return;
-  if (Freshness.shouldAutoRefresh(lastStateAt, Date.now(), FOCUS_REFRESH_THROTTLE_MS)) refresh();
+  if (Freshness.shouldAutoRefresh(lastStateAt, Date.now(), FOCUS_REFRESH_THROTTLE_MS)) {
+    // Stamp BEFORE the fetch: returning to the tab fires both `focus` and
+    // `visibilitychange`, and without this both would start a refresh.
+    lastStateAt = Date.now();
+    refresh();
+  }
 }
 window.addEventListener("focus", maybeFocusRefresh);
 document.addEventListener("visibilitychange", maybeFocusRefresh);

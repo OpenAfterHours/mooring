@@ -632,17 +632,30 @@ def cmd_pull(cfg: config.Config, theirs: bool, keep_both: bool) -> int:
 
 
 def _push_guard_fn(cfg: config.Config, acknowledge: bool):
-    """The push guard for a CLI push/propose: scans every outgoing candidate
-    (mooring.pushguard) unless the user acknowledged the findings — and even
-    then only when the team's synced policy allows it ([guard] push = "warn").
-    Returns (guard_fn or None, collected, mode)."""
+    """The push guard for a CLI push/propose. Returns
+    ``(guard_fn, collected, mode, acknowledged)``.
+
+    ``--acknowledge-findings`` does NOT turn the scan off: the guard still runs
+    and everything it would have flagged is collected into ``acknowledged`` and
+    printed after the push — so the user sees exactly what they let out AT PUSH
+    TIME, and a finding that appeared since the first run can't ride out unseen
+    (the hub's token flow gets the same guarantee by binding tokens to bytes).
+    In block mode ([guard] push = "block") the flag is refused entirely."""
     from mooring import pushguard
 
     mode = workspace_config.guard_mode(cfg.workspace())
     if acknowledge and mode != "block":
-        return None, {}, mode
+        acknowledged: dict = {}
+
+        def allow_fn(rel_path: str, data: bytes) -> list[str]:
+            findings = pushguard.scan_text(rel_path, data)
+            if findings:
+                acknowledged[rel_path] = {"findings": findings}
+            return []
+
+        return allow_fn, {}, mode, acknowledged
     guard_fn, collected = pushguard.make_guard()
-    return guard_fn, collected, mode
+    return guard_fn, collected, mode, {}
 
 
 def _print_guard_findings(collected: dict, mode: str, verb: str) -> None:
@@ -663,12 +676,20 @@ def _print_guard_findings(collected: dict, mode: str, verb: str) -> None:
         )
 
 
+def _print_acknowledged(acknowledged: dict) -> None:
+    total = sum(len(info["findings"]) for info in acknowledged.values())
+    print(f"\nPushed with {total} acknowledged finding(s) — now visible to everyone:")
+    for path, info in sorted(acknowledged.items()):
+        for f in info["findings"]:
+            print(f"  {path}:{f.line}  {f.kind}")
+
+
 def cmd_push(
     cfg: config.Config, only_paths: list[str], message: str | None, acknowledge: bool = False
 ) -> int:
     from mooring import sync
 
-    guard_fn, collected, mode = _push_guard_fn(cfg, acknowledge)
+    guard_fn, collected, mode, acknowledged = _push_guard_fn(cfg, acknowledge)
     result = sync.push(
         _client(cfg), cfg, paths=only_paths or None, message=message, guard_fn=guard_fn
     )
@@ -683,6 +704,8 @@ def cmd_push(
     _print_sync_result(result)
     if collected:
         _print_guard_findings(collected, mode, "push")
+    if acknowledged:
+        _print_acknowledged(acknowledged)
     return 0 if not (result.blocked_conflicts or collected) else 1
 
 
@@ -691,7 +714,7 @@ def cmd_propose(
 ) -> int:
     from mooring import sync
 
-    guard_fn, collected, mode = _push_guard_fn(cfg, acknowledge)
+    guard_fn, collected, mode, acknowledged = _push_guard_fn(cfg, acknowledge)
     result = sync.propose(
         _client(cfg), cfg, paths=only_paths or None, message=message, guard_fn=guard_fn
     )
@@ -706,6 +729,8 @@ def cmd_propose(
     _print_sync_result(result)
     if collected:
         _print_guard_findings(collected, mode, "propose")
+    if acknowledged:
+        _print_acknowledged(acknowledged)
     return 0 if not (result.blocked_conflicts or collected) else 1
 
 
@@ -736,11 +761,17 @@ def cmd_scan(cfg: config.Config) -> int:
 
 
 def cmd_recall(cfg: config.Config, assume_yes: bool) -> int:
-    from mooring import sync
+    from mooring import manifest as manifest_mod, sync
 
+    recorded = sorted(manifest_mod.load(cfg.workspace()).last_push)
     if not assume_yes:
         if not sys.stdin.isatty():
             sys.exit("Refusing to recall the last push without confirmation. Re-run with --yes.")
+        # Name exactly what would be reverted — the way a stale record gets caught.
+        for rel in recorded[:12]:
+            print(f"  would revert {rel}")
+        if len(recorded) > 12:
+            print(f"  …and {len(recorded) - 12} more")
         prompt = (
             "Undo your last push on GitHub? The previous versions are written back; "
             "the pushed commit stays in history. [y/N] "

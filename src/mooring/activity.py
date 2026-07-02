@@ -38,13 +38,24 @@ def _ledger(workspace: Path | str) -> Path:
     return Path(workspace) / _STATE_DIR / _LEDGER_NAME
 
 
+def _norm(path) -> str:
+    """One path convention in the ledger (POSIX separators), so a CLI entry
+    recorded from a backslashed argument still matches the hub's filter."""
+    return str(path).replace("\\", "/").strip("/")
+
+
 def record(workspace: Path | str, op: str, **fields) -> None:
     """Append one entry, best-effort: a full disk or a locked file must never
     break the sync/delete/apply operation being recorded."""
     entry = {"ts": datetime.now(timezone.utc).isoformat(timespec="seconds"), "op": op}
     for key, value in fields.items():
-        if value or value == 0:
-            entry[key] = value
+        if not (value or value == 0):
+            continue
+        if key == "path":
+            value = _norm(value)
+        elif key == "paths" and isinstance(value, list):
+            value = [_norm(p) for p in value]
+        entry[key] = value
     path = _ledger(workspace)
     with contextlib.suppress(OSError, ValueError):
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -67,6 +78,7 @@ def read(workspace: Path | str, limit: int = 200, path: str | None = None) -> li
         lines = ledger.read_text("utf-8").splitlines()
     except OSError:
         return []
+    wanted = _norm(path) if path is not None else None
     out: list[dict] = []
     for line in reversed(lines):
         if len(out) >= limit:
@@ -77,7 +89,9 @@ def read(workspace: Path | str, limit: int = 200, path: str | None = None) -> li
             continue
         if not isinstance(entry, dict) or "op" not in entry:
             continue
-        if path is not None and entry.get("path") != path and path not in entry.get("paths", []):
+        if wanted is not None and entry.get("path") != wanted and wanted not in entry.get(
+            "paths", []
+        ):
             continue
         out.append(entry)
     return out

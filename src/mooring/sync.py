@@ -861,8 +861,23 @@ def restore_version(
         return result
     short = at[:7]
     if as_copy:
+        # "As copy" is the ALWAYS-SAFE path, so it must never overwrite anything:
+        # the name is deterministic, and a copy restored earlier may have been
+        # edited since — uniquify instead of clobbering (byte-identical is a no-op).
         p = Path(rel_path)
-        copy_path = str(p.with_name(f"{p.stem}.restored-{short}{p.suffix}")).replace("\\", "/")
+        copy_path = ""
+        for n in range(1, 100):
+            tail = "" if n == 1 else f"-{n}"
+            candidate = str(
+                p.with_name(f"{p.stem}.restored-{short}{tail}{p.suffix}")
+            ).replace("\\", "/")
+            target = workspace / candidate
+            if not target.is_file() or target.read_bytes() == data:
+                copy_path = candidate
+                break
+        if not copy_path:
+            result.lines.append(f"{rel_path}: too many restored copies of {short} — tidy up")
+            return result
         _write_blob(workspace, copy_path, data)
         result.reverted += 1
         result.lines.append(f"restored {rel_path} @ {short} as {copy_path} (a new local file)")
@@ -1072,6 +1087,14 @@ def _finalize_push(
     if recall_log:
         mft.last_push = dict(recall_log)
         mft.last_push_branch = cfg.branch
+    elif result.pushed or result.withheld or result.blocked_conflicts:
+        # The push did SOMETHING (review-branch writes, withheld or conflicted
+        # candidates) but recorded nothing recallable — a stale record from an
+        # earlier push must not survive it, or "Recall last push" would revert
+        # an older push than the user's last action. A true no-op push (nothing
+        # to do) keeps the record: nothing new happened.
+        mft.last_push = {}
+        mft.last_push_branch = ""
     mft.branch = cfg.branch
     manifest_mod.save(workspace, mft)
 
@@ -1105,31 +1128,43 @@ def recall(client: GitHubClientProtocol, cfg: Config) -> SyncResult:
         )
         return result
 
-    for path, rec in sorted(mft.last_push.items()):
-        prev, new = rec.get("prev"), rec.get("new")
-        try:
-            if prev is None:
-                # The push created it — recall removes it from the branch head.
-                client.delete_file(path, f"Recall {path} via mooring", cfg.branch, new)
-                mft.files.pop(path, None)
-                result.lines.append(f"recalled {path} (removed from {cfg.branch})")
-            else:
-                data = client.get_blob(prev)
-                response = client.put_file(
-                    path, data, f"Recall {path} via mooring", cfg.branch, base_sha=new
+    done: list[str] = []
+    try:
+        for path, rec in sorted(mft.last_push.items()):
+            prev, new = rec.get("prev"), rec.get("new")
+            try:
+                if prev is None:
+                    # The push created it — recall removes it from the branch head.
+                    client.delete_file(path, f"Recall {path} via mooring", cfg.branch, new)
+                    mft.files.pop(path, None)
+                    result.lines.append(f"recalled {path} (removed from {cfg.branch})")
+                else:
+                    data = client.get_blob(prev)
+                    response = client.put_file(
+                        path, data, f"Recall {path} via mooring", cfg.branch, base_sha=new
+                    )
+                    mft.files[path] = response["content"]["sha"]
+                    result.lines.append(f"recalled {path} (previous version restored)")
+            except RemoteConflict:
+                result.blocked_conflicts.append(path)
+                result.lines.append(
+                    f"conflict {path} (cannot recall — a teammate pushed on top; pull first)"
                 )
-                mft.files[path] = response["content"]["sha"]
-                result.lines.append(f"recalled {path} (previous version restored)")
-        except RemoteConflict:
-            result.blocked_conflicts.append(path)
-            result.lines.append(
-                f"conflict {path} (cannot recall — a teammate pushed on top; pull first)"
-            )
-            continue
-        except NotFound:
-            result.lines.append(f"could not recall {path} (previous version unavailable)")
-            continue
-        result.pushed += 1
+                continue
+            except NotFound:
+                result.lines.append(f"could not recall {path} (previous version unavailable)")
+                continue
+            done.append(path)
+            result.pushed += 1
+    except Exception:
+        # A mid-recall failure (rate limit, network) must not lose the files
+        # already recalled: persist their manifest updates, drop them from the
+        # record so a retry doesn't double-recall, keep the rest recallable,
+        # and force a live refetch. The error still propagates to the caller.
+        mft.last_push = {p: r for p, r in mft.last_push.items() if p not in done}
+        mft.head_commit = ""
+        manifest_mod.save(workspace, mft)
+        raise
 
     if result.pushed:
         result.lines.append(
@@ -1255,8 +1290,12 @@ def resolve(
     rel_path: str,
     strategy: ConflictStrategy,
     username: str = "",
+    guard_fn=None,
 ) -> SyncResult:
-    """Resolve a single conflicted file (hub per-file actions)."""
+    """Resolve a single conflicted file (hub per-file actions). ``guard_fn``
+    (see :func:`push`) scans PUSH_COPY's upload — the one resolve strategy that
+    writes local bytes to the shared branch — so the push guard covers every
+    road into the repo, including this one."""
     workspace = cfg.workspace()
     mft = manifest_mod.load(workspace)
     head = client.get_branch_head(cfg.branch)
@@ -1277,6 +1316,18 @@ def resolve(
         suffix = username or "copy"
         copy_path = str(p.with_name(f"{p.stem}-{suffix}{p.suffix}")).replace("\\", "/")
         data = gitsha.read_for_push(workspace / rel_path, rel_path)
+        if guard_fn is not None:
+            findings = guard_fn(copy_path, data)
+            if findings:
+                # Withheld, not resolved: the conflict stays visible and the
+                # adapters surface the findings exactly like a withheld push.
+                result.withheld.extend((copy_path, desc) for desc in findings)
+                noun = "finding" if len(findings) == 1 else "findings"
+                result.lines.append(
+                    f"withheld {copy_path} ({len(findings)} {noun} — fix or acknowledge)"
+                )
+                manifest_mod.save(workspace, mft)
+                return result
         _write_blob(workspace, copy_path, data)
         response = client.put_file(
             copy_path, data, f"Add {copy_path} via mooring (conflict copy)", cfg.branch

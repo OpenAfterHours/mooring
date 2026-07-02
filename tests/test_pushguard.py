@@ -98,3 +98,10 @@ def test_clean_file_yields_nothing():
     guard_fn, collected = pushguard.make_guard()
     assert guard_fn("notebooks/a.py", b"import marimo\napp = marimo.App()\n") == []
     assert collected == {}
+
+
+def test_oversized_text_file_is_flagged_not_skipped():
+    big = b"just text\n" * (500_000)  # ~5 MB, over the scan cap
+    findings = pushguard.scan_text("data/dump.txt", big)
+    assert findings
+    assert "too big to scan" in findings[0].kind

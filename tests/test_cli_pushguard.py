@@ -85,3 +85,14 @@ def test_recall_round_trip(workspace, monkeypatch, capsys):
     assert "recalled notebooks/a.py" in out
     assert "history" in out  # the honest note
     assert fake.get_blob(fake.tree["notebooks/a.py"]) == b"v1\n"
+
+
+def test_acknowledge_still_scans_and_prints_what_rode_out(workspace, monkeypatch, capsys):
+    fake = _fake_client(monkeypatch)
+    _write(workspace, "notebooks/leaky.py", SECRETY)
+    assert cli.main(["push", "--acknowledge-findings"]) == 0
+    out = capsys.readouterr().out
+    # The guard did not go silent: the user sees exactly what they let out.
+    assert "acknowledged finding(s)" in out
+    assert "notebooks/leaky.py:1  GitHub token" in out
+    assert "notebooks/leaky.py" in fake.tree

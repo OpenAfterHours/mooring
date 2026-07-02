@@ -153,6 +153,11 @@ def test_report_redaction_pins(tmp_path, monkeypatch):
     assert home not in report
     assert "~" in report  # collapsed, not dropped
     assert "1 fail" in report
+    # Org/repo names identify the customer; workspace-path hints end in them.
+    leaky = [doctor.ProbeResult("w", "Workspace", doctor.WARN, "Found acme and nbs in a path.")]
+    scrubbed = doctor.build_report(leaky, cfg)
+    assert "acme" not in scrubbed
+    assert "nbs" not in scrubbed
 
 
 def test_build_report_counts_header(cfg):

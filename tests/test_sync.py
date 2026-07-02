@@ -1,4 +1,4 @@
-"""Sync engine tests against an in-memory fake of the GitHub client."""
+﻿"""Sync engine tests against an in-memory fake of the GitHub client."""
 
 import time
 from dataclasses import replace
@@ -37,8 +37,8 @@ def test_discover_unsynced_folders_groups_by_top_level(cfg):
             "analysis/q2.py": b"print(2)\n",
             "analysis/notes.md": b"# notes\n",
             "lib/helpers.py": b"def f(): ...\n",
-            ".github/workflows/ci.yml": b"on: push\n",  # dot-dir — invisible to sync
-            "README.md": b"hi\n",  # loose root file — not a folder candidate
+            ".github/workflows/ci.yml": b"on: push\n",  # dot-dir â€” invisible to sync
+            "README.md": b"hi\n",  # loose root file â€” not a folder candidate
         }
     )
     candidates = sync.discover_unsynced_folders(client, cfg)
@@ -51,7 +51,7 @@ def test_discover_unsynced_folders_groups_by_top_level(cfg):
 def test_discover_descends_below_a_nested_synced_folder(cfg):
     # With a deep folder already synced (notebooks/team-a), a sibling out-of-scope file
     # must yield a candidate that does NOT overlap it (notebooks/team-b), with an
-    # accurate count — not the bare top-level "notebooks" that would re-cover team-a.
+    # accurate count â€” not the bare top-level "notebooks" that would re-cover team-a.
     client = FakeClient(
         {
             "notebooks/team-a/keep.py": b"print(1)\n",  # already synced (scoped)
@@ -113,7 +113,7 @@ def test_adopt_flow_registers_widens_and_pulls_then_stays_symmetric(cfg):
     assert read_local(wide, "analysis/q1.py") == "print(2)\n"
     assert read_local(wide, "lib/helpers.py") == "def f(): ...\n"
 
-    # Symmetry: once adopted, the folders read as SYNCED on both sides — a later push
+    # Symmetry: once adopted, the folders read as SYNCED on both sides â€” a later push
     # must NOT see them as local-only files to delete remotely.
     states = {f.path: f.state for f in sync.status(client, wide).files}
     assert states["analysis/q1.py"] is FileState.SYNCED
@@ -325,7 +325,7 @@ def test_pull_keep_both_saves_remote_copy_and_keeps_mine_pushable(cfg):
     copies = list((cfg.workspace() / "notebooks").glob("a.remote-*.py"))
     assert len(copies) == 1
     assert copies[0].read_text("utf-8") == "theirs\n"
-    # my version is now MODIFIED against the new remote base — pushable
+    # my version is now MODIFIED against the new remote base â€” pushable
     report = sync.status(client, cfg)
     assert [f.state for f in report.files if f.path == "notebooks/a.py"] == [FileState.MODIFIED]
 
@@ -334,7 +334,7 @@ def test_skipped_conflict_stays_conflict_on_next_cycle(cfg):
     """Regression: a default skip-pull must not let the head-commit fast path mask an
     unresolved conflict as MODIFIED on the next cycle. Before the fix, pull advanced
     head_commit while leaving the conflicted file's base sha stale, so the next status
-    served the stale sha as the 'remote' view and reclassified CONFLICT -> MODIFIED —
+    served the stale sha as the 'remote' view and reclassified CONFLICT -> MODIFIED â€”
     hiding the per-file resolution UI and wedging pull (no-op) / push (409) with no way
     out (the user-reported "pull never clears it, no choice offered" deadlock)."""
     client = FakeClient({"notebooks/a.py": b"v1\n"})
@@ -396,7 +396,7 @@ def test_push_local_delete(cfg):
 
 def test_delete_then_push_removes_remote(cfg):
     """End-to-end: deletion.delete() leaves the file as DELETED_LOCAL, and the
-    next push removes it from the team repo — the deletion module's contract."""
+    next push removes it from the team repo â€” the deletion module's contract."""
     from mooring import deletion
 
     client = FakeClient({"notebooks/a.py": b"v1\n", "notebooks/b.py": b"v1\n"})
@@ -433,7 +433,7 @@ def test_delete_pbip_then_push_removes_all_members(cfg):
 
 def test_delete_proposed_new_file_withdraws_it_from_review(cfg):
     """A brand-new file proposed for review, then deleted locally, must be
-    withdrawn from the open PR — not silently dropped (it was never on
+    withdrawn from the open PR â€” not silently dropped (it was never on
     cfg.branch, so classify would otherwise omit it entirely)."""
     from mooring import deletion
 
@@ -600,7 +600,7 @@ def test_merge_observed_clears_review_and_next_propose_is_fresh(cfg):
 
 def test_merge_then_keep_editing_pushes_cleanly(cfg):
     """After a proposal merges, editing the notebook again and pushing must go
-    straight to main without a spurious conflict — the sync base advanced to the
+    straight to main without a spurious conflict â€” the sync base advanced to the
     merged content rather than staying at the pre-proposal blob."""
     client = FakeClient({"notebooks/a.py": b"v1\n"})
     sync.pull(client, cfg)
@@ -875,7 +875,7 @@ def test_resolve_keep_both_saves_remote_copy(cfg):
 
 def test_resolve_keep_both_remote_deleted_keeps_local(cfg):
     # The resolve-only branch the helper declines: the remote was deleted, so keep
-    # my file and drop the base — it survives as a NEW_LOCAL, pushable file.
+    # my file and drop the base â€” it survives as a NEW_LOCAL, pushable file.
     client = FakeClient()
     client.seed("notebooks/a.py", b"v1\n")
     sync.pull(client, cfg)
@@ -927,7 +927,7 @@ def test_revert_takes_a_snapshot_before_overwriting(cfg):
 def test_revert_new_local_is_left_alone(cfg):
     client = FakeClient({"notebooks/a.py": b"v1\n"})
     sync.pull(client, cfg)
-    write_local(cfg, "notebooks/new.py", "fresh\n")  # NEW_LOCAL — no checkpoint
+    write_local(cfg, "notebooks/new.py", "fresh\n")  # NEW_LOCAL â€” no checkpoint
     result = sync.revert(client, cfg, "notebooks/new.py")
     assert result.reverted == 0
     assert read_local(cfg, "notebooks/new.py") == "fresh\n"  # not deleted
@@ -1095,7 +1095,7 @@ def test_scan_includes_platform_excludes_pbi_dir(cfg):
 
 def test_remote_dotfile_ignored_not_deleted(cfg):
     """Regression: a dotfile committed remotely (via real git) must be invisible
-    on both sides — previously it was pulled into the manifest, then looked
+    on both sides â€” previously it was pulled into the manifest, then looked
     locally deleted, and the next push deleted it from the repo."""
     client = FakeClient(
         {
@@ -1217,7 +1217,7 @@ def test_revert_of_notebook_does_not_double_bank(cfg):
 
 def test_safety_net_files_never_reach_scan_local(cfg):
     """Invariant pin: the trash and the activity ledger live in .mooring, which
-    sync excludes structurally — a workspace full of safety-net state yields
+    sync excludes structurally â€” a workspace full of safety-net state yields
     NOTHING new from scan_local, so it can never leak into a push."""
     from mooring import activity, trash
 
@@ -1322,3 +1322,93 @@ def test_recall_restores_a_pushed_deletion(cfg):
     result = sync.recall(client, cfg)
     assert result.pushed == 1
     assert client.get_blob(client.tree["notebooks/a.py"]) == b"v1\n"
+
+
+# -- review fixes: guard on push-copy, last_push staleness, recall failure ----
+
+
+def test_resolve_push_copy_is_guarded(cfg):
+    client = FakeClient({"notebooks/a.py": b"v1\n"})
+    sync.pull(client, cfg)
+    write_local(cfg, "notebooks/a.py", "secret-shaped\n")
+    client.seed("notebooks/a.py", b"theirs\n")  # -> CONFLICT
+    result = sync.resolve(
+        client, cfg, "notebooks/a.py", ConflictStrategy.PUSH_COPY, "phil",
+        guard_fn=lambda rel, data: ["line 1: GitHub token"],
+    )
+    # Withheld: nothing uploaded, local copy untouched, conflict still visible.
+    assert result.withheld
+    assert result.pushed == 0
+    assert "notebooks/a-phil.py" not in client.tree
+    assert read_local(cfg, "notebooks/a.py") == "secret-shaped\n"
+
+
+def test_review_branch_push_clears_stale_last_push(cfg):
+    client = FakeClient({"notebooks/a.py": b"v1\n"})
+    sync.pull(client, cfg)
+    write_local(cfg, "notebooks/a.py", "v2\n")
+    sync.push(client, cfg, throttle=0)  # Monday: recallable
+    assert manifest.load(cfg.workspace()).last_push
+    # Tuesday: the file rides an open proposal; pushes go to the review branch.
+    write_local(cfg, "notebooks/a.py", "v3\n")
+    sync.propose(client, cfg, throttle=0)
+    write_local(cfg, "notebooks/a.py", "v4\n")
+    sync.push(client, cfg, throttle=0)  # goes to the review branch
+    mft = manifest.load(cfg.workspace())
+    # Monday's record must NOT survive Tuesday's push, or Recall would revert
+    # the wrong (older) push on the team branch.
+    assert mft.last_push == {}
+
+
+def test_all_withheld_push_clears_stale_last_push(cfg):
+    client = FakeClient({"notebooks/a.py": b"v1\n"})
+    sync.pull(client, cfg)
+    write_local(cfg, "notebooks/a.py", "v2\n")
+    sync.push(client, cfg, throttle=0)
+    write_local(cfg, "notebooks/a.py", "v3\n")
+    result = sync.push(
+        client, cfg, throttle=0, guard_fn=lambda rel, data: ["line 1: finding"]
+    )
+    assert result.withheld
+    assert manifest.load(cfg.workspace()).last_push == {}
+
+
+def test_noop_push_keeps_last_push(cfg):
+    client = FakeClient({"notebooks/a.py": b"v1\n"})
+    sync.pull(client, cfg)
+    write_local(cfg, "notebooks/a.py", "v2\n")
+    sync.push(client, cfg, throttle=0)
+    sync.push(client, cfg, throttle=0)  # nothing to do
+    assert manifest.load(cfg.workspace()).last_push  # still recallable
+
+
+def test_recall_partial_failure_keeps_remaining_recallable(cfg, monkeypatch):
+    from mooring.github import GitHubError
+
+    client = FakeClient({"notebooks/a.py": b"v1\n", "notebooks/b.py": b"v1\n"})
+    sync.pull(client, cfg)
+    write_local(cfg, "notebooks/a.py", "v2\n")
+    write_local(cfg, "notebooks/b.py", "v2\n")
+    sync.push(client, cfg, throttle=0)
+
+    real_get_blob = client.get_blob
+    calls = {"n": 0}
+
+    def flaky_get_blob(sha):
+        calls["n"] += 1
+        if calls["n"] > 1:
+            raise GitHubError("rate limited")
+        return real_get_blob(sha)
+
+    monkeypatch.setattr(client, "get_blob", flaky_get_blob)
+    with pytest.raises(GitHubError):
+        sync.recall(client, cfg)
+    monkeypatch.setattr(client, "get_blob", real_get_blob)
+    mft = manifest.load(cfg.workspace())
+    # a.py was recalled (dropped from the record + base advanced); b.py stays
+    # recallable for a retry.
+    assert set(mft.last_push) == {"notebooks/b.py"}
+    assert client.get_blob(client.tree["notebooks/a.py"]) == b"v1\n"
+    retry = sync.recall(client, cfg)
+    assert retry.pushed == 1
+    assert client.get_blob(client.tree["notebooks/b.py"]) == b"v1\n"

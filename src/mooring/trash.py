@@ -58,9 +58,12 @@ def _dir(workspace: Path | str) -> Path:
 
 
 def _token(rel_path: str) -> str:
-    """An injective, time-sortable deposit token (also the blob/meta file stem)."""
+    """An injective, time-sortable deposit token (also the blob/meta file stem).
+    The slug is readability only (the hash carries injectivity), so it is capped —
+    on default Windows a deep workspace plus a long rel-path could otherwise push
+    the deposit filename past MAX_PATH and silently cost the file its safety net."""
     norm = str(rel_path).replace("\\", "/").strip("/")
-    slug = re.sub(r"[^A-Za-z0-9._-]", "_", norm) or "_"
+    slug = (re.sub(r"[^A-Za-z0-9._-]", "_", norm) or "_")[:40]
     digest = hashlib.sha1(norm.encode("utf-8")).hexdigest()[:8]
     return f"{slug}-{digest}-{int(time.time() * 1000):013d}-{secrets.token_hex(2)}"
 
@@ -166,7 +169,10 @@ def restore(workspace: Path | str, token: str) -> str:
         if not target.is_file():
             raise RestoreSuperseded(rel)
         current = target.read_bytes()
-        if _local_sha(current, rel) != after_sha:
+        # after_sha may be a manifest-convention sha (LF-normalized for .py) or a
+        # raw remote blob sha (a CRLF .py committed outside mooring hashes raw) —
+        # accept either, or every restore of such a file would refuse forever.
+        if after_sha not in (_local_sha(current, rel), blob_sha(current)):
             raise RestoreSuperseded(rel)
         # Undo is itself undoable: bank what the destructive action wrote.
         deposit(workspace, rel, current, "restore", after_sha=str(meta.get("sha") or ""))

@@ -86,9 +86,13 @@ async def api_resolve(request: Request) -> JSONResponse:
     data = await request.json()
     strategy = sync.ConflictStrategy(data["strategy"])
     username = hub.username() if strategy is sync.ConflictStrategy.PUSH_COPY else ""
-    return hub._sync_op(
-        "resolve",
-        lambda: sync.resolve(hub.client(), hub.cfg, data["path"], strategy, username),
+    # PUSH_COPY uploads local bytes to the shared branch — the one resolve
+    # strategy the push guard must cover, with the same warn-and-confirm flow.
+    return _guarded_sync_op(
+        hub, "resolve", data,
+        lambda guard_fn: sync.resolve(
+            hub.client(), hub.cfg, data["path"], strategy, username, guard_fn=guard_fn
+        ),
     )
 
 

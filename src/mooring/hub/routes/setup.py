@@ -79,10 +79,13 @@ def api_state(request: Request) -> JSONResponse:
         # /api/freshness can tell the client whether its cached rows are stale.
         hub._state_heads[str(cfg.workspace())] = report.head_commit
         # Whether "Recall last push" has anything to recall (a local manifest
-        # read — no extra API call). Drives the toolbar button's visibility.
+        # read — no extra API call), and WHICH files it would touch — the
+        # confirm dialog names them so the user can catch a stale record.
         from mooring import manifest as manifest_mod
 
-        body["can_recall"] = bool(manifest_mod.load(cfg.workspace()).last_push)
+        last_push = manifest_mod.load(cfg.workspace()).last_push
+        body["can_recall"] = bool(last_push)
+        body["recall_paths"] = sorted(last_push)
         if report.review_branch:
             body["review"] = {
                 "branch": report.review_branch,

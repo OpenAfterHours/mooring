@@ -1,4 +1,4 @@
-"""The local trash: deposit/restore round-trips, supersession, and retention."""
+﻿"""The local trash: deposit/restore round-trips, supersession, and retention."""
 
 import json
 
@@ -134,10 +134,37 @@ def test_prune_total_size_evicts_oldest_first(tmp_path):
     t_old = trash.deposit(tmp_path, "data/a.csv", b"x" * 600_000, "delete")
     meta_file = tmp_path / ".mooring" / "trash" / f"{t_old}.json"
     meta = json.loads(meta_file.read_text("utf-8"))
-    meta["ts"] = "2026-01-01T00:00:00+00:00"  # clearly older, well within keep_days? no —
+    meta["ts"] = "2026-01-01T00:00:00+00:00"  # clearly older, well within keep_days? no â€”
     meta_file.write_text(json.dumps(meta), "utf-8")
     trash.deposit(tmp_path, "data/b.csv", b"y" * 600_000, "delete")
     # Cap of 1 MB: both together exceed it; the OLDER entry is evicted.
     trash.prune(tmp_path, keep_days=100_000, max_total_mb=1)
     remaining = trash.entries(tmp_path)
     assert [e["path"] for e in remaining] == ["data/b.csv"]
+
+
+def test_restore_accepts_raw_crlf_after_sha(tmp_path):
+    # A .py committed with CRLF outside mooring: the remote blob sha is RAW
+    # (unnormalized), while the local convention normalizes .py to LF. The
+    # supersession check must accept either, or such deposits are unrestorable.
+    remote_crlf = b"x = 1\r\n"
+    token = trash.deposit(
+        tmp_path, "notebooks/a.py", b"mine\n", "pull-overwrite",
+        after_sha=gitsha.blob_sha(remote_crlf),  # raw sha, CRLF intact
+    )
+    (tmp_path / "notebooks").mkdir(parents=True)
+    (tmp_path / "notebooks/a.py").write_bytes(remote_crlf)
+    assert trash.restore(tmp_path, token) == "notebooks/a.py"
+    assert (tmp_path / "notebooks/a.py").read_bytes() == b"mine\n"
+
+
+def test_token_slug_is_capped_for_long_paths(tmp_path):
+    # A long FILENAME (not deep folders, which would exceed MAX_PATH for the
+    # restore destination itself): the token's slug must be capped so the flat
+    # trash blob name stays well inside the path budget.
+    deep = "notebooks/" + "x" * 120 + ".py"
+    token = trash.deposit(tmp_path, deep, b"x", "delete")
+    assert token is not None
+    # slug(40) + hash(8) + millis(13) + rand(4) + separators â€” bounded name.
+    assert len(token) <= 40 + 1 + 8 + 1 + 13 + 1 + 4
+    assert trash.restore(tmp_path, token) == deep

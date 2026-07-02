@@ -152,7 +152,19 @@ def _probe_github_auth(cfg: config.Config) -> ProbeResult:
             "Not logged in to GitHub.",
             "Run `mooring login` (or the hub's Log in button).",
         )
-    client = GitHubClient(token, cfg.owner, cfg.repo, host=cfg.host)
+    # Fail fast on a dead network before the real calls: the sync client's
+    # session auto-retries GETs with backoff, which is right for sync and wrong
+    # for a health check — a black-holed connection would sit for minutes.
+    try:
+        requests.get(githost.api_root(cfg.host), timeout=_REACH_TIMEOUT)
+    except requests.exceptions.RequestException:
+        return ProbeResult(
+            "auth", "GitHub login & repo access", UNKNOWN,
+            "Skipped — the GitHub host is unreachable (see the reachability check).",
+            "Fix the connection first, then re-run.",
+        )
+    # A plain session: no retry adapter, so the two calls below are bounded.
+    client = GitHubClient(token, cfg.owner, cfg.repo, host=cfg.host, session=requests.Session())
     try:
         client.get_user()
         client.get_branch_head(cfg.branch)
@@ -321,13 +333,17 @@ def render_lines(results: list[ProbeResult]) -> list[str]:
 
 def redact(text: str, cfg: config.Config) -> str:
     """Make report text safe to paste into a ticket: collapse the home directory,
-    the enterprise GitHub host, and the OS username. Second line of defence —
-    probes already emit curated strings, never raw exception dumps."""
+    the enterprise GitHub host, the org/repo names, and the OS username. Second
+    line of defence — probes already emit curated strings, never raw dumps."""
     home = str(Path.home())
     if home and home != "/":
         text = text.replace(home, "~").replace(home.replace("\\", "/"), "~")
     if cfg.host and cfg.host != githost.DEFAULT_HOST:
         text = text.replace(cfg.host, "<github-host>")
+    # Org/repo names identify the customer; workspace-path hints end in them.
+    for value, placeholder in ((cfg.owner, "<owner>"), (cfg.repo, "<repo>")):
+        if value and len(value) > 2:
+            text = text.replace(value, placeholder)
     try:
         user = getpass.getuser()
     except Exception:  # noqa: BLE001  # no login name — nothing to redact

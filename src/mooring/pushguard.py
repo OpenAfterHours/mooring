@@ -110,6 +110,14 @@ def scan_text(rel_path: str, data: bytes) -> list[Finding]:
             if 1 <= line <= len(lines) and PUSH_OK_MARKER in lines[line - 1]:
                 continue  # a reviewed false positive, retired in the diff
             findings.append(Finding(line=line, kind=kind))
+    else:
+        # No silent caps: a text file too big to scan is flagged instead of
+        # waved through — a multi-MB "text" file heading for the shared repo is
+        # exactly the data-dump shape the guard exists to question.
+        mb = len(data) // (1024 * 1024)
+        findings.append(
+            Finding(line=1, kind=f"large text file (~{mb} MB) — too big to scan; review it")
+        )
     rows = _looks_like_data_export(text, Path(rel_path).suffix.lower())
     if rows:
         findings.append(Finding(line=1, kind=f"bulk data export (~{rows} rows)"))

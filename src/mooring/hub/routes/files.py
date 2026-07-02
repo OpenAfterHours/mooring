@@ -218,7 +218,9 @@ async def api_history(request: Request) -> JSONResponse:
     try:
         versions = sync.history(hub.client(), hub.cfg, rel, page=page)
     except (GitHubError, OSError) as exc:
-        telemetry.log_error(exc=exc, op="history")
+        # Central telemetry never carries file paths — and a NotFound message
+        # embeds the request URL including contents/<path>, so log the TYPE only.
+        telemetry.log_error(exc=type(exc)("history read failed"), op="history")
         return JSONResponse({"error": str(exc)}, status_code=502)
     return JSONResponse({"path": rel, "page": page, "versions": versions})
 
@@ -243,7 +245,8 @@ async def api_history_file(request: Request) -> JSONResponse:
     try:
         _, data = hub.client().get_file_at(rel, at)
     except (GitHubError, OSError) as exc:
-        telemetry.log_error(exc=exc, op="history_file")
+        # Type only: a NotFound message embeds the contents/<path> URL.
+        telemetry.log_error(exc=type(exc)("history file read failed"), op="history_file")
         return JSONResponse({"error": str(exc)}, status_code=502)
     old = data.decode("utf-8", "replace")
     current = target.read_text("utf-8", errors="replace") if target.is_file() else ""
@@ -290,7 +293,8 @@ async def api_restore(request: Request) -> JSONResponse:
                 hub.client(), hub.cfg, rel, at, as_copy=as_copy, snapshot_fn=snapshot_fn
             )
     except (GitHubError, OSError) as exc:
-        telemetry.log_error(exc=exc, op="restore")
+        # Type only: a NotFound message embeds the contents/<path> URL.
+        telemetry.log_error(exc=type(exc)("restore failed"), op="restore")
         return JSONResponse({"error": str(exc)}, status_code=502)
     telemetry.log_event("restore", copy=int(as_copy), reverted=result.reverted)
     hub._activity(

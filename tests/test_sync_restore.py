@@ -137,3 +137,26 @@ def test_restored_copy_is_not_hidden_from_sync(cfg):
     assert copy_rel in sync.scan_local(cfg.workspace(), cfg.folders, cfg.exclude)
     # And the manifest still round-trips (guard for the earlier no-write pin).
     assert manifest.load(cfg.workspace()).files["notebooks/a.py"]
+
+def test_restore_as_copy_never_overwrites_an_edited_copy(cfg):
+    client = FakeClient({"notebooks/a.py": b"v1\n"})
+    old, _ = _pushed_versions(cfg, client)
+    sync.restore_version(client, cfg, "notebooks/a.py", old, as_copy=True)
+    copy_rel = f"notebooks/a.restored-{old[:7]}.py"
+    write_local(cfg, copy_rel, "my edits on the copy\n")
+    # Restoring the same version again must uniquify, not clobber the edits.
+    result = sync.restore_version(client, cfg, "notebooks/a.py", old, as_copy=True)
+    assert result.reverted == 1
+    assert read_local(cfg, copy_rel) == "my edits on the copy\n"
+    assert read_local(cfg, f"notebooks/a.restored-{old[:7]}-2.py") == "v1\n"
+
+
+def test_restore_as_copy_byte_identical_is_a_noop_rewrite(cfg):
+    client = FakeClient({"notebooks/a.py": b"v1\n"})
+    old, _ = _pushed_versions(cfg, client)
+    sync.restore_version(client, cfg, "notebooks/a.py", old, as_copy=True)
+    result = sync.restore_version(client, cfg, "notebooks/a.py", old, as_copy=True)
+    copy_rel = f"notebooks/a.restored-{old[:7]}.py"
+    assert read_local(cfg, copy_rel) == "v1\n"
+    assert not (cfg.workspace() / f"notebooks/a.restored-{old[:7]}-2.py").exists()
+    assert result.reverted == 1

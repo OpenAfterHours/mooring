@@ -1,4 +1,4 @@
-import tomllib
+﻿import tomllib
 
 import pytest
 from conftest import FakeClient
@@ -14,7 +14,7 @@ def unconfigured_client(tmp_path, monkeypatch):
     monkeypatch.setattr(paths, "user_config_dir", lambda: tmp_path / "appdata")
     monkeypatch.delenv("MOORING_TOKEN", raising=False)
     monkeypatch.delenv("MOORING_GITHUB_HOST", raising=False)
-    # No client_id, so unconfigured — but with a tmp workspace to keep file
+    # No client_id, so unconfigured â€” but with a tmp workspace to keep file
     # endpoints away from the real default workspace folder.
     spec = config.RepoSpec(alias="ws", owner="", repo="", workspace_path=str(tmp_path / "ws"))
     hub = Hub(config.AppConfig(repos=(spec,), active_alias="ws"))
@@ -44,7 +44,7 @@ def test_state_includes_ui_theme(unconfigured_client):
 
 def test_index_inlines_the_default_theme(unconfigured_client):
     # The pre-paint script's server-default fallback is rendered, not the literal
-    # token — so a fresh browser paints in the configured theme with no flash.
+    # token â€” so a fresh browser paints in the configured theme with no flash.
     client, hub = unconfigured_client
     text = client.get("/").text
     assert "__MOORING_DEFAULT_THEME__" not in text
@@ -212,7 +212,7 @@ def test_open_warning_includes_shadow(unconfigured_client, monkeypatch):
 
 
 def test_local_mode_new_lists_and_opens_without_login(unconfigured_client, monkeypatch):
-    # The headline: create a notebook, see it listed as "local", and open it — all
+    # The headline: create a notebook, see it listed as "local", and open it â€” all
     # with no repo and no GitHub token. The editor is faked so no marimo spawns.
     client, _hub = unconfigured_client
 
@@ -349,7 +349,7 @@ def test_state_env_frozen_build_notes_rebuild(unconfigured_client, monkeypatch):
 
 def test_local_mode_ai_open_surfaces_provider_failure(unconfigured_client, monkeypatch):
     # AI is reachable in local mode (no repo/login); if Copilot isn't available the
-    # open fails cleanly as a 502 the chat UI can show — not a crash.
+    # open fails cleanly as a 502 the chat UI can show â€” not a crash.
     client, hub = unconfigured_client
     ws = hub.cfg.workspace()
     ws.mkdir(parents=True, exist_ok=True)
@@ -697,7 +697,7 @@ def test_undo_superseded_when_a_later_snapshot_is_on_top(configured):
     t2 = client.post("/api/rollback", json={"path": "notebooks/a.py"}).json()["undo_token"]
     assert t1 != t2
     stale = client.post("/api/undo", json={"path": "notebooks/a.py", "token": t1})
-    assert stale.status_code == 409  # superseded — left the file alone
+    assert stale.status_code == 409  # superseded â€” left the file alone
     assert nb.read_text("utf-8") == "v1\n"
     fresh = client.post("/api/undo", json={"path": "notebooks/a.py", "token": t2})
     assert fresh.status_code == 200
@@ -731,7 +731,7 @@ def test_undo_rejects_traversal(configured):
 
 
 class _RecordingLock:
-    """A threading.Lock stand-in that counts acquisitions (deterministic — no timing)."""
+    """A threading.Lock stand-in that counts acquisitions (deterministic â€” no timing)."""
 
     def __init__(self):
         import threading
@@ -750,13 +750,13 @@ class _RecordingLock:
 
 
 def test_rollback_apply_and_undo_serialize_on_the_same_lock(configured):
-    """The per-notebook undo stack is shared by THREE write paths — sync rollback
+    """The per-notebook undo stack is shared by THREE write paths â€” sync rollback
     (/api/rollback), AI Apply (apply_with_undo, called by BOTH the chat and the
     batch Apply), and Undo/restore (restore_undo, behind /api/undo and the chat
-    rollback). All three must serialize on the SAME lock — hub.apply.lock, owned
-    by the app/apply.py guard — or a concurrent pair can race the snapshot stack.
+    rollback). All three must serialize on the SAME lock â€” hub.apply.lock, owned
+    by the app/apply.py guard â€” or a concurrent pair can race the snapshot stack.
     Pinned deterministically by swapping in a counting lock and driving each path
-    once — if a refactor moves any path onto its own lock, its acquisition lands
+    once â€” if a refactor moves any path onto its own lock, its acquisition lands
     on the wrong object and the count here stops adding up."""
     from mooring import notebook_template
 
@@ -856,14 +856,14 @@ def test_chat_open_rejects_traversal(unconfigured_client):
 
 def test_chat_open_reports_ready_for_stub_session(unconfigured_client, stub_chat):
     # The stub session is ready the instant it's constructed, so the open response
-    # tells the UI it can enable the input immediately (no "connecting…" gate).
+    # tells the UI it can enable the input immediately (no "connectingâ€¦" gate).
     client, hub = unconfigured_client
     assert _open_chat(client, hub).json()["ready"] is True
 
 
 def test_chat_open_defers_live_schema_probe(unconfigured_client, stub_chat, monkeypatch):
     # The live-kernel probe must NOT run during chat-open (it's deferred to the first
-    # turn). If it did, this would blow up — proving it's off the open critical path.
+    # turn). If it did, this would blow up â€” proving it's off the open critical path.
     from mooring.ai import introspect
 
     client, hub = unconfigured_client
@@ -899,7 +899,7 @@ def test_chat_datasets_disabled_when_ai_off(tmp_path, monkeypatch):
 
 def test_state_no_longer_walks_datasets(configured, monkeypatch):
     # The recursive dataset walk moved off /api/state (it's only used by the chat,
-    # which fetches /api/ai/datasets) — so /api/state must not call list_datasets.
+    # which fetches /api/ai/datasets) â€” so /api/state must not call list_datasets.
     from mooring import schema
 
     client, _, _, _ = configured
@@ -965,7 +965,7 @@ def test_chat_send_streams_events(unconfigured_client, stub_chat):
 
 def test_chat_send_refreshes_live_schema(unconfigured_client, stub_chat, monkeypatch):
     # A dataframe added to the kernel AFTER chat-open is picked up on the next turn,
-    # without reopening — and is not re-injected on later turns while unchanged.
+    # without reopening â€” and is not re-injected on later turns while unchanged.
     from mooring.ai import introspect
     from mooring.schema import DatasetSchema
 
@@ -994,13 +994,13 @@ def test_chat_send_refreshes_live_schema(unconfigured_client, stub_chat, monkeyp
 
 def test_chat_send_live_schema_value_free(unconfigured_client, stub_chat, monkeypatch):
     # The per-turn refresh reuses the value-free introspect render, so a data value
-    # can never ride into the prefix — only names + dtypes do.
+    # can never ride into the prefix â€” only names + dtypes do.
     from mooring.ai import introspect
     from mooring.schema import DatasetSchema
 
     client, hub = unconfigured_client
     sid = _open_chat(client, hub).json()["sid"]
-    # DatasetSchema structurally holds only (name, columns, n_rows) — no values. The
+    # DatasetSchema structurally holds only (name, columns, n_rows) â€” no values. The
     # render must surface the column NAME but nothing that looks like a value.
     frames = [DatasetSchema(name="t", columns=(("acct", "String"),), n_rows=7)]
     monkeypatch.setattr(introspect, "live_dataset_schemas", lambda *a, **k: list(frames))
@@ -1019,7 +1019,7 @@ def test_chat_apply_writes_cell_into_notebook(unconfigured_client, stub_chat):
     # The cell was written into the .py source (marimo --watch shows it in the tab).
     nb = (hub.cfg.workspace() / "nb.py").read_text("utf-8")
     assert "result = 41 + 1" in nb
-    assert "﻿" not in nb  # no BOM (the marimo parser rejects it)
+    assert "ï»¿" not in nb  # no BOM (the marimo parser rejects it)
 
 
 def test_chat_apply_rejects_empty_code(unconfigured_client, stub_chat):
@@ -1333,7 +1333,7 @@ def test_chat_apply_blocked_after_disable_leaves_file_untouched(unconfigured_cli
 
 
 def test_chat_rollback_blocked_after_disable(unconfigured_client, stub_chat):
-    # Rollback also writes the notebook, so it must be gated like apply — otherwise a
+    # Rollback also writes the notebook, so it must be gated like apply â€” otherwise a
     # disabled notebook could still be rewritten through the undo path.
     from mooring import workspace_config
 
@@ -1384,7 +1384,7 @@ class _FakeModelProvider:
 class _FakeUnauthorizedProvider:
     """Signed in, but the account can't USE Copilot: list_models returns [] and
     reports WHY (a 403), exactly like CopilotProvider after a models.list 403. The
-    auth probe still says "connected" — authorization is a separate gate."""
+    auth probe still says "connected" â€” authorization is a separate gate."""
 
     def list_models(self, force=False):
         return []
@@ -1417,7 +1417,7 @@ def test_chat_models_lists_models(unconfigured_client, monkeypatch):
 
 
 def test_chat_models_surfaces_authorization_error(unconfigured_client, monkeypatch):
-    # An unlicensed account must not silently get an empty picker — the 403 reason
+    # An unlicensed account must not silently get an empty picker â€” the 403 reason
     # rides along so the settings page / chat can tell the user to fix access.
     client, _ = unconfigured_client
     monkeypatch.setattr("mooring.ai.get_provider", lambda app_cfg: _FakeUnauthorizedProvider())
@@ -1534,7 +1534,7 @@ class _FakeAuthProvider:
 
         self.running = True
         self.connect_host = host
-        return ProviderStatus("copilot", available=True, connected=False, detail="Browser opening…")
+        return ProviderStatus("copilot", available=True, connected=False, detail="Browser openingâ€¦")
 
     def login_state(self):
         return {"running": self.running, "output": ["visit https://github.com/login/device"]}
@@ -1592,7 +1592,7 @@ def test_ai_login_poll_pending_then_ok(unconfigured_client, monkeypatch):
     pending = client.get("/api/ai/login/poll").json()
     assert pending["status"] == "pending"  # browser still open
     # The captured CLI output (where `copilot login` prints the device code + URL)
-    # MUST ride along so the UI can show it — switching account is impossible
+    # MUST ride along so the UI can show it â€” switching account is impossible
     # otherwise. ChatCore.parseDeviceLogin pulls the code out of these lines.
     assert pending["output"] == ["visit https://github.com/login/device"]
     # The user authorised in the browser; the CLI exited and the account is connected.
@@ -1703,7 +1703,7 @@ def test_batch_apply_writes_the_proposal_into_the_notebook(batch_client):
     assert resp.status_code == 200 and resp.json()["ok"] is True
     nb = (hub.cfg.workspace() / "notebooks/rev.py").read_text("utf-8")
     assert "df.describe()" in nb  # the stub's proposed cell landed
-    assert "﻿" not in nb  # no BOM
+    assert "ï»¿" not in nb  # no BOM
 
 
 def test_batch_apply_unknown_batch_404(batch_client):
@@ -1726,7 +1726,7 @@ def test_batch_refine_folds_note_into_brief_and_rebuilds(batch_client):
     job = tray2["jobs"][0]
     assert job["status"] == "built"
     assert "use a bar chart" in job["brief"]  # the revision note was folded in
-    # The notebook on disk is still the skeleton — nothing applied yet.
+    # The notebook on disk is still the skeleton â€” nothing applied yet.
     nb = (hub.cfg.workspace() / "notebooks/rev.py").read_text("utf-8")
     assert "df.describe()" not in nb
 
@@ -1795,7 +1795,7 @@ def test_batch_force_unknown_batch_404(batch_client):
 
 def test_batch_refine_inherits_a_forced_jobs_override(batch_client, monkeypatch):
     # A force-built job stays overridden: refining it must NOT re-block on the same flagged
-    # brief — the revision auto-confirms, and the override stays visible on the result.
+    # brief â€” the revision auto-confirms, and the override stays visible on the result.
     from mooring.ai.chat import StubChatSession
 
     client, _ = batch_client
@@ -1929,7 +1929,7 @@ def test_batch_page_404_when_ai_off(tmp_path, monkeypatch):
 
 
 def test_batch_add_appends_more_jobs_to_an_open_run(batch_client):
-    # Kick off one job, then add another to the SAME run while it builds — the tray
+    # Kick off one job, then add another to the SAME run while it builds â€” the tray
     # accumulates both. This is the "write the next while the first runs" workflow.
     client, hub = batch_client
     opened = client.post("/api/ai/batch/open", json={"jobs": [{"name": "first", "brief": "do a"}]})
@@ -2048,7 +2048,7 @@ def test_state_includes_declared_folders(unconfigured_client):
 
 def test_blank_stub_py_is_a_notebook_not_a_module(unconfigured_client):
     # A blank/whitespace-only .py opens as a fresh notebook (the open guards allow it),
-    # so the listing must classify it as a notebook — never badge it 'module' while
+    # so the listing must classify it as a notebook â€” never badge it 'module' while
     # /api/open would happily open it.
     client, hub = unconfigured_client
     ws = hub.cfg.workspace()
@@ -2138,7 +2138,7 @@ def test_state_adds_github_url_for_remote_files(configured):
     client, _, fake, tmp_path = configured
     # A file that exists on the remote branch but not on disk (new-remote).
     fake.seed("notebooks/shared.py", b"import marimo\napp = marimo.App()\n")
-    # A file that exists only locally, never pushed (new-local) — no remote blob.
+    # A file that exists only locally, never pushed (new-local) â€” no remote blob.
     write_ws(tmp_path, "ws1", "notebooks/localonly.py", "x = 1\n")
     files = {f["path"]: f for f in client.get("/api/state").json()["files"]}
     assert files["notebooks/shared.py"]["github_url"] == (
@@ -2148,7 +2148,7 @@ def test_state_adds_github_url_for_remote_files(configured):
 
 
 def test_state_no_github_url_in_local_mode(unconfigured_client):
-    # No repo configured → no remote → no View-on-GitHub link.
+    # No repo configured â†’ no remote â†’ no View-on-GitHub link.
     client, hub = unconfigured_client
     ws = hub.cfg.workspace()
     (ws / "notebooks").mkdir(parents=True, exist_ok=True)
@@ -2176,15 +2176,15 @@ def test_freshness_fresh_after_state_and_stale_after_remote_moves(configured):
     client.get("/api/state")  # records the rendered head
     data = client.get("/api/freshness").json()
     assert data == {"fresh": True, "head": fake.head}
-    fake.seed("notebooks/new.py", b"x\n")  # a teammate pushes → the head moves
+    fake.seed("notebooks/new.py", b"x\n")  # a teammate pushes â†’ the head moves
     data = client.get("/api/freshness").json()
     assert data["fresh"] is False
-    client.get("/api/state")  # re-render — the client caught up
+    client.get("/api/state")  # re-render â€” the client caught up
     assert client.get("/api/freshness").json()["fresh"] is True
 
 
 def test_freshness_before_any_state_render_reports_fresh(configured):
-    # Nothing rendered yet → nothing cached to be stale against.
+    # Nothing rendered yet â†’ nothing cached to be stale against.
     client, _, _, _ = configured
     assert client.get("/api/freshness").json()["fresh"] is True
 
@@ -2204,13 +2204,13 @@ def test_freshness_github_error_maps_502(configured, monkeypatch):
 
 
 def test_freshness_local_mode_is_always_fresh(unconfigured_client):
-    # No repo → nothing can be stale; the endpoint must not try to reach GitHub.
+    # No repo â†’ nothing can be stale; the endpoint must not try to reach GitHub.
     client, _ = unconfigured_client
     assert client.get("/api/freshness").json() == {"fresh": True, "head": ""}
 
 
 def test_open_has_no_server_side_staleness_gate(configured, monkeypatch):
-    """Invariant pin: the staleness guard is purely client-side and advisory —
+    """Invariant pin: the staleness guard is purely client-side and advisory â€”
     a `remote changed` file still opens through /api/open with no new gate."""
 
     class FakeEditor:
@@ -2491,3 +2491,40 @@ def test_api_doctor_appends_copilot_probe_when_ai_enabled(configured, monkeypatc
     assert body["results"][0]["id"] == "copilot"
     assert body["results"][0]["status"] == "pass"
     assert "@phil" in body["results"][0]["detail"]
+
+
+def test_appjs_element_ids_all_exist_in_index_html():
+    """Wiring pin: every element id app.js looks up must exist in index.html.
+    A load-time addEventListener on a missing element throws and kills the whole
+    hub frontend, so this catches renamed/forgotten ids before a browser does."""
+    import re
+    from importlib import resources
+
+    static = resources.files("mooring.hub").joinpath("static")
+    app_js = (static / "app.js").read_text("utf-8")
+    index_html = (static / "index.html").read_text("utf-8")
+    ids = set(re.findall(r'\$\("([A-Za-z0-9_-]+)"\)', app_js))
+    assert ids  # the pattern must keep matching if $() changes shape
+    created = set(re.findall(r'\.id = "([A-Za-z0-9_-]+)"', app_js))  # built by app.js itself
+    missing = [i for i in sorted(ids - created) if f'id="{i}"' not in index_html]
+    assert not missing, f"app.js references ids missing from index.html: {missing}"
+
+
+def test_resolve_push_copy_goes_through_the_guard(configured):
+    client, hub, fake, tmp_path = configured
+    _seed_and_pull(hub, fake, "notebooks/a.py")
+    (tmp_path / "ws1" / "notebooks/a.py").write_text(_SECRETY, "utf-8", newline="\n")
+    fake.seed("notebooks/a.py", b"theirs\n")  # -> CONFLICT
+    resp = client.post("/api/resolve", json={"path": "notebooks/a.py", "strategy": "push-copy"})
+    assert resp.status_code == 409
+    body = resp.json()
+    assert body["guard_findings"][0]["path"] == "notebooks/a-phil.py"
+    assert "notebooks/a-phil.py" not in fake.tree  # withheld, not uploaded
+    # Acknowledge with the token -> the resolution completes.
+    tokens = [f["token"] for f in body["guard_findings"]]
+    resp2 = client.post(
+        "/api/resolve",
+        json={"path": "notebooks/a.py", "strategy": "push-copy", "confirm_tokens": tokens},
+    )
+    assert resp2.status_code == 200
+    assert "notebooks/a-phil.py" in fake.tree
