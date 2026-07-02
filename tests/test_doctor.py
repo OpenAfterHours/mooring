@@ -78,6 +78,22 @@ def test_auth_probe_curated_fixes(cfg, monkeypatch):
     assert limited.status == doctor.WARN
 
 
+def test_auth_probe_network_drop_mid_check_is_a_tailored_hiccup(cfg, monkeypatch):
+    # The reachability pre-check succeeds, then the connection drops during
+    # get_user(). GitHubClient._send re-raises every transport failure as
+    # Unreachable (never a raw RequestException), so the probe must keep its own
+    # UNKNOWN "network hiccup" answer instead of escaping to run_probes' generic
+    # "Diagnostic probe — This check could not run." replacement row.
+    from mooring.github import Unreachable
+
+    monkeypatch.setattr(doctor.requests, "get", lambda url, timeout: object())
+    result = _auth_probe_with(monkeypatch, cfg, Unreachable("connection dropped"))
+    assert result.status == doctor.UNKNOWN
+    assert result.title == "GitHub login & repo access"
+    assert "hiccup" in result.detail
+    assert "re-run" in result.fix.lower()
+
+
 def test_auth_probe_not_logged_in_and_not_configured(cfg, monkeypatch, tmp_path):
     monkeypatch.setattr(doctor.auth, "get_token", lambda host=None: "")
     assert doctor._probe_github_auth(cfg).status == doctor.WARN

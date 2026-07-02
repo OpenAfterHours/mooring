@@ -4,9 +4,19 @@ icon: lucide/book-open
 
 # Handover explainer: explain this notebook
 
-!!! note "Status: proposed"
-    Designed 2026-07 from a multi-agent ideation review; not yet implemented.
-    Scope and phasing may change as it is built.
+!!! success "Status: implemented"
+    All four phases shipped 2026-07: the `/explain` slash command (fixed prompt
+    + compact label as pinned pure constants in `chat_core.js`, with a
+    `submitMessage(message, visibleLabel)` refactor so `/retry` re-shows the
+    compact label too), the hub **Explain** action (`openChatWindow(path, opts)`
+    + `&explain=1`, auto-run consumed by a once-per-window flag at both
+    readiness paths so a `/model` or effort switch never re-fires it), the
+    **Add as notes cell** follow-up (offered on the explain reply when the turn
+    goes idle; `notesCellPrompt()` demands `mooring_propose_cell` only, with the
+    disclaimer inside the cell), and the docs. Entirely static-JS (L4) as
+    designed — zero new Python, endpoints, or config keys, checked by the
+    unchanged route-table pin in `tests/test_hub_routes.py`. The optional
+    `insert` op (notes cell at the top) remains out of scope.
 
 ## Problem
 
@@ -48,8 +58,9 @@ Two entry points, one existing channel:
   `printHelp`, extended in phase 1.
 
 `/explain` sends one **fixed, value-free prompt** through the ordinary send
-path (`/api/ai/chat/send` → `session.send` → the `_pii_gate` prompt valve in
-`src/mooring/ai/chat.py`). The prompt instructs the model to:
+path (`/api/ai/chat/send` in `src/mooring/hub/routes/chat.py` → `session.send`
+→ the `_pii_gate` prompt valve in `src/mooring/ai/session.py`). The prompt
+instructs the model to:
 
 1. call `mooring_read_notebook_source` first — its output enumerates cells as
    `# === cell N ===` blocks, which gives every claim a checkable anchor;
@@ -72,16 +83,17 @@ card offers an "Add as notes cell" button. It sends a canned follow-up turn
 asking the model to propose the walkthrough as a single markdown documentation
 cell via the existing `mooring_propose_cell` tool. That proposal flows through
 the normal card → Apply → `/api/ai/chat/apply` path, so it gets the same review
-step, the same `_apply_with_undo` byte snapshot (`src/mooring/hub/server.py`),
-and the same `--watch` reload in the open editor. The cell then syncs with the
-notebook like any other edit.
+step, the same `ApplyGuard.apply_with_undo` byte snapshot
+(`src/mooring/app/apply.py` — which also re-checks the per-notebook AI opt-out
+under its lock), and the same `--watch` reload in the open editor. The cell
+then syncs with the notebook like any other edit.
 
 Two deliberate adaptations from the ideation sketch, following the code:
 
 - **No new one-shot endpoint or read-only hub panel.** The sanctioned AI
   channel in the code is the per-notebook streaming chat session
   (`api_chat_open` / `api_chat_send` / the SSE stream in
-  `src/mooring/hub/server.py`); every prompt passes `_pii_gate`, and the
+  `src/mooring/hub/routes/chat.py`); every prompt passes `_pii_gate`, and the
   disabled-notebook gate is re-checked at each egress (`_disabled_block`). A
   separate one-shot call would duplicate that machinery and create a second
   egress surface to audit. Rendering in the chat window also keeps the output

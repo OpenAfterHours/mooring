@@ -1,6 +1,7 @@
 import base64
 
 import pytest
+import requests
 import responses
 
 from mooring.github import (
@@ -9,6 +10,8 @@ from mooring.github import (
     GitHubError,
     RefAlreadyExists,
     RemoteConflict,
+    TlsFailure,
+    Unreachable,
     blob_url,
     compare_url,
 )
@@ -260,6 +263,77 @@ def test_list_commits_for_path_empty_page():
     assert client().list_commits_for_path("notebooks/a.py", "main", page=9) == []
 
 
+# -- compare (the pull digest's one-request horizon window) -------------------
+
+
+@responses.activate
+def test_compare_request_shape_and_raw_passthrough():
+    responses.add(
+        responses.GET,
+        f"{REPO}/compare/aaa111...bbb222",
+        json={
+            "total_commits": 2,
+            "commits": [
+                {
+                    "sha": "c1",
+                    "commit": {
+                        "message": "Update notebooks/a.py via mooring",
+                        "author": {"name": "Maria", "date": "2026-06-30T09:00:00Z"},
+                    },
+                    "author": {"login": "maria"},
+                },
+                {
+                    "sha": "c2",
+                    "commit": {
+                        "message": "Update notebooks/b.py via mooring",
+                        "author": {"name": "Maria", "date": "2026-06-30T09:00:05Z"},
+                    },
+                    "author": {"login": "maria"},
+                },
+            ],
+            "files": [
+                {"filename": "notebooks/a.py", "status": "modified"},
+                {"filename": "notebooks/b.py", "status": "added"},
+            ],
+        },
+    )
+    data = client().compare("aaa111", "bbb222")
+    # Raw dict passthrough — callers (mooring.whatsnew) shape it themselves.
+    assert data["total_commits"] == 2
+    assert [c["sha"] for c in data["commits"]] == ["c1", "c2"]
+    assert [f["filename"] for f in data["files"]] == ["notebooks/a.py", "notebooks/b.py"]
+    assert responses.calls[0].request.url.endswith("/compare/aaa111...bbb222")
+
+
+@responses.activate
+def test_compare_lost_anchor_raises_notfound():
+    # A GC'd or force-pushed-away base 404s — the "anchor lost" signal callers
+    # treat as "fall back to per-file commit lookups".
+    from mooring.github import NotFound
+
+    responses.add(responses.GET, f"{REPO}/compare/gone111...head222", status=404)
+    with pytest.raises(NotFound):
+        client().compare("gone111", "head222")
+
+
+@responses.activate
+def test_compare_surfaces_auth_and_rate_errors():
+    from mooring.github import RateLimited
+
+    responses.add(responses.GET, f"{REPO}/compare/a...b", status=401)
+    with pytest.raises(AuthFailed):
+        client().compare("a", "b")
+    responses.reset()
+    responses.add(
+        responses.GET,
+        f"{REPO}/compare/a...b",
+        status=403,
+        headers={"x-ratelimit-remaining": "0", "x-ratelimit-reset": "1"},
+    )
+    with pytest.raises(RateLimited):
+        client().compare("a", "b")
+
+
 @responses.activate
 def test_get_file_at_inline_content():
     responses.add(
@@ -299,6 +373,102 @@ def test_get_file_at_missing_raises_notfound():
     responses.add(responses.GET, f"{REPO}/contents/notebooks/gone.py", status=404)
     with pytest.raises(NotFound):
         client().get_file_at("notebooks/gone.py", "ref1")
+
+
+# -- transport classification (offline / outage / proxy TLS) ------------------
+# Every session call goes through the _send seam, so a transport failure — no
+# HTTP response at all — maps to Unreachable/TlsFailure on reads AND writes,
+# including the version-history and pull-digest endpoints added later.
+
+
+@responses.activate
+def test_connection_error_on_a_read_is_unreachable():
+    responses.add(
+        responses.GET,
+        f"{REPO}/git/ref/heads/main",
+        body=requests.exceptions.ConnectionError("dns down"),
+    )
+    with pytest.raises(Unreachable, match="unreachable"):
+        client().get_branch_head("main")
+
+
+@responses.activate
+def test_connection_error_on_a_write_is_unreachable():
+    responses.add(
+        responses.PUT,
+        f"{REPO}/contents/notebooks/a.py",
+        body=requests.exceptions.ConnectionError("connection refused"),
+    )
+    with pytest.raises(Unreachable):
+        client().put_file("notebooks/a.py", b"data", "msg", "main", base_sha="oldsha")
+
+
+@responses.activate
+def test_ssl_error_is_tlsfailure_a_subtype_of_unreachable():
+    responses.add(
+        responses.GET, f"{API_ROOT}/user", body=requests.exceptions.SSLError("bad handshake")
+    )
+    with pytest.raises(TlsFailure, match="proxy") as exc_info:
+        client().get_user()
+    assert isinstance(exc_info.value, Unreachable)  # one `except Unreachable` covers both
+
+
+@responses.activate
+def test_connect_timeout_is_unreachable():
+    responses.add(
+        responses.GET,
+        f"{REPO}/git/blobs/{'a' * 40}",
+        body=requests.exceptions.ConnectTimeout("timed out"),
+    )
+    with pytest.raises(Unreachable):
+        client().get_blob("a" * 40)
+
+
+@responses.activate
+def test_history_and_compare_reads_are_unreachable_too():
+    # The newer endpoints (version history, pull digest) ride the same seam.
+    responses.add(responses.GET, f"{REPO}/commits", body=requests.exceptions.ConnectionError("x"))
+    with pytest.raises(Unreachable):
+        client().list_commits_for_path("notebooks/a.py", "main")
+    responses.reset()
+    responses.add(
+        responses.GET,
+        f"{REPO}/contents/notebooks/a.py",
+        body=requests.exceptions.ConnectionError("x"),
+    )
+    with pytest.raises(Unreachable):
+        client().get_file_at("notebooks/a.py", "ref1")
+    responses.reset()
+    responses.add(
+        responses.GET, f"{REPO}/compare/a...b", body=requests.exceptions.ConnectionError("x")
+    )
+    with pytest.raises(Unreachable):
+        client().compare("a", "b")
+
+
+@responses.activate
+def test_http_401_is_authfailed_never_unreachable():
+    # The conservative-classification pin: anything that DID produce an HTTP
+    # response classifies in _check. A fixable auth problem must never hide
+    # behind an "offline" banner (and an outage must never delete the token).
+    responses.add(responses.GET, f"{API_ROOT}/user", json={}, status=401)
+    with pytest.raises(AuthFailed) as exc_info:
+        client().get_user()
+    assert not isinstance(exc_info.value, Unreachable)
+
+
+@responses.activate
+def test_other_request_exceptions_stay_generic_githuberror():
+    # e.g. a malformed redirect: loud, not "offline" — misclassifying a broken
+    # proxy answer as an outage would hide a diagnosable problem.
+    responses.add(
+        responses.GET,
+        f"{REPO}/git/ref/heads/main",
+        body=requests.exceptions.TooManyRedirects("loop"),
+    )
+    with pytest.raises(GitHubError) as exc_info:
+        client().get_branch_head("main")
+    assert not isinstance(exc_info.value, Unreachable)
 
 
 @responses.activate

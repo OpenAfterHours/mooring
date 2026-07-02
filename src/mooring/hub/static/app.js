@@ -17,6 +17,7 @@ const STATE_BADGES = {
 };
 
 const PUSH_STATES = new Set(["modified", "new local", "deleted locally"]);
+const PULL_STATES = new Set(["remote changed", "new remote", "deleted remotely"]);
 
 // Appearance, shared with the chat window (same origin) via this localStorage
 // key; a `storage` event lets an open chat re-theme live. The server is the
@@ -36,6 +37,9 @@ function applyTheme(theme) {
 let busy = false;
 let showAddRepo = false;
 let lastFiles = [];
+let lastArtifacts = [];
+let lastFolders = [];
+let lastReview = null;
 let aiChatEnabled = false;
 // When the last /api/state landed (client clock) and whether it was logged in —
 // the freshness banner's inputs. There is no server-side "last refreshed" time:
@@ -43,6 +47,11 @@ let aiChatEnabled = false;
 // open tab, not of the workspace.
 let lastStateAt = null;
 let lastLoggedIn = false;
+// GitHub is unreachable: /api/state carried an `offline` payload and the rows
+// are the last OBSERVED sync state. Network actions (pull/push/propose/resolve/
+// review/history/discard/recall/what's-new) hide behind the amber banner;
+// local work (Open/Reveal/Undo/Delete/Duplicate/AI) stays live.
+let offlineMode = false;
 const FOCUS_REFRESH_THROTTLE_MS = 60_000;
 
 async function api(path, body) {
@@ -150,7 +159,19 @@ function showGuardDialog(data, apiPath, body) {
     const confirmed = Object.assign({}, body, {
       confirm_tokens: GuardFmt.allTokens(findings),
     });
-    action(apiPath, confirmed);
+    action(apiPath, confirmed).then((data) => {
+      if (!data || data.error || data.needs_confirm) return;
+      // The confirmed re-POST bypasses the ORIGINAL caller's .then continuation
+      // (pushAction/proposeAction/reviewSend attached theirs to the first,
+      // 409'd request) — re-run the success effects here, or a push completed
+      // via "Push anyway" never ticks the checklist and leaves the Review panel
+      // open showing a stale diff with a live "Push this file" button.
+      if (apiPath === "/api/push" || apiPath === "/api/propose") checklistSet("pushed");
+      if (reviewPath && (body.paths || []).includes(reviewPath)) {
+        $("review-card").classList.add("hidden");
+        reviewPath = null;
+      }
+    });
   };
   $("guard-cancel").onclick = () => dialog.close();
   dialog.showModal();
@@ -213,9 +234,13 @@ function showUndoToast(trashed) {
 
 // Pop the copilot out into its own window (not a tab) so it sits beside the
 // notebook. The window features are what make the browser open a window rather
-// than a tab; a per-notebook name reuses/focuses an already-open chat window.
-function openChatWindow(path) {
-  const url = `/ai/chat?notebook=${encodeURIComponent(path)}`;
+// than a tab; a per-notebook name reuses/focuses an already-open chat window —
+// keyed on the path ALONE, so "Explain" (opts.explain adds &explain=1, which
+// auto-runs /explain once the session is ready) targets the same window as "AI"
+// instead of spawning a second chat for the notebook.
+function openChatWindow(path, opts) {
+  let url = `/ai/chat?notebook=${encodeURIComponent(path)}`;
+  if (opts && opts.explain) url += "&explain=1";
   const name = "mooringAI_" + path.replace(/[^a-z0-9]/gi, "_");
   const height = Math.min(960, window.screen?.availHeight || 900);
   const win = window.open(url, name, `popup,width=560,height=${height},left=80,top=60`);
@@ -232,7 +257,8 @@ async function doOpen(path) {
   const prev = summary.textContent;
   summary.textContent = "Starting the editor…";
   try {
-    await action("/api/open", { path }, false);
+    const data = await action("/api/open", { path }, false);
+    if (data && !data.error) checklistSet("opened");
   } finally {
     summary.textContent = prev;
   }
@@ -331,6 +357,17 @@ function revealAction(path) {
   return action("/api/reveal", { path });
 }
 
+// A safe playground: byte-copy this notebook to a personal {stem}-{login}-draft.py
+// sibling. To the three-way engine the draft is just a new local file — it can never
+// conflict with the team file and is only shared by an explicit push. The response's
+// url auto-opens the copy in the editor (action() handles it).
+function duplicateAction(path) {
+  return action("/api/duplicate", { path }).then((data) => {
+    if (data && !data.error) checklistSet("duplicated");
+    return data;
+  });
+}
+
 // Open an external URL (e.g. GitHub) in a new tab, severing window.opener so the
 // opened page can't navigate this hub tab (external-site hygiene).
 function openExternal(url) {
@@ -339,14 +376,22 @@ function openExternal(url) {
 }
 
 // The contents API is throttled to ~1 file/s; tell the user a long push is alive.
+// A push guard 409 (needs_confirm) means nothing sensitive went yet, so it never
+// ticks the checklist's push item — only a clean success does.
 function pushAction(paths, count) {
   if (count > 3) $("summary").textContent = `Pushing ${count} file(s)… (~${Math.ceil(count * 0.8)}s)`;
-  return action("/api/push", paths ? { paths } : {});
+  return action("/api/push", paths ? { paths } : {}).then((data) => {
+    if (data && !data.error && !data.needs_confirm) checklistSet("pushed");
+    return data;
+  });
 }
 
 function proposeAction(paths, count) {
   if (count > 3) $("summary").textContent = `Proposing ${count} file(s)… (~${Math.ceil(count * 0.8)}s)`;
-  return action("/api/propose", paths ? { paths } : {});
+  return action("/api/propose", paths ? { paths } : {}).then((data) => {
+    if (data && !data.error && !data.needs_confirm) checklistSet("pushed");
+    return data;
+  });
 }
 
 function deleteAction(path, kind) {
@@ -506,19 +551,244 @@ $("history-close").addEventListener("click", () => {
   historyPath = null;
 });
 
+// -- review changes (the cell-aware pre-push diff + the optional push note) --
+// Read-only by design: the only inputs are the note field and the footer's
+// per-file Push/Propose — resolving hunks in place would be a merge tool.
+
+let reviewPath = null;
+
+async function reviewAction(path) {
+  const data = await api("/api/diff", { path });
+  if (data.error) return showError(data.error);
+  reviewPath = path;
+  renderReview(path, data);
+}
+
+function renderReview(path, result) {
+  const card = $("review-card");
+  card.classList.remove("hidden");
+  $("review-title").textContent = `Review changes — ${path}`;
+  $("review-summary").textContent = DiffFmt.summary(result);
+  const cellsBox = $("review-cells");
+  cellsBox.textContent = ""; // clear children — diff text is untrusted, plain text only
+  const view = $("review-view");
+  view.textContent = "";
+  view.classList.add("hidden");
+  if (result.kind === "cells") {
+    for (const block of DiffFmt.buildBlocks(result.cells)) {
+      const cell = document.createElement("div");
+      cell.className = "review-cell";
+      const label = document.createElement("div");
+      label.className = `review-cell-label review-${block.status}`;
+      label.textContent = block.label;
+      cell.appendChild(label);
+      if (block.diff) {
+        const pre = document.createElement("pre");
+        pre.className = "review-cell-diff";
+        pre.textContent = block.diff;
+        cell.appendChild(pre);
+      }
+      cellsBox.appendChild(cell);
+    }
+  } else if (result.kind === "lines") {
+    view.textContent = result.line_diff || "(no differences against the last-synced version)";
+    view.classList.remove("hidden");
+  }
+  // kind "binary": the summary line (sizes only) is the whole story.
+  $("review-note").value = "";
+  card.scrollIntoView({ block: "nearest" });
+}
+
+// Per-file Push/Propose with the optional note as the commit message. Through
+// the shared action() helper so the push-guard 409 dialog (whose confirm
+// re-POST re-sends this body, note included), busy state, and undo toasts all
+// keep working. Ticks the checklist exactly like pushAction: only a clean
+// success (a guard 409 means nothing sensitive went yet). The panel stays open
+// on a 409 so the note survives the user's "Push anyway" decision visibly.
+function reviewSend(apiPath) {
+  if (!reviewPath) return;
+  const body = { paths: [reviewPath] };
+  const note = $("review-note").value.trim();
+  if (note) body.message = note;
+  action(apiPath, body).then((data) => {
+    if (data && !data.error && !data.needs_confirm) {
+      checklistSet("pushed");
+      $("review-card").classList.add("hidden");
+      reviewPath = null;
+    }
+  });
+}
+
+$("review-push").addEventListener("click", () => reviewSend("/api/push"));
+$("review-propose").addEventListener("click", () => reviewSend("/api/propose"));
+$("review-close").addEventListener("click", () => {
+  $("review-card").classList.add("hidden");
+  reviewPath = null;
+});
+
+// -- what's new (the pull digest) + the per-file watch set -------------------
+// The digest answers "who changed what since MY last sync" (server-computed
+// against the manifest horizon); watching a file promotes it — a badge on its
+// row when teammate changes wait, and its digest entry sorts first. The watch
+// set is client-side only (localStorage per repo, the theme-mirror posture).
+
+let watchKey = null;
+let watchedPaths = new Set();
+let lastWhatsnew = null;
+let lastWhatsnewTitle = "What's new";
+
+function loadWatched(repo) {
+  watchKey = repo ? WhatsnewFmt.watchKey(repo) : null;
+  let raw = null;
+  try {
+    raw = watchKey ? localStorage.getItem(watchKey) : null;
+  } catch {
+    // localStorage unavailable (private mode) — watching quietly degrades.
+  }
+  watchedPaths = WhatsnewFmt.watchSet(raw);
+}
+
+function toggleWatch(path) {
+  if (watchedPaths.has(path)) watchedPaths.delete(path);
+  else watchedPaths.add(path);
+  try {
+    if (watchKey) localStorage.setItem(watchKey, WhatsnewFmt.watchSerialize(watchedPaths));
+  } catch {
+    // best-effort persistence; the in-memory set still drives this session
+  }
+  renderFiles(lastFiles, lastArtifacts, lastFolders); // re-badge + relabel the menus
+  if (lastWhatsnew && !$("whatsnew-card").classList.contains("hidden")) {
+    renderWhatsnew(lastWhatsnew, lastWhatsnewTitle); // re-sort watched-first
+  }
+}
+
+function watchBadge() {
+  const span = document.createElement("span");
+  span.className = "badge watched";
+  span.textContent = "watched";
+  span.title = "You watch this file — a teammate's change is waiting to pull.";
+  return span;
+}
+
+async function whatsnewAction() {
+  const data = await api("/api/whatsnew");
+  if (data.error) return showError(data.error);
+  renderWhatsnew(data, "What's new since your last sync");
+}
+
+// Expand one entry to a compact "what actually changed" summary (cell counts
+// for notebooks, line counts otherwise). BOTH shas ride from the digest entry:
+// remote_sha so the summary matches the panel even if the branch moved, and
+// base_sha because after a pull the manifest already points at the remote sha —
+// a server-derived base would diff the pulled blob against itself and report
+// "no cell changes" for the very change the panel is describing.
+async function whatsnewDetail(entry, slot, btn) {
+  btn.disabled = true;
+  btn.textContent = "…";
+  const data = await api("/api/whatsnew/detail", {
+    path: entry.path,
+    remote_sha: entry.remote_sha || "",
+    base_sha: entry.base_sha || "",
+  });
+  if (data.error) {
+    btn.disabled = false;
+    btn.textContent = "Details";
+    return showError(data.error);
+  }
+  btn.remove();
+  slot.textContent = WhatsnewFmt.detailSummary(data);
+}
+
+function renderWhatsnew(digest, title) {
+  lastWhatsnew = digest;
+  lastWhatsnewTitle = title || lastWhatsnewTitle;
+  const card = $("whatsnew-card");
+  card.classList.remove("hidden");
+  $("whatsnew-title").textContent = lastWhatsnewTitle;
+  const now = Date.now();
+  const note = $("whatsnew-note");
+  if (digest.attributed === false) {
+    note.textContent = "Couldn't read the commit history — showing sync states only.";
+  } else if (digest.truncated) {
+    note.textContent =
+      "A long time away — GitHub truncated the commit window, so attribution may be partial.";
+  } else {
+    note.textContent = "Read-only: Pull applies these; a conflict is resolved from its file row.";
+  }
+  const groupsBox = $("whatsnew-groups");
+  groupsBox.textContent = "";
+  for (const g of (digest.groups || []).slice(0, 5)) {
+    const div = document.createElement("div");
+    div.textContent = WhatsnewFmt.groupLabel(g, now);
+    groupsBox.appendChild(div);
+  }
+  const tbody = $("whatsnew-table").querySelector("tbody");
+  tbody.innerHTML = "";
+  const entries = WhatsnewFmt.sortEntries(digest.entries || [], watchedPaths);
+  if (!entries.length) {
+    const tr = document.createElement("tr");
+    const td = document.createElement("td");
+    td.colSpan = 3;
+    td.className = "muted";
+    td.textContent = "Nothing new — you're up to date.";
+    tr.appendChild(td);
+    tbody.appendChild(tr);
+  }
+  for (const entry of entries) {
+    const tr = document.createElement("tr");
+    const pathTd = document.createElement("td");
+    pathTd.className = "path";
+    pathTd.textContent = entry.path;
+    if (watchedPaths.has(entry.path)) pathTd.append(" ", watchBadge());
+    const stateTd = document.createElement("td");
+    const badge = document.createElement("span");
+    badge.className = `badge ${STATE_BADGES[entry.state] || ""}`;
+    badge.textContent = entry.state;
+    stateTd.appendChild(badge);
+    const whoTd = document.createElement("td");
+    const label = document.createElement("span");
+    label.textContent = WhatsnewFmt.entryLabel(entry, now) || "—";
+    whoTd.appendChild(label);
+    // Details needs at least one blob to diff; the endpoint 404s otherwise.
+    if (entry.remote_sha || entry.base_sha) {
+      const slot = document.createElement("span");
+      slot.className = "muted";
+      const btn = document.createElement("button");
+      btn.className = "small";
+      btn.textContent = "Details";
+      btn.addEventListener("click", () => whatsnewDetail(entry, slot, btn));
+      whoTd.append(" ", btn, " ", slot);
+    }
+    tr.append(pathTd, stateTd, whoTd);
+    tbody.appendChild(tr);
+  }
+  card.scrollIntoView({ block: "nearest" });
+}
+
+$("btn-whatsnew").addEventListener("click", whatsnewAction);
+$("whatsnew-close").addEventListener("click", () => {
+  $("whatsnew-card").classList.add("hidden");
+});
+
 function fileActions(file, opts) {
   opts = opts || {};
   const actions = [];
-  if (file.state === "conflict") {
+  // Offline every NETWORK action is skipped — the banner explains why. The
+  // conflict resolves, Push/Propose, "Review changes…" (fetches the base blob),
+  // "Discard my changes" (ditto), and "History…" all need the team repo. A
+  // conflicted row keeps its badge: the cached remote still classifies it.
+  if (file.state === "conflict" && !offlineMode) {
     actions.push(
       ["Use remote", () => action("/api/resolve", { path: file.path, strategy: "theirs" })],
       ["Keep both", () => action("/api/resolve", { path: file.path, strategy: "keep-both" })],
       ["Push as copy", () => action("/api/resolve", { path: file.path, strategy: "push-copy" })],
     );
-  } else if (PUSH_STATES.has(file.state)) {
+  } else if (PUSH_STATES.has(file.state) && !offlineMode) {
     actions.push(
-      ["Push", () => action("/api/push", { paths: [file.path] })],
-      ["Propose", () => action("/api/propose", { paths: [file.path] })],
+      // First, above Push: see what a push would publish before publishing it.
+      ["Review changes…", () => reviewAction(file.path)],
+      ["Push", () => pushAction([file.path], 1)],
+      ["Propose", () => proposeAction([file.path], 1)],
     );
     // "Discard my changes" (né Revert) restores the last synced version.
     // Notebook-only: data files and Power BI members aren't snapshotted (so an
@@ -532,7 +802,7 @@ function fileActions(file, opts) {
   }
   // History: every pushed version of this file (the git-free time machine).
   // Never-synced files have no history; PBIP members restore only whole.
-  if (HistoryFmt.hasHistory(file) && !opts.member) {
+  if (HistoryFmt.hasHistory(file) && !opts.member && !offlineMode) {
     actions.push(["History…", () => historyAction(file.path)]);
   }
   // A one-shot Undo for a file just reverted this session (snapshot kept server-side).
@@ -548,6 +818,12 @@ function fileActions(file, opts) {
   const openable = isNotebook || file.path.endsWith(".pbip");
   if (openable && file.has_local) {
     actions.push(["Open", () => openAction(file.path)]);
+  }
+  // A fearless personal copy: {stem}-{login}-draft.py in the same folder, opened
+  // at once. Notebooks only (a PBIP member never satisfies isNotebook) — a draft
+  // never flows back into the original automatically; fold work back by hand.
+  if (isNotebook && file.has_local) {
+    actions.push(["Duplicate as draft", () => duplicateAction(file.path)]);
   }
   // A plain helper module (non-marimo .py) can't open in marimo (it would be rewritten
   // into notebook form), so instead of Open it gets Reveal — open it in the file manager
@@ -568,7 +844,13 @@ function fileActions(file, opts) {
   // off switch for "this notebook now handles PII; don't let AI touch it by mistake".
   // Modules (non-notebook .py) get no AI: the copilot operates on notebooks.
   if (aiChatEnabled && isNotebook && file.has_local) {
-    if (!file.ai_disabled) actions.push(["AI", () => openChatWindow(file.path)]);
+    if (!file.ai_disabled) {
+      actions.push(["AI", () => openChatWindow(file.path)]);
+      // Explain: the same chat window, but it auto-runs /explain once ready — a
+      // cell-anchored walkthrough for picking up a teammate's notebook. Same gate
+      // as AI (and it IS a model turn, so the ai_disabled opt-out applies).
+      actions.push(["Explain", () => openChatWindow(file.path, { explain: true })]);
+    }
     const label = file.ai_disabled ? "Enable AI" : "Disable AI";
     actions.push([label, () =>
       action("/api/ai/notebook/toggle", { notebook: file.path, disabled: !file.ai_disabled })]);
@@ -578,6 +860,15 @@ function fileActions(file, opts) {
   // structurally broken artifact.
   if (file.has_local && !opts.member) {
     actions.push(["Delete", () => deleteAction(file.path)]);
+  }
+  // Watch: promote this file — its row badges when a teammate change waits and
+  // its What's-new entry sorts first. Per-repo and client-side only; a plain
+  // menu button like every other action, never auto-run (the actionsMenu rule).
+  if (watchKey && file.state !== "local") {
+    actions.push([
+      watchedPaths.has(file.path) ? "Unwatch" : "Watch",
+      () => toggleWatch(file.path),
+    ]);
   }
   return actions;
 }
@@ -672,6 +963,11 @@ function buildFileRow(file, opts) {
   const extras = [];
   if (file.shadows) extras.push(" ", shadowBadge(file.shadows));
   if (file.is_module) extras.push(" ", moduleBadge());
+  // A watched file with a teammate change waiting gets its promotion badge —
+  // quiet otherwise (watching an in-sync file must not add row noise).
+  if (watchedPaths.has(file.path) && PULL_STATES.has(file.state)) {
+    extras.push(" ", watchBadge());
+  }
   const pathCell = extras.length ? [display, ...extras] : display;
   return buildRow(pathCell, file.state, fileActions(file, opts), file.path);
 }
@@ -704,12 +1000,22 @@ function buildArtifactRows(artifact, files) {
   if (artifact.to_push) counts.push(`${artifact.to_push} to push`);
   if (artifact.to_pull) counts.push(`${artifact.to_pull} to pull`);
   if (artifact.conflicts) counts.push(`${artifact.conflicts} conflicted`);
+  // The semantic-model summary (server-side, mtime-cached): what the copilot
+  // could read of this project — plus the synced per-model opt-out state.
+  const modelBits = artifact.model
+    ? ` · model: ${artifact.model.tables} tables, ${artifact.model.measures} measures` +
+      (artifact.ai_model_disabled ? " (AI off)" : "")
+    : "";
   detail.textContent =
     `— Power BI project, ${artifact.members.length} files` +
-    (counts.length ? ` (${counts.join(", ")})` : "");
+    (counts.length ? ` (${counts.join(", ")})` : "") +
+    modelBits;
 
   const actions = [];
-  if (artifact.to_push) {
+  // Offline the header's Push/Propose hide exactly like a file row's (see
+  // fileActions) — the cached report still computes to_push, but the network
+  // actions live behind the amber banner.
+  if (artifact.to_push && !offlineMode) {
     const paths = artifact.members.filter((p) => {
       const f = byPath.get(p);
       return f && PUSH_STATES.has(f.state);
@@ -725,6 +1031,15 @@ function buildArtifactRows(artifact, files) {
     // the artifact header's Open exactly like every file row's.
     actions.push(["Open", () => openAction(artifact.pointer)]);
     actions.push(["Delete", () => deleteAction(artifact.pointer, "project")]);
+  }
+  // Per-model AI opt-out (synced mooring.toml): shown whenever the project has a
+  // readable semantic model and the copilot is on. A plain menu button like every
+  // other action (the actionsMenu rule — never auto-run). Disabling applies to
+  // chats opened AFTER the toggle; tools are bound when a chat opens.
+  if (aiChatEnabled && artifact.model) {
+    const label = artifact.ai_model_disabled ? "Enable AI on model" : "Disable AI on model";
+    actions.push([label, () =>
+      action("/api/ai/model/toggle", { model: artifact.key, disabled: !artifact.ai_model_disabled })]);
   }
 
   const header = buildRow([caret, name, detail], artifact.state, actions, artifact.name);
@@ -831,6 +1146,25 @@ function renderFreshnessBanner() {
   banner.appendChild(btn);
 }
 
+// "GitHub unreachable — showing sync state as of N min ago." Loud and amber:
+// the rows below are the last OBSERVED remote view (server-cached), not live.
+// `offline` is /api/state's payload: { reason: "tls"|"network", as_of: ISO|"" }.
+function renderOfflineBanner(offline) {
+  const banner = $("offline-banner");
+  banner.classList.toggle("hidden", !offline);
+  if (!offline) return;
+  const what = offline.reason === "tls"
+    ? "Couldn't make a secure connection to GitHub (a proxy may be interfering)"
+    : "GitHub is unreachable";
+  const asOf = offline.as_of ? Date.parse(offline.as_of) : NaN;
+  const shown = Number.isNaN(asOf)
+    ? "no cached sync state yet"
+    // Math.max: clock skew must not blank the age ("just now" is honest enough).
+    : `showing sync state as of ${Freshness.ageText(Math.max(0, Date.now() - asOf))}`;
+  banner.textContent = `${what} — ${shown}. ` +
+    "Editing works normally; push and pull resume when you're back online.";
+}
+
 function renderReviewBanner(review) {
   const banner = $("review-banner");
   banner.innerHTML = "";
@@ -845,6 +1179,63 @@ function renderReviewBanner(review) {
   banner.appendChild(a);
 }
 
+// -- first-run checklist (the self-ticking ramp; pure derivation in checklist.js) --
+// Progress lives in localStorage under a per-repo key (the LS_THEME posture:
+// best-effort, private mode just means the checklist re-derives what it can from
+// the /api/state rows). Repo mode only — it teaches the pull→push rhythm, which
+// needs a connected repo. Null key = no checklist surface (local mode/login wall).
+
+let checklistKey = null;
+
+function checklistStored() {
+  if (!checklistKey) return {};
+  try {
+    return JSON.parse(localStorage.getItem(checklistKey)) || {};
+  } catch {
+    return {};
+  }
+}
+
+function checklistSet(flag) {
+  if (!checklistKey) return;
+  try {
+    const stored = checklistStored();
+    if (!stored[flag]) {
+      stored[flag] = true;
+      localStorage.setItem(checklistKey, JSON.stringify(stored));
+    }
+  } catch {
+    // localStorage unavailable — the derivable items still tick from the rows.
+  }
+  renderChecklist(); // tick immediately; the next refresh() re-derives anyway
+}
+
+function renderChecklist() {
+  const card = $("checklist-card");
+  if (!checklistKey) {
+    card.classList.add("hidden");
+    return;
+  }
+  const stored = checklistStored();
+  const items = Checklist.derive(lastFiles, lastReview, stored);
+  const hide = !!stored.dismissed || Checklist.isDone(items);
+  card.classList.toggle("hidden", hide);
+  if (hide) return;
+  const list = $("checklist-items");
+  list.innerHTML = "";
+  for (const item of items) {
+    const li = document.createElement("li");
+    if (item.done) li.classList.add("done");
+    const tick = document.createElement("span");
+    tick.className = "tick";
+    tick.textContent = item.done ? "✓" : "○";
+    li.append(tick, item.label);
+    list.appendChild(li);
+  }
+}
+
+$("checklist-dismiss").addEventListener("click", () => checklistSet("dismissed"));
+
 // The repo identity discovery last ran for. Discovery costs a full-tree fetch on
 // the server, so we run it once per repo-session (on login / repo switch), NOT on
 // every refresh() — and force a re-check (null) after an adopt so the banner clears.
@@ -853,6 +1244,14 @@ let lastDiscoverRepo = null;
 async function maybeDiscover(state) {
   const banner = $("adopt-banner");
   if (!state.logged_in) {
+    banner.classList.add("hidden");
+    lastDiscoverRepo = null;
+    return;
+  }
+  if (offlineMode) {
+    // Offline mode keeps logged_in true, so without this the one-per-repo-session
+    // shot would be burnt on a discovery that cannot succeed — and the adopt
+    // banner would then never appear after connectivity returns. Re-arm instead.
     banner.classList.add("hidden");
     lastDiscoverRepo = null;
     return;
@@ -936,6 +1335,8 @@ async function refresh() {
   const state = await api("/api/state");
   lastStateAt = Date.now();
   lastLoggedIn = !!state.logged_in;
+  offlineMode = !!state.offline;
+  renderOfflineBanner(state.offline);
   showError(state.error || "");
   if (state.ui_theme) {
     applyTheme(state.ui_theme);
@@ -992,17 +1393,33 @@ async function refresh() {
     copilotMenu.open = false; // don't leave the dropdown open when it's hidden
   }
 
-  // Pull / Push all / Propose only make sense against a connected, logged-in repo.
-  // In local mode the notebooks are usable but there's nothing to sync to, so hide
-  // those controls (the per-file rows already omit Push/Propose for "local" files).
-  for (const id of ["btn-pull", "btn-push", "btn-propose"]) {
-    $(id).classList.toggle("hidden", !state.logged_in);
+  // Pull / Push all / Propose (and the pull digest) only make sense against a
+  // connected, logged-in repo that is REACHABLE. In local mode the notebooks are
+  // usable but there's nothing to sync to; offline the network controls hide
+  // behind the amber banner (the per-file rows already omit their network
+  // actions — see fileActions).
+  for (const id of ["btn-pull", "btn-whatsnew", "btn-push", "btn-propose"]) {
+    $(id).classList.toggle("hidden", !state.logged_in || offlineMode);
   }
+  if (!state.logged_in || offlineMode) {
+    $("whatsnew-card").classList.add("hidden");
+    // An already-open Review/History panel keeps live "Push this file"/"Restore"
+    // buttons, each of which needs GitHub — close them too, like the rows that
+    // stop offering Review/History while the amber banner shows.
+    $("review-card").classList.add("hidden");
+    reviewPath = null;
+    $("history-card").classList.add("hidden");
+    historyPath = null;
+  }
+  // The per-file watch set is keyed by repo; local mode has no digest to watch.
+  loadWatched(state.mode === "repo" && state.logged_in ? state.repo : null);
   // Recall shows only while the manifest holds a recallable last push; the
   // confirm names exactly which files it would revert (a stale record is the
   // trap — this is how the user catches one).
   recallPaths = state.recall_paths || [];
-  $("btn-recall").classList.toggle("hidden", !(state.logged_in && state.can_recall));
+  $("btn-recall").classList.toggle(
+    "hidden", !(state.logged_in && state.can_recall && !offlineMode),
+  );
   // Workspace-level "Batch build" — only when the opt-in orchestrator is enabled.
   $("btn-batch").classList.toggle("hidden", !state.ai_batch);
   // No team Pull in local mode, so don't dangle it in the empty-state hint.
@@ -1010,6 +1427,13 @@ async function refresh() {
     ? "No notebooks yet &mdash; click <b>New notebook</b> to create one."
     : "No notebooks yet &mdash; click <b>New notebook</b> to create one, or <b>Pull</b> to " +
       "fetch your team's notebooks.";
+
+  // First-run checklist: keyed per repo so a second repo ramps afresh. The key
+  // gates every checklist surface, so local mode and the login wall show nothing.
+  checklistKey = state.mode === "repo" && state.logged_in
+    ? Checklist.storageKey(state.repo)
+    : null;
+  lastReview = (state.logged_in && state.review) || null;
 
   if (state.logged_in) {
     const userInfo = $("user-info");
@@ -1037,10 +1461,15 @@ async function refresh() {
   }
   if (showFiles) {
     lastFiles = state.files || [];
-    renderFiles(lastFiles, state.artifacts || [], state.folders || []);
+    lastArtifacts = state.artifacts || [];
+    lastFolders = state.folders || [];
+    renderFiles(lastFiles, lastArtifacts, lastFolders);
   } else {
     lastFiles = [];  // no file surface (login wall) — don't leave stale push/propose targets
+    lastArtifacts = [];
+    lastFolders = [];
   }
+  renderChecklist();  // after lastFiles lands: two of the items derive from the rows
   renderFreshnessBanner();
   // Prompt to adopt any notebook folders the repo keeps outside the synced folders.
   // Runs once per repo-session (see maybeDiscover), so it never rides the refresh loop.
@@ -1219,16 +1648,59 @@ $("copilot-check").addEventListener("click", () => {
   });
 });
 
+// Bulk Push/Propose sweeps up personal -draft.py copies with everything else; ask
+// first, so a draft is only ever shared on purpose. The question is about the
+// DRAFTS, so Cancel answers it: the drafts are EXCLUDED and everything else still
+// goes (never a silent abort of the whole push — the old behaviour, where Cancel
+// quietly sent nothing, read as "5 team files pushed" to the analyst). Returns
+// { paths, count }: paths null = push everything, [] = nothing left to send.
+// A filename-shape check only — the push guard's server-side content scan still
+// runs and its dialog fires independently afterwards. Pushing a draft from its
+// own row stays unprompted: that click is already explicit.
+function draftShareSelection(candidates) {
+  const isDraft = (f) => Checklist.DRAFT_RE.test(f.path);
+  const drafts = candidates.filter(isDraft);
+  if (!drafts.length) return { paths: null, count: candidates.length };
+  const names = drafts.map((f) => "  " + f.path).join("\n");
+  const include = confirm(
+    `Include your ${drafts.length} draft(s)?\n\n${names}\n\n` +
+    "OK sends everything; Cancel sends everything EXCEPT the draft(s)."
+  );
+  if (include) return { paths: null, count: candidates.length };
+  const rest = candidates.filter((f) => !isDraft(f));
+  return { paths: rest.map((f) => f.path), count: rest.length };
+}
+
 $("login-start").addEventListener("click", startLogin);
 $("btn-refresh").addEventListener("click", refresh);
-$("btn-pull").addEventListener("click", () => action("/api/pull", {}));
+$("btn-pull").addEventListener("click", async () => {
+  const data = await action("/api/pull", {});
+  // The pull response carries the digest of what just landed, computed against
+  // the PRE-pull horizon — so a pull is never a black box. States shown are the
+  // pre-pull ones ("remote changed" = what the pull just applied).
+  if (data && !data.error && data.whatsnew && (data.whatsnew.entries || []).length) {
+    renderWhatsnew(data.whatsnew, "What just landed");
+  }
+});
 $("btn-push").addEventListener("click", () => {
-  const count = lastFiles.filter((f) => PUSH_STATES.has(f.state)).length;
-  return pushAction(null, count);
+  const candidates = lastFiles.filter((f) => PUSH_STATES.has(f.state));
+  const sel = draftShareSelection(candidates);
+  if (!sel.count) {
+    // Everything pending was a draft and the user excluded them — say so
+    // rather than silently doing nothing.
+    $("summary").textContent = "Nothing pushed — only drafts were pending.";
+    return;
+  }
+  return pushAction(sel.paths, sel.count);
 });
 $("btn-propose").addEventListener("click", () => {
-  const count = lastFiles.filter((f) => PUSH_STATES.has(f.state)).length;
-  return proposeAction(null, count);
+  const candidates = lastFiles.filter((f) => PUSH_STATES.has(f.state));
+  const sel = draftShareSelection(candidates);
+  if (!sel.count) {
+    $("summary").textContent = "Nothing proposed — only drafts were pending.";
+    return;
+  }
+  return proposeAction(sel.paths, sel.count);
 });
 let recallPaths = [];
 

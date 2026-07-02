@@ -182,6 +182,12 @@ def _build_parser() -> argparse.ArgumentParser:
         "packages/finance/notebooks/sales)",
     )
 
+    dup = sub.add_parser(
+        "duplicate",
+        help="copy a notebook to a personal -draft sibling and open it",
+    )
+    dup.add_argument("path", help="workspace-relative notebook path to duplicate")
+
     delete_cmd = sub.add_parser(
         "delete",
         help="delete a notebook from the workspace (push afterwards to remove it remotely)",
@@ -210,6 +216,11 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     history_cmd.add_argument("path", help="workspace-relative file path")
     history_cmd.add_argument("--page", type=int, default=1, help="older pages (30 per page)")
+
+    whatsnew_cmd = sub.add_parser(
+        "whatsnew",
+        help="who changed what on the team branch since your last sync (needs login)",
+    )
 
     restore_cmd = sub.add_parser(
         "restore", help="bring back a file as it was at a past version (needs login)"
@@ -279,9 +290,11 @@ def _build_parser() -> argparse.ArgumentParser:
         adopt,
         open_cmd,
         new,
+        dup,
         delete_cmd,
         rollback_cmd,
         history_cmd,
+        whatsnew_cmd,
         restore_cmd,
         trash_cmd,
         activity_cmd,
@@ -319,6 +332,17 @@ def _build_parser() -> argparse.ArgumentParser:
         "check", help="parse context/ dictionaries and report tables, columns, and dropped keys"
     )
     ai_dict_check.add_argument("--repo", default=None, metavar="ALIAS", help=_REPO_ARG_HELP)
+    # `ai model check` (this Power BI semantic-model lint) is a DIFFERENT command
+    # from `ai pii model` below (the NER model download) — one level up the tree.
+    ai_model = ai_sub.add_parser(
+        "model", help="inspect what the copilot would see of a Power BI semantic model"
+    )
+    ai_model_sub = ai_model.add_subparsers(dest="ai_model_command", required=True)
+    ai_model_check = ai_model_sub.add_parser(
+        "check",
+        help="parse synced .SemanticModel folders and report what's kept, excluded, and flagged",
+    )
+    ai_model_check.add_argument("--repo", default=None, metavar="ALIAS", help=_REPO_ARG_HELP)
     ai_pii = ai_sub.add_parser(
         "pii", help="scan context/ and notebook source for structured-PII risks (offline)"
     )
@@ -341,6 +365,21 @@ def _build_parser() -> argparse.ArgumentParser:
         "doctor",
         help="check the PII guard config end-to-end: which backend runs, what's ready, what to fix",
     )
+    ai_tb = ai_sub.add_parser(
+        "traceback", help="preview the value-safe traceback rewrite (offline)"
+    )
+    ai_tb_sub = ai_tb.add_subparsers(dest="ai_traceback_command", required=True)
+    ai_tb_check = ai_tb_sub.add_parser(
+        "check", help="sanitise a pasted traceback from FILE (or stdin) and print the rewrite"
+    )
+    ai_tb_check.add_argument(
+        "file",
+        nargs="?",
+        default=None,
+        metavar="FILE",
+        help="file containing the traceback (omit to read from stdin)",
+    )
+    ai_tb_check.add_argument("--repo", default=None, metavar="ALIAS", help=_REPO_ARG_HELP)
 
     cfg_cmd = sub.add_parser("config", help="view and edit settings in your user config.toml")
     cfg_sub = cfg_cmd.add_subparsers(dest="config_command", required=True)
@@ -563,9 +602,25 @@ def cmd_whoami(cfg: config.Config) -> int:
 
 def cmd_status(cfg: config.Config) -> int:
     from mooring import sync
+    from mooring.github import Unreachable
 
     client = _client(cfg)
-    report = sync.status(client, cfg)
+    try:
+        report = sync.status(client, cfg)
+    except Unreachable as exc:
+        # Offline: show the last observed sync state (sync.cached_status — pure
+        # local reads) under a loud header instead of a traceback. The adopt
+        # hint needs a live tree read, so it is skipped here. No cache yet →
+        # nothing local to show, so exit with the classified one-liner.
+        cached = sync.cached_status(cfg)
+        if cached is None:
+            sys.exit(str(exc))
+        report, fetched_at = cached
+        print(f"OFFLINE — GitHub unreachable; showing sync state as of {fetched_at}")
+        if not report.files:
+            print("Workspace empty and no remote files. Try `mooring new <name>`.")
+            return 0
+        return _print_status_report(cfg, report)
     if not report.files:
         # An EMPTY in-scope report is exactly the headline case (a new repo whose
         # notebooks all live outside the synced folders): run discovery so the hint can
@@ -576,6 +631,12 @@ def cmd_status(cfg: config.Config) -> int:
         for line in hint or ["Workspace empty and no remote files. Try `mooring new <name>`."]:
             print(line)
         return 0
+    return _print_status_report(cfg, report)
+
+
+def _print_status_report(cfg: config.Config, report) -> int:
+    """The width-aligned rows + summary shared by the live and OFFLINE status
+    paths (the shadow warnings are local, so they print in both)."""
     width = max(len(f.path) for f in report.files)
     for f in report.files:
         print(f"  {f.path:<{width}}  {f.state.value}")
@@ -958,6 +1019,30 @@ def cmd_new(cfg: config.Config, name: str) -> int:
     return cmd_open(cfg, rel_path)
 
 
+def cmd_duplicate(cfg: config.Config, rel_path: str) -> int:
+    from mooring import notebook_template
+    from mooring.app import notebooks
+    from mooring.github import AuthFailed, GitHubError
+
+    # The owner suffix is the GitHub login; no repo (NotConfigured subclasses
+    # AuthFailed), no login, or an offline machine degrades to plain "-draft"
+    # rather than failing the copy — the draft is a purely local file.
+    try:
+        owner = notebooks.client_for(cfg).get_user()["login"]
+    except (AuthFailed, GitHubError, OSError):
+        owner = ""
+    try:
+        new_rel = notebook_template.duplicate_as_draft(
+            cfg.workspace(), rel_path, owner=owner, exclude=cfg.exclude
+        )
+    except (ValueError, FileNotFoundError, FileExistsError) as exc:
+        sys.exit(str(exc))
+    telemetry.log_event("duplicate")
+    _record_activity(cfg, "duplicate", path=rel_path, draft=new_rel)
+    print(f"Created {new_rel}")
+    return cmd_open(cfg, new_rel)
+
+
 def cmd_init(cfg: config.Config) -> int:
     workspace = cfg.workspace()
     target = pyproject_env.pyproject_path(workspace)
@@ -1108,6 +1193,39 @@ def cmd_history(cfg: config.Config, rel_path: str, page: int) -> int:
     if len(versions) == 30:
         print(f"  (older versions: mooring history {rel_path} --page {page + 1})")
     print(f"Restore one with: mooring restore {rel_path} --at <sha>  (add --copy to keep both)")
+    return 0
+
+
+def cmd_whatsnew(cfg: config.Config) -> int:
+    """Print the pull digest: every synced file changed on the team branch since
+    this machine's last sync (the manifest horizon), with best-effort who/when/
+    why (see mooring.whatsnew). Read-only — pull applies, this only reports."""
+    from mooring import sync, whatsnew
+
+    client = _client(cfg)
+    report = sync.status(client, cfg)
+    digest = whatsnew.pending_digest(client, cfg, report)
+    if not digest.entries:
+        print("Nothing new — no teammate changes waiting since your last sync.")
+        return 0
+    width = max(len(e.path) for e in digest.entries)
+    state_width = max(len(e.state) for e in digest.entries)
+    for e in digest.entries:
+        who = ", ".join(e.authors)
+        when = (e.date or "")[:10]
+        message = e.messages[0] if e.messages else ""
+        detail = " · ".join(part for part in (who, when, message) if part)
+        line = f"  {e.path:<{width}}  {e.state:<{state_width}}"
+        print(f"{line}  {detail}".rstrip())
+    if not digest.attributed:
+        print("(couldn't read the commit history — showing sync states only)")
+    if digest.truncated:
+        print("(a long window — GitHub truncated the commit list; attribution may be partial)")
+    print(f"{len(digest.entries)} file(s) changed on {cfg.branch} since your last sync.")
+    conflicts = sum(1 for e in digest.entries if e.state == sync.FileState.CONFLICT.value)
+    if conflicts:
+        print(f"{conflicts} conflicted file(s) need resolving (the hub, or mooring pull --theirs).")
+    print("Apply the changes with: mooring pull")
     return 0
 
 
@@ -1332,6 +1450,71 @@ def cmd_ai_dictionary_check(app_cfg: config.AppConfig, cfg: config.Config) -> in
     return 0
 
 
+def cmd_ai_model_check(app_cfg: config.AppConfig, cfg: config.Config) -> int:
+    """Show exactly what the copilot would see of each Power BI semantic model.
+
+    The `ai dictionary check` idiom, offline (no Copilot, no network): per model,
+    which definition files were read, which tables/measures were kept, what the
+    allowlist excluded (partition M bodies skipped uncaptured; roles/translations
+    never opened), plus the egress scrubber's value-free findings over everything
+    the model tools could render. Exit 1 on scrubber findings, so it doubles as a
+    pre-share lint and the TMDL-drift detector.
+    """
+    from mooring import pbip_model
+    from mooring.ai import egress
+
+    workspace = cfg.workspace()
+    refs = pbip_model.find_models(workspace, cfg.folders)
+    if not app_cfg.ai_semantic_model:
+        print("Note: [ai] semantic_model is OFF - the copilot will not see these models.\n")
+    if not refs:
+        print(
+            "No Power BI semantic models (<name>.SemanticModel/definition/) "
+            "under the synced folders."
+        )
+        return 0
+    exit_code = 0
+    for ref in refs:
+        model = pbip_model.extract_model(ref.path, key=ref.key, name=ref.name)
+        opted_out = workspace_config.is_semantic_model_disabled(workspace, ref.key)
+        print(f"{ref.key}{pbip_model.MODEL_DIR_SUFFIX}:")
+        if opted_out:
+            print("  AI access: OFF for this model (mooring.toml [ai] disabled_semantic_models)")
+        for rel in model.files_read:
+            print(f"  read {rel}")
+        for note in model.notes:
+            print(f"  note: {note}")
+        print(f"  kept: {len(model.tables)} tables, {model.n_measures} measures, "
+              f"{len(model.relationships)} relationships")
+        ex = model.excluded
+        excluded_bits = []
+        if ex.partitions:
+            excluded_bits.append(f"{ex.partitions} partition/source block(s) (never captured)")
+        if ex.roles_files:
+            excluded_bits.append(f"{ex.roles_files} roles file(s) (never opened)")
+        if ex.culture_files:
+            excluded_bits.append(f"{ex.culture_files} translation file(s) (never opened)")
+        if excluded_bits:
+            print(f"  excluded: {', '.join(excluded_bits)}")
+        if ex.dropped:
+            dropped = ", ".join(f"{k} x{n}" for k, n in ex.dropped)
+            print(f"  dropped constructs/properties: {dropped}")
+        # The scrubber pre-flight: everything the model tools could render, through
+        # the same egress.scrub_text the tools apply. Findings are value-free.
+        rendered = [pbip_model.render_summary(model)]
+        rendered += [pbip_model.render_table(model, t) for t in model.tables]
+        _, findings = egress.scrub_text("\n".join(rendered))
+        if findings:
+            exit_code = 1
+            print(f"  scrub: {len(findings)} finding(s) - these lines would be withheld:")
+            for f in findings:
+                print(f"    line {f.line}  {f.kind}")
+        else:
+            print("  scrub: clean (best-effort - not a guarantee; DAX is authored code)")
+        print("")
+    return exit_code
+
+
 _PII_FOOTER = (
     "\n(best-effort - detects well-formed cards, IBANs, NHS numbers, emails, and UK NINOs;\n"
     " never sort codes, account numbers, SSNs, or phones. Names need detect_names + the\n"
@@ -1399,6 +1582,66 @@ def cmd_ai_pii_check(
         print(_PII_FOOTER)
         return 1
     print("pii scan: clean (best-effort — not a guarantee; never paste real values)")
+    return 0
+
+
+def cmd_ai_traceback_check(
+    app_cfg: config.AppConfig, cfg: config.Config, args: argparse.Namespace
+) -> int:
+    """Show exactly how the traceback guard would rewrite a pasted traceback, offline.
+
+    Mirrors ``ai pii check``: no Copilot, no network — a security reviewer can see
+    what survives sanitising before trusting the chat guard. Reads FILE, or stdin
+    when no file is given. The chat additionally rescues exception messages whose
+    quoted tokens are already in the session's context (live schema, notebook
+    source); this offline preview has no session, so it redacts more, never less.
+    """
+    del app_cfg  # symmetric signature with the other `ai` commands; not needed here
+    from mooring.ai import egress
+
+    if getattr(args, "file", None):
+        try:
+            raw = Path(args.file).read_bytes()
+        except OSError as exc:
+            print(f"Could not read {args.file}: {exc}")
+            return 1
+        # PowerShell 5.1's `2> file` / `Out-File` write UTF-16 (and BOM'd UTF-8)
+        # by default on Windows — the very files this command is pointed at. A
+        # decode failure must degrade to a friendly line, never a raw traceback
+        # from the no-raw-tracebacks command itself.
+        try:
+            text = raw.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            try:
+                text = raw.decode("utf-16")
+            except UnicodeDecodeError:
+                print(f"Could not read {args.file}: not UTF-8 or UTF-16 text.")
+                return 1
+    else:
+        text = sys.stdin.read()
+    if not text.strip():
+        print("Nothing to check — paste a traceback on stdin or give a FILE.")
+        return 1
+    result = egress.sanitize_traceback(text, workspace=cfg.workspace())
+    if not result.detected:
+        print("No traceback detected — the text would be sent unchanged")
+        print("(after the usual outbound PII scan, when that guard is enabled).")
+        return 0
+    print("Sanitised rewrite (what the assistant would receive):")
+    print()
+    print(result.text)
+    print()
+    if result.findings:
+        print(f"redactions: {len(result.findings)}")
+        for f in result.findings:
+            print(f"  line {f.line}  {f.kind}")
+    else:
+        print("redactions: none (everything was provably value-free)")
+    print(
+        "\n(the raw paste is never stored or sent — the chat holds this rewrite for a"
+        "\n 'Send sanitised' confirm; in the chat, exception messages also survive when"
+        "\n every quoted token is already in the session's schema/notebook context)"
+    )
     return 0
 
 
@@ -1584,7 +1827,8 @@ def _print_download_progress(done: int, total: int) -> None:
 
 def cmd_ai(app_cfg: config.AppConfig, cfg: config.Config, args: argparse.Namespace) -> int:
     """Manage the AI copilot: Copilot sign-in (login / status), dictionary check,
-    and the offline PII pre-flight scan (pii check).
+    the offline PII pre-flight scan (pii check), and the offline traceback-rewrite
+    preview (traceback check).
 
     Code generation lives in the interactive chat (hub "AI" button), not the CLI.
     """
@@ -1595,6 +1839,11 @@ def cmd_ai(app_cfg: config.AppConfig, cfg: config.Config, args: argparse.Namespa
             return cmd_ai_dictionary_check(app_cfg, cfg)
         return 2
 
+    if args.ai_command == "model":
+        if args.ai_model_command == "check":
+            return cmd_ai_model_check(app_cfg, cfg)
+        return 2
+
     if args.ai_command == "pii":
         if args.ai_pii_command == "check":
             return cmd_ai_pii_check(app_cfg, cfg, args)
@@ -1602,6 +1851,11 @@ def cmd_ai(app_cfg: config.AppConfig, cfg: config.Config, args: argparse.Namespa
             return cmd_ai_pii_model(app_cfg, cfg, args)
         if args.ai_pii_command == "doctor":
             return cmd_ai_pii_doctor(app_cfg)
+        return 2
+
+    if args.ai_command == "traceback":
+        if args.ai_traceback_command == "check":
+            return cmd_ai_traceback_check(app_cfg, cfg, args)
         return 2
 
     try:
@@ -1758,6 +2012,8 @@ def _dispatch(
         return cmd_open(cfg, args.path)
     if command == "new":
         return cmd_new(cfg, args.name)
+    if command == "duplicate":
+        return cmd_duplicate(cfg, args.path)
     if command == "init":
         return cmd_init(cfg)
     if command == "deps":
@@ -1776,6 +2032,8 @@ def _dispatch(
         return cmd_activity(cfg, args)
     if command == "history":
         return cmd_history(cfg, args.path, args.page)
+    if command == "whatsnew":
+        return cmd_whatsnew(cfg)
     if command == "restore":
         return cmd_restore(cfg, args.path, args.at, args.copy, args.yes)
     parser.error(f"unknown command {command!r}")
@@ -1811,10 +2069,16 @@ def main(argv: list[str] | None = None) -> int:
     )
     telemetry.log_event("app_start", command=command)
 
+    from mooring.github import Unreachable
+
     try:
         return _dispatch(parser, command, app_cfg, cfg, args)
     except SystemExit:
         raise  # user-facing errors (sys.exit / argparse) are not app failures
+    except Unreachable as exc:
+        # An outage is not an app failure worth a traceback: one classified line.
+        telemetry.log_error(exc=exc, command=command)
+        sys.exit(str(exc))
     except BaseException as exc:  # noqa: BLE001  # record genuine failures, then re-raise
         telemetry.log_error(exc=exc, command=command)
         raise

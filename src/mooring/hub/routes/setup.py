@@ -8,7 +8,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from mooring import __version__, auth, config, config_store, sync, telemetry
-from mooring.github import AuthFailed, GitHubError, compare_url
+from mooring.github import AuthFailed, GitHubError, TlsFailure, Unreachable, compare_url
 from mooring.runtime import workspace_hint
 
 
@@ -93,6 +93,26 @@ def api_state(request: Request) -> JSONResponse:
                     cfg.owner, cfg.repo, cfg.branch, report.review_branch, host=cfg.host
                 ),
             }
+    except Unreachable as exc:
+        # An outage, not an auth failure (ordered BEFORE AuthFailed/GitHubError;
+        # Unreachable subclasses the latter): the token is NOT deleted and the
+        # user stays logged in. Fall back to the last observed remote view so
+        # the files card degrades to stale-with-a-banner instead of vanishing.
+        # hub._state_heads is deliberately not touched — /api/freshness has
+        # nothing new to compare against, and it too stays silent offline.
+        telemetry.log_error(exc=exc, op="state")
+        body["user"] = hub._user_login  # may be "" on a cold start; don't retry here
+        body["logged_in"] = True
+        as_of = ""
+        cached = sync.cached_status(cfg)
+        if cached is not None:
+            report, as_of = cached
+            body["files"], body["artifacts"] = hub._files_artifacts(report, cfg.workspace())
+            body["summary"] = report.summary()
+        body["offline"] = {
+            "reason": "tls" if isinstance(exc, TlsFailure) else "network",
+            "as_of": as_of,
+        }
     except AuthFailed:
         auth.delete_token(host=cfg.host)
         hub._user_login = ""

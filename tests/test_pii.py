@@ -537,6 +537,169 @@ def test_prompt_fails_open_loud(monkeypatch):
     assert "idle" in [e.kind for e in evs]  # but forwarded (fail open)
 
 
+# -- traceback guard: sanitise-and-hold on a StubChatSession --------------------
+# The combined hold contract: a traceback-bearing prompt is sanitised, PII-scanned
+# (the SANITISED text), and held under ONE token that stores ONLY the sanitised
+# rewrite — so the shared send_confirmed path cannot forward the raw paste.
+
+TB_SECRET = "SECRET_VALUE_DO_NOT_LEAK"
+
+_TB_PASTE = (
+    "why does this fail?\n"
+    "\n"
+    "Traceback (most recent call last):\n"
+    '  File "C:\\elsewhere\\pipeline.py", line 7, in run\n'
+    "    value = row[key]\n"
+    f"KeyError: '{TB_SECRET}'"
+)
+
+
+def test_traceback_prompt_is_sanitised_and_held():
+    sess = StubChatSession(traceback_guard=True)
+    q = sess.subscribe()
+    sess.send(_TB_PASTE)
+    events = _drain(q)
+    assert [e.kind for e in events] == ["traceback"]  # held — nothing else fired
+    assert sess.last_sent == ""  # nothing forwarded
+    data = events[0].data
+    assert data["token"]
+    assert TB_SECRET not in json.dumps(data)  # the event is value-free end to end
+    assert "KeyError: <redacted:" in data["preview"]
+    assert data["redactions"] and all({"line", "kind"} == set(d) for d in data["redactions"])
+    # The raw paste is dropped at the gate: only the sanitised rewrite is stored.
+    assert list(sess._pending.values()) == [data["preview"]]
+
+
+def test_traceback_confirm_forwards_only_the_sanitised_text():
+    sess = StubChatSession(traceback_guard=True)
+    q = sess.subscribe()
+    sess.send(_TB_PASTE)
+    token = _drain(q)[0].data["token"]
+    sess.send_confirmed(token)
+    after = [e.kind for e in _drain(q)]
+    assert "message" in after and "idle" in after  # forwarded exactly now
+    assert TB_SECRET not in sess.last_sent
+    assert "KeyError: <redacted:" in sess.last_sent
+    assert "why does this fail?" in sess.last_sent  # prose untouched
+    # single-use token, like the PII hold
+    from mooring.ai.base import AIError
+
+    with pytest.raises(AIError):
+        sess.send_confirmed(token)
+
+
+def test_traceback_hold_carries_prose_pii_findings_on_the_same_card():
+    # One COMBINED hold: prose PII around the traceback rides the traceback event
+    # (pii_findings), never a second sequential hold; the one confirm forwards.
+    sess = StubChatSession(traceback_guard=True, pii_enabled=True, pii_block=True)
+    q = sess.subscribe()
+    sess.send(f"card {VALID_CARD} keeps failing\n\n{_TB_PASTE}")
+    events = _drain(q)
+    assert [e.kind for e in events] == ["traceback"]  # no separate "pii" hold
+    data = events[0].data
+    assert any(f["kind"] == pii.CARD for f in data["pii_findings"])
+    assert VALID_CARD not in json.dumps(data["pii_findings"])
+    # The block verdict rides the hold, so an UNATTENDED consumer (the batch
+    # worker) can honour it — an interactive confirm has the analyst looking.
+    assert data["pii_hold"] is True
+    sess.send_confirmed(data["token"])
+    assert TB_SECRET not in sess.last_sent
+    assert VALID_CARD in sess.last_sent  # prose is untouched — the analyst confirmed it
+
+
+def test_traceback_hold_pii_verdict_reflects_warn_mode():
+    # Warn mode: the findings still ride the card, but pii_hold is False — the
+    # guard would not have held the prose on its own, so an unattended consumer
+    # may auto-confirm exactly as warn mode allows a plain send to proceed.
+    sess = StubChatSession(traceback_guard=True, pii_enabled=True, pii_block=False)
+    q = sess.subscribe()
+    sess.send(f"card {VALID_CARD} keeps failing\n\n{_TB_PASTE}")
+    data = _drain(q)[0].data
+    assert any(f["kind"] == pii.CARD for f in data["pii_findings"])
+    assert data["pii_hold"] is False
+
+
+def test_traceback_guard_off_is_passthrough():
+    sess = StubChatSession()  # guard not armed
+    q = sess.subscribe()
+    sess.send(_TB_PASTE)
+    kinds_seen = [e.kind for e in _drain(q)]
+    assert "traceback" not in kinds_seen and "idle" in kinds_seen
+    assert TB_SECRET in sess.last_sent  # forwarded raw — it IS the guard doing the work
+
+
+def test_traceback_plain_prose_skips_the_hold():
+    sess = StubChatSession(traceback_guard=True)
+    q = sess.subscribe()
+    sess.send("how do I aggregate revenue by month?")
+    kinds_seen = [e.kind for e in _drain(q)]
+    assert "traceback" not in kinds_seen and "idle" in kinds_seen
+
+
+def test_traceback_close_clears_the_held_rewrite():
+    sess = StubChatSession(traceback_guard=True)
+    q = sess.subscribe()
+    sess.send(_TB_PASTE)
+    _drain(q)
+    assert sess._pending
+    sess.close()
+    assert sess._pending == {}
+
+
+def test_traceback_known_tokens_rescue_from_system_context():
+    sess = StubChatSession(traceback_guard=True, system_context="DATASET SCHEMA:\nrevenue Int64")
+    q = sess.subscribe()
+    sess.send(
+        "Traceback (most recent call last):\n"
+        '  File "C:\\elsewhere\\lib.py", line 2, in f\n'
+        "KeyError: 'revenue'"
+    )
+    preview = _drain(q)[0].data["preview"]
+    assert "KeyError: 'revenue'" in preview  # already in-channel — nothing new revealed
+
+
+def test_traceback_known_tokens_rescue_from_notebook_on_disk(tmp_path):
+    (tmp_path / "nb.py").write_text('df = df.select("net revenue")\n', "utf-8")
+    sess = StubChatSession(traceback_guard=True, workspace=tmp_path, notebook_rel="nb.py")
+    q = sess.subscribe()
+    sess.send(
+        "Traceback (most recent call last):\n"
+        '  File "C:\\elsewhere\\lib.py", line 2, in f\n'
+        "KeyError: 'net revenue'"
+    )
+    preview = _drain(q)[0].data["preview"]
+    assert "KeyError: 'net revenue'" in preview
+
+
+def test_traceback_guard_survives_a_non_utf8_notebook(tmp_path):
+    # A stray latin-1 byte in the notebook (hand-edit in a wrong-encoding editor)
+    # must not break EVERY send while the default-on guard is armed: the
+    # known-token rescue just gets fewer tokens and the turn goes through.
+    (tmp_path / "nb.py").write_bytes(b"# caf\xe9\nrevenue = 1\n")
+    sess = StubChatSession(traceback_guard=True, workspace=tmp_path, notebook_rel="nb.py")
+    q = sess.subscribe()
+    sess.send("plain question, no traceback")
+    kinds_seen = [e.kind for e in _drain(q)]
+    assert "idle" in kinds_seen  # the turn was answered, not a decode crash
+    assert sess.last_sent == "plain question, no traceback"
+
+
+def test_traceback_workspace_frame_rereads_source_from_disk(tmp_path):
+    (tmp_path / "nb.py").write_text("import marimo\ntotal = df.sum()\n", "utf-8")
+    sess = StubChatSession(traceback_guard=True, workspace=tmp_path, notebook_rel="nb.py")
+    q = sess.subscribe()
+    sess.send(
+        "Traceback (most recent call last):\n"
+        f'  File "{tmp_path / "nb.py"}", line 2, in _\n'
+        f"    total = df.sum({TB_SECRET!r})\n"  # doctored paste — must not be trusted
+        "AttributeError: boom"
+    )
+    preview = _drain(q)[0].data["preview"]
+    assert TB_SECRET not in preview
+    assert 'File "nb.py", line 2, in _' in preview
+    assert "total = df.sum()" in preview  # the disk truth
+
+
 # -- Channel E: team context (fail-closed) -------------------------------------
 
 

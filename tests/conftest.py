@@ -160,6 +160,42 @@ class FakeClient:
         start = (page - 1) * per_page
         return touched[start : start + per_page]
 
+    def compare(self, base, head):
+        """The GitHub compare API: the commits between two shas plus the
+        aggregate file diff — answered from the recorded commit_log (commits
+        oldest-first, like the real API) and its tree snapshots."""
+        idx = {c["sha"]: i for i, c in enumerate(self.commit_log)}
+        if base not in idx:
+            raise NotFound(f"compare base {base}")
+        if head not in idx:
+            raise NotFound(f"compare head {head}")
+        i, j = idx[base], idx[head]
+        branch = self.commit_log[j]["branch"]
+        window = [
+            c for c in self.commit_log[i + 1 : j + 1] if c["branch"] == branch
+        ]
+        commits = [
+            {
+                "sha": c["sha"],
+                "commit": {
+                    "message": c["message"],
+                    "author": {"name": "phil", "date": "2026-07-02T09:00:00Z"},
+                },
+                "author": {"login": "phil"},
+            }
+            for c in window
+        ]
+        base_tree = self.commit_log[i]["tree"]
+        head_tree = self.commit_log[j]["tree"]
+        files = []
+        for path in sorted(set(base_tree) | set(head_tree)):
+            b, h = base_tree.get(path), head_tree.get(path)
+            if b == h:
+                continue
+            status = "added" if b is None else "removed" if h is None else "modified"
+            files.append({"filename": path, "status": status})
+        return {"commits": commits, "files": files, "total_commits": len(commits)}
+
     def get_file_at(self, path, ref):
         for c in self.commit_log:
             if c["sha"] == ref:

@@ -63,6 +63,17 @@ _DICT_TOOL_GUIDE = (
     "code; a relevant slice may already be in your context."
 )
 
+_MODEL_TOOL_GUIDE = (
+    "\n\nA POWER BI SEMANTIC MODEL is available (tables, columns+types, "
+    "relationships, and measure DAX — authored code, never any data value):\n"
+    "- mooring_get_semantic_model — table names + measure NAMES (no DAX; cheap)\n"
+    "- mooring_describe_model_table(table) — one table's columns and its measures' DAX\n"
+    "- mooring_get_measure(measure) — one measure's full DAX + format string.\n"
+    "Use these to translate business logic faithfully — e.g. recreate a measure in "
+    "polars from its real DAX instead of guessing. Fetch only the tables/measures "
+    "you need; never ask for the whole model at once."
+)
+
 
 class CopilotChatSession(ChatBroadcaster):
     def __init__(
@@ -75,6 +86,7 @@ class CopilotChatSession(ChatBroadcaster):
         notebook_rel: str,
         reasoning_effort: str | None = None,
         dictionary=None,
+        semantic_models=None,
         pii_enabled: bool = False,
         pii_block: bool = True,
         pii_names: bool = False,
@@ -82,6 +94,7 @@ class CopilotChatSession(ChatBroadcaster):
         pii_name_threshold: float = 0.7,
         pii_name_model: "ModelRef | str | None" = None,
         pii_name_backend: str = "auto",
+        traceback_guard: bool = False,
     ) -> None:
         super().__init__()
         self.configure_pii(
@@ -93,16 +106,25 @@ class CopilotChatSession(ChatBroadcaster):
             model=pii_name_model,
             backend=pii_name_backend,
         )
+        # The traceback guard needs the workspace (to bound its source re-read)
+        # and the notebook (for the known-token rescue) — both already travel
+        # into this ctor, so no route/hub arming call exists to forget.
+        self.configure_traceback_guard(
+            enabled=traceback_guard, workspace=workspace, notebook_rel=notebook_rel
+        )
         self._model = (model or "").strip()
         self._reasoning_effort = (reasoning_effort or "").strip() or None
         guide = _TOOL_GUIDE
         if dictionary is not None and not dictionary.is_empty():
             guide += _DICT_TOOL_GUIDE
+        if semantic_models:
+            guide += _MODEL_TOOL_GUIDE
         self._system_context = system_context + guide
         self._workspace = Path(workspace)
         self._folders = tuple(folders)
         self._notebook_rel = notebook_rel
         self._dictionary = dictionary
+        self._semantic_models = list(semantic_models or [])
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
         self._client = None
@@ -115,6 +137,11 @@ class CopilotChatSession(ChatBroadcaster):
         # class defaults to "ready"; flip it so the hub can return the chat-open
         # response immediately and surface readiness over the SSE stream instead.
         self._mark_starting()
+
+    def _known_text(self) -> str:
+        # The system context (schema + notebook source + tool guide) the model has
+        # already been shown — the traceback guard's known-token rescue source.
+        return self._system_context
 
     # -- lifecycle ----------------------------------------------------------
 
@@ -218,6 +245,7 @@ class CopilotChatSession(ChatBroadcaster):
             emit_proposal=self._emit_proposal,
             emit_proposal_patch=self._emit_proposal_patch,
             dictionary=self._dictionary,
+            semantic_models=self._semantic_models,
             pii_enabled=self._pii_enabled,
         )
         extra: dict[str, Any] = {}

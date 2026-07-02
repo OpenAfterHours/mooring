@@ -47,6 +47,19 @@ class RefAlreadyExists(GitHubError):
     """Branch creation hit an existing ref (HTTP 422)."""
 
 
+class Unreachable(GitHubError):
+    """GitHub could not be reached at the transport level — no HTTP response at
+    all (offline, DNS failure, connection refused, timeout). Deliberately
+    conservative: anything that DID produce an HTTP response classifies in
+    ``_check`` instead (a 401 must stay :class:`AuthFailed` — a fixable auth
+    problem is never hidden behind an "offline" banner)."""
+
+
+class TlsFailure(Unreachable):
+    """The TLS handshake to GitHub failed — the corporate proxy-interception
+    signature (the proxy's root CA is missing from the trust store)."""
+
+
 def compare_url(
     owner: str, repo: str, base: str, branch: str, host: str = githost.DEFAULT_HOST
 ) -> str:
@@ -100,6 +113,8 @@ class GitHubClientProtocol(Protocol):
         self, path: str, branch: str, page: int = 1, per_page: int = 30
     ) -> list[dict]: ...
 
+    def compare(self, base: str, head: str) -> dict: ...
+
     def get_file_at(self, path: str, ref: str) -> tuple[str, bytes]: ...
 
     def create_ref(self, branch: str, sha: str) -> dict: ...
@@ -152,6 +167,26 @@ class GitHubClient:
     def _repo_url(self, tail: str) -> str:
         return f"{self.api_root}/repos/{self.owner}/{self.repo}/{tail}"
 
+    def _send(self, method: str, url: str, **kwargs) -> requests.Response:
+        """Every session call goes through here, so a transport failure (no HTTP
+        response at all) classifies into a typed error exactly once. HTTP-status
+        classification stays entirely in :meth:`_check`. SSLError is caught first:
+        under requests it subclasses ConnectionError, and the TLS diagnosis is the
+        more specific (and more actionable) one."""
+        try:
+            return self._session.request(method, url, **kwargs)
+        except requests.exceptions.SSLError as exc:
+            raise TlsFailure(
+                "Could not make a secure (TLS) connection to GitHub — a corporate "
+                "proxy may be intercepting traffic. Try `mooring doctor`."
+            ) from exc
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as exc:
+            raise Unreachable(
+                "GitHub is unreachable — check your network connection and try again."
+            ) from exc
+        except requests.RequestException as exc:
+            raise GitHubError(f"GitHub request failed: {exc}") from exc
+
     def _check(self, resp: requests.Response) -> dict:
         if resp.status_code == 401:
             raise AuthFailed("GitHub rejected the token. Log in again.")
@@ -180,10 +215,10 @@ class GitHubClient:
     # -- reads ---------------------------------------------------------------
 
     def get_user(self) -> dict:
-        return self._check(self._session.get(f"{self.api_root}/user", timeout=30))
+        return self._check(self._send("GET", f"{self.api_root}/user", timeout=30))
 
     def get_branch_head(self, branch: str) -> str:
-        data = self._check(self._session.get(self._repo_url(f"git/ref/heads/{branch}"), timeout=30))
+        data = self._check(self._send("GET", self._repo_url(f"git/ref/heads/{branch}"), timeout=30))
         return data["object"]["sha"]
 
     def get_tree(
@@ -213,10 +248,11 @@ class GitHubClient:
         same fetch narrowed to the synced folders (and is where the SHA-256 guard runs,
         on the in-scope entries), so the two can never disagree about the tree."""
         commit = self._check(
-            self._session.get(self._repo_url(f"git/commits/{commit_sha}"), timeout=30)
+            self._send("GET", self._repo_url(f"git/commits/{commit_sha}"), timeout=30)
         )
         data = self._check(
-            self._session.get(
+            self._send(
+                "GET",
                 self._repo_url(f"git/trees/{commit['tree']['sha']}"),
                 params={"recursive": "1"},
                 timeout=60,
@@ -234,7 +270,7 @@ class GitHubClient:
         ]
 
     def get_blob(self, sha: str) -> bytes:
-        data = self._check(self._session.get(self._repo_url(f"git/blobs/{sha}"), timeout=120))
+        data = self._check(self._send("GET", self._repo_url(f"git/blobs/{sha}"), timeout=120))
         if data.get("encoding") == "base64":
             return base64.b64decode(data["content"])
         return data.get("content", "").encode()
@@ -247,13 +283,26 @@ class GitHubClient:
         does not follow renames — history for a renamed file starts at the
         rename. Returns the raw commit dicts; callers shape them."""
         data = self._check(
-            self._session.get(
+            self._send(
+                "GET",
                 self._repo_url("commits"),
                 params={"path": path, "sha": branch, "per_page": per_page, "page": page},
                 timeout=30,
             )
         )
         return data if isinstance(data, list) else []
+
+    def compare(self, base: str, head: str) -> dict:
+        """The commits and changed files on ``base...head`` — the whole horizon
+        window in one request (the pull digest's primary read). Returns the raw
+        dict (``commits`` oldest-first, ``files``, ``total_commits``); callers
+        shape it. The API caps its answer (~250 commits listed, 300 files), so
+        callers must treat ``total_commits > len(commits)`` or a full ``files``
+        page as a truncated window and degrade. A GC'd or force-pushed ``base``
+        404s, which :meth:`_check` maps to :class:`NotFound` ("anchor lost")."""
+        return self._check(
+            self._send("GET", self._repo_url(f"compare/{base}...{head}"), timeout=60)
+        )
 
     def get_file_at(self, path: str, ref: str) -> tuple[str, bytes]:
         """``(blob_sha, bytes)`` of ``path`` as it existed at ``ref``.
@@ -263,7 +312,8 @@ class GitHubClient:
         than walking a full historic tree. Raises :class:`NotFound` when the
         path did not exist at that ref."""
         data = self._check(
-            self._session.get(
+            self._send(
+                "GET",
                 self._repo_url(f"contents/{quote(path, safe='/')}"),
                 params={"ref": ref},
                 timeout=60,
@@ -279,7 +329,8 @@ class GitHubClient:
     # -- writes (Contents API, one commit per file) ---------------------------
 
     def create_ref(self, branch: str, sha: str) -> dict:
-        resp = self._session.post(
+        resp = self._send(
+            "POST",
             self._repo_url("git/refs"),
             json={"ref": f"refs/heads/{branch}", "sha": sha},
             timeout=30,
@@ -316,11 +367,11 @@ class GitHubClient:
         if base_sha:
             body["sha"] = base_sha
         return self._check(
-            self._session.put(self._repo_url(f"contents/{path}"), json=body, timeout=120)
+            self._send("PUT", self._repo_url(f"contents/{path}"), json=body, timeout=120)
         )
 
     def delete_file(self, path: str, message: str, branch: str, base_sha: str) -> dict:
         body = {"message": message, "sha": base_sha, "branch": branch}
         return self._check(
-            self._session.delete(self._repo_url(f"contents/{path}"), json=body, timeout=60)
+            self._send("DELETE", self._repo_url(f"contents/{path}"), json=body, timeout=60)
         )

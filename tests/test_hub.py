@@ -27,6 +27,9 @@ def test_index_serves_html(unconfigured_client):
     resp = client.get("/")
     assert resp.status_code == 200
     assert "mooring" in resp.text
+    # The offline banner's DOM slot ships with the page (app.js renders into it
+    # whenever /api/state carries an `offline` payload).
+    assert 'id="offline-banner"' in resp.text
 
 
 def test_state_unconfigured(unconfigured_client):
@@ -291,6 +294,94 @@ def test_new_rejects_a_path_outside_the_workspace(unconfigured_client):
     resp = client.post("/api/new", json={"name": "../escape"})
     assert resp.status_code == 400
     assert "workspace" in resp.json()["error"]
+
+
+# -- duplicate as draft: the fearless personal copy ---------------------------
+
+
+NB_SOURCE = "import marimo\napp = marimo.App()\n"
+
+
+class DuplicateFakeEditor:
+    def __init__(self, workspace, theme="system"):
+        self.workspace = workspace
+
+    def ensure_started(self):
+        pass  # no-op: in-memory editor double, nothing to launch
+
+    def use_uv(self):
+        return False
+
+    def url_for(self, rel_path):
+        return f"http://editor/{rel_path}"
+
+    def shutdown(self):
+        pass  # no-op: in-memory editor double, nothing to tear down
+
+
+def test_local_mode_duplicate_mints_plain_draft_lists_and_opens(unconfigured_client, monkeypatch):
+    # No repo, no login: the owner lookup falls through (NotConfigured is an
+    # AuthFailed), so the suffix is plain "-draft" — and the copy lists as "local"
+    # and opens like any notebook.
+    client, hub = unconfigured_client
+    monkeypatch.setattr(server, "EditorServer", DuplicateFakeEditor)
+    ws = hub.cfg.workspace()
+    (ws / "notebooks").mkdir(parents=True, exist_ok=True)
+    (ws / "notebooks" / "sales.py").write_text(NB_SOURCE, "utf-8")
+
+    resp = client.post("/api/duplicate", json={"path": "notebooks/sales.py"})
+    assert resp.status_code == 200
+    assert resp.json()["url"] == "http://editor/notebooks/sales-draft.py"
+    assert (ws / "notebooks" / "sales-draft.py").read_text("utf-8") == NB_SOURCE
+
+    files = {f["path"]: f for f in client.get("/api/state").json()["files"]}
+    assert files["notebooks/sales-draft.py"]["state"] == "local"
+
+
+def test_configured_duplicate_uses_the_login_suffix(configured, monkeypatch):
+    # Logged in: the draft carries the GitHub login (FakeClient reports "phil"),
+    # classifies "new local" beside the original, and lands in the activity ledger.
+    client, _hub, _fake, tmp_path = configured
+    monkeypatch.setattr(server, "EditorServer", DuplicateFakeEditor)
+    write_ws(tmp_path, "ws1", "notebooks/sales.py", NB_SOURCE)
+
+    resp = client.post("/api/duplicate", json={"path": "notebooks/sales.py"})
+    assert resp.status_code == 200
+    assert resp.json()["url"] == "http://editor/notebooks/sales-phil-draft.py"
+
+    files = {f["path"]: f for f in client.get("/api/state").json()["files"]}
+    assert files["notebooks/sales-phil-draft.py"]["state"] == "new local"
+
+    entries = client.get("/api/activity").json()["entries"]
+    assert entries[0]["op"] == "duplicate"
+    assert entries[0]["path"] == "notebooks/sales.py"
+    assert entries[0]["draft"] == "notebooks/sales-phil-draft.py"
+
+
+def test_duplicate_rejects_a_path_outside_the_workspace(unconfigured_client):
+    client, _ = unconfigured_client
+    resp = client.post("/api/duplicate", json={"path": "../escape.py"})
+    assert resp.status_code == 400
+    assert "workspace" in resp.json()["error"]
+
+
+def test_duplicate_refuses_a_helper_module(unconfigured_client):
+    # The hub only offers the action on is_notebook rows; the server backstops a
+    # direct call — duplicating a module would just spread the un-openable file.
+    client, hub = unconfigured_client
+    ws = hub.cfg.workspace()
+    (ws / "notebooks").mkdir(parents=True, exist_ok=True)
+    (ws / "notebooks" / "helpers.py").write_text("def clean(df):\n    return df\n", "utf-8")
+    resp = client.post("/api/duplicate", json={"path": "notebooks/helpers.py"})
+    assert resp.status_code == 400
+    assert "not a marimo notebook" in resp.json()["error"]
+
+
+def test_duplicate_404s_when_the_source_is_missing(unconfigured_client):
+    client, _ = unconfigured_client
+    resp = client.post("/api/duplicate", json={"path": "notebooks/missing.py"})
+    assert resp.status_code == 404
+    assert "missing.py" in resp.json()["error"]
 
 
 def test_state_env_no_project_lists_top_level_env_packages(unconfigured_client, monkeypatch):
@@ -1169,6 +1260,72 @@ def test_chat_rollback_write_failure_keeps_snapshot(unconfigured_client, stub_ch
     assert "added = 1" not in nb.read_text("utf-8")  # the retry actually undid it
 
 
+def test_chat_send_traceback_held_then_confirm_forwards_sanitised(
+    unconfigured_client, monkeypatch
+):
+    # End-to-end over /api/ai/chat/send: a pasted traceback is sanitised and HELD
+    # (a "traceback" SSE event carries the confirm token), and the EXISTING
+    # confirm_token path forwards ONLY the sanitised rewrite — the raw paste is
+    # never stored, so no wire sequence can transmit it.
+    import json as _json
+    import queue as _queue
+
+    from mooring.ai.chat import StubChatSession
+
+    client, hub = unconfigured_client
+    monkeypatch.setattr(
+        Hub,
+        "_make_chat_session",
+        lambda self, ctx, ws, nb, **kw: StubChatSession(
+            system_context=ctx, traceback_guard=True, workspace=ws, notebook_rel=nb
+        ),
+    )
+    sid = _open_chat(client, hub, source=_NB_SRC).json()["sid"]
+    session = hub._chats[sid]
+    q = session.subscribe()
+    secret = "SECRET_VALUE_DO_NOT_LEAK"
+    tb_text = (
+        "Traceback (most recent call last):\n"
+        '  File "C:\\elsewhere\\lib.py", line 3, in f\n'
+        f"KeyError: '{secret}'"
+    )
+    resp = client.post("/api/ai/chat/send", json={"sid": sid, "text": tb_text})
+    assert resp.status_code == 200
+    assert session.last_sent == ""  # held — nothing forwarded yet
+    held = None
+    while True:
+        try:
+            ev = q.get_nowait()
+        except _queue.Empty:
+            break
+        if ev.kind == "traceback":
+            held = ev
+    assert held is not None and held.data["token"]
+    assert secret not in _json.dumps(held.data)  # the SSE payload is value-free
+    resp = client.post(
+        "/api/ai/chat/send", json={"sid": sid, "confirm_token": held.data["token"]}
+    )
+    assert resp.status_code == 200
+    assert "KeyError: <redacted:" in session.last_sent
+    assert secret not in session.last_sent
+
+
+def test_chat_send_traceback_guard_off_is_passthrough(unconfigured_client, stub_chat):
+    # The default stub session has the guard OFF — the same paste goes through
+    # unchanged, proving the hold above is the guard's doing, not the transport's.
+    client, hub = unconfigured_client
+    sid = _open_chat(client, hub, source=_NB_SRC).json()["sid"]
+    session = hub._chats[sid]
+    tb_text = (
+        "Traceback (most recent call last):\n"
+        '  File "C:\\elsewhere\\lib.py", line 3, in f\n'
+        "KeyError: 'v'"
+    )
+    resp = client.post("/api/ai/chat/send", json={"sid": sid, "text": tb_text})
+    assert resp.status_code == 200
+    assert session.last_sent == tb_text
+
+
 def test_chat_stream_emits_sse_frames(unconfigured_client, monkeypatch):
     from mooring.ai.chat import ChatBroadcaster, ChatEvent
 
@@ -1480,7 +1637,9 @@ def test_chat_open_threads_model_and_effort(unconfigured_client, monkeypatch):
     client, hub = unconfigured_client
     seen = {}
 
-    def fake_make(self, ctx, ws, nb, model="", reasoning_effort=None, dictionary=None):
+    def fake_make(
+        self, ctx, ws, nb, model="", reasoning_effort=None, dictionary=None, semantic_models=None
+    ):
         from mooring.ai.chat import StubChatSession
 
         seen["model"] = model
@@ -1677,6 +1836,34 @@ def test_batch_open_disabled_by_default_403(unconfigured_client):
     resp = client.post("/api/ai/batch/open", json={"jobs": [{"brief": "x"}]})
     assert resp.status_code == 403
     assert resp.json()["reason"] == "batch_disabled"
+
+
+def test_batch_context_carries_no_semantic_model_hint(batch_client):
+    # Batch builder sessions get NO model tools (_make_batch_session passes no
+    # models), so their context must not carry the "use the model tools" hint —
+    # inviting the model to call tools that don't exist burns follow-up turns on
+    # unknown-tool failures. The interactive chat context DOES fold the hint in
+    # for the same workspace, proving the model is otherwise discoverable.
+    import threading
+
+    from mooring.ai.chat import ChatBroadcaster
+
+    _client, hub = batch_client
+    ws = hub.cfg.workspace()
+    (ws / "nb.py").write_text("import marimo\n", "utf-8")
+    tables = ws / "reports" / "Sales.SemanticModel" / "definition" / "tables"
+    tables.mkdir(parents=True)
+    (tables / "Sales.tmdl").write_text(
+        "table Sales\n\tcolumn Amount\n\t\tdataType: decimal\n", "utf-8"
+    )
+    chat_ctx = hub._build_chat_context(ws, "nb.py", "")[0]
+    assert "POWER BI SEMANTIC MODELS" in chat_ctx  # the chat path offers the tools
+    planner = hub._new_batch_planner(ws, ChatBroadcaster(), threading.Event())
+    try:
+        batch_ctx, _dictionary = planner._build_context("nb.py", "")
+    finally:
+        planner.close(cancel=True)
+    assert "POWER BI SEMANTIC MODELS" not in batch_ctx
 
 
 def test_batch_builds_notebooks_and_tray_lists_them(batch_client):
@@ -2240,6 +2427,88 @@ def test_open_has_no_server_side_staleness_gate(configured, monkeypatch):
     assert resp.json()["url"] == "http://editor/notebooks/a.py"
 
 
+# -- offline mode: Unreachable degrades loudly, never a 500 -------------------
+
+
+def _go_offline(fake, monkeypatch, exc_type=None):
+    """Make every networked FakeClient entry point raise Unreachable — the
+    transport-classified 'GitHub is down / no network' signal."""
+    from mooring.github import Unreachable
+
+    kind = exc_type or Unreachable
+
+    def boom(*args, **kwargs):
+        raise kind("GitHub is unreachable — check your network connection and try again.")
+
+    for name in ("get_branch_head", "get_user", "get_tree", "get_full_tree", "get_blob"):
+        monkeypatch.setattr(fake, name, boom)
+
+
+def test_state_offline_falls_back_to_the_cached_view(configured, monkeypatch):
+    client, hub, fake, _ = configured
+    _seed_and_pull(hub, fake, "notebooks/a.py")
+    assert client.get("/api/state").json()["logged_in"] is True  # online render first
+    heads_before = dict(hub._state_heads)
+    _go_offline(fake, monkeypatch)
+    state = client.get("/api/state").json()
+    # Still logged in, still showing the files — just loudly stale.
+    assert state["logged_in"] is True
+    assert state["user"] == "phil"
+    assert state["offline"]["reason"] == "network"
+    assert state["offline"]["as_of"]  # the cache's fetched_at rides along
+    assert [f["path"] for f in state["files"]] == ["notebooks/a.py"]
+    assert state["files"][0]["state"] == "synced"
+    assert "summary" in state
+    # The freshness anchor is NOT advanced by an offline render.
+    assert hub._state_heads == heads_before
+
+
+def test_state_offline_keeps_the_token_and_reports_tls(configured, monkeypatch):
+    from mooring.github import TlsFailure
+
+    client, hub, fake, _ = configured
+    deleted = []
+    monkeypatch.setattr(server.auth, "delete_token", lambda host=None: deleted.append(host))
+    _go_offline(fake, monkeypatch, TlsFailure)  # cold start: no cache, no username yet
+    state = client.get("/api/state").json()
+    assert state["offline"] == {"reason": "tls", "as_of": ""}
+    assert state["logged_in"] is True
+    assert state["files"] == []
+    assert deleted == []  # an outage must NEVER log the user out
+    assert server.auth.get_token(host=hub.cfg.host) == "t"
+
+
+def test_push_offline_returns_friendly_503_and_leaves_disk_alone(configured, monkeypatch):
+    client, hub, fake, tmp_path = configured
+    _seed_and_pull(hub, fake, "notebooks/a.py")
+    (tmp_path / "ws1" / "notebooks/a.py").write_text("mine\n", "utf-8", newline="\n")
+    _go_offline(fake, monkeypatch)
+    resp = client.post("/api/push")
+    assert resp.status_code == 503
+    error = resp.json()["error"]
+    assert "unreachable" in error and "safe on disk" in error
+    assert (tmp_path / "ws1" / "notebooks/a.py").read_text("utf-8") == "mine\n"
+
+
+def test_freshness_offline_answers_fresh_not_502(configured, monkeypatch):
+    # The staleness guard goes SILENT offline (the offline banner owns the
+    # story); a 502 would log a telemetry error on every Open.
+    client, hub, fake, _ = configured
+    client.get("/api/state")  # records a head to be stale against
+    _go_offline(fake, monkeypatch)
+    resp = client.get("/api/freshness")
+    assert resp.status_code == 200
+    assert resp.json() == {"fresh": True, "head": ""}
+
+
+def test_whatsnew_offline_degrades_to_502_not_500(configured, monkeypatch):
+    client, _, fake, _ = configured
+    _go_offline(fake, monkeypatch)
+    resp = client.get("/api/whatsnew")
+    assert resp.status_code == 502
+    assert "unreachable" in resp.json()["error"]
+
+
 # -- the local safety net: trash endpoints + the activity ledger -------------
 
 
@@ -2445,6 +2714,334 @@ def test_restore_over_endpoint_returns_undo_token(configured):
     undo = client.post("/api/undo", json={"path": "notebooks/a.py", "token": token})
     assert undo.status_code == 200
     assert (tmp_path / "ws1" / "notebooks/a.py").read_text("utf-8") == "v2\n"
+
+
+# -- review my changes: /api/diff + the optional push note --------------------
+
+
+_NB_V1 = (
+    "import marimo\n\n"
+    '__generated_with = "0.23.9"\n'
+    "app = marimo.App()\n\n\n"
+    "@app.cell\n"
+    "def _():\n"
+    "    x = 1\n"
+    "    return\n\n\n"
+    'if __name__ == "__main__":\n'
+    "    app.run()\n"
+)
+
+
+def test_diff_endpoint_cell_aware_happy_path(configured):
+    client, hub, fake, tmp_path = configured
+    _seed_and_pull(hub, fake, "notebooks/a.py", _NB_V1.encode("utf-8"))
+    (tmp_path / "ws1" / "notebooks/a.py").write_text(
+        _NB_V1.replace("x = 1", "x = 2"), "utf-8", newline="\n"
+    )
+    resp = client.post("/api/diff", json={"path": "notebooks/a.py"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["path"] == "notebooks/a.py"
+    assert body["kind"] == "cells"
+    changed = [c for c in body["cells"] if c["status"] == "changed"]
+    assert len(changed) == 1
+    assert "-x = 1" in changed[0]["diff"] and "+x = 2" in changed[0]["diff"]
+    # Read-only pin: no editor spawned, workspace bytes untouched.
+    assert hub.editors == {}
+    assert "x = 2" in (tmp_path / "ws1" / "notebooks/a.py").read_text("utf-8")
+
+
+def test_diff_new_local_skips_the_blob_fetch(configured, monkeypatch):
+    client, _, fake, tmp_path = configured
+
+    def boom(sha):  # a new-local file has no manifest base — never fetch
+        raise AssertionError("blob fetched for a new-local diff")
+
+    monkeypatch.setattr(fake, "get_blob", boom)
+    write_ws(tmp_path, "ws1", "notebooks/new.py", "x = 1\n")
+    body = client.post("/api/diff", json={"path": "notebooks/new.py"}).json()
+    assert body["kind"] == "lines"  # a plain .py is not marimo-parseable
+    assert "+x = 1" in body["line_diff"]
+
+
+def test_diff_deleted_locally_works_without_a_local_file(configured):
+    client, hub, fake, tmp_path = configured
+    _seed_and_pull(hub, fake, "notebooks/a.py")  # b"v1\n"
+    (tmp_path / "ws1" / "notebooks/a.py").unlink()
+    resp = client.post("/api/diff", json={"path": "notebooks/a.py"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["kind"] == "lines"
+    assert "-v1" in body["line_diff"]
+
+
+def test_diff_gcd_base_blob_degrades_to_full_file(configured, monkeypatch):
+    from mooring.github import NotFound
+
+    client, hub, fake, tmp_path = configured
+    _seed_and_pull(hub, fake, "notebooks/a.py")
+    (tmp_path / "ws1" / "notebooks/a.py").write_text("v2\n", "utf-8", newline="\n")
+
+    def gone(sha):
+        raise NotFound("blob was garbage-collected")
+
+    monkeypatch.setattr(fake, "get_blob", gone)
+    resp = client.post("/api/diff", json={"path": "notebooks/a.py"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["note"] == "no base available — showing the full file"
+    assert "+v2" in body["line_diff"]
+
+
+def test_diff_rejects_traversal_and_missing(configured):
+    client, _, _, _ = configured
+    assert client.post("/api/diff", json={"path": "../evil.py"}).status_code == 400
+    assert client.post("/api/diff", json={"path": ""}).status_code == 400
+    # No local file and no synced base: nothing to compare.
+    assert client.post("/api/diff", json={"path": "notebooks/nope.py"}).status_code == 404
+
+
+def test_push_note_becomes_the_commit_message(configured):
+    client, hub, fake, tmp_path = configured
+    _seed_and_pull(hub, fake, "notebooks/a.py")
+    (tmp_path / "ws1" / "notebooks/a.py").write_text("v2\n", "utf-8", newline="\n")
+    resp = client.post(
+        "/api/push", json={"paths": ["notebooks/a.py"], "message": "fix the June totals"}
+    )
+    assert resp.status_code == 200
+    assert fake.commit_log[-1]["message"] == "fix the June totals"
+
+
+def test_push_without_note_keeps_the_machine_default_message(configured):
+    client, hub, fake, tmp_path = configured
+    _seed_and_pull(hub, fake, "notebooks/a.py")
+    (tmp_path / "ws1" / "notebooks/a.py").write_text("v2\n", "utf-8", newline="\n")
+    assert client.post("/api/push", json={}).status_code == 200
+    assert fake.commit_log[-1]["message"] == "Update notebooks/a.py via mooring"
+
+
+def test_propose_note_and_default_message(configured):
+    client, hub, fake, tmp_path = configured
+    _seed_and_pull(hub, fake, "notebooks/a.py")
+    (tmp_path / "ws1" / "notebooks/a.py").write_text("v2\n", "utf-8", newline="\n")
+    resp = client.post(
+        "/api/propose", json={"paths": ["notebooks/a.py"], "message": "swap the data source"}
+    )
+    assert resp.status_code == 200
+    assert fake.commit_log[-1]["message"] == "swap the data source"
+    # A later note-free propose of another file keeps the machine default.
+    write_ws(tmp_path, "ws1", "notebooks/b.py", "v1\n")
+    assert client.post("/api/propose", json={"paths": ["notebooks/b.py"]}).status_code == 200
+    assert fake.commit_log[-1]["message"] == "Propose notebooks/b.py via mooring"
+
+
+def test_push_note_survives_the_guard_confirm_re_post(configured):
+    client, _, fake, tmp_path = configured
+    write_ws(tmp_path, "ws1", "notebooks/leaky.py", _SECRETY)
+    body = client.post("/api/push", json={"message": "adds the token loader"}).json()
+    tokens = [f["token"] for f in body["guard_findings"]]
+    # showGuardDialog re-POSTs Object.assign({}, body, {confirm_tokens}) — the
+    # note rides the original body, so the confirmed push must still carry it.
+    resp = client.post(
+        "/api/push", json={"message": "adds the token loader", "confirm_tokens": tokens}
+    )
+    assert resp.status_code == 200
+    assert "notebooks/leaky.py" in fake.tree
+    assert fake.commit_log[-1]["message"] == "adds the token loader"
+
+
+# -- pull digest: /api/whatsnew + the pre-pull digest on /api/pull ------------
+
+
+def test_whatsnew_unconfigured_returns_empty(unconfigured_client):
+    client, _ = unconfigured_client
+    # The api_discover-style guard: no repo/login means no digest, not an error.
+    assert client.get("/api/whatsnew").json() == {"entries": []}
+
+
+def test_whatsnew_endpoint_shape(configured):
+    client, hub, fake, _ = configured
+    _seed_and_pull(hub, fake, "notebooks/a.py")
+    fake.seed("notebooks/a.py", b"v2\n")  # a teammate pushes
+    resp = client.get("/api/whatsnew")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["source"] == "compare"
+    assert body["attributed"] is True
+    assert body["anchor"] and body["head"] and body["anchor"] != body["head"]
+    [entry] = body["entries"]
+    assert entry["path"] == "notebooks/a.py"
+    assert entry["state"] == "remote changed"
+    assert entry["authors"] == ["phil"]
+    assert entry["remote_sha"]
+    assert body["groups"]  # the window's collapsed pushes
+
+
+def test_pull_response_carries_the_pre_pull_digest(configured):
+    client, hub, fake, tmp_path = configured
+    _seed_and_pull(hub, fake, "notebooks/a.py")
+    fake.seed("notebooks/a.py", b"v2\n")
+    resp = client.post("/api/pull", json={})
+    assert resp.status_code == 200
+    body = resp.json()
+    # The digest reflects the PRE-pull state (what the pull just applied) —
+    # api_pull computes it before sync.pull rewrites the horizon.
+    [entry] = body["whatsnew"]["entries"]
+    assert entry["path"] == "notebooks/a.py"
+    assert entry["state"] == "remote changed"
+    # ...and the pull itself really ran.
+    assert (tmp_path / "ws1" / "notebooks/a.py").read_text("utf-8") == "v2\n"
+
+
+def test_pull_still_succeeds_when_the_digest_fails(configured, monkeypatch):
+    from mooring import whatsnew as whatsnew_mod
+
+    client, hub, fake, tmp_path = configured
+    _seed_and_pull(hub, fake, "notebooks/a.py")
+    fake.seed("notebooks/a.py", b"v2\n")
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("digest exploded")
+
+    monkeypatch.setattr(whatsnew_mod, "pending_digest", boom)
+    resp = client.post("/api/pull", json={})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert "whatsnew" not in body  # best-effort: no digest, no error
+    assert (tmp_path / "ws1" / "notebooks/a.py").read_text("utf-8") == "v2\n"
+
+
+def test_whatsnew_detail_cell_counts_and_sha_keyed_cache(configured, monkeypatch):
+    client, hub, fake, _ = configured
+    _seed_and_pull(hub, fake, "notebooks/a.py", _NB_V1.encode("utf-8"))
+    fake.seed("notebooks/a.py", _NB_V1.replace("x = 1", "x = 2").encode("utf-8"))
+    remote_sha = fake.tree["notebooks/a.py"]
+
+    calls = {"n": 0}
+    orig = fake.get_blob
+
+    def counting(sha):
+        calls["n"] += 1
+        return orig(sha)
+
+    monkeypatch.setattr(fake, "get_blob", counting)
+    resp = client.post(
+        "/api/whatsnew/detail", json={"path": "notebooks/a.py", "remote_sha": remote_sha}
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["kind"] == "cells"
+    assert body["changed"] == 1 and body["added"] == 0 and body["removed"] == 0
+    fetched = calls["n"]
+    assert fetched == 2  # base + remote, once each
+    # Second expand of the same (path, base, remote) serves from the Hub cache.
+    again = client.post(
+        "/api/whatsnew/detail", json={"path": "notebooks/a.py", "remote_sha": remote_sha}
+    )
+    assert again.json() == body
+    assert calls["n"] == fetched  # no further blob fetches
+
+
+def test_whatsnew_detail_line_counts_for_data_files(configured):
+    client, hub, fake, _ = configured
+    _seed_and_pull(hub, fake, "data/x.csv", b"a,b\n1,2\n")
+    fake.seed("data/x.csv", b"a,b\n1,2\n3,4\n")
+    resp = client.post(
+        "/api/whatsnew/detail",
+        json={"path": "data/x.csv", "remote_sha": fake.tree["data/x.csv"]},
+    )
+    assert resp.status_code == 200
+    assert resp.json() == {"path": "data/x.csv", "kind": "lines", "added": 1, "removed": 0}
+
+
+def test_whatsnew_detail_summary_respects_the_cell_differs_size_cap():
+    # A >4 MB .py used to fall out of celldiff's "binary" (too-large) answer into
+    # whatsnew.summarize_diff, silently UN-capping exactly the difflib work the
+    # cap refused. The celldiff result is now kept as-is.
+    from mooring.hub.routes.sync import _detail_summary
+
+    big = b"# c\n" * (4 * 1024 * 1024 // 4 + 1)
+    out = _detail_summary(big, b"import marimo\n", "notebooks/big.py")
+    assert out["kind"] == "binary"
+    assert out["base_size"] == len(big)
+
+
+def test_whatsnew_detail_summary_line_counts_for_a_helper_module():
+    # A non-notebook .py takes celldiff's "lines" answer (counted here), keeping
+    # one code path — and one size cap — for every .py detail.
+    from mooring.hub.routes.sync import _detail_summary
+
+    out = _detail_summary(b"a = 1\n", b"a = 1\nb = 2\n", "notebooks/helper.py")
+    assert out == {"kind": "lines", "added": 1, "removed": 0}
+
+
+def test_whatsnew_detail_uses_the_entrys_pre_pull_base_sha(configured):
+    # After a Pull the manifest already points at the remote sha, so the "What
+    # just landed" panel's Details must diff the PRE-pull pair the digest entry
+    # carries (the client sends both shas) — a manifest-derived base would diff
+    # the pulled blob against itself and say "no cell changes" for a file a
+    # teammate just rewrote.
+    client, hub, fake, _ = configured
+    _seed_and_pull(hub, fake, "notebooks/a.py", _NB_V1.encode("utf-8"))
+    base_sha = fake.tree["notebooks/a.py"]
+    fake.seed("notebooks/a.py", _NB_V1.replace("x = 1", "x = 2").encode("utf-8"))
+    remote_sha = fake.tree["notebooks/a.py"]
+    pulled = client.post("/api/pull", json={})
+    assert pulled.status_code == 200
+    [entry] = pulled.json()["whatsnew"]["entries"]
+    assert (entry["base_sha"], entry["remote_sha"]) == (base_sha, remote_sha)
+    resp = client.post(
+        "/api/whatsnew/detail",
+        json={
+            "path": entry["path"],
+            "remote_sha": entry["remote_sha"] or "",
+            "base_sha": entry["base_sha"] or "",
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["kind"] == "cells"
+    assert body["changed"] == 1  # the real pre-pull change, not "no cell changes"
+    # Sanity: an old-style request (no base_sha key) falls back to the POST-pull
+    # manifest — the very self-diff the entry shas exist to avoid.
+    stale = client.post(
+        "/api/whatsnew/detail",
+        json={"path": entry["path"], "remote_sha": entry["remote_sha"]},
+    ).json()
+    assert stale["changed"] == 0
+
+
+def test_whatsnew_detail_deleted_remotely_still_works_after_the_pull(configured):
+    # A deleted-remotely entry has remote_sha None; post-pull the manifest entry
+    # is gone too, so without the entry's base_sha the endpoint used to 404.
+    client, hub, fake, _ = configured
+    _seed_and_pull(hub, fake, "data/x.csv", b"a,b\n1,2\n")
+    fake.remove("data/x.csv")
+    pulled = client.post("/api/pull", json={})
+    assert pulled.status_code == 200
+    [entry] = pulled.json()["whatsnew"]["entries"]
+    assert entry["state"] == "deleted remotely" and entry["remote_sha"] is None
+    resp = client.post(
+        "/api/whatsnew/detail",
+        json={
+            "path": entry["path"],
+            "remote_sha": entry["remote_sha"] or "",
+            "base_sha": entry["base_sha"] or "",
+        },
+    )
+    assert resp.status_code == 200
+    assert resp.json() == {"path": "data/x.csv", "kind": "lines", "added": 0, "removed": 2}
+
+
+def test_whatsnew_detail_rejects_traversal_and_nothing_to_diff(configured):
+    client, _, _, _ = configured
+    assert (
+        client.post("/api/whatsnew/detail", json={"path": "../evil.py"}).status_code == 400
+    )
+    assert client.post("/api/whatsnew/detail", json={"path": ""}).status_code == 400
+    # No synced base and no remote sha: nothing to summarize.
+    resp = client.post("/api/whatsnew/detail", json={"path": "notebooks/nope.py"})
+    assert resp.status_code == 404
 
 
 # -- the health check endpoint (mooring doctor) --------------------------------

@@ -85,6 +85,16 @@ class AiConfig:
     context_dir: str = "context"
     context_max_kb: int = 256
     live_schema: bool = True
+    # Read a synced Power BI semantic model (PBIP TMDL): tables, columns,
+    # relationships, and measure/calculated-column DAX — authored code, the same
+    # class as notebook source, so it defaults ON like the source itself. The
+    # extractor is allowlist-based (M partitions/roles/annotations never read) and
+    # a synced per-model opt-out lives in the workspace mooring.toml.
+    semantic_model: bool = True
+    # Sanitise-and-hold for pasted Python tracebacks (which can embed data values).
+    # Default ON: it only ever REMOVES information, and the raw paste is never
+    # stored, so there is no send-raw path. Turning it off is a weakening flip.
+    traceback_guard: bool = True
     pii: PiiConfig = field(default_factory=PiiConfig)
     batch: BatchConfig = field(default_factory=BatchConfig)
 
@@ -174,6 +184,12 @@ def load_ai_config(ai: Mapping, env: Mapping[str, str]) -> AiConfig:
         context_max_kb=int(env.get("MOORING_AI_CONTEXT_MAX_KB", ai.get("context_max_kb", 256))),
         live_schema=_as_bool(
             env.get("MOORING_AI_LIVE_SCHEMA"), _as_bool(ai.get("live_schema"), True)
+        ),
+        semantic_model=_as_bool(
+            env.get("MOORING_AI_SEMANTIC_MODEL"), _as_bool(ai.get("semantic_model"), True)
+        ),
+        traceback_guard=_as_bool(
+            env.get("MOORING_AI_TRACEBACK_GUARD"), _as_bool(ai.get("traceback_guard"), True)
         ),
         pii=pii,
         batch=batch,

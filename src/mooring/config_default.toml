@@ -96,6 +96,24 @@ live_schema = true          # read the schema of dataframes live in the running 
                             # add mid-session are picked up without reopening. Value-free —
                             # names + dtypes only, never a value; set false to disable.
                             # See docs/admins/ai-privacy.md.
+semantic_model = true       # let the copilot read a synced Power BI semantic model
+                            # (a PBIP's <name>.SemanticModel TMDL): tables, columns,
+                            # relationships, and measure/calculated-column DAX — authored
+                            # code, the same class as the notebook source it always sees.
+                            # Partition/source M expressions and annotations are dropped
+                            # at parse time (the table .tmdl is read, those parts are
+                            # never captured); RLS role and translation files are never
+                            # even opened. A per-model opt-out lives in the
+                            # SYNCED mooring.toml ([ai] disabled_semantic_models); run
+                            # `mooring ai model check` to preview exactly what it would see.
+traceback_guard = true      # when a chat message contains a pasted Python traceback,
+                            # rewrite it value-safe before it leaves (exception types and
+                            # workspace frames kept — their source re-read from disk —
+                            # messages and unrecognised lines redacted) and HOLD the turn
+                            # for a "Send sanitised" confirm. The raw paste is never kept,
+                            # so it cannot be sent. Setting this false lets raw tracebacks
+                            # (which can embed data values, e.g. KeyError: 'a customer
+                            # name') reach the model. See docs/admins/ai-privacy.md.
 
 # Per-notebook off switch: a user can turn the copilot off for ONE notebook (from
 # the hub row or the chat window) — e.g. before working with PII. That lives in a

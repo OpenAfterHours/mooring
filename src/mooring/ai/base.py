@@ -76,16 +76,20 @@ class AIProvider(Protocol):
         model: str | None = None,
         reasoning_effort: str | None = None,
         dictionary=None,
+        semantic_models=None,
         pii: "PiiConfig | None" = None,
     ):
         """Open a long-lived, streaming chat session (a ``ChatBroadcaster``).
 
         Sends the model ONLY ``system_context`` (schema + notebook source, plus
         any opt-in team context already folded in) and the analyst's turns.
-        ``dictionary`` (a parsed index) enables the value-free dictionary tools.
-        ``pii`` is the whole :class:`~mooring.ai_config.PiiConfig`, passed as one
-        object so a guard field can't be silently dropped in transit; None
-        disables the guard. Raises :class:`AIError` if unavailable/not signed in.
+        ``dictionary`` (a parsed index) enables the value-free dictionary tools;
+        ``semantic_models`` (pre-parsed :class:`mooring.pbip_model.SemanticModel`
+        objects, already gated by config + the synced per-model opt-out) enables
+        the Power BI model tools. ``pii`` is the whole
+        :class:`~mooring.ai_config.PiiConfig`, passed as one object so a guard
+        field can't be silently dropped in transit; None disables the guard.
+        Raises :class:`AIError` if unavailable/not signed in.
         """
         ...
 

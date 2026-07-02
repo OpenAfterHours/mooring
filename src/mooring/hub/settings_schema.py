@@ -149,6 +149,40 @@ EDITABLE: tuple[SettingSpec, ...] = (
         "more conservative choice.",
     ),
     SettingSpec(
+        key="ai.semantic_model",
+        accessor="ai_semantic_model",
+        label="Read Power BI semantic models",
+        group="ai",
+        type="bool",
+        control="toggle",
+        default=True,
+        sensitivity="needs_care",
+        env_var="MOORING_AI_SEMANTIC_MODEL",
+        help="Let the copilot read a synced Power BI semantic model: tables, columns, "
+        "relationships, and measure DAX — authored code, never data (partition/source "
+        "M expressions and RLS roles are never read). OFF is the more conservative "
+        "choice; a per-model opt-out also lives in the synced mooring.toml.",
+    ),
+    SettingSpec(
+        key="ai.traceback_guard",
+        accessor="ai_traceback_guard",
+        label="Sanitise pasted tracebacks",
+        group="ai",
+        type="bool",
+        control="toggle",
+        default=True,
+        sensitivity="weakens",
+        env_var="MOORING_AI_TRACEBACK_GUARD",
+        weaken_value=False,
+        confirm="Turning the traceback guard OFF sends pasted Python tracebacks to the "
+        "assistant RAW. Tracebacks routinely embed data values (KeyError: 'a customer "
+        "name', a repr of the offending row), so this re-opens the paste-a-traceback "
+        "leak the guard exists to close. Continue?",
+        help="Rewrite a pasted traceback into a value-safe form (exception types and "
+        "workspace code kept, messages redacted unless provably value-free) and hold it "
+        "for a “Send sanitised” confirm. There is deliberately no send-raw option.",
+    ),
+    SettingSpec(
         key="ai.context",
         accessor="ai_context",
         label="Team context (instructions + data dictionary)",

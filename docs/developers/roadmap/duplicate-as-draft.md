@@ -4,9 +4,21 @@ icon: lucide/copy
 
 # Duplicate as draft and a first-run checklist
 
-!!! note "Status: proposed"
-    Designed 2026-07 from a multi-agent ideation review. Not yet implemented;
-    scope and naming may change.
+!!! success "Status: implemented"
+    All three phases shipped 2026-07:
+    `notebook_template.duplicate_as_draft` (byte-for-byte copy, owner suffix,
+    `create_unique`-style collision counter, draft-of-a-draft collapse scoped to
+    the exact suffixes the feature mints — a notebook literally named
+    `first-draft.py` keeps its identity, pinned by test), the hub row action +
+    `POST /api/duplicate` + `mooring duplicate <path>`, the draft-aware
+    `confirm()` on the toolbar Push all / Propose (filename-shape only; the push
+    guard's content scan fires independently afterwards), the `[sync] exclude`
+    escape hatch documented in [configuration](../../admins/configuration.md),
+    and the localStorage-backed first-run checklist (`checklist.js` +
+    `renderChecklist` in `app.js`, per-repo key, `pulled`/`duplicated`
+    re-deriving from the `/api/state` rows). One addition beyond the sketch: a
+    duplicate is recorded in the local activity ledger like every other
+    file-shaping action.
 
 ## Problem
 

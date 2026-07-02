@@ -26,6 +26,16 @@ def isolated_config(tmp_path, monkeypatch):
     return tmp_path
 
 
+def test_workspace_commands_accept_the_repo_alias_flag():
+    # duplicate/whatsnew were missing from the shared --repo loop, so targeting a
+    # non-active repo exited 2 with "unrecognized arguments" while every sibling
+    # workspace command (history/status/open/new/...) accepted it.
+    parser = cli._build_parser()
+    assert parser.parse_args(["duplicate", "notebooks/a.py", "--repo", "lab"]).repo == "lab"
+    assert parser.parse_args(["whatsnew", "--repo", "lab"]).repo == "lab"
+    assert parser.parse_args(["history", "notebooks/a.py", "--repo", "lab"]).repo == "lab"
+
+
 def test_repo_add_and_list(capsys):
     assert cli.main(["repo", "add", "acme/nbs"]) == 0
     assert cli.main(["repo", "add", "acme/lab", "--alias", "lab", "--no-use"]) == 0

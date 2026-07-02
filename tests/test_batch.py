@@ -156,6 +156,113 @@ def test_a_pii_brief_blocks_just_that_job_under_block_job(tmp_path):
     assert not (tmp_path / "notebooks/leak.py").exists()
 
 
+def test_a_traceback_brief_is_auto_confirmed_sanitised(tmp_path):
+    # A brief containing a traceback trips the session's traceback guard, which
+    # HOLDS the turn with a "traceback" event. Unattended, the worker may
+    # auto-confirm it ONLY because the hold stores the SANITISED rewrite and the
+    # PII scan of that rewrite did not itself hold (pii_hold False here — see the
+    # block-mode test below) — without that branch the job would hang to its
+    # timeout. The value-free redaction report lands on the result for the tray.
+    secret = "SECRET_VALUE_DO_NOT_LEAK"
+    brief = (
+        "Fix this error in a fresh notebook:\n"
+        "\n"
+        "Traceback (most recent call last):\n"
+        '  File "C:\\elsewhere\\lib.py", line 3, in f\n'
+        f"KeyError: '{secret}'"
+    )
+    sessions = []
+
+    def opener(ctx, nb, m, e, d):
+        session = StubChatSession(
+            system_context=ctx, traceback_guard=True, workspace=tmp_path, notebook_rel=nb
+        )
+        sessions.append(session)
+        return session
+
+    planner = _make_planner(tmp_path, opener)
+    [result] = planner.run([BatchJob(name="fix", brief=brief)])
+    assert result.status == "built"  # auto-confirmed, not hung to timeout
+    assert result.proposals
+    assert result.traceback_redactions and result.traceback_redactions[0]["kind"]
+    assert secret not in repr(result.traceback_redactions)  # value-free report
+    [session] = sessions
+    assert secret not in session.last_sent  # only the sanitised rewrite was forwarded
+    assert "KeyError: <redacted:" in session.last_sent
+
+
+# PII in the PROSE of a traceback-bearing brief: the email passes the checksum-only
+# pre-flight, and the pasted traceback makes the session hold the brief with a
+# "traceback" event rather than a "pii" one — but the sanitiser rewrites only the
+# traceback block, so the prose PII rides the combined hold (pii_findings/pii_hold).
+_PROSE_PII_TB_BRIEF = (
+    "customer jane.doe@example.com hits this error:\n"
+    "\n"
+    "Traceback (most recent call last):\n"
+    '  File "C:\\elsewhere\\lib.py", line 3, in f\n'
+    "ValueError: boom\n"
+)
+
+
+def _guarded_opener(tmp_path, sessions):
+    """A builder whose session runs the REAL combined traceback+PII hold in block
+    mode — the exact wiring the hub gives batch sessions (block_prompt forced)."""
+
+    def opener(ctx, nb, m, e, d):
+        session = StubChatSession(
+            system_context=ctx,
+            pii_enabled=True,
+            pii_block=True,
+            traceback_guard=True,
+            workspace=tmp_path,
+            notebook_rel=nb,
+        )
+        sessions.append(session)
+        return session
+
+    return opener
+
+
+def test_block_mode_pii_in_a_traceback_brief_is_not_forwarded_unattended(tmp_path):
+    # THE adversarial-review regression (#1/#2): a block-mode PII verdict riding a
+    # combined traceback hold must be honoured exactly like a plain "pii" hold —
+    # the job blocks, and NOTHING is forwarded to the model without a human.
+    sessions = []
+    planner = _make_planner(
+        tmp_path, _guarded_opener(tmp_path, sessions), pii=PiiConfig(enabled=True)
+    )
+    [result] = planner.run([BatchJob(name="leaky", brief=_PROSE_PII_TB_BRIEF)])
+    assert result.status == "pii_blocked"
+    assert result.pii and result.pii[0]["kind"]  # value-free findings for the tray
+    assert result.traceback_redactions  # the rewrite report still rides the result
+    assert "jane.doe@example.com" not in repr(result.pii)  # findings stay value-free
+    [session] = sessions
+    assert session.last_sent == ""  # nothing crossed to the model, confirmed or otherwise
+
+
+def test_build_anyway_forces_a_pii_hold_inside_a_traceback_brief(tmp_path):
+    # The one escape hatch stays the analyst's explicit "Build anyway": the forced
+    # rebuild auto-confirms the combined hold (forwarding the SANITISED text) and
+    # records the overridden findings on the result so the tray shows what crossed.
+    sessions = []
+    planner = _make_planner(
+        tmp_path, _guarded_opener(tmp_path, sessions), pii=PiiConfig(enabled=True)
+    )
+    planner.start()
+    planner.add([BatchJob(name="leaky", brief=_PROSE_PII_TB_BRIEF)])
+    planner.wait_idle()
+    assert planner.snapshot()[0].status == "pii_blocked"
+    planner.force(0)
+    planner.wait_idle()
+    planner.close()
+    [result] = planner.snapshot()
+    assert result.status == "built"
+    assert result.pii and result.pii[0]["kind"]  # the override is visible in the tray
+    forced = sessions[-1]
+    assert "jane.doe@example.com" in forced.last_sent  # the analyst chose to send it
+    assert "ValueError: <redacted:" in forced.last_sent  # ...still the SANITISED rewrite
+
+
 def test_a_pii_brief_aborts_the_whole_batch_under_block_batch(tmp_path):
     planner = _make_planner(
         tmp_path,

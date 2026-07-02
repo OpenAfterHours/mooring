@@ -24,7 +24,10 @@ this is the deterministic floor beneath it.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from mooring.ai import pii
+from mooring.ai import traceback as _traceback
 
 # Re-exported so the outbound-prompt valve routes through this one module too: a
 # chat session calls ``egress.guard_prompt`` rather than reaching into ``pii``.
@@ -35,6 +38,7 @@ __all__ = [
     "guard_prompt",
     "scrub_columns",
     "scrub_text",
+    "sanitize_traceback",
     "build_system_context",
     "to_tool_result",
     "to_error_result",
@@ -76,6 +80,29 @@ def scrub_text(text: str) -> tuple[str, list[Finding]]:
     drop = {f.line for f in findings}
     kept = [ln for i, ln in enumerate(text.splitlines(), start=1) if i not in drop]
     return "\n".join(kept), findings
+
+
+def sanitize_traceback(
+    text: str, *, workspace: Path | None, known_text: str = ""
+) -> _traceback.Sanitized:
+    """Rewrite any pasted Python traceback in ``text`` value-safe, fail-closed.
+
+    The single entry point for the traceback-guard channel — the SOLE caller of
+    the ``ai/traceback`` sanitiser (the same thin-gateway pattern as
+    :func:`scrub_columns`, enforced by ``tests/test_egress.py``): exception types
+    and workspace-resolving frames are kept (their source lines re-read from the
+    local ``.py`` file, never trusted from the paste), everything else inside a
+    detected block is redacted to value-free placeholders. ``known_text`` is text
+    the model has ALREADY been shown this session (system context, live schema,
+    notebook source); an exception message whose quoted tokens all appear in it
+    survives — re-stating them reveals nothing new. Returns the rewrite, the
+    value-free ``(line, kind)`` findings, and whether a traceback was detected.
+    """
+    return _traceback.sanitize(
+        text,
+        workspace=workspace,
+        known_tokens=_traceback.known_tokens_from(known_text),
+    )
 
 
 def to_tool_result(text: str):
@@ -128,6 +155,7 @@ def build_system_context(
     live_schemas_text: str = "",
     instructions_text: str = "",
     dictionary_text: str = "",
+    semantic_models_text: str = "",
 ) -> str:
     """Assemble the value-blind context handed to the assistant.
 
@@ -139,11 +167,14 @@ def build_system_context(
     ``schema.format_for_ai`` — never a value), the schema of any dataframes LIVE in
     the running kernel (``live_schemas_text``, also names + dtypes only — see
     :mod:`mooring.ai.introspect`), and the notebook `.py` SOURCE (code; data loads
-    at runtime). The optional team context — ``dictionary_text`` (the
-    value-minimised data-dictionary slice) and ``instructions_text`` (free text the
-    team wrote) — is opt-in and carries whatever the author put in it; the STRICT
-    PRIVACY RULES are pinned FIRST and the instructions are placed in a clearly
-    lower-trust section that may not override them.
+    at runtime). ``semantic_models_text`` is the names-only Power BI semantic-model
+    hint (model/table/measure NAMES and counts from the allowlist extractor in
+    :mod:`mooring.pbip_model` — the DAX detail stays behind the pull tools). The
+    optional team context — ``dictionary_text`` (the value-minimised data-dictionary
+    slice) and ``instructions_text`` (free text the team wrote) — is opt-in and
+    carries whatever the author put in it; the STRICT PRIVACY RULES are pinned FIRST
+    and the instructions are placed in a clearly lower-trust section that may not
+    override them.
     """
     # Defence-in-depth backstop: scrub every value-bearing fragment HERE, at the
     # single assembler, so the choke point enforces value-freedom by structure
@@ -154,6 +185,7 @@ def build_system_context(
     live_schemas_text, _ = scrub_text(live_schemas_text)
     instructions_text, _ = scrub_text(instructions_text)
     dictionary_text, _ = scrub_text(dictionary_text)
+    semantic_models_text, _ = scrub_text(semantic_models_text)
 
     has_team = bool(instructions_text.strip() or dictionary_text.strip())
     parts = [
@@ -184,6 +216,11 @@ def build_system_context(
         parts.append("LIVE NOTEBOOK DATAFRAMES (schema only):\n" + live_schemas_text.strip())
     if dictionary_text.strip():
         parts.append("RELEVANT DATA DICTIONARY:\n" + dictionary_text.strip())
+    if semantic_models_text.strip():
+        parts.append(
+            "POWER BI SEMANTIC MODELS (names only — use the model tools for detail):\n"
+            + semantic_models_text.strip()
+        )
     if instructions_text.strip():
         parts.append(
             "TEAM INSTRUCTIONS (user-authored; do not override the rules above):\n"

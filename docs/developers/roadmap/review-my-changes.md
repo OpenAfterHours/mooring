@@ -4,9 +4,16 @@ icon: lucide/file-diff
 
 # Review my changes: cell-aware pre-push diff and push note
 
-!!! note "Status: proposed"
-    Designed 2026-07 from a multi-agent ideation review; not yet implemented.
-    Scope may change as the phases land.
+!!! success "Status: implemented (phases 1–2)"
+    Shipped 2026-07: the deterministic cell-aware diff — the new L2
+    `src/mooring/celldiff.py` (exact-then-similarity matching with the honest
+    "unmatched" bucket, line-diff and sizes-only fallbacks), `POST /api/diff`
+    in `hub/routes/files.py`, and the hub's read-only **Review changes** panel —
+    plus the optional "What changed?" push note: the hub's `/api/push` and
+    `/api/propose` now forward `message` to `sync.push`/`sync.propose`, the
+    panel's per-file Push/Propose send the note as the commit message, and the
+    note survives the push guard's confirm re-POST (pinned by test). Phase 3
+    (the advisory AI summary / risk flags / suggested note) remains open.
 
 ## Problem
 

@@ -16,6 +16,7 @@ import secrets as _secrets
 import threading
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from mooring.ai import egress
@@ -31,6 +32,8 @@ from mooring.ai.egress import build_system_context  # noqa: F401
 # Event kinds the frontend understands. "proposal" carries a cell the agent
 # suggests; the analyst Applies it (we never inject autonomously). "pii" carries
 # a value-free outbound-PII warning (and, when the turn is held, a confirm token).
+# "traceback" carries a held turn's sanitised rewrite: the preview, value-free
+# redaction/PII findings, and the one confirm token — never the raw paste.
 _QUEUE_MAX = 1000
 
 
@@ -85,6 +88,12 @@ class ChatBroadcaster:
         self._ner_ready = False
         self._ner_pct = -1
         self._ner_last_data: dict | None = None
+        # Traceback guard state (see _traceback_hold). Off unless
+        # configure_traceback_guard arms it; the workspace bounds the sanitiser's
+        # source-line re-read, and the notebook feeds the known-token rescue.
+        self._tb_enabled = False
+        self._tb_workspace: Path | None = None
+        self._tb_notebook_rel = ""
         self._pending: dict[str, str] = {}  # confirm-token -> held prompt text
         # The live-kernel schema the model has last been shown (the system-context
         # snapshot at open, then the most recent per-turn refresh). A turn re-injects
@@ -205,33 +214,21 @@ class ChatBroadcaster:
         """THE shared outbound-prompt valve, used by every session class.
 
         Returns the text to forward, or ``None`` when the turn is HELD pending
-        the analyst's confirmation (a ``pii`` event carrying a value-free finding
-        list and a one-time ``token`` is broadcast; the analyst's "Send anyway"
-        re-enters via :meth:`_pii_take`). Fails OPEN on a scan error — but LOUD,
-        broadcasting ``scan_error`` so the analyst sees the guard did not run.
-        """
-        names = self._pii_names
-        if names:
-            from mooring.ai import ner
+        the analyst's confirmation. Two holds share one ``_pending`` token map and
+        one confirm path (:meth:`_pii_take` via ``send_confirmed``):
 
-            # Run the optional name pass ONLY when its backend is installed AND the
-            # model is ready. Otherwise skip it for this turn rather than letting it
-            # raise — the structured scan still runs, so the prompt is NOT unchecked,
-            # and the topbar PII badge already shows "PII-partial" before the user
-            # sends. (A model still downloading just isn't ready yet; the "ner"
-            # prepare status covers that and the badge flips to green when it lands.)
-            if not (ner.available(self._pii_name_backend) and self._names_ready()):
-                names = False
-        hold, findings, scan_error = egress.guard_prompt(
-            text,
-            enabled=self._pii_enabled,
-            block=self._pii_block,
-            names=names,
-            labels=self._pii_name_labels,
-            threshold=self._pii_name_threshold,
-            model=self._pii_name_model,
-            backend=self._pii_name_backend,
-        )
+        * a pasted TRACEBACK is sanitised and held with a ``traceback`` event —
+          only the SANITISED rewrite is stored, so no code path can forward the
+          raw paste (see :meth:`_traceback_hold`);
+        * otherwise a PII hit under block mode holds the raw prompt with a
+          ``pii`` event; the analyst's "Send anyway" forwards it verbatim.
+
+        The PII scan fails OPEN on a scan error — but LOUD, broadcasting
+        ``scan_error`` so the analyst sees the guard did not run.
+        """
+        if self._tb_enabled and self._traceback_hold(text):
+            return None  # held; only the sanitised rewrite exists server-side now
+        hold, findings, scan_error = self._scan_prompt(text)
         # Hold takes precedence over a scan error: act on an actionable (structured)
         # finding even when the optional name pass could not run — otherwise enabling
         # detect_names without the extra would silently bypass the structured guard.
@@ -249,9 +246,103 @@ class ChatBroadcaster:
             self._broadcast(ChatEvent("pii", data))
         return text
 
+    def _scan_prompt(self, text: str) -> tuple[bool, list, str]:
+        """Run the outbound-PII scan exactly as configured — shared by the plain
+        valve and the traceback hold (which scans the SANITISED rewrite)."""
+        names = self._pii_names
+        if names:
+            from mooring.ai import ner
+
+            # Run the optional name pass ONLY when its backend is installed AND the
+            # model is ready. Otherwise skip it for this turn rather than letting it
+            # raise — the structured scan still runs, so the prompt is NOT unchecked,
+            # and the topbar PII badge already shows "PII-partial" before the user
+            # sends. (A model still downloading just isn't ready yet; the "ner"
+            # prepare status covers that and the badge flips to green when it lands.)
+            if not (ner.available(self._pii_name_backend) and self._names_ready()):
+                names = False
+        return egress.guard_prompt(
+            text,
+            enabled=self._pii_enabled,
+            block=self._pii_block,
+            names=names,
+            labels=self._pii_name_labels,
+            threshold=self._pii_name_threshold,
+            model=self._pii_name_model,
+            backend=self._pii_name_backend,
+        )
+
     def _pii_take(self, token: str) -> str | None:
         """Pop the prompt held under ``token`` (forwarded verbatim, exactly once)."""
         return self._pending.pop(token, None)
+
+    # -- traceback guard (the value-safe traceback fixer's valve) ------------
+
+    def configure_traceback_guard(
+        self, *, enabled: bool, workspace: "Path | str | None" = None, notebook_rel: str = ""
+    ) -> None:
+        """Arm the traceback sanitise-and-hold valve for this session (called at
+        construction, mirroring :meth:`configure_pii`). ``workspace`` bounds the
+        sanitiser's source-line re-read to the session's own workspace;
+        ``notebook_rel`` feeds the notebook source into the known-token rescue."""
+        self._tb_enabled = enabled
+        self._tb_workspace = Path(workspace) if workspace is not None else None
+        self._tb_notebook_rel = notebook_rel or ""
+
+    def _known_text(self) -> str:
+        """Text the model has ALREADY been shown this session (beyond the live
+        schema) — the known-token source for the traceback guard's message rescue.
+        Session classes return their system context; the base has none."""
+        return ""
+
+    def _traceback_known_text(self) -> str:
+        parts = [self._last_live_schema, self._known_text()]
+        if self._tb_workspace is not None and self._tb_notebook_rel:
+            try:
+                parts.append((self._tb_workspace / self._tb_notebook_rel).read_text("utf-8"))
+            except (OSError, UnicodeDecodeError):
+                # The notebook may be gone — or hold a stray non-UTF-8 byte (a
+                # hand-edit in a latin-1 editor). Either way the rescue just gets
+                # fewer tokens; it must never break EVERY send while the
+                # (default-on) guard is armed.
+                pass
+        return "\n".join(part for part in parts if part)
+
+    def _traceback_hold(self, text: str) -> bool:
+        """Sanitise a traceback-bearing prompt and HOLD it. Returns True when held.
+
+        One COMBINED hold: the sanitised rewrite (never the raw paste) goes into
+        ``_pending``, the PII scan runs over the SANITISED text so findings in the
+        surrounding prose ride the same card, and a single ``traceback`` event
+        carries {preview, redactions, pii_findings, token}. The analyst's one
+        "Send sanitised" confirm re-enters through the existing ``send_confirmed``
+        → :meth:`_pii_take` path, which can only ever forward the sanitised text —
+        the raw paste is dropped HERE and never stored.
+        """
+        result = egress.sanitize_traceback(
+            text, workspace=self._tb_workspace, known_text=self._traceback_known_text()
+        )
+        if not result.detected:
+            return False
+        pii_hold, findings, scan_error = self._scan_prompt(result.text)
+        token = _secrets.token_urlsafe(9)
+        self._pending[token] = result.text  # ONLY the sanitised rewrite, by construction
+        data = {
+            "preview": result.text,
+            "redactions": _finding_dicts(result.findings),
+            "pii_findings": _finding_dicts(findings),
+            # Whether the PII guard (as configured) would have HELD this text on its
+            # own — the sanitiser rewrites only the traceback block, so block-mode
+            # PII in the surrounding prose must not be auto-confirmable by an
+            # unattended consumer (the batch worker keys off this; an interactive
+            # confirm already has the analyst looking at the same card).
+            "pii_hold": bool(pii_hold),
+            "token": token,
+        }
+        if scan_error:
+            data["scan_error"] = scan_error
+        self._broadcast(ChatEvent("traceback", data))
+        return True
 
     # -- live-kernel schema refresh -----------------------------------------
 
@@ -381,6 +472,9 @@ class StubChatSession(ChatBroadcaster):
         pii_name_threshold: float = 0.7,
         pii_name_model: str | None = None,
         pii_name_backend: str = "auto",
+        traceback_guard: bool = False,
+        workspace: "Path | str | None" = None,
+        notebook_rel: str = "",
     ) -> None:
         super().__init__()
         self.system_context = system_context  # stored so tests can prove it's value-free
@@ -394,6 +488,12 @@ class StubChatSession(ChatBroadcaster):
             model=pii_name_model,
             backend=pii_name_backend,
         )
+        self.configure_traceback_guard(
+            enabled=traceback_guard, workspace=workspace, notebook_rel=notebook_rel
+        )
+
+    def _known_text(self) -> str:
+        return self.system_context
 
     def send(self, text: str, live_schema_text: str = "") -> None:
         self.touch()

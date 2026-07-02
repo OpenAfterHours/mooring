@@ -15,10 +15,12 @@ the manifest.
 
 from __future__ import annotations
 
+import contextlib
 import fnmatch
 import time
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 
@@ -479,6 +481,30 @@ def status(client: GitHubClientProtocol, cfg: Config) -> StatusReport:
     return report
 
 
+def cached_status(cfg: Config) -> tuple[StatusReport, str] | None:
+    """The offline fallback: the same three-way status computed from pure local
+    reads — the manifest, the last OBSERVED remote tree (manifest.load_cache,
+    written by :func:`_prepare`), and a fresh local scan. No client, no network.
+
+    Returns ``(report, fetched_at)``, or None when there is no usable cache or
+    it was captured under a different sync scope (mirroring :func:`_scope_matches`
+    — a narrower-scope cache must not masquerade as the whole remote).
+    ``_reconcile_review`` needs the network and is skipped, so open-proposal
+    state is carried as-is. Display-only: pull/push/propose always refetch live,
+    so a stale cache can mislead a glance but never a sync decision."""
+    workspace = cfg.workspace()
+    cache = manifest_mod.load_cache(workspace)
+    if cache is None:
+        return None
+    if cache.scope_folders != tuple(cfg.folders) or cache.scope_exclude != tuple(cfg.exclude):
+        return None
+    mft = manifest_mod.load(workspace)
+    local = scan_local(workspace, cfg.folders, cfg.exclude)
+    report = compute_status(mft, local, cache.files, cache.head_commit, review=mft.review_files)
+    report.review_branch = mft.review_branch
+    return report, cache.fetched_at
+
+
 def _write_blob(workspace: Path, rel_path: str, data: bytes) -> None:
     target = workspace / rel_path
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -522,9 +548,59 @@ def _prepare(client: GitHubClientProtocol, cfg: Config, *, make_workspace: bool 
     head = client.get_branch_head(cfg.branch)
     local = scan_local(workspace, cfg.folders, cfg.exclude)
     remote = _remote_entries(client, cfg, head, mft)
+    # Persist the observed remote view (the offline fallback's input — see
+    # manifest.RemoteCache and cached_status). Best-effort by construction: a
+    # failed cache write must never fail the sync operation it rides on. Gated
+    # on the workspace existing so a bare status keeps the "only pull creates
+    # the workspace" contract (creating .mooring here would also suppress the
+    # legacy-workspace migration hint, which keys off that directory).
+    if workspace.is_dir():
+        with contextlib.suppress(OSError):
+            manifest_mod.save_cache(
+                workspace,
+                manifest_mod.RemoteCache(
+                    head_commit=head,
+                    fetched_at=datetime.now(timezone.utc).isoformat(),
+                    files=dict(remote),
+                    scope_folders=tuple(cfg.folders),
+                    scope_exclude=tuple(cfg.exclude),
+                ),
+            )
     review_changed = _reconcile_review(client, mft, remote, cfg.exclude)
     report = compute_status(mft, local, remote, head, review=mft.review_files)
     return _Prepared(workspace, mft, head, local, remote, report, review_changed)
+
+
+def _update_cache(
+    workspace: Path, cfg: Config, updates: dict[str, str | None], head: str = ""
+) -> None:
+    """Fold a successful remote WRITE into the offline view (manifest.RemoteCache).
+
+    _prepare captures the cache BEFORE the operation's Contents-API writes, so
+    without this a push/recall/PUSH_COPY would leave the cache holding the
+    pre-write tree — and cached_status would show a file the user just pushed as
+    "remote changed" (or, after an offline edit on top, a phantom CONFLICT). The
+    write responses ARE an observed remote view, so folding them in keeps the
+    cache's "last remote view we observed" contract. Same best-effort posture as
+    the save in _prepare (a cache failure never fails the sync op); a cache
+    captured under a different scope is already unusable and is left alone.
+    ``None`` in ``updates`` means the path was deleted on the branch."""
+    if not updates:
+        return
+    cache = manifest_mod.load_cache(workspace)
+    if cache is None:
+        return
+    if cache.scope_folders != tuple(cfg.folders) or cache.scope_exclude != tuple(cfg.exclude):
+        return
+    for path, sha in updates.items():
+        if sha is None:
+            cache.files.pop(path, None)
+        else:
+            cache.files[path] = sha
+    if head:
+        cache.head_commit = head
+    with contextlib.suppress(OSError):
+        manifest_mod.save_cache(workspace, cache)
 
 
 def _gather_candidates(
@@ -1087,6 +1163,13 @@ def _finalize_push(
     if recall_log:
         mft.last_push = dict(recall_log)
         mft.last_push_branch = cfg.branch
+        # The offline cache still holds the PRE-push tree _prepare observed; fold
+        # the writes in so cached_status doesn't call our own push a teammate change.
+        _update_cache(
+            workspace, cfg,
+            {path: rec["new"] for path, rec in recall_log.items()},
+            head=last_commit,
+        )
     elif result.pushed or result.withheld or result.blocked_conflicts:
         # The push did SOMETHING (review-branch writes, withheld or conflicted
         # candidates) but recorded nothing recallable — a stale record from an
@@ -1129,6 +1212,7 @@ def recall(client: GitHubClientProtocol, cfg: Config) -> SyncResult:
         return result
 
     done: list[str] = []
+    cache_updates: dict[str, str | None] = {}  # the recall's own writes, for the offline cache
     try:
         for path, rec in sorted(mft.last_push.items()):
             prev, new = rec.get("prev"), rec.get("new")
@@ -1137,6 +1221,7 @@ def recall(client: GitHubClientProtocol, cfg: Config) -> SyncResult:
                     # The push created it — recall removes it from the branch head.
                     client.delete_file(path, f"Recall {path} via mooring", cfg.branch, new)
                     mft.files.pop(path, None)
+                    cache_updates[path] = None
                     result.lines.append(f"recalled {path} (removed from {cfg.branch})")
                 else:
                     data = client.get_blob(prev)
@@ -1144,6 +1229,7 @@ def recall(client: GitHubClientProtocol, cfg: Config) -> SyncResult:
                         path, data, f"Recall {path} via mooring", cfg.branch, base_sha=new
                     )
                     mft.files[path] = response["content"]["sha"]
+                    cache_updates[path] = response["content"]["sha"]
                     result.lines.append(f"recalled {path} (previous version restored)")
             except RemoteConflict:
                 result.blocked_conflicts.append(path)
@@ -1164,6 +1250,7 @@ def recall(client: GitHubClientProtocol, cfg: Config) -> SyncResult:
         mft.last_push = {p: r for p, r in mft.last_push.items() if p not in done}
         mft.head_commit = ""
         manifest_mod.save(workspace, mft)
+        _update_cache(workspace, cfg, cache_updates)  # the files already recalled
         raise
 
     if result.pushed:
@@ -1177,6 +1264,7 @@ def recall(client: GitHubClientProtocol, cfg: Config) -> SyncResult:
     mft.last_push_branch = ""
     mft.head_commit = ""
     manifest_mod.save(workspace, mft)
+    _update_cache(workspace, cfg, cache_updates)
     return result
 
 
@@ -1333,6 +1421,9 @@ def resolve(
             copy_path, data, f"Add {copy_path} via mooring (conflict copy)", cfg.branch
         )
         mft.files[copy_path] = response["content"]["sha"]
+        # PUSH_COPY skips _prepare, so the cache predates this write — fold the
+        # new copy in or the offline view shows it as a phantom "deleted remotely".
+        _update_cache(workspace, cfg, {copy_path: response["content"]["sha"]})
         # The local bytes survive at copy_path (and were just pushed), so this
         # deposit is redundancy — but if the copy is later deleted, it is the
         # only pre-image left, and banking it costs one small blob.

@@ -160,10 +160,24 @@
       </div>
     </section>
 
+    <!-- First-run checklist: teaches the working rhythm (pull → open → duplicate a
+         draft → push/propose) by ticking itself off as each step happens. Client-side
+         only: progress lives in localStorage per repo; two items re-derive from the
+         /api/state rows. Hidden once complete or dismissed, in local (no-repo) mode,
+         and behind the login wall. Rendered by renderChecklist in app.js. -->
+    <section id="checklist-card" class="card hidden">
+      <div class="checklist-head">
+        <h3>Getting started</h3>
+        <button id="checklist-dismiss" class="small" title="Hide this checklist for this repo">Dismiss</button>
+      </div>
+      <ul id="checklist-items" class="checklist"></ul>
+    </section>
+
     <section id="files-card" class="card hidden">
       <div class="toolbar">
         <button id="btn-refresh">&#8635; Refresh</button>
         <button id="btn-pull" class="primary">&#8595; Pull</button>
+        <button id="btn-whatsnew" title="Who changed what on the team branch since your last sync">&#128240; What&#8217;s new</button>
         <button id="btn-push" class="primary">&#8593; Push all</button>
         <button id="btn-propose" title="Upload changes to a review branch and open a pull request on GitHub">&#8599; Propose</button>
         <button id="btn-recall" class="hidden" title="Undo your last push on GitHub (writes the previous versions back; history keeps the pushed commit)">&#8617; Recall push</button>
@@ -172,6 +186,7 @@
       </div>
       <div id="summary" class="muted"></div>
       <div id="review-banner" class="muted hidden"></div>
+      <div id="offline-banner" class="hidden" role="status"></div>
       <div id="freshness-banner" class="hidden" role="status"></div>
       <div id="adopt-banner" class="hidden"></div>
       <table id="files-table">
@@ -206,6 +221,45 @@
         <button id="history-close" class="small">Close</button>
       </div>
       <pre id="history-view" class="hidden"></pre>
+    </section>
+
+    <!-- Review changes: a read-only, cell-aware diff of your local copy against
+         the last-synced version — "what exactly am I about to push?" — plus an
+         optional one-line note that becomes the commit message for THIS file's
+         Push/Propose. Local-only display on 127.0.0.1; nothing here reaches the
+         AI. Read-only by design: the note field and the footer buttons are the
+         only inputs (resolving hunks in place would be a merge tool). -->
+    <section id="review-card" class="card hidden">
+      <h3 id="review-title">Review changes</h3>
+      <div id="review-summary" class="muted"></div>
+      <div id="review-cells"></div>
+      <pre id="review-view" class="hidden"></pre>
+      <div class="toolbar review-note-row">
+        <input id="review-note" type="text" maxlength="200"
+               placeholder="What changed? (optional — becomes the commit message)">
+        <button id="review-push" class="primary small">Push this file</button>
+        <button id="review-propose" class="small" title="Upload to a review branch and open a pull request instead of pushing directly">Propose this file</button>
+        <button id="review-close" class="small">Close</button>
+      </div>
+    </section>
+
+    <!-- What's new: the pull digest — every synced file changed on the team
+         branch since YOUR last sync (the manifest horizon), with who/when/why.
+         Populated on demand from the toolbar button and automatically after a
+         Pull (the pull response carries the digest of what just landed).
+         Read-only by design: conflicts appear marked and are resolved from the
+         file row's actions, never from here. -->
+    <section id="whatsnew-card" class="card hidden">
+      <h3 id="whatsnew-title">What's new</h3>
+      <div id="whatsnew-note" class="muted"></div>
+      <div id="whatsnew-groups" class="muted whatsnew-groups"></div>
+      <table id="whatsnew-table">
+        <thead><tr><th>File</th><th>Status</th><th>Changed</th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <div class="toolbar">
+        <button id="whatsnew-close" class="small">Close</button>
+      </div>
     </section>
 
     <div id="error-banner" class="hidden"></div>
@@ -265,6 +319,9 @@
   <script src="/static/freshness.js"></script>
   <script src="/static/guard_fmt.js"></script>
   <script src="/static/history_fmt.js"></script>
+  <script src="/static/diff_fmt.js"></script>
+  <script src="/static/whatsnew_fmt.js"></script>
+  <script src="/static/checklist.js"></script>
   <script src="/static/app.js"></script>
   <!-- Decorative backdrop: deterministic starfield + the one-time boat voyage.
        Last in <body> so the scene is already parsed; no DOM/side effects elsewhere. -->

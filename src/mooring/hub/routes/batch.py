@@ -80,6 +80,9 @@ def _tray_jobs(run, results) -> list[dict]:
                 "status": res.status,
                 "error": res.error,
                 "pii": res.pii,
+                # Value-free (line, kind) report when a traceback in the brief was
+                # sanitised and auto-confirmed (only the rewrite was forwarded).
+                "traceback_redactions": res.traceback_redactions,
                 "proposals": proposals,
                 "refining": idx in refining,
                 "forcing": idx in forcing,

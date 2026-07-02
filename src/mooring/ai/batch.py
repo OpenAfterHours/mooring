@@ -86,7 +86,10 @@ class BatchResult:
     value-free source code — an ``{code, rationale}`` append or a
     ``{kind, ops, diffs}`` patch); the hub turns the human's chosen one into a write
     through the EXISTING single-notebook Apply path. ``pii`` carries value-free
-    findings (line + kind) when the job was blocked.
+    findings (line + kind) when the job was blocked. ``traceback_redactions``
+    carries the value-free (line + kind) redaction report when a traceback in the
+    brief was sanitised and auto-confirmed (see the "traceback" branch in
+    :meth:`BatchPlanner._drive`) — so the tray can show the brief was rewritten.
     """
 
     job: BatchJob
@@ -95,6 +98,7 @@ class BatchResult:
     proposals: list[dict] = field(default_factory=list)
     error: str = ""
     pii: list[dict] = field(default_factory=list)
+    traceback_redactions: list[dict] = field(default_factory=list)
 
 
 def _name_from_brief(brief: str) -> str:
@@ -651,6 +655,7 @@ class BatchPlanner:
 
         proposals: list[dict] = []
         forced_pii: list[dict] = []  # findings the analyst overrode, carried onto the result
+        tb_redactions: list[dict] = []  # value-free rewrite report of a sanitised brief
         follow_ups = max(0, self._cfg.follow_up_turns)
         while True:
             if abort.is_set():
@@ -662,6 +667,7 @@ class BatchPlanner:
                     proposals=proposals,
                     error="" if proposals else "Batch cancelled.",
                     pii=forced_pii,
+                    traceback_redactions=tb_redactions,
                 )
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -673,6 +679,7 @@ class BatchPlanner:
                     proposals=proposals,
                     error="" if proposals else "Timed out before the assistant proposed anything.",
                     pii=forced_pii,
+                    traceback_redactions=tb_redactions,
                 )
             try:
                 event = q.get(timeout=min(remaining, _POLL))
@@ -709,6 +716,45 @@ class BatchPlanner:
                     return self._make_result(
                         job, notebook_rel, "pii_blocked", pii=data.get("findings", [])
                     )
+            elif kind == "traceback":
+                # The session's traceback guard sanitised a traceback in the brief and
+                # HELD the turn. The hold stores only the SANITISED rewrite (ai/chat.py
+                # drops the raw paste before storing), so confirming forwards nothing
+                # the TRACEBACK guard withheld — but the sanitiser rewrites only the
+                # traceback block itself: PII in the surrounding PROSE survives the
+                # rewrite, and the session's PII verdict on the sanitised text rides
+                # the hold as pii_findings/pii_hold. That verdict gets exactly the
+                # "pii" branch's policy: under block mode it stops the job unless the
+                # analyst chose "Build anyway" (force_pii), which records the
+                # overridden findings on the result so the tray shows what crossed.
+                # Only a PII-clean (or forced) hold is auto-confirmed — without that
+                # a traceback-bearing brief would hang the job to its timeout. The
+                # value-free redaction report is kept for the tray either way.
+                token = data.get("token")
+                if token:
+                    tb_redactions = list(data.get("redactions", []))
+                    pii_findings = list(data.get("pii_findings", []))
+                    if data.get("pii_hold"):
+                        if not force_pii:
+                            return self._make_result(
+                                job,
+                                notebook_rel,
+                                "pii_blocked",
+                                pii=pii_findings,
+                                traceback_redactions=tb_redactions,
+                            )
+                        forced_pii = pii_findings
+                    try:
+                        session.send_confirmed(token, "")
+                    except Exception as exc:  # noqa: BLE001
+                        return self._make_result(
+                            job,
+                            notebook_rel,
+                            "failed",
+                            error=str(exc),
+                            pii=forced_pii,
+                            traceback_redactions=tb_redactions,
+                        )
             elif kind == "fail":
                 status = "built" if proposals else "failed"
                 return self._make_result(
@@ -718,6 +764,7 @@ class BatchPlanner:
                     proposals=proposals,
                     error=str(data.get("text", "") or "The assistant reported an error."),
                     pii=forced_pii,
+                    traceback_redactions=tb_redactions,
                 )
             elif kind == "idle":
                 if follow_ups > 0:
@@ -731,6 +778,7 @@ class BatchPlanner:
                             "built" if proposals else "empty",
                             proposals=proposals,
                             pii=forced_pii,
+                            traceback_redactions=tb_redactions,
                         )
                     continue
                 return self._make_result(
@@ -739,6 +787,7 @@ class BatchPlanner:
                     "built" if proposals else "empty",
                     proposals=proposals,
                     pii=forced_pii,
+                    traceback_redactions=tb_redactions,
                 )
             elif kind == "closed":
                 return self._make_result(
@@ -748,6 +797,7 @@ class BatchPlanner:
                     proposals=proposals,
                     error="" if proposals else "The session closed before proposing anything.",
                     pii=forced_pii,
+                    traceback_redactions=tb_redactions,
                 )
 
     def _await_ready(self, session, q, deadline: float, abort: threading.Event) -> bool:
@@ -823,6 +873,7 @@ class BatchPlanner:
         proposals: list[dict] | None = None,
         error: str = "",
         pii: list[dict] | None = None,
+        traceback_redactions: list[dict] | None = None,
     ) -> BatchResult:
         """Build a BatchResult WITHOUT storing/emitting/discarding — pure, so the caller
         decides whether to adopt it (an initial build always; a revision only if built)."""
@@ -833,6 +884,7 @@ class BatchPlanner:
             proposals=list(proposals or []),
             error=error,
             pii=list(pii or []),
+            traceback_redactions=list(traceback_redactions or []),
         )
 
     def _commit(self, index: int, result: BatchResult) -> BatchResult:

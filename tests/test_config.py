@@ -79,6 +79,27 @@ def test_ai_batch_toml_and_env_populate_the_nested_object(tmp_path):
     assert app2.ai.batch.enabled is False
 
 
+def test_ai_semantic_model_defaults_on_with_flat_shim(tmp_path):
+    # Semantic-model reading defaults ON (the content is the notebook-source
+    # class — authored code); the flat accessor forwards to the nested store.
+    app = load_app_config(user_config_path=tmp_path / "missing.toml", env={})
+    assert app.ai.semantic_model is True
+    assert app.ai_semantic_model is app.ai.semantic_model
+
+
+def test_ai_semantic_model_toml_and_env_override(tmp_path):
+    user = tmp_path / "config.toml"
+    user.write_text("[ai]\nsemantic_model = false\n", "utf-8")
+    app = load_app_config(user_config_path=user, env={})
+    assert app.ai.semantic_model is False and app.ai_semantic_model is False
+    # env overrides the file in both directions
+    on = load_app_config(user_config_path=user, env={"MOORING_AI_SEMANTIC_MODEL": "1"})
+    assert on.ai_semantic_model is True
+    user.write_text("", "utf-8")
+    off = load_app_config(user_config_path=user, env={"MOORING_AI_SEMANTIC_MODEL": "0"})
+    assert off.ai_semantic_model is False
+
+
 def test_ai_pii_name_backend_defaults_and_parses(tmp_path):
     app = load_app_config(user_config_path=tmp_path / "missing.toml", env={})
     assert app.ai.pii.name_backend == "auto"  # default: auto-select at runtime

@@ -1,3 +1,5 @@
+import pytest
+
 from mooring import manifest
 
 
@@ -69,3 +71,40 @@ def test_manifest_without_last_push_still_loads(tmp_path):
     loaded = manifest.load(tmp_path)
     assert loaded.last_push == {}
     assert loaded.last_push_branch == ""
+
+
+# -- the remote-view cache (the offline fallback's input) ----------------------
+
+
+def test_remote_cache_roundtrip_and_atomic_write(tmp_path):
+    cache = manifest.RemoteCache(
+        head_commit="abc",
+        fetched_at="2026-07-02T09:00:00+00:00",
+        files={"notebooks/a.py": "sha1", "data/x.csv": "sha2"},
+        scope_folders=("notebooks", "data"),
+        scope_exclude=("scratch",),
+    )
+    manifest.save_cache(tmp_path, cache)
+    assert manifest.load_cache(tmp_path) == cache
+    # atomic write: no stray temp file left behind (the manifest.save idiom)
+    assert list((tmp_path / ".mooring").glob("*.tmp")) == []
+    # the cache is a SIBLING of the manifest, never the manifest itself
+    assert manifest.cache_path(tmp_path) != manifest.manifest_path(tmp_path)
+    assert not manifest.manifest_path(tmp_path).exists()
+
+
+def test_load_cache_missing_returns_none(tmp_path):
+    assert manifest.load_cache(tmp_path) is None
+
+
+@pytest.mark.parametrize(
+    "payload",
+    ["{not json", '"a bare string"', "[1, 2]", '{"files": [1, 2]}', '{"scope_folders": 3}'],
+)
+def test_load_cache_corrupt_returns_none(tmp_path, payload):
+    # Fail-soft by contract: the cache is display-only, so a broken one means
+    # "no offline view", never an exception.
+    path = manifest.cache_path(tmp_path)
+    path.parent.mkdir(parents=True)
+    path.write_text(payload, "utf-8")
+    assert manifest.load_cache(tmp_path) is None

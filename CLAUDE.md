@@ -38,7 +38,7 @@ L4   cli.py, hub/           two sibling presentation adapters (hub must not impo
 L3.5 app/                   application services shared by BOTH adapters (notebooks,
                             chat_service, apply, batch_service) — imports no adapter
 L3   ai/*                   AI orchestration + privacy/safety
-L2   sync, manifest, pbip, deletion   domain core  ·  editor, schema, marimo_rt   marimo bridge
+L2   sync, manifest, pbip, pbip_model, whatsnew, deletion   domain core  ·  editor, schema, marimo_rt, celldiff   marimo bridge
 L1   config, config_store, auth, github, runtime, ai_config   identity + config
 L0   githost, paths, gitsha  stdlib-pure leaves (import nothing else in mooring)
 ```
@@ -62,12 +62,12 @@ No git, ever. `sync.py` does **three-way change detection** by comparing three S
 
 ### AI copilot — structurally value-blind (`ai/`)
 
-The copilot (opt-in `mooring[copilot]` extra) is designed so the model **structurally cannot see data** — only schema (column names + types) and notebook source. Before touching anything in `ai/`, read `docs/admins/ai-privacy.md`; the value-blindness is a maintained security property with dedicated tests, not an accident. Key invariants:
+The copilot (opt-in `mooring[copilot]` extra) is designed so the model **structurally cannot see data** — only schema (column names + types) and authored code: notebook source, plus a Power BI semantic model's tables/relationships and measure/calculated-column DAX (`pbip_model.py`, allowlist parser — partition M and annotations are dropped at parse; RLS roles/translations never opened). Pasted tracebacks reach the model only as the fail-closed, value-safe rewrite from `ai/traceback.py` (held for a "Send sanitised" confirm; never the raw paste). Before touching anything in `ai/`, read `docs/admins/ai-privacy.md`; the value-blindness is a maintained security property with dedicated tests, not an accident. Key invariants:
 
 - System context is assembled in **one** place (`ai/chat.py:build_system_context`).
 - The agent gets only mooring's own value-free tools (`ai/tools.py`); the SDK's file/shell tools are removed, a deny-all permission handler backstops, and it runs in an empty working directory.
 - Applying a cell writes **source only** via marimo codegen (`ai/cellwrite.py`); mooring never opens a marimo websocket (the only channel carrying outputs/values). Live-schema introspection (`ai/introspect.py`) pushes a fixed, value-free probe over HTTP and reads back only names+dtypes.
-- The egress guard (`ai/egress.py`, `pii.py`, `secrets.py`, `ner.py`/`ner_spacy.py`) scans text leaving the workspace for structured PII / names; findings are value-free `(line, kind)` pairs. PII name detection is behind the `pii` (GLiNER) or `pii-spacy` (offline) extras.
+- The egress guard (`ai/egress.py`, `pii.py`, `secrets.py`, `traceback.py`, `ner.py`/`ner_spacy.py`) scans text leaving the workspace for structured PII / names and sanitises pasted tracebacks; findings are value-free `(line, kind)` pairs. `egress.sanitize_traceback` is the ONE gateway to the sanitiser (pinned by `test_egress.py`). PII name detection is behind the `pii` (GLiNER) or `pii-spacy` (offline) extras.
 
 Tests that pin these guarantees use a `SECRET_VALUE_DO_NOT_LEAK` fixture and assert it never reaches the model (`test_schema.py`, `test_ai_tools.py`, `test_chat_session.py`, `test_introspect.py`, …). Keep them green.
 

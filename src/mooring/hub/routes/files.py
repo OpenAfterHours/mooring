@@ -4,27 +4,71 @@ local safety net (trash listing/restore + the activity ledger)."""
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 
 from starlette.concurrency import run_in_threadpool
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from mooring import notebook_template, reveal, sync, telemetry, trash
-from mooring.github import GitHubError
+from mooring import celldiff, gitsha, manifest, notebook_template, reveal, sync, telemetry, trash
+from mooring.github import AuthFailed, GitHubError, NotFound
 
 
 async def api_new(request: Request) -> JSONResponse:
     hub = request.app.state.hub
     data = await request.json()
     cfg = hub.cfg
-    try:
-        rel_path = notebook_template.create_from_input(
-            cfg.workspace(), data.get("name", ""), folders=cfg.folders, exclude=cfg.exclude
-        )
-    except (ValueError, FileExistsError) as exc:
-        return JSONResponse({"error": str(exc)}, status_code=400)
-    telemetry.log_event("new")
-    return hub._open(rel_path)
+
+    def _run() -> JSONResponse:
+        try:
+            rel_path = notebook_template.create_from_input(
+                cfg.workspace(), data.get("name", ""), folders=cfg.folders, exclude=cfg.exclude
+            )
+        except (ValueError, FileExistsError) as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        telemetry.log_event("new")
+        return hub._open(rel_path)
+
+    # _open may spawn the marimo subprocess and block on its readiness poll —
+    # off the event loop, exactly like api_open below (it had the same latent
+    # first-open freeze before the api_duplicate review caught it).
+    return await run_in_threadpool(_run)
+
+
+async def api_duplicate(request: Request) -> JSONResponse:
+    """Byte-copy a notebook to a personal ``{stem}-{login}-draft.py`` sibling and
+    open it — a safe playground the three-way engine classifies as a new local
+    file, so it can never conflict with the team file and is only shared by an
+    explicit push. The owner suffix is the GitHub login; local mode (AuthFailed,
+    which NotConfigured subclasses) and an offline hub degrade to plain
+    ``-draft`` rather than failing the copy."""
+    hub = request.app.state.hub
+    data = await request.json()
+    rel_path = str(data.get("path", ""))
+    cfg = hub.cfg
+
+    def _run() -> JSONResponse:
+        # username() is a blocking GET /user (a full transport timeout when
+        # offline — the very flow this endpoint supports) and _open may spawn
+        # marimo; both stay off the event loop so a Duplicate click can never
+        # freeze /api/state polls and the open chat SSE streams.
+        try:
+            owner = hub.username()
+        except (AuthFailed, GitHubError, OSError):
+            owner = ""
+        try:
+            new_rel = notebook_template.duplicate_as_draft(
+                cfg.workspace(), rel_path, owner=owner, exclude=cfg.exclude
+            )
+        except (ValueError, FileExistsError) as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        except FileNotFoundError:
+            return JSONResponse({"error": f"No such notebook: {rel_path}"}, status_code=404)
+        telemetry.log_event("duplicate")
+        hub._activity("duplicate", path=rel_path, draft=new_rel)
+        return hub._open(new_rel)
+
+    return await run_in_threadpool(_run)
 
 
 async def api_open(request: Request) -> JSONResponse:
@@ -260,6 +304,54 @@ async def api_history_file(request: Request) -> JSONResponse:
         )
     )
     return JSONResponse({"path": rel, "at": at, "source": old, "diff": diff})
+
+
+async def api_diff(request: Request) -> JSONResponse:
+    """A read-only, cell-aware diff of one file's local copy against its
+    last-synced base (the manifest blob) — "what exactly am I about to push?".
+    Strictly local display: never opens an editor, never writes the workspace,
+    never goes near the AI. Resolves via _resolve_within (not _ws_file) because
+    a deleted-locally row legitimately has no local file, and skips the blob
+    fetch entirely for a new-local file (no manifest base). A GC'd base blob
+    (NotFound) degrades to showing the full file, the sync.revert posture."""
+    hub = request.app.state.hub
+    data = await request.json()
+    workspace = hub.cfg.workspace()
+    try:
+        rel, target = _resolve_within(workspace, str(data.get("path", "")))
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+    def _compute() -> dict:
+        base_sha = manifest.load(workspace).files.get(rel)
+        base = None
+        gc_note = ""
+        if base_sha:
+            try:
+                base = hub.client().get_blob(base_sha)
+            except NotFound:
+                gc_note = "no base available — showing the full file"
+        local = gitsha.read_for_push(target, rel) if target.is_file() else None
+        body = dataclasses.asdict(celldiff.diff(base, local, rel))
+        if gc_note:
+            body["note"] = gc_note
+        return body
+
+    try:
+        # The blob fetch is a synchronous network call and the marimo IR parse
+        # is CPU-bound — keep both off the event loop (the api_undo idiom).
+        body = await asyncio.to_thread(_compute)
+    except ValueError:
+        return JSONResponse(
+            {"error": f"Nothing to compare for {rel}: no local file and no synced base."},
+            status_code=404,
+        )
+    except (GitHubError, OSError) as exc:
+        # Type only: a NotFound message embeds the request URL (the history
+        # endpoints' telemetry posture — paths never reach central telemetry).
+        telemetry.log_error(exc=type(exc)("diff base read failed"), op="diff")
+        return JSONResponse({"error": str(exc)}, status_code=502)
+    return JSONResponse({"path": rel, **body})
 
 
 async def api_restore(request: Request) -> JSONResponse:

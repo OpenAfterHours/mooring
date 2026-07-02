@@ -41,9 +41,10 @@ async def api_chat_open(request: Request) -> JSONResponse:
     if workspace_config.is_ai_disabled(workspace, notebook):
         return JSONResponse({"enabled": False, "reason": "notebook_disabled"}, status_code=403)
     try:
-        # File IO (notebook source, dataset schema, team context) — off the event
-        # loop so a slow read can't stall the hub's other requests.
-        context, index, pii_banner, live_text = await run_in_threadpool(
+        # File IO (notebook source, dataset schema, team context, semantic-model
+        # extraction) — off the event loop so a slow read can't stall the hub's
+        # other requests.
+        context, index, pii_banner, live_text, models = await run_in_threadpool(
             hub._build_chat_context, workspace, notebook, dataset
         )
     except ValueError as exc:
@@ -59,6 +60,7 @@ async def api_chat_open(request: Request) -> JSONResponse:
             model=model,
             reasoning_effort=reasoning_effort,
             dictionary=index,
+            semantic_models=models,
         )
     except Exception as exc:  # noqa: BLE001  # AIError surfaces to the UI in Phase 1
         return JSONResponse({"error": str(exc)}, status_code=502)
@@ -393,3 +395,46 @@ async def api_notebook_ai_toggle(request: Request) -> JSONResponse:
     return JSONResponse(
         {"ok": True, "notebook": notebook, "ai_disabled": disabled, "closed_sessions": closed}
     )
+
+
+async def api_model_ai_toggle(request: Request) -> JSONResponse:
+    """Turn the copilot's semantic-model access off (or back on) for ONE Power BI
+    model. Writes the synced mooring.toml opt-out ([ai] disabled_semantic_models,
+    keyed by the PBIP artifact key, e.g. "reports/Sales") so the decision travels
+    to teammates — the artifact-row action in the hub calls this.
+
+    NEXT-OPEN semantics, by design: the model tools are bound at session creation
+    (build_tools runs once, in _aopen), and unlike the per-notebook opt-out there
+    is no session registry keyed by model to tear down — so disabling a model
+    takes effect for chats opened AFTER the toggle; already-open windows keep
+    their tools until closed or reaped.
+    """
+    hub = request.app.state.hub
+    if not hub.app_cfg.ai_enabled:
+        return JSONResponse({"enabled": False}, status_code=404)
+    data = await request.json()
+    model = str(data.get("model", "")).strip()
+    disabled = bool(data.get("disabled", True))
+    if not model:
+        return JSONResponse({"error": "A model is required."}, status_code=400)
+    workspace = hub.cfg.workspace()
+    # Validate the key resolves under the workspace (no traversal/absolute paths),
+    # but do NOT require the model dir to exist: disabling must work before the
+    # first pull, and re-enabling after a rename/delete (to clear a stale opt-out).
+    key = workspace_config.normalize_notebook(model)
+    try:
+        target = (workspace / key).resolve()
+        target.relative_to(workspace.resolve())
+    except (ValueError, OSError):
+        return JSONResponse({"error": "Path escapes the workspace."}, status_code=400)
+    try:
+        await run_in_threadpool(
+            workspace_config.set_semantic_model_disabled, workspace, key, disabled
+        )
+    except tomllib.TOMLDecodeError:
+        return JSONResponse(
+            {"error": "mooring.toml is malformed — fix it before changing AI settings."},
+            status_code=409,
+        )
+    telemetry.log_event("ai_model_toggle", disabled=int(disabled))
+    return JSONResponse({"ok": True, "model": key, "ai_model_disabled": disabled})

@@ -4,10 +4,23 @@ icon: lucide/newspaper
 
 # Pull digest: what changed while you were away
 
-!!! note "Status: proposed"
-    Designed 2026-07 from a multi-agent ideation review; not yet implemented.
-    Scope and endpoint names may change as the shared pieces from
-    [Review my changes](review-my-changes.md) land.
+!!! success "Status: implemented (phases 1–3)"
+    Shipped 2026-07: the deterministic digest core — the new L2
+    `src/mooring/whatsnew.py` (`pending_digest`: one `compare(anchor, head)`
+    call over the manifest horizon, a capped per-file `list_commits_for_path`
+    fallback when the anchor is blank/lost or the compare window truncates,
+    and a state-only degradation that never raises past the digest boundary),
+    `GitHubClient.compare`, and the `mooring whatsnew` CLI; the hub's
+    on-demand **What's new** panel (`GET /api/whatsnew`, the `/api/discover`
+    posture) with per-entry cell/line-count summaries
+    (`POST /api/whatsnew/detail`, computed by the shared cell differ from
+    [Review my changes](review-my-changes.md) and cached by blob-sha pair);
+    the pull response carrying the **pre**-pull digest (best-effort — a
+    digest failure never fails the pull); and the per-file **Watch** toggle
+    (per-repo `localStorage`) with watched-first sorting and row badges.
+    Phase 4 (the copilot **Explain**) and the deterministic "may affect your
+    work" flag remain open — the explain awaits a shared one-shot provider
+    pattern (see [handover explainer](handover-explainer.md)).
 
 ## Problem
 
