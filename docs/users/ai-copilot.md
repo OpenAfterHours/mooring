@@ -93,6 +93,32 @@ copilot about its schema straight away — see the
     numbers, so the rule still stands. See
     [the privacy page](../admins/ai-privacy.md#structured-pii-pre-flight-scan-opt-in-best-effort).
 
+## Explain this notebook
+
+Inherited a notebook — a leaver's month-end report, say — and need to know what
+it does before you dare touch it? On the notebook's row, open **Actions** and
+click **Explain** (or type `/explain` in an already-open chat). The copilot
+reads the notebook's source and replies with a structured walkthrough: its
+**purpose**, the **inputs it reads**, the **pipeline stages** in order, the
+**outputs it writes**, and the **things you'd change each period** — dates,
+paths, and literals spotted in the code. Every claim cites the `cell N` it
+comes from, so you can check each one against the notebook.
+
+When the walkthrough finishes, an **Add as notes cell** button appears on the
+reply. Click it and the copilot proposes the walkthrough as a single markdown
+documentation cell — you review and **Apply** it like any other proposal (and
+can Undo it). Once applied, the notes sync with the notebook and greet the next
+person who inherits it.
+
+Like everything else in the chat, it's schema-only: the walkthrough is built
+from your notebook's code and column names, never your data.
+
+!!! warning "Generated — verify before relying on it"
+    The walkthrough opens with a reminder that it was generated from the
+    notebook source. The cell anchors make every claim checkable, but the
+    copilot can be confidently wrong — read the cited cells before acting on
+    "change this each month" advice.
+
 ## Turn on the PII guard
 
 The copilot is schema-only by design, so your **data** never reaches the model. On

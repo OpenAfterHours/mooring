@@ -222,9 +222,13 @@ function showUndoToast(trashed) {
 
 // Pop the copilot out into its own window (not a tab) so it sits beside the
 // notebook. The window features are what make the browser open a window rather
-// than a tab; a per-notebook name reuses/focuses an already-open chat window.
-function openChatWindow(path) {
-  const url = `/ai/chat?notebook=${encodeURIComponent(path)}`;
+// than a tab; a per-notebook name reuses/focuses an already-open chat window —
+// keyed on the path ALONE, so "Explain" (opts.explain adds &explain=1, which
+// auto-runs /explain once the session is ready) targets the same window as "AI"
+// instead of spawning a second chat for the notebook.
+function openChatWindow(path, opts) {
+  let url = `/ai/chat?notebook=${encodeURIComponent(path)}`;
+  if (opts && opts.explain) url += "&explain=1";
   const name = "mooringAI_" + path.replace(/[^a-z0-9]/gi, "_");
   const height = Math.min(960, window.screen?.availHeight || 900);
   const win = window.open(url, name, `popup,width=560,height=${height},left=80,top=60`);
@@ -824,7 +828,13 @@ function fileActions(file, opts) {
   // off switch for "this notebook now handles PII; don't let AI touch it by mistake".
   // Modules (non-notebook .py) get no AI: the copilot operates on notebooks.
   if (aiChatEnabled && isNotebook && file.has_local) {
-    if (!file.ai_disabled) actions.push(["AI", () => openChatWindow(file.path)]);
+    if (!file.ai_disabled) {
+      actions.push(["AI", () => openChatWindow(file.path)]);
+      // Explain: the same chat window, but it auto-runs /explain once ready — a
+      // cell-anchored walkthrough for picking up a teammate's notebook. Same gate
+      // as AI (and it IS a model turn, so the ai_disabled opt-out applies).
+      actions.push(["Explain", () => openChatWindow(file.path, { explain: true })]);
+    }
     const label = file.ai_disabled ? "Enable AI" : "Disable AI";
     actions.push([label, () =>
       action("/api/ai/notebook/toggle", { notebook: file.path, disabled: !file.ai_disabled })]);

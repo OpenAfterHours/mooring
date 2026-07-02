@@ -9,6 +9,9 @@
 
 const $ = (id) => document.getElementById(id);
 const NOTEBOOK = new URLSearchParams(location.search).get("notebook") || "";
+// The hub's "Explain" action opens this window with &explain=1: run /explain
+// automatically once the session is ready (see maybeAutoExplain).
+const EXPLAIN = new URLSearchParams(location.search).get("explain") === "1";
 const LS_MODEL = "mooring.ai.model";
 const LS_EFFORT = "mooring.ai.effort";
 const LS_THEME = "mooring.ui.theme"; // shared with the hub (same origin)
@@ -62,6 +65,11 @@ let toolStack = []; // open tool-call rows in this turn
 let latestProposal = null; // { card, kind, ops, copyText, applyBtn, note, applied, skipped }
 let lastUndoBtn = null; // the single visible "Undo" button (the last applied change)
 let lastUserText = ""; // for /retry
+let lastUserLabel = ""; // its compact visible label (so /retry re-shows it too)
+let explainFired = false; // &explain=1 auto-runs at most ONCE per window — openChat()
+// is re-invoked on model/effort switches, sign-in, and AI re-enable, and none of
+// those may silently burn a second explain turn.
+let explainTurnActive = false; // the turn answering /explain (offers "Add as notes cell")
 let currentGuard = null; // outbound-PII guard status for this session (topbar badge)
 const history = new ChatCore.HistoryRing(); // in-memory ONLY (never persisted)
 
@@ -520,6 +528,7 @@ function askAiToFix(error) {
     " Please re-propose a corrected version. Remember each cell is the BODY only — " +
     "no @app.cell, no def, and no return statements.";
   lastUserText = msg;
+  lastUserLabel = ""; // /retry after a fix attempt resends (and shows) the fix text
   startTurn();
   api("/api/ai/chat/send", { sid, text: msg }).then(({ data }) => {
     if (data.error) {
@@ -591,6 +600,36 @@ function copyCode(code, note) {
   if (navigator.clipboard?.writeText) {
     navigator.clipboard.writeText(code).then(done, () => {});
   }
+}
+
+// -- "Add as notes cell" (the /explain follow-up) -----------------------------
+
+// A walkthrough that lives only in this transcript rots; one that syncs with the
+// notebook greets the next inheritor. After an explain turn goes idle, offer to
+// send the canned follow-up (chat_core.js notesCellPrompt — one appended markdown
+// cell via mooring_propose_cell only). The resulting proposal rides the normal
+// card → Apply → Undo path untouched, so it still gets the human review step.
+function offerNotesCell() {
+  const rows = $("messages").querySelectorAll(".row-assistant");
+  const last = rows[rows.length - 1];
+  if (!last) return; // the turn produced no assistant row (e.g. it failed)
+  const bar = document.createElement("div");
+  bar.className = "toolbar";
+  const btn = document.createElement("button");
+  btn.className = "small";
+  btn.textContent = "Add as notes cell";
+  btn.addEventListener("click", () => {
+    if (!sid || isBusy() || turnState === "connecting") {
+      addSysRow("Wait for the current turn to finish.");
+      return;
+    }
+    btn.disabled = true;
+    stick = true;
+    submitMessage(ChatCore.notesCellPrompt(), "add the walkthrough as a notes cell");
+  });
+  bar.appendChild(btn);
+  last.appendChild(bar);
+  maybeScroll();
 }
 
 // -- outbound-PII guard -----------------------------------------------------
@@ -695,6 +734,18 @@ function setTurnState(state) {
 
 // -- session ----------------------------------------------------------------
 
+// Opened with &explain=1 (the hub's "Explain" action): run /explain once the
+// session can take a turn. Consumed at BOTH readiness paths — the SSE "ready"
+// event (backgrounded Copilot handshake) and openChat's immediate-ready branch —
+// and never on the disabled/no-sid early returns (they bail before sid is set).
+// The once-per-window flag is what keeps a later /model or effort switch (each
+// re-invokes openChat) from silently re-sending the walkthrough turn.
+function maybeAutoExplain() {
+  if (!EXPLAIN || explainFired || !sid) return;
+  explainFired = true;
+  runCommand({ cmd: "explain", arg: "" });
+}
+
 function closeStream() {
   if (source) {
     source.close();
@@ -735,11 +786,18 @@ async function openChat() {
   source.addEventListener("tool", (e) => onTool(JSON.parse(e.data)));
   source.addEventListener("tool_done", (e) => onToolDone(JSON.parse(e.data).success !== false));
   source.addEventListener("intent", (e) => onIntent(JSON.parse(e.data).text));
-  source.addEventListener("idle", () => setTurnState("idle"));
+  source.addEventListener("idle", () => {
+    setTurnState("idle");
+    if (explainTurnActive) {
+      explainTurnActive = false;
+      offerNotesCell(); // the walkthrough landed — offer to keep it with the notebook
+    }
+  });
   // The (backgrounded) Copilot session finished starting — unblock the input. The
   // hub also REPLAYS this on (re)connect, so we catch it even if it fired first.
   source.addEventListener("ready", () => {
     if (turnState === "connecting") setTurnState("idle");
+    maybeAutoExplain();
   });
   source.addEventListener("pii", (e) => {
     const d = JSON.parse(e.data);
@@ -795,6 +853,7 @@ async function openChat() {
   // and keep the input disabled until the "ready" event arrives; an already-ready
   // session (data.ready) is usable immediately.
   setTurnState(data.ready === false ? "connecting" : "idle");
+  if (data.ready !== false) maybeAutoExplain(); // still-connecting: the "ready" event fires it
 }
 
 // -- per-notebook AI off-switch ---------------------------------------------
@@ -1020,9 +1079,18 @@ async function send() {
   await submitMessage(message);
 }
 
-async function submitMessage(message) {
+// Send one user turn. `visibleLabel`, when given, is what the transcript row
+// shows in place of the full text — used by the canned /explain prompts so the
+// transcript reads compactly. lastUserText stays the FULL prompt (what /retry
+// resends), with lastUserLabel alongside so the retried row reads the same way.
+async function submitMessage(message, visibleLabel) {
   lastUserText = message;
-  addUserRow(message);
+  lastUserLabel = visibleLabel || "";
+  // The turn answering the /explain prompt (a pinned constant, so equality is
+  // reliable — including via /retry) offers "Add as notes cell" when it lands;
+  // any other turn clears a stale tag left by an errored one.
+  explainTurnActive = message === ChatCore.explainPrompt();
+  addUserRow(visibleLabel || message);
   startTurn();
   const { data } = await api("/api/ai/chat/send", { sid, text: message });
   if (data.reason === "notebook_disabled") {
@@ -1040,6 +1108,23 @@ function runCommand(cmd) {
   switch (cmd.cmd) {
     case "help":
       printHelp();
+      break;
+    case "explain":
+      // The handover walkthrough: send the fixed, value-free prompt (chat_core.js)
+      // through the ordinary send path — the PII valve and the per-notebook
+      // off-switch apply like any turn. The transcript shows the compact label.
+      // send() doesn't reach runCommand while busy, but the auto-run path can —
+      // so guard both a turn in flight and a still-connecting session here.
+      if (isBusy() || turnState === "connecting") {
+        addSysRow("Wait for the session to be ready.");
+        break;
+      }
+      addSysRow(
+        "The walkthrough is generated from the notebook source — verify it against " +
+        "the notebook before relying on it."
+      );
+      stick = true;
+      submitMessage(ChatCore.explainPrompt(), ChatCore.explainLabel());
       break;
     case "clear":
       $("messages").innerHTML = "";
@@ -1066,7 +1151,7 @@ function runCommand(cmd) {
       break;
     case "retry":
       if (isBusy()) addSysRow("Wait for the current turn to finish.");
-      else if (lastUserText) { stick = true; submitMessage(lastUserText); }
+      else if (lastUserText) { stick = true; submitMessage(lastUserText, lastUserLabel); }
       else addSysRow("Nothing to resend yet.");
       break;
     case "":
@@ -1123,6 +1208,7 @@ function printBanner() {
 function printHelp() {
   const rows = [
     ["/help", "show this help"],
+    ["/explain", "walk through what this notebook does"],
     ["/clear", "clear the transcript (keeps the session)"],
     ["/model [name]", "list or switch the model"],
     ["/apply", "apply the latest proposal"],

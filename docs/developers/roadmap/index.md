@@ -37,7 +37,7 @@ what cloud notebook platforms do.
 | [Pull digest](pull-digest.md) | ✅ Phases 1–3 shipped 2026-07 | M | "What changed while you were away" — computed against each analyst's personal sync horizon. |
 | [Duplicate as draft](duplicate-as-draft.md) | ✅ Shipped 2026-07 | S | A fearless personal copy of any notebook, plus a first-run checklist for new teammates. |
 | [Offline mode](offline-mode.md) | ✅ Shipped 2026-07 | M | Degrade gracefully when GitHub is unreachable instead of looking broken. |
-| [Handover explainer](handover-explainer.md) | Planned | S | One-shot copilot walkthrough of an inherited notebook, cell by cell. |
+| [Handover explainer](handover-explainer.md) | ✅ Shipped 2026-07 | S | One-shot copilot walkthrough of an inherited notebook, cell by cell. |
 | [Traceback fixer](traceback-fixer.md) | Planned | M | Debug from a traceback without the model ever seeing the data values inside it. |
 | [Power BI semantic model](pbi-semantic-model.md) | Planned | M | Let the copilot read synced PBIP tables, relationships, and DAX — schema and authored code, never data. |
 
