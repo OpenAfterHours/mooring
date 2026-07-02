@@ -93,8 +93,16 @@ async function action(path, body, refreshAfter = true) {
   showError("");
   try {
     const data = await api(path, body || {});
-    if (data.error) showError(data.error);
-    showLog(data);
+    // The push guard withheld file(s): not an error — open the confirm dialog
+    // (api() synthesized data.error from the 409; the dialog is the real UI).
+    if (GuardFmt.needsDialog(data)) {
+      delete data.error;
+      showLog(data);
+      showGuardDialog(data, path, body || {});
+    } else {
+      if (data.error) showError(data.error);
+      showLog(data);
+    }
     if (data.url) window.open(data.url, "_blank");
     if (data.trashed && data.trashed.length) showUndoToast(data.trashed);
     if (refreshAfter) await refresh();
@@ -102,6 +110,48 @@ async function action(path, body, refreshAfter = true) {
   } finally {
     setBusy(false);
   }
+}
+
+// The push guard found something that looks like a secret / structured PII /
+// a bulk data export in files about to publish. Flagged files were WITHHELD
+// (clean files already went). Warn mode offers "Push anyway" carrying per-file
+// confirm tokens — each binds the exact findings to the exact bytes, so a
+// changed file or a new finding is never covered by an old confirm. Block mode
+// ([guard] push = "block" in the synced mooring.toml) offers no override.
+function showGuardDialog(data, apiPath, body) {
+  const dialog = $("guard-dialog");
+  const findings = data.guard_findings || [];
+  const files = findings.length;
+  $("guard-message").textContent =
+    `${files} file(s) were NOT ${apiPath.includes("propose") ? "proposed" : "pushed"} — ` +
+    "they contain something that looks sensitive:";
+  const list = $("guard-findings");
+  list.innerHTML = "";
+  for (const row of GuardFmt.rows(findings)) {
+    const li = document.createElement("li");
+    li.textContent = row;
+    list.appendChild(li);
+  }
+  const override = GuardFmt.canOverride(data);
+  $("guard-hint").textContent = override
+    ? "Remove the flagged content, or add a “mooring: push-ok” comment on a " +
+      "reviewed false-positive line. Pushing anyway publishes it to everyone " +
+      "with access to the repo."
+    : "Your team's policy blocks pushing flagged files ([guard] push = \"block\"). " +
+      "Remove the flagged content, or add a “mooring: push-ok” comment on a " +
+      "reviewed false-positive line, then push again.";
+  const anyway = $("guard-anyway");
+  anyway.classList.toggle("hidden", !override);
+  anyway.onclick = () => {
+    dialog.close();
+    const confirmed = Object.assign({}, body, {
+      confirm_tokens: GuardFmt.allTokens(findings),
+    });
+    action(apiPath, confirmed);
+  };
+  $("guard-cancel").onclick = () => dialog.close();
+  dialog.showModal();
+  $("guard-cancel").focus(); // the safe choice is the default
 }
 
 // "Local copy replaced — Undo": a transient toast for every pre-image the last
@@ -812,6 +862,8 @@ async function refresh() {
   for (const id of ["btn-pull", "btn-push", "btn-propose"]) {
     $(id).classList.toggle("hidden", !state.logged_in);
   }
+  // Recall shows only while the manifest holds a recallable last push.
+  $("btn-recall").classList.toggle("hidden", !(state.logged_in && state.can_recall));
   // Workspace-level "Batch build" — only when the opt-in orchestrator is enabled.
   $("btn-batch").classList.toggle("hidden", !state.ai_batch);
   // No team Pull in local mode, so don't dangle it in the empty-state hint.
@@ -1038,6 +1090,16 @@ $("btn-push").addEventListener("click", () => {
 $("btn-propose").addEventListener("click", () => {
   const count = lastFiles.filter((f) => PUSH_STATES.has(f.state)).length;
   return proposeAction(null, count);
+});
+$("btn-recall").addEventListener("click", () => {
+  const ok = confirm(
+    "Undo your last push on GitHub?\n\n" +
+    "The previous version of each pushed file is written back to the team branch. " +
+    "The pushed version stays in the repo's history — if you pushed a secret, you " +
+    "still need to rotate it. If a teammate has pushed since, the recall stops with " +
+    "a conflict instead of overwriting their work."
+  );
+  if (ok) action("/api/recall", {});
 });
 $("btn-new").addEventListener("click", () => {
   const name = prompt(

@@ -131,6 +131,11 @@ def _build_parser() -> argparse.ArgumentParser:
     push = sub.add_parser("push", help="upload local changes to the team repo")
     push.add_argument("paths", nargs="*", help="specific files to push (default: all changes)")
     push.add_argument("-m", "--message", default=None, help="commit message")
+    push.add_argument(
+        "--acknowledge-findings",
+        action="store_true",
+        help="push files the guard flagged anyway (refused when the team policy is block)",
+    )
 
     propose = sub.add_parser(
         "propose", help="upload changes to a review branch (open a pull request on GitHub)"
@@ -139,6 +144,20 @@ def _build_parser() -> argparse.ArgumentParser:
         "paths", nargs="*", help="specific files to propose (default: all changes)"
     )
     propose.add_argument("-m", "--message", default=None, help="commit message")
+    propose.add_argument(
+        "--acknowledge-findings",
+        action="store_true",
+        help="propose files the guard flagged anyway (refused when the team policy is block)",
+    )
+
+    scan = sub.add_parser(
+        "scan", help="scan outgoing changes for secrets/PII/bulk data without pushing"
+    )
+
+    recall = sub.add_parser(
+        "recall", help="undo your last push on GitHub (history keeps the pushed commit)"
+    )
+    recall.add_argument("-y", "--yes", action="store_true", help="skip the confirmation prompt")
 
     adopt = sub.add_parser(
         "adopt",
@@ -233,6 +252,8 @@ def _build_parser() -> argparse.ArgumentParser:
         pull,
         push,
         propose,
+        scan,
+        recall,
         adopt,
         open_cmd,
         new,
@@ -516,32 +537,126 @@ def cmd_pull(cfg: config.Config, theirs: bool, keep_both: bool) -> int:
     return 0 if not result.skipped_conflicts else 1
 
 
-def cmd_push(cfg: config.Config, only_paths: list[str], message: str | None) -> int:
+def _push_guard_fn(cfg: config.Config, acknowledge: bool):
+    """The push guard for a CLI push/propose: scans every outgoing candidate
+    (mooring.pushguard) unless the user acknowledged the findings — and even
+    then only when the team's synced policy allows it ([guard] push = "warn").
+    Returns (guard_fn or None, collected, mode)."""
+    from mooring import pushguard
+
+    mode = workspace_config.guard_mode(cfg.workspace())
+    if acknowledge and mode != "block":
+        return None, {}, mode
+    guard_fn, collected = pushguard.make_guard()
+    return guard_fn, collected, mode
+
+
+def _print_guard_findings(collected: dict, mode: str, verb: str) -> None:
+    print(f"\n{len(collected)} file(s) withheld — they contain something that looks sensitive:")
+    for path, info in sorted(collected.items()):
+        for f in info["findings"]:
+            print(f"  {path}:{f.line}  {f.kind}")
+    if mode == "block":
+        print(
+            "Your team's policy blocks pushing flagged files ([guard] push = \"block\").\n"
+            "Remove the flagged content, or add a `mooring: push-ok` comment on a\n"
+            f"reviewed false-positive line, then {verb} again."
+        )
+    else:
+        print(
+            "Remove the flagged content, add a `mooring: push-ok` comment on a reviewed\n"
+            f"false-positive line, or re-run with --acknowledge-findings to {verb} anyway."
+        )
+
+
+def cmd_push(
+    cfg: config.Config, only_paths: list[str], message: str | None, acknowledge: bool = False
+) -> int:
     from mooring import sync
 
-    result = sync.push(_client(cfg), cfg, paths=only_paths or None, message=message)
+    guard_fn, collected, mode = _push_guard_fn(cfg, acknowledge)
+    result = sync.push(
+        _client(cfg), cfg, paths=only_paths or None, message=message, guard_fn=guard_fn
+    )
     telemetry.log_event(
         "push",
         pushed=result.pushed,
         conflicts=len(result.blocked_conflicts),
         lines=len(result.lines),
+        withheld=len(collected),
     )
     _record_activity(cfg, "push", result)
     _print_sync_result(result)
-    return 0 if not result.blocked_conflicts else 1
+    if collected:
+        _print_guard_findings(collected, mode, "push")
+    return 0 if not (result.blocked_conflicts or collected) else 1
 
 
-def cmd_propose(cfg: config.Config, only_paths: list[str], message: str | None) -> int:
+def cmd_propose(
+    cfg: config.Config, only_paths: list[str], message: str | None, acknowledge: bool = False
+) -> int:
     from mooring import sync
 
-    result = sync.propose(_client(cfg), cfg, paths=only_paths or None, message=message)
+    guard_fn, collected, mode = _push_guard_fn(cfg, acknowledge)
+    result = sync.propose(
+        _client(cfg), cfg, paths=only_paths or None, message=message, guard_fn=guard_fn
+    )
     telemetry.log_event(
         "propose",
         proposed=result.proposed,
         conflicts=len(result.blocked_conflicts),
         review_branch=bool(result.review_branch),
+        withheld=len(collected),
     )
     _record_activity(cfg, "propose", result)
+    _print_sync_result(result)
+    if collected:
+        _print_guard_findings(collected, mode, "propose")
+    return 0 if not (result.blocked_conflicts or collected) else 1
+
+
+def cmd_scan(cfg: config.Config) -> int:
+    """Run the push guard over the current push candidates without pushing —
+    the push-scoped sibling of `mooring ai pii check`."""
+    from mooring import pushguard, sync
+
+    report = sync.status(_client(cfg), cfg)
+    workspace = cfg.workspace()
+    findings_total = 0
+    for f in report.by_state(*sync.PUSH_STATES):
+        target = workspace / f.path
+        if not target.is_file():
+            continue  # a deletion has no bytes to scan
+        findings = pushguard.scan_text(f.path, target.read_bytes())
+        for finding in findings:
+            print(f"  {f.path}:{finding.line}  {finding.kind}")
+        findings_total += len(findings)
+    if findings_total:
+        print(
+            f"{findings_total} finding(s). Fix them, or mark a reviewed false positive "
+            "with a `mooring: push-ok` comment on that line."
+        )
+        return 1
+    print("No findings in the current push candidates.")
+    return 0
+
+
+def cmd_recall(cfg: config.Config, assume_yes: bool) -> int:
+    from mooring import sync
+
+    if not assume_yes:
+        if not sys.stdin.isatty():
+            sys.exit("Refusing to recall the last push without confirmation. Re-run with --yes.")
+        prompt = (
+            "Undo your last push on GitHub? The previous versions are written back; "
+            "the pushed commit stays in history. [y/N] "
+        )
+        if input(prompt).strip().lower() not in ("y", "yes"):
+            print("Cancelled.")
+            return 0
+    result = sync.recall(_client(cfg), cfg)
+    telemetry.log_event("recall", recalled=result.pushed, conflicts=len(result.blocked_conflicts))
+    _record_activity(cfg, "recall", result)
     _print_sync_result(result)
     return 0 if not result.blocked_conflicts else 1
 
@@ -1449,9 +1564,13 @@ def _dispatch(
     if command == "pull":
         return cmd_pull(cfg, args.theirs, args.keep_both)
     if command == "push":
-        return cmd_push(cfg, args.paths, args.message)
+        return cmd_push(cfg, args.paths, args.message, args.acknowledge_findings)
     if command == "propose":
-        return cmd_propose(cfg, args.paths, args.message)
+        return cmd_propose(cfg, args.paths, args.message, args.acknowledge_findings)
+    if command == "scan":
+        return cmd_scan(cfg)
+    if command == "recall":
+        return cmd_recall(cfg, args.yes)
     if command == "adopt":
         return cmd_adopt(cfg, args.folders, args.all_folders)
     if command == "open":

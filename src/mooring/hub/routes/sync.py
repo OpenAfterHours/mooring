@@ -1,4 +1,4 @@
-"""Sync endpoints: pull, push, propose, resolve, and the discover/adopt pair."""
+"""Sync endpoints: pull, push, propose, resolve, recall, and discover/adopt."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import tomllib
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from mooring import auth, sync, telemetry, workspace_config
+from mooring import auth, pushguard, sync, telemetry, workspace_config
 from mooring.app import notebooks as nb_ops
 from mooring.github import GitHubError
 
@@ -19,18 +19,66 @@ async def api_pull(request: Request) -> JSONResponse:
     return hub._sync_op("pull", lambda: sync.pull(hub.client(), hub.cfg, strategy=strategy))
 
 
+def _guarded_sync_op(hub, name: str, data: dict, run) -> JSONResponse:
+    """Run push/propose behind the push guard's warn-and-confirm flow.
+
+    Every outgoing candidate is scanned (mooring.pushguard) via sync's injected
+    ``guard_fn``; flagged files are WITHHELD (clean ones still go), and the
+    response upgrades to a 409 carrying value-free findings + per-file confirm
+    tokens. "Push anyway" re-POSTs with those tokens: each token binds the exact
+    findings to the exact bytes, so a changed file or a new finding is never
+    covered by an old confirm. In block mode ([guard] push = "block" in the
+    synced mooring.toml) tokens are refused — the pragma/fix is the only way.
+    """
+    mode = workspace_config.guard_mode(hub.cfg.workspace())
+    confirmed = frozenset(str(t) for t in (data.get("confirm_tokens") or []))
+    if mode == "block":
+        confirmed = frozenset()
+    guard_fn, collected = pushguard.make_guard(confirmed)
+    body, status = hub._sync_op_body(name, lambda: run(guard_fn))
+    if status == 200 and collected:
+        telemetry.log_event("push_guard", findings=sum(
+            len(info["findings"]) for info in collected.values()
+        ))
+        body["needs_confirm"] = mode != "block"
+        body["guard_mode"] = mode
+        body["guard_findings"] = [
+            {
+                "path": path,
+                "token": info["token"],
+                "findings": [{"line": f.line, "kind": f.kind} for f in info["findings"]],
+            }
+            for path, info in sorted(collected.items())
+        ]
+        status = 409
+    return JSONResponse(body, status_code=status)
+
+
 async def api_push(request: Request) -> JSONResponse:
     hub = request.app.state.hub
     data = await request.json() if await request.body() else {}
     paths_arg = data.get("paths") or None
-    return hub._sync_op("push", lambda: sync.push(hub.client(), hub.cfg, paths=paths_arg))
+    return _guarded_sync_op(
+        hub, "push", data,
+        lambda guard_fn: sync.push(hub.client(), hub.cfg, paths=paths_arg, guard_fn=guard_fn),
+    )
 
 
 async def api_propose(request: Request) -> JSONResponse:
     hub = request.app.state.hub
     data = await request.json() if await request.body() else {}
     paths_arg = data.get("paths") or None
-    return hub._sync_op("propose", lambda: sync.propose(hub.client(), hub.cfg, paths=paths_arg))
+    return _guarded_sync_op(
+        hub, "propose", data,
+        lambda guard_fn: sync.propose(hub.client(), hub.cfg, paths=paths_arg, guard_fn=guard_fn),
+    )
+
+
+async def api_recall(request: Request) -> JSONResponse:
+    """Undo the LAST push on the team branch (see sync.recall). The response is
+    honest about limits: history retains the commit; conflicts are loud."""
+    hub = request.app.state.hub
+    return hub._sync_op("recall", lambda: sync.recall(hub.client(), hub.cfg))
 
 
 async def api_resolve(request: Request) -> JSONResponse:

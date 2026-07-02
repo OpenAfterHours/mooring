@@ -253,6 +253,10 @@ class SyncResult:
     # (rel_path, trash token) for every local pre-image this operation banked
     # before overwriting/removing the file — the adapters' Undo affordance.
     trashed: list[tuple[str, str]] = field(default_factory=list)
+    # (rel_path, value-free description) for every candidate the push guard
+    # withheld (see mooring.pushguard) — never pushed silently, never blocked
+    # silently. The adapters turn these into the warn-and-confirm flow.
+    withheld: list[tuple[str, str]] = field(default_factory=list)
 
     def summary(self) -> str:
         parts = []
@@ -809,7 +813,13 @@ def push(
     message: str | None = None,
     throttle: float = 0.8,
     sleep=time.sleep,
+    guard_fn=None,
 ) -> SyncResult:
+    """``guard_fn(rel_path, data) -> list[str]`` (optional) sees the exact bytes
+    about to upload; a non-empty return (value-free finding descriptions)
+    WITHHOLDS the file with a result line — never silently. Passed in rather
+    than imported (the ``snapshot_fn`` idiom), so the sync core stays free of
+    the scanners; see :mod:`mooring.pushguard`."""
     prep = _prepare(client, cfg)
     workspace, mft, report = prep.workspace, prep.mft, prep.report
     result = SyncResult()
@@ -834,10 +844,16 @@ def push(
     last_commit = ""
     touched_review = False
     stale_remote = False
+    # What this push wrote to cfg.branch — path -> {prev, new} blob shas — so
+    # "recall last push" can write the prior state back (see recall()).
+    recall_log: dict[str, dict] = {}
     for index, f in enumerate(candidates):
         if index > 0 and throttle:
             sleep(throttle)  # contents-API writes trip secondary rate limits if rapid
-        outcome = _push_candidate(client, cfg, workspace, mft, review_tree, f, message, result)
+        outcome = _push_candidate(
+            client, cfg, workspace, mft, review_tree, f, message, result,
+            guard_fn=guard_fn, recall_log=recall_log,
+        )
         stale_remote = stale_remote or outcome.stale_remote
         if not outcome.counted:
             continue
@@ -847,7 +863,10 @@ def push(
             last_commit = outcome.commit
         result.pushed += 1
 
-    _finalize_push(workspace, mft, cfg, result, last_commit, touched_review, stale_remote)
+    _finalize_push(
+        workspace, mft, cfg, result, last_commit, touched_review, stale_remote,
+        recall_log=recall_log,
+    )
     return result
 
 
@@ -861,7 +880,19 @@ class _PushOutcome:
     stale_remote: bool = False
 
 
-def _push_candidate(client, cfg, workspace, mft, review_tree, f, message, result) -> _PushOutcome:
+def _withhold(f, findings: list[str], result: SyncResult) -> _PushOutcome:
+    """Record a guard-withheld candidate — visible, never silent (the adapters
+    turn result.withheld into the warn-and-confirm flow)."""
+    result.withheld.extend((f.path, desc) for desc in findings)
+    noun = "finding" if len(findings) == 1 else "findings"
+    result.lines.append(f"withheld {f.path} ({len(findings)} {noun} — fix or acknowledge)")
+    return _PushOutcome()
+
+
+def _push_candidate(
+    client, cfg, workspace, mft, review_tree, f, message, result,
+    *, guard_fn=None, recall_log=None,
+) -> _PushOutcome:
     """Push or delete ONE candidate to its target branch (cfg.branch, or the open
     proposal's review branch). Mutates ``mft`` + ``result``; returns the per-file effects
     push() folds into its accumulators."""
@@ -871,10 +902,16 @@ def _push_candidate(client, cfg, workspace, mft, review_tree, f, message, result
     dest = " → review branch (PR)" if in_review else ""
     if f.state is FileState.DELETED_LOCAL:
         response = _push_delete(client, mft, f, target, base, in_review, dest, message, result)
+        if response is not None and not in_review and recall_log is not None:
+            recall_log[f.path] = {"prev": f.base_sha, "new": None}
     else:
         data = _read_checked(workspace, f, cfg, result)
         if data is None:
             return _PushOutcome()
+        if guard_fn is not None:
+            findings = guard_fn(f.path, data)
+            if findings:
+                return _withhold(f, findings, result)
         try:
             response = client.put_file(
                 f.path, data, message or f"Update {f.path} via mooring", target, base_sha=base
@@ -886,6 +923,8 @@ def _push_candidate(client, cfg, workspace, mft, review_tree, f, message, result
         else:
             mft.files[f.path] = response["content"]["sha"]
             mft.review_files.pop(f.path, None)
+            if recall_log is not None:
+                recall_log[f.path] = {"prev": f.base_sha, "new": response["content"]["sha"]}
         result.lines.append(f"pushed   {f.path}{dest}")
     commit = "" if in_review else (response or {}).get("commit", {}).get("sha", "")
     return _PushOutcome(counted=True, commit=commit, touched_review=in_review)
@@ -932,9 +971,14 @@ def _push_conflict(f, base, in_review, result) -> _PushOutcome:
     return _PushOutcome(stale_remote=stale_remote)
 
 
-def _finalize_push(workspace, mft, cfg, result, last_commit, touched_review, stale_remote) -> None:
+def _finalize_push(
+    workspace, mft, cfg, result, last_commit, touched_review, stale_remote,
+    *, recall_log=None,
+) -> None:
     """Persist the manifest after a push: clear an emptied review branch, surface the PR
-    compare URL, advance the sync base, and force a refetch when the remote went stale."""
+    compare URL, advance the sync base, and force a refetch when the remote went stale.
+    A push that wrote to cfg.branch also replaces the recallable ``last_push`` record
+    wholesale — only the LAST push is recallable; that is the promise in the name."""
     if not mft.review_files:
         mft.review_branch = ""
     if touched_review and mft.review_branch:
@@ -948,8 +992,80 @@ def _finalize_push(workspace, mft, cfg, result, last_commit, touched_review, sta
         # Drop the head-commit short-circuit in _remote_entries so the next pull
         # refetches the live tree and rebuilds a consistent manifest.
         mft.head_commit = ""
+    if recall_log:
+        mft.last_push = dict(recall_log)
+        mft.last_push_branch = cfg.branch
     mft.branch = cfg.branch
     manifest_mod.save(workspace, mft)
+
+
+def recall(client: GitHubClientProtocol, cfg: Config) -> SyncResult:
+    """Write the pre-push state of the LAST push back to cfg.branch — "get it off
+    the branch, now" after a bad push.
+
+    Per file: a changed file gets its previous blob re-pushed with the pushed
+    sha as the optimistic base (``put_file(..., base_sha=<new>)``), so if a
+    teammate pushed on top since, GitHub rejects it and the conflict is loud —
+    exactly like any stale write. A file the push CREATED is deleted; a file
+    the push DELETED is re-created. Local files are untouched (they simply
+    reclassify on the next status), and the record is consumed — only the last
+    push is recallable, once.
+
+    Honest by design: **git history still retains the recalled commit** — a
+    leaked secret must still be rotated; recall only stops the bleeding on the
+    branch head.
+    """
+    workspace = cfg.workspace()
+    mft = manifest_mod.load(workspace)
+    result = SyncResult()
+    if not mft.last_push:
+        result.lines.append("nothing to recall (no recorded push)")
+        return result
+    if mft.last_push_branch and mft.last_push_branch != cfg.branch:
+        result.lines.append(
+            f"nothing to recall on {cfg.branch} (the last push went to "
+            f"{mft.last_push_branch})"
+        )
+        return result
+
+    for path, rec in sorted(mft.last_push.items()):
+        prev, new = rec.get("prev"), rec.get("new")
+        try:
+            if prev is None:
+                # The push created it — recall removes it from the branch head.
+                client.delete_file(path, f"Recall {path} via mooring", cfg.branch, new)
+                mft.files.pop(path, None)
+                result.lines.append(f"recalled {path} (removed from {cfg.branch})")
+            else:
+                data = client.get_blob(prev)
+                response = client.put_file(
+                    path, data, f"Recall {path} via mooring", cfg.branch, base_sha=new
+                )
+                mft.files[path] = response["content"]["sha"]
+                result.lines.append(f"recalled {path} (previous version restored)")
+        except RemoteConflict:
+            result.blocked_conflicts.append(path)
+            result.lines.append(
+                f"conflict {path} (cannot recall — a teammate pushed on top; pull first)"
+            )
+            continue
+        except NotFound:
+            result.lines.append(f"could not recall {path} (previous version unavailable)")
+            continue
+        result.pushed += 1
+
+    if result.pushed:
+        result.lines.append(
+            "note: the recalled commit remains in the repo's history — if a secret "
+            "leaked, rotate it."
+        )
+    # Consumed either way: a recall is a one-shot on the recorded push. Force the
+    # next status/pull to refetch the live tree rather than trust the cache.
+    mft.last_push = {}
+    mft.last_push_branch = ""
+    mft.head_commit = ""
+    manifest_mod.save(workspace, mft)
+    return result
 
 
 def propose(
@@ -960,10 +1076,12 @@ def propose(
     throttle: float = 0.8,
     sleep=time.sleep,
     now=time.localtime,
+    guard_fn=None,
 ) -> SyncResult:
     """Upload push candidates to an auto-created review branch instead of
     cfg.branch, so the user can open a pull request on GitHub. The sync base
-    (manifest files/head_commit/branch) stays pointed at cfg.branch."""
+    (manifest files/head_commit/branch) stays pointed at cfg.branch.
+    ``guard_fn`` withholds flagged candidates exactly as in :func:`push`."""
     prep = _prepare(client, cfg)
     workspace, mft, report = prep.workspace, prep.mft, prep.report
     result = SyncResult()
@@ -1013,6 +1131,11 @@ def propose(
             data = _read_checked(workspace, f, cfg, result)
             if data is None:
                 continue
+            if guard_fn is not None:
+                findings = guard_fn(f.path, data)
+                if findings:
+                    _withhold(f, findings, result)
+                    continue
             try:
                 response = client.put_file(
                     f.path,

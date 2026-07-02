@@ -166,6 +166,7 @@
         <button id="btn-pull" class="primary">&#8595; Pull</button>
         <button id="btn-push" class="primary">&#8593; Push all</button>
         <button id="btn-propose" title="Upload changes to a review branch and open a pull request on GitHub">&#8599; Propose</button>
+        <button id="btn-recall" class="hidden" title="Undo your last push on GitHub (writes the previous versions back; history keeps the pushed commit)">&#8617; Recall push</button>
         <button id="btn-new">+ New notebook</button>
         <button id="btn-batch" class="hidden" title="Build several notebooks at once from a list of briefs (the AI copilot proposes each; you review and apply)">&#9889; Batch build&hellip;</button>
       </div>
@@ -204,6 +205,20 @@
         <button id="stale-cancel">Cancel</button>
       </div>
     </dialog>
+
+    <!-- Push-guard confirm: the scan found something that looks like a secret,
+         structured PII, or a bulk data export in files about to publish. The
+         flagged files were WITHHELD (clean files already went); "Push anyway"
+         re-sends with per-file confirm tokens. Hidden in block mode. -->
+    <dialog id="guard-dialog">
+      <p id="guard-message"></p>
+      <ul id="guard-findings" class="guard-findings"></ul>
+      <p id="guard-hint" class="muted"></p>
+      <div class="toolbar">
+        <button id="guard-anyway">Push anyway</button>
+        <button id="guard-cancel" class="primary">Go back and fix</button>
+      </div>
+    </dialog>
   </main>
 
   <footer>
@@ -221,6 +236,7 @@
   <script src="/static/chat_core.js"></script>
   <script src="/static/files_tree.js"></script>
   <script src="/static/freshness.js"></script>
+  <script src="/static/guard_fmt.js"></script>
   <script src="/static/app.js"></script>
   <!-- Decorative backdrop: deterministic starfield + the one-time boat voyage.
        Last in <body> so the scene is already parsed; no DOM/side effects elsewhere. -->

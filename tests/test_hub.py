@@ -2303,3 +2303,83 @@ def test_activity_ledger_records_and_filters(configured):
     only_a = client.get("/api/activity?path=notebooks/a.py").json()["entries"]
     assert [e["op"] for e in only_a] == ["delete"]
     assert only_a[0]["trashed"][0]["path"] == "notebooks/a.py"
+
+
+# -- the push guard at the hub seam + recall ----------------------------------
+
+
+_SECRETY = 'TOKEN = "ghp_' + "a" * 40 + '"\n'
+
+
+def test_push_guard_409_with_findings_and_confirm_flow(configured):
+    client, hub, fake, tmp_path = configured
+    write_ws(tmp_path, "ws1", "notebooks/leaky.py", _SECRETY)
+    write_ws(tmp_path, "ws1", "notebooks/clean.py", "x = 1\n")
+    resp = client.post("/api/push", json={})
+    assert resp.status_code == 409
+    body = resp.json()
+    assert body["needs_confirm"] is True
+    assert body["guard_mode"] == "warn"
+    flagged = {f["path"]: f for f in body["guard_findings"]}
+    assert set(flagged) == {"notebooks/leaky.py"}
+    assert flagged["notebooks/leaky.py"]["findings"][0]["kind"] == "GitHub token"
+    # The clean file went; the flagged one was withheld.
+    assert "notebooks/clean.py" in fake.tree
+    assert "notebooks/leaky.py" not in fake.tree
+    # Findings are value-free: the secret never appears in the payload.
+    assert "ghp_" + "a" * 40 not in resp.text
+    # "Push anyway" with the per-file token completes the push.
+    tokens = [f["token"] for f in body["guard_findings"]]
+    resp2 = client.post("/api/push", json={"confirm_tokens": tokens})
+    assert resp2.status_code == 200
+    assert "notebooks/leaky.py" in fake.tree
+
+
+def test_push_guard_stale_token_re409s(configured):
+    client, _, fake, tmp_path = configured
+    write_ws(tmp_path, "ws1", "notebooks/leaky.py", _SECRETY)
+    body = client.post("/api/push", json={}).json()
+    tokens = [f["token"] for f in body["guard_findings"]]
+    # The file changes between the 409 and the confirm: the old token no longer
+    # matches, so the confirm must NOT cover the new bytes.
+    write_ws(tmp_path, "ws1", "notebooks/leaky.py", _SECRETY + "extra = 1\n")
+    resp = client.post("/api/push", json={"confirm_tokens": tokens})
+    assert resp.status_code == 409
+    assert "notebooks/leaky.py" not in fake.tree
+
+
+def test_push_guard_block_mode_refuses_tokens(configured):
+    client, _, fake, tmp_path = configured
+    write_ws(tmp_path, "ws1", "mooring.toml", '[guard]\npush = "block"\n')
+    write_ws(tmp_path, "ws1", "notebooks/leaky.py", _SECRETY)
+    body = client.post("/api/push", json={}).json()
+    assert body["needs_confirm"] is False
+    assert body["guard_mode"] == "block"
+    tokens = [f["token"] for f in body["guard_findings"]]
+    resp = client.post("/api/push", json={"confirm_tokens": tokens})
+    assert resp.status_code == 409  # tokens ignored in block mode
+    assert "notebooks/leaky.py" not in fake.tree
+
+
+def test_push_guard_pragma_suppresses(configured):
+    client, _, fake, tmp_path = configured
+    write_ws(tmp_path, "ws1", "notebooks/ok.py", _SECRETY.rstrip() + "  # mooring: push-ok\n")
+    resp = client.post("/api/push", json={})
+    assert resp.status_code == 200
+    assert "notebooks/ok.py" in fake.tree
+
+
+def test_state_reports_can_recall_and_api_recall_works(configured):
+    client, hub, fake, tmp_path = configured
+    _seed_and_pull(hub, fake, "notebooks/a.py")
+    assert client.get("/api/state").json()["can_recall"] is False
+    (tmp_path / "ws1" / "notebooks/a.py").write_text("v2\n", "utf-8", newline="\n")
+    client.post("/api/push", json={})
+    assert client.get("/api/state").json()["can_recall"] is True
+    resp = client.post("/api/recall", json={})
+    assert resp.status_code == 200
+    lines = resp.json()["lines"]
+    assert any("recalled" in line for line in lines)
+    assert any("history" in line for line in lines)
+    assert fake.get_blob(fake.tree["notebooks/a.py"]) == b"v1\n"
+    assert client.get("/api/state").json()["can_recall"] is False

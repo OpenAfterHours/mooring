@@ -177,3 +177,22 @@ def test_shadow_ignore_write_does_not_clobber_corrupt_file(tmp_path):
     with pytest.raises(tomllib.TOMLDecodeError):
         wc.set_shadow_ignored(tmp_path, "notebooks/polars.py", True)
     assert (tmp_path / "mooring.toml").read_text("utf-8") == original
+
+
+def test_guard_mode_defaults_and_parses(tmp_path):
+    from mooring import workspace_config
+
+    assert workspace_config.guard_mode(tmp_path) == "warn"  # no file
+    (tmp_path / "mooring.toml").write_text('[guard]\npush = "block"\n', "utf-8")
+    assert workspace_config.guard_mode(tmp_path) == "block"
+    (tmp_path / "mooring.toml").write_text('[guard]\npush = "BLOCK"\n', "utf-8")
+    assert workspace_config.guard_mode(tmp_path) == "block"  # case-tolerant
+    (tmp_path / "mooring.toml").write_text('[guard]\npush = "nonsense"\n', "utf-8")
+    assert workspace_config.guard_mode(tmp_path) == "warn"  # unknown -> default
+
+
+def test_guard_mode_fails_open_on_malformed_toml(tmp_path):
+    from mooring import workspace_config
+
+    (tmp_path / "mooring.toml").write_text("[guard\npush =", "utf-8")
+    assert workspace_config.guard_mode(tmp_path) == "warn"

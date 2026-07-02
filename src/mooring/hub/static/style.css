@@ -500,19 +500,30 @@ tr.folder-header b { font-weight: 600; }
   font-size: 0.9rem;
 }
 
-/* Open-time staleness confirm (#stale-dialog): a native <dialog> with three
-   explicit buttons — the safe action gets focus, never "Open my copy anyway". */
-#stale-dialog {
+/* Hub confirm dialogs (staleness at Open, the push guard): native <dialog>s
+   with explicit buttons — the safe action gets focus, never the risky one. */
+#stale-dialog,
+#guard-dialog {
   background: var(--card);
   color: var(--ink);
   border: 1px solid var(--border);
   border-radius: 10px;
   padding: 1.1rem 1.3rem;
-  max-width: 26rem;
+  max-width: 30rem;
   box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
 }
-#stale-dialog::backdrop { background: rgba(8, 12, 24, 0.45); }
-#stale-dialog p { margin-top: 0; }
+#stale-dialog::backdrop,
+#guard-dialog::backdrop { background: rgba(8, 12, 24, 0.45); }
+#stale-dialog p,
+#guard-dialog p { margin-top: 0; }
+.guard-findings {
+  margin: 0.4rem 0;
+  padding-left: 1.2rem;
+  font-family: Consolas, monospace;
+  font-size: 0.85rem;
+  max-height: 12rem;
+  overflow-y: auto;
+}
 
 /* Adopt prompt: notebook folders the repo keeps outside the synced folders. An
    informational accent banner (not an error), shown until the folders are adopted. */

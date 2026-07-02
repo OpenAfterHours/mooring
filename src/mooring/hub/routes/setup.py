@@ -78,6 +78,11 @@ def api_state(request: Request) -> JSONResponse:
         # Remember which branch head this render was computed from, so a later
         # /api/freshness can tell the client whether its cached rows are stale.
         hub._state_heads[str(cfg.workspace())] = report.head_commit
+        # Whether "Recall last push" has anything to recall (a local manifest
+        # read — no extra API call). Drives the toolbar button's visibility.
+        from mooring import manifest as manifest_mod
+
+        body["can_recall"] = bool(manifest_mod.load(cfg.workspace()).last_push)
         if report.review_branch:
             body["review"] = {
                 "branch": report.review_branch,

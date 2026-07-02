@@ -551,12 +551,15 @@ class Hub:
         (which never carries file paths). Best-effort by construction."""
         activity.record(self.cfg.workspace(), op, **fields)
 
-    def _sync_op(self, name: str, op) -> JSONResponse:
+    def _sync_op_body(self, name: str, op) -> tuple[dict, int]:
+        """Run one sync operation and shape its JSON body + status. Split out of
+        :meth:`_sync_op` so the guarded push/propose endpoints can append their
+        warn-and-confirm fields before the response is sealed."""
         try:
             result = op()
         except (GitHubError, OSError) as exc:
             telemetry.log_error(exc=exc, op=name)
-            return JSONResponse({"error": str(exc)}, status_code=502)
+            return {"error": str(exc)}, 502
         telemetry.log_event(
             name,
             pulled=result.pulled,
@@ -579,7 +582,11 @@ class Hub:
         if result.review_branch:
             body["review_branch"] = result.review_branch
             body["compare_url"] = result.compare_url
-        return JSONResponse(body)
+        return body, 200
+
+    def _sync_op(self, name: str, op) -> JSONResponse:
+        body, status = self._sync_op_body(name, op)
+        return JSONResponse(body, status_code=status)
 
 
 
@@ -858,6 +865,7 @@ def create_app(hub: Hub) -> Starlette:
             Route("/api/push", sync_routes.api_push, methods=["POST"]),
             Route("/api/propose", sync_routes.api_propose, methods=["POST"]),
             Route("/api/resolve", sync_routes.api_resolve, methods=["POST"]),
+            Route("/api/recall", sync_routes.api_recall, methods=["POST"]),
             Route("/api/new", files.api_new, methods=["POST"]),
             Route("/api/open", files.api_open, methods=["POST"]),
             Route("/api/reveal", files.api_reveal, methods=["POST"]),

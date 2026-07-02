@@ -1228,3 +1228,97 @@ def test_safety_net_files_never_reach_scan_local(cfg):
     activity.record(cfg.workspace(), "pull", summary="1 pulled")
     after = sync.scan_local(cfg.workspace(), cfg.folders, cfg.exclude)
     assert before == after
+
+
+# -- the push guard (guard_fn) and recall-last-push ---------------------------
+
+
+def _guarded(descs):
+    def guard_fn(rel_path, data):
+        return descs.get(rel_path, [])
+
+    return guard_fn
+
+
+def test_push_guard_withholds_flagged_files(cfg, monkeypatch):
+    client = FakeClient()
+    write_local(cfg, "notebooks/clean.py", "x = 1\n")
+    write_local(cfg, "notebooks/flagged.py", "token = 'shape-of-a-secret'\n")
+    result = sync.push(
+        client, cfg, throttle=0,
+        guard_fn=_guarded({"notebooks/flagged.py": ["line 1: GitHub token"]}),
+    )
+    # The clean file pushed; the flagged one was withheld, loudly, and never
+    # reached the FakeClient.
+    assert "notebooks/clean.py" in client.tree
+    assert "notebooks/flagged.py" not in client.tree
+    assert result.pushed == 1
+    assert result.withheld == [("notebooks/flagged.py", "line 1: GitHub token")]
+    assert any(line.startswith("withheld notebooks/flagged.py") for line in result.lines)
+
+
+def test_propose_guard_withholds_too(cfg):
+    client = FakeClient()
+    write_local(cfg, "notebooks/flagged.py", "x\n")
+    result = sync.propose(
+        client, cfg, throttle=0,
+        guard_fn=_guarded({"notebooks/flagged.py": ["line 1: email address"]}),
+    )
+    assert result.withheld
+    assert result.proposed == 0
+
+
+def test_push_records_last_push_for_recall(cfg):
+    client = FakeClient({"notebooks/a.py": b"v1\n"})
+    sync.pull(client, cfg)
+    prev_sha = client.tree["notebooks/a.py"]
+    write_local(cfg, "notebooks/a.py", "v2\n")
+    write_local(cfg, "notebooks/new.py", "n\n")
+    sync.push(client, cfg, throttle=0)
+    mft = manifest.load(cfg.workspace())
+    assert mft.last_push["notebooks/a.py"]["prev"] == prev_sha
+    assert mft.last_push["notebooks/a.py"]["new"] == client.tree["notebooks/a.py"]
+    assert mft.last_push["notebooks/new.py"]["prev"] is None  # created by this push
+    assert mft.last_push_branch == "main"
+
+
+def test_recall_restores_previous_state(cfg):
+    client = FakeClient({"notebooks/a.py": b"v1\n"})
+    sync.pull(client, cfg)
+    write_local(cfg, "notebooks/a.py", "v2\n")
+    write_local(cfg, "notebooks/new.py", "n\n")
+    sync.push(client, cfg, throttle=0)
+    result = sync.recall(client, cfg)
+    assert result.pushed == 2
+    # The changed file is back at v1 on the branch; the created file is gone.
+    assert client.get_blob(client.tree["notebooks/a.py"]) == b"v1\n"
+    assert "notebooks/new.py" not in client.tree
+    assert any("history" in line for line in result.lines)
+    # Consumed: a second recall has nothing to do.
+    again = sync.recall(client, cfg)
+    assert again.pushed == 0
+    assert any("nothing to recall" in line for line in again.lines)
+
+
+def test_recall_conflicts_loudly_when_a_teammate_pushed_on_top(cfg):
+    client = FakeClient({"notebooks/a.py": b"v1\n"})
+    sync.pull(client, cfg)
+    write_local(cfg, "notebooks/a.py", "v2\n")
+    sync.push(client, cfg, throttle=0)
+    client.seed("notebooks/a.py", b"teammate\n")  # someone pushed since
+    result = sync.recall(client, cfg)
+    assert result.pushed == 0
+    assert result.blocked_conflicts == ["notebooks/a.py"]
+    # Their work is untouched.
+    assert client.get_blob(client.tree["notebooks/a.py"]) == b"teammate\n"
+
+
+def test_recall_restores_a_pushed_deletion(cfg):
+    client = FakeClient({"notebooks/a.py": b"v1\n"})
+    sync.pull(client, cfg)
+    (cfg.workspace() / "notebooks/a.py").unlink()
+    sync.push(client, cfg, throttle=0)  # pushes the deletion
+    assert "notebooks/a.py" not in client.tree
+    result = sync.recall(client, cfg)
+    assert result.pushed == 1
+    assert client.get_blob(client.tree["notebooks/a.py"]) == b"v1\n"

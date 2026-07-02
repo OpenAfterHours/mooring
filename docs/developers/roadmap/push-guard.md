@@ -4,9 +4,20 @@ icon: lucide/shield-check
 
 # Push guard: scan every push for secrets, PII, and raw data
 
-!!! note "Status: proposed"
-    Designed July 2026 from a multi-agent ideation review; not yet implemented.
-    Scope may change as phases land.
+!!! success "Status: implemented"
+    All four phases shipped 2026-07-02: the orchestrator
+    (`src/mooring/pushguard.py` — detectors stay in `ai/`), the injected
+    `guard_fn` withhold seam in `sync.push`/`propose`, warn-and-confirm at both
+    adapters (per-file confirm tokens binding findings to bytes; `mooring scan`
+    + `--acknowledge-findings` on the CLI), `[guard] push = "block"` escalation
+    in the synced `mooring.toml`, and recall-last-push (`sync.recall()`, the
+    manifest's `last_push` record, `mooring recall`, `/api/recall` + the hub's
+    Recall button). One divergence from the sketch: `pushguard` is *not* added
+    to the `frozen-core-is-lean` lint contract — `ai/pii.py`'s optional NER
+    hooks give it a static (lazily executed) path to spaCy that the
+    no-indirect contract would count; the guard is adapter-layer surface, not
+    frozen-core surface. `test_egress.py`/`test_pii.py`/`test_secrets.py`
+    pass unmodified, as pinned.
 
 ## Problem
 
