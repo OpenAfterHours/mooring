@@ -574,9 +574,25 @@ def cmd_whoami(cfg: config.Config) -> int:
 
 def cmd_status(cfg: config.Config) -> int:
     from mooring import sync
+    from mooring.github import Unreachable
 
     client = _client(cfg)
-    report = sync.status(client, cfg)
+    try:
+        report = sync.status(client, cfg)
+    except Unreachable as exc:
+        # Offline: show the last observed sync state (sync.cached_status — pure
+        # local reads) under a loud header instead of a traceback. The adopt
+        # hint needs a live tree read, so it is skipped here. No cache yet →
+        # nothing local to show, so exit with the classified one-liner.
+        cached = sync.cached_status(cfg)
+        if cached is None:
+            sys.exit(str(exc))
+        report, fetched_at = cached
+        print(f"OFFLINE — GitHub unreachable; showing sync state as of {fetched_at}")
+        if not report.files:
+            print("Workspace empty and no remote files. Try `mooring new <name>`.")
+            return 0
+        return _print_status_report(cfg, report)
     if not report.files:
         # An EMPTY in-scope report is exactly the headline case (a new repo whose
         # notebooks all live outside the synced folders): run discovery so the hint can
@@ -587,6 +603,12 @@ def cmd_status(cfg: config.Config) -> int:
         for line in hint or ["Workspace empty and no remote files. Try `mooring new <name>`."]:
             print(line)
         return 0
+    return _print_status_report(cfg, report)
+
+
+def _print_status_report(cfg: config.Config, report) -> int:
+    """The width-aligned rows + summary shared by the live and OFFLINE status
+    paths (the shadow warnings are local, so they print in both)."""
     width = max(len(f.path) for f in report.files)
     for f in report.files:
         print(f"  {f.path:<{width}}  {f.state.value}")
@@ -1883,10 +1905,16 @@ def main(argv: list[str] | None = None) -> int:
     )
     telemetry.log_event("app_start", command=command)
 
+    from mooring.github import Unreachable
+
     try:
         return _dispatch(parser, command, app_cfg, cfg, args)
     except SystemExit:
         raise  # user-facing errors (sys.exit / argparse) are not app failures
+    except Unreachable as exc:
+        # An outage is not an app failure worth a traceback: one classified line.
+        telemetry.log_error(exc=exc, command=command)
+        sys.exit(str(exc))
     except BaseException as exc:  # noqa: BLE001  # record genuine failures, then re-raise
         telemetry.log_error(exc=exc, command=command)
         raise

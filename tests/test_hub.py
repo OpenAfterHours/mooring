@@ -27,6 +27,9 @@ def test_index_serves_html(unconfigured_client):
     resp = client.get("/")
     assert resp.status_code == 200
     assert "mooring" in resp.text
+    # The offline banner's DOM slot ships with the page (app.js renders into it
+    # whenever /api/state carries an `offline` payload).
+    assert 'id="offline-banner"' in resp.text
 
 
 def test_state_unconfigured(unconfigured_client):
@@ -2326,6 +2329,88 @@ def test_open_has_no_server_side_staleness_gate(configured, monkeypatch):
     resp = client.post("/api/open", json={"path": "notebooks/a.py"})
     assert resp.status_code == 200
     assert resp.json()["url"] == "http://editor/notebooks/a.py"
+
+
+# -- offline mode: Unreachable degrades loudly, never a 500 -------------------
+
+
+def _go_offline(fake, monkeypatch, exc_type=None):
+    """Make every networked FakeClient entry point raise Unreachable — the
+    transport-classified 'GitHub is down / no network' signal."""
+    from mooring.github import Unreachable
+
+    kind = exc_type or Unreachable
+
+    def boom(*args, **kwargs):
+        raise kind("GitHub is unreachable — check your network connection and try again.")
+
+    for name in ("get_branch_head", "get_user", "get_tree", "get_full_tree", "get_blob"):
+        monkeypatch.setattr(fake, name, boom)
+
+
+def test_state_offline_falls_back_to_the_cached_view(configured, monkeypatch):
+    client, hub, fake, _ = configured
+    _seed_and_pull(hub, fake, "notebooks/a.py")
+    assert client.get("/api/state").json()["logged_in"] is True  # online render first
+    heads_before = dict(hub._state_heads)
+    _go_offline(fake, monkeypatch)
+    state = client.get("/api/state").json()
+    # Still logged in, still showing the files — just loudly stale.
+    assert state["logged_in"] is True
+    assert state["user"] == "phil"
+    assert state["offline"]["reason"] == "network"
+    assert state["offline"]["as_of"]  # the cache's fetched_at rides along
+    assert [f["path"] for f in state["files"]] == ["notebooks/a.py"]
+    assert state["files"][0]["state"] == "synced"
+    assert "summary" in state
+    # The freshness anchor is NOT advanced by an offline render.
+    assert hub._state_heads == heads_before
+
+
+def test_state_offline_keeps_the_token_and_reports_tls(configured, monkeypatch):
+    from mooring.github import TlsFailure
+
+    client, hub, fake, _ = configured
+    deleted = []
+    monkeypatch.setattr(server.auth, "delete_token", lambda host=None: deleted.append(host))
+    _go_offline(fake, monkeypatch, TlsFailure)  # cold start: no cache, no username yet
+    state = client.get("/api/state").json()
+    assert state["offline"] == {"reason": "tls", "as_of": ""}
+    assert state["logged_in"] is True
+    assert state["files"] == []
+    assert deleted == []  # an outage must NEVER log the user out
+    assert server.auth.get_token(host=hub.cfg.host) == "t"
+
+
+def test_push_offline_returns_friendly_503_and_leaves_disk_alone(configured, monkeypatch):
+    client, hub, fake, tmp_path = configured
+    _seed_and_pull(hub, fake, "notebooks/a.py")
+    (tmp_path / "ws1" / "notebooks/a.py").write_text("mine\n", "utf-8", newline="\n")
+    _go_offline(fake, monkeypatch)
+    resp = client.post("/api/push")
+    assert resp.status_code == 503
+    error = resp.json()["error"]
+    assert "unreachable" in error and "safe on disk" in error
+    assert (tmp_path / "ws1" / "notebooks/a.py").read_text("utf-8") == "mine\n"
+
+
+def test_freshness_offline_answers_fresh_not_502(configured, monkeypatch):
+    # The staleness guard goes SILENT offline (the offline banner owns the
+    # story); a 502 would log a telemetry error on every Open.
+    client, hub, fake, _ = configured
+    client.get("/api/state")  # records a head to be stale against
+    _go_offline(fake, monkeypatch)
+    resp = client.get("/api/freshness")
+    assert resp.status_code == 200
+    assert resp.json() == {"fresh": True, "head": ""}
+
+
+def test_whatsnew_offline_degrades_to_502_not_500(configured, monkeypatch):
+    client, _, fake, _ = configured
+    _go_offline(fake, monkeypatch)
+    resp = client.get("/api/whatsnew")
+    assert resp.status_code == 502
+    assert "unreachable" in resp.json()["error"]
 
 
 # -- the local safety net: trash endpoints + the activity ledger -------------

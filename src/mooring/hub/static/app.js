@@ -47,6 +47,11 @@ let aiChatEnabled = false;
 // open tab, not of the workspace.
 let lastStateAt = null;
 let lastLoggedIn = false;
+// GitHub is unreachable: /api/state carried an `offline` payload and the rows
+// are the last OBSERVED sync state. Network actions (pull/push/propose/resolve/
+// review/history/discard/recall/what's-new) hide behind the amber banner;
+// local work (Open/Reveal/Undo/Delete/Duplicate/AI) stays live.
+let offlineMode = false;
 const FOCUS_REFRESH_THROTTLE_MS = 60_000;
 
 async function api(path, body) {
@@ -748,13 +753,17 @@ $("whatsnew-close").addEventListener("click", () => {
 function fileActions(file, opts) {
   opts = opts || {};
   const actions = [];
-  if (file.state === "conflict") {
+  // Offline every NETWORK action is skipped — the banner explains why. The
+  // conflict resolves, Push/Propose, "Review changes…" (fetches the base blob),
+  // "Discard my changes" (ditto), and "History…" all need the team repo. A
+  // conflicted row keeps its badge: the cached remote still classifies it.
+  if (file.state === "conflict" && !offlineMode) {
     actions.push(
       ["Use remote", () => action("/api/resolve", { path: file.path, strategy: "theirs" })],
       ["Keep both", () => action("/api/resolve", { path: file.path, strategy: "keep-both" })],
       ["Push as copy", () => action("/api/resolve", { path: file.path, strategy: "push-copy" })],
     );
-  } else if (PUSH_STATES.has(file.state)) {
+  } else if (PUSH_STATES.has(file.state) && !offlineMode) {
     actions.push(
       // First, above Push: see what a push would publish before publishing it.
       ["Review changes…", () => reviewAction(file.path)],
@@ -773,7 +782,7 @@ function fileActions(file, opts) {
   }
   // History: every pushed version of this file (the git-free time machine).
   // Never-synced files have no history; PBIP members restore only whole.
-  if (HistoryFmt.hasHistory(file) && !opts.member) {
+  if (HistoryFmt.hasHistory(file) && !opts.member && !offlineMode) {
     actions.push(["History…", () => historyAction(file.path)]);
   }
   // A one-shot Undo for a file just reverted this session (snapshot kept server-side).
@@ -1092,6 +1101,25 @@ function renderFreshnessBanner() {
   banner.appendChild(btn);
 }
 
+// "GitHub unreachable — showing sync state as of N min ago." Loud and amber:
+// the rows below are the last OBSERVED remote view (server-cached), not live.
+// `offline` is /api/state's payload: { reason: "tls"|"network", as_of: ISO|"" }.
+function renderOfflineBanner(offline) {
+  const banner = $("offline-banner");
+  banner.classList.toggle("hidden", !offline);
+  if (!offline) return;
+  const what = offline.reason === "tls"
+    ? "Couldn't make a secure connection to GitHub (a proxy may be interfering)"
+    : "GitHub is unreachable";
+  const asOf = offline.as_of ? Date.parse(offline.as_of) : NaN;
+  const shown = Number.isNaN(asOf)
+    ? "no cached sync state yet"
+    // Math.max: clock skew must not blank the age ("just now" is honest enough).
+    : `showing sync state as of ${Freshness.ageText(Math.max(0, Date.now() - asOf))}`;
+  banner.textContent = `${what} — ${shown}. ` +
+    "Editing works normally; push and pull resume when you're back online.";
+}
+
 function renderReviewBanner(review) {
   const banner = $("review-banner");
   banner.innerHTML = "";
@@ -1254,6 +1282,8 @@ async function refresh() {
   const state = await api("/api/state");
   lastStateAt = Date.now();
   lastLoggedIn = !!state.logged_in;
+  offlineMode = !!state.offline;
+  renderOfflineBanner(state.offline);
   showError(state.error || "");
   if (state.ui_theme) {
     applyTheme(state.ui_theme);
@@ -1311,20 +1341,23 @@ async function refresh() {
   }
 
   // Pull / Push all / Propose (and the pull digest) only make sense against a
-  // connected, logged-in repo. In local mode the notebooks are usable but there's
-  // nothing to sync to, so hide those controls (the per-file rows already omit
-  // Push/Propose for "local" files).
+  // connected, logged-in repo that is REACHABLE. In local mode the notebooks are
+  // usable but there's nothing to sync to; offline the network controls hide
+  // behind the amber banner (the per-file rows already omit their network
+  // actions — see fileActions).
   for (const id of ["btn-pull", "btn-whatsnew", "btn-push", "btn-propose"]) {
-    $(id).classList.toggle("hidden", !state.logged_in);
+    $(id).classList.toggle("hidden", !state.logged_in || offlineMode);
   }
-  if (!state.logged_in) $("whatsnew-card").classList.add("hidden");
+  if (!state.logged_in || offlineMode) $("whatsnew-card").classList.add("hidden");
   // The per-file watch set is keyed by repo; local mode has no digest to watch.
   loadWatched(state.mode === "repo" && state.logged_in ? state.repo : null);
   // Recall shows only while the manifest holds a recallable last push; the
   // confirm names exactly which files it would revert (a stale record is the
   // trap — this is how the user catches one).
   recallPaths = state.recall_paths || [];
-  $("btn-recall").classList.toggle("hidden", !(state.logged_in && state.can_recall));
+  $("btn-recall").classList.toggle(
+    "hidden", !(state.logged_in && state.can_recall && !offlineMode),
+  );
   // Workspace-level "Batch build" — only when the opt-in orchestrator is enabled.
   $("btn-batch").classList.toggle("hidden", !state.ai_batch);
   // No team Pull in local mode, so don't dangle it in the empty-state hint.

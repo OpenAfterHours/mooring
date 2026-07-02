@@ -15,10 +15,12 @@ the manifest.
 
 from __future__ import annotations
 
+import contextlib
 import fnmatch
 import time
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 
@@ -479,6 +481,30 @@ def status(client: GitHubClientProtocol, cfg: Config) -> StatusReport:
     return report
 
 
+def cached_status(cfg: Config) -> tuple[StatusReport, str] | None:
+    """The offline fallback: the same three-way status computed from pure local
+    reads — the manifest, the last OBSERVED remote tree (manifest.load_cache,
+    written by :func:`_prepare`), and a fresh local scan. No client, no network.
+
+    Returns ``(report, fetched_at)``, or None when there is no usable cache or
+    it was captured under a different sync scope (mirroring :func:`_scope_matches`
+    — a narrower-scope cache must not masquerade as the whole remote).
+    ``_reconcile_review`` needs the network and is skipped, so open-proposal
+    state is carried as-is. Display-only: pull/push/propose always refetch live,
+    so a stale cache can mislead a glance but never a sync decision."""
+    workspace = cfg.workspace()
+    cache = manifest_mod.load_cache(workspace)
+    if cache is None:
+        return None
+    if cache.scope_folders != tuple(cfg.folders) or cache.scope_exclude != tuple(cfg.exclude):
+        return None
+    mft = manifest_mod.load(workspace)
+    local = scan_local(workspace, cfg.folders, cfg.exclude)
+    report = compute_status(mft, local, cache.files, cache.head_commit, review=mft.review_files)
+    report.review_branch = mft.review_branch
+    return report, cache.fetched_at
+
+
 def _write_blob(workspace: Path, rel_path: str, data: bytes) -> None:
     target = workspace / rel_path
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -522,6 +548,24 @@ def _prepare(client: GitHubClientProtocol, cfg: Config, *, make_workspace: bool 
     head = client.get_branch_head(cfg.branch)
     local = scan_local(workspace, cfg.folders, cfg.exclude)
     remote = _remote_entries(client, cfg, head, mft)
+    # Persist the observed remote view (the offline fallback's input — see
+    # manifest.RemoteCache and cached_status). Best-effort by construction: a
+    # failed cache write must never fail the sync operation it rides on. Gated
+    # on the workspace existing so a bare status keeps the "only pull creates
+    # the workspace" contract (creating .mooring here would also suppress the
+    # legacy-workspace migration hint, which keys off that directory).
+    if workspace.is_dir():
+        with contextlib.suppress(OSError):
+            manifest_mod.save_cache(
+                workspace,
+                manifest_mod.RemoteCache(
+                    head_commit=head,
+                    fetched_at=datetime.now(timezone.utc).isoformat(),
+                    files=dict(remote),
+                    scope_folders=tuple(cfg.folders),
+                    scope_exclude=tuple(cfg.exclude),
+                ),
+            )
     review_changed = _reconcile_review(client, mft, remote, cfg.exclude)
     report = compute_status(mft, local, remote, head, review=mft.review_files)
     return _Prepared(workspace, mft, head, local, remote, report, review_changed)

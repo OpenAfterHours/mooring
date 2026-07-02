@@ -542,6 +542,19 @@ tr.folder-header b { font-weight: 600; }
   font-size: 0.9rem;
 }
 
+/* Offline: GitHub is unreachable — the rows below are the LAST OBSERVED sync
+   state, not live. Amber and louder than freshness (bold): stale data must
+   never read as the normal quiet chrome. */
+#offline-banner {
+  border: 1px solid var(--warn);
+  color: var(--warn);
+  border-radius: 8px;
+  padding: 0.5rem 1rem;
+  margin: 0.4rem 0 0.8rem;
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
 /* Hub confirm dialogs (staleness at Open, the push guard): native <dialog>s
    with explicit buttons — the safe action gets focus, never the risky one. */
 #stale-dialog,

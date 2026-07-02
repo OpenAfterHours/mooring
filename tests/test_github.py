@@ -1,6 +1,7 @@
 import base64
 
 import pytest
+import requests
 import responses
 
 from mooring.github import (
@@ -9,6 +10,8 @@ from mooring.github import (
     GitHubError,
     RefAlreadyExists,
     RemoteConflict,
+    TlsFailure,
+    Unreachable,
     blob_url,
     compare_url,
 )
@@ -370,6 +373,102 @@ def test_get_file_at_missing_raises_notfound():
     responses.add(responses.GET, f"{REPO}/contents/notebooks/gone.py", status=404)
     with pytest.raises(NotFound):
         client().get_file_at("notebooks/gone.py", "ref1")
+
+
+# -- transport classification (offline / outage / proxy TLS) ------------------
+# Every session call goes through the _send seam, so a transport failure — no
+# HTTP response at all — maps to Unreachable/TlsFailure on reads AND writes,
+# including the version-history and pull-digest endpoints added later.
+
+
+@responses.activate
+def test_connection_error_on_a_read_is_unreachable():
+    responses.add(
+        responses.GET,
+        f"{REPO}/git/ref/heads/main",
+        body=requests.exceptions.ConnectionError("dns down"),
+    )
+    with pytest.raises(Unreachable, match="unreachable"):
+        client().get_branch_head("main")
+
+
+@responses.activate
+def test_connection_error_on_a_write_is_unreachable():
+    responses.add(
+        responses.PUT,
+        f"{REPO}/contents/notebooks/a.py",
+        body=requests.exceptions.ConnectionError("connection refused"),
+    )
+    with pytest.raises(Unreachable):
+        client().put_file("notebooks/a.py", b"data", "msg", "main", base_sha="oldsha")
+
+
+@responses.activate
+def test_ssl_error_is_tlsfailure_a_subtype_of_unreachable():
+    responses.add(
+        responses.GET, f"{API_ROOT}/user", body=requests.exceptions.SSLError("bad handshake")
+    )
+    with pytest.raises(TlsFailure, match="proxy") as exc_info:
+        client().get_user()
+    assert isinstance(exc_info.value, Unreachable)  # one `except Unreachable` covers both
+
+
+@responses.activate
+def test_connect_timeout_is_unreachable():
+    responses.add(
+        responses.GET,
+        f"{REPO}/git/blobs/{'a' * 40}",
+        body=requests.exceptions.ConnectTimeout("timed out"),
+    )
+    with pytest.raises(Unreachable):
+        client().get_blob("a" * 40)
+
+
+@responses.activate
+def test_history_and_compare_reads_are_unreachable_too():
+    # The newer endpoints (version history, pull digest) ride the same seam.
+    responses.add(responses.GET, f"{REPO}/commits", body=requests.exceptions.ConnectionError("x"))
+    with pytest.raises(Unreachable):
+        client().list_commits_for_path("notebooks/a.py", "main")
+    responses.reset()
+    responses.add(
+        responses.GET,
+        f"{REPO}/contents/notebooks/a.py",
+        body=requests.exceptions.ConnectionError("x"),
+    )
+    with pytest.raises(Unreachable):
+        client().get_file_at("notebooks/a.py", "ref1")
+    responses.reset()
+    responses.add(
+        responses.GET, f"{REPO}/compare/a...b", body=requests.exceptions.ConnectionError("x")
+    )
+    with pytest.raises(Unreachable):
+        client().compare("a", "b")
+
+
+@responses.activate
+def test_http_401_is_authfailed_never_unreachable():
+    # The conservative-classification pin: anything that DID produce an HTTP
+    # response classifies in _check. A fixable auth problem must never hide
+    # behind an "offline" banner (and an outage must never delete the token).
+    responses.add(responses.GET, f"{API_ROOT}/user", json={}, status=401)
+    with pytest.raises(AuthFailed) as exc_info:
+        client().get_user()
+    assert not isinstance(exc_info.value, Unreachable)
+
+
+@responses.activate
+def test_other_request_exceptions_stay_generic_githuberror():
+    # e.g. a malformed redirect: loud, not "offline" — misclassifying a broken
+    # proxy answer as an outage would hide a diagnosable problem.
+    responses.add(
+        responses.GET,
+        f"{REPO}/git/ref/heads/main",
+        body=requests.exceptions.TooManyRedirects("loop"),
+    )
+    with pytest.raises(GitHubError) as exc_info:
+        client().get_branch_head("main")
+    assert not isinstance(exc_info.value, Unreachable)
 
 
 @responses.activate

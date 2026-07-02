@@ -43,7 +43,7 @@ from mooring.app.apply import ApplyGuard
 from mooring.app.batch_service import BatchService
 from mooring.app.chat_service import ChatService
 from mooring.editor import EditorServer, free_port
-from mooring.github import GitHubClient, GitHubError, blob_url
+from mooring.github import GitHubClient, GitHubError, Unreachable, blob_url
 from mooring.hub import settings_schema
 
 
@@ -562,6 +562,14 @@ class Hub:
         warn-and-confirm fields before the response is sealed."""
         try:
             result = op()
+        except Unreachable as exc:
+            # Ordered BEFORE the generic pair (Unreachable subclasses GitHubError):
+            # an outage is not a sync failure — nothing was lost, nothing to fix.
+            telemetry.log_error(exc=exc, op=name)
+            return {
+                "error": "GitHub is unreachable — your changes are safe on disk; "
+                "push or pull again when you're back online."
+            }, 503
         except (GitHubError, OSError) as exc:
             telemetry.log_error(exc=exc, op=name)
             return {"error": str(exc)}, 502

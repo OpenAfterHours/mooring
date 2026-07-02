@@ -13,6 +13,7 @@ from pathlib import Path
 
 MANIFEST_DIR = ".mooring"
 MANIFEST_NAME = "manifest.json"
+CACHE_NAME = "remote-cache.json"
 
 
 @dataclass
@@ -93,6 +94,65 @@ def save(workspace: Path, manifest: Manifest) -> None:
             "branch": manifest.last_push_branch,
             "files": dict(sorted(manifest.last_push.items())),
         }
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(payload, indent=2), "utf-8")
+    os.replace(tmp, path)
+
+
+@dataclass
+class RemoteCache:
+    """The last remote tree we OBSERVED: cfg.branch's head plus the in-scope
+    ``path -> blob sha`` map, with the sync scope it was captured under and a
+    timezone-aware UTC ISO timestamp. Written on every successful sync preamble
+    (sync._prepare) and read only by the offline fallback (sync.cached_status).
+
+    Deliberately NOT the manifest: ``Manifest.files`` is the last-SYNCED base,
+    and after a pull that skipped a conflict the manifest blanks ``head_commit``
+    so the next cycle re-detects it — the cache, by contrast, still holds the
+    conflicting remote view, so a conflict stays a conflict offline. Display
+    only: sync decisions always refetch live.
+    """
+
+    head_commit: str = ""
+    fetched_at: str = ""  # datetime.now(timezone.utc).isoformat()
+    files: dict[str, str] = field(default_factory=dict)  # repo path -> blob sha
+    scope_folders: tuple[str, ...] = ()
+    scope_exclude: tuple[str, ...] = ()
+
+
+def cache_path(workspace: Path) -> Path:
+    return workspace / MANIFEST_DIR / CACHE_NAME
+
+
+def load_cache(workspace: Path) -> RemoteCache | None:
+    """The cached remote view, or None when missing or corrupt. Fail-soft by
+    contract: a broken cache means "no offline view", never an error — the
+    cache is display-only, so the worst outcome of dropping it is a blunter
+    offline message."""
+    path = cache_path(workspace)
+    try:
+        data = json.loads(path.read_text("utf-8"))
+        return RemoteCache(
+            head_commit=str(data.get("head_commit", "")),
+            fetched_at=str(data.get("fetched_at", "")),
+            files={str(k): str(v) for k, v in data.get("files", {}).items()},
+            scope_folders=tuple(str(f) for f in data.get("scope_folders", ())),
+            scope_exclude=tuple(str(p) for p in data.get("scope_exclude", ())),
+        )
+    except (OSError, ValueError, TypeError, AttributeError):
+        return None
+
+
+def save_cache(workspace: Path, cache: RemoteCache) -> None:
+    path = cache_path(workspace)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "head_commit": cache.head_commit,
+        "fetched_at": cache.fetched_at,
+        "files": dict(sorted(cache.files.items())),
+        "scope_folders": list(cache.scope_folders),
+        "scope_exclude": list(cache.scope_exclude),
+    }
     tmp = path.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(payload, indent=2), "utf-8")
     os.replace(tmp, path)

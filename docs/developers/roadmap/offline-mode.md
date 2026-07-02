@@ -4,9 +4,19 @@ icon: lucide/wifi-off
 
 # Offline and outage graceful mode
 
-!!! note "Status: proposed"
-    Designed 2026-07 from a multi-agent ideation review; not yet implemented.
-    Scope may change — this page records the intended shape and the reasoning.
+!!! success "Status: implemented"
+    All four phases shipped 2026-07: the transport-classification seam
+    (`GitHubClient._send` mapping connection failures/timeouts to
+    `Unreachable` and TLS errors to `TlsFailure`, with the 401 → `AuthFailed`
+    pin intact), the `.mooring/remote-cache.json` observed-remote view written
+    on every successful sync preamble, `sync.cached_status` + the hub's amber
+    `#offline-banner` over the cached rows (network actions hidden — including
+    the later-shipped Review changes, History, Discard, Recall, and What's new
+    surfaces; Open/Reveal/Undo/Delete/Duplicate/AI stay live), a friendly 503
+    from every sync endpoint, a silent `/api/freshness`, and the CLI's
+    `OFFLINE — GitHub unreachable` status header with one-line exits elsewhere.
+    **The no-offline-push-queue non-goal stands**: pushes stay explicit and
+    always run live.
 
 ## Problem
 

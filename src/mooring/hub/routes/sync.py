@@ -15,7 +15,7 @@ from starlette.responses import JSONResponse
 from mooring import auth, celldiff, manifest, pushguard, sync, telemetry, whatsnew
 from mooring import workspace_config
 from mooring.app import notebooks as nb_ops
-from mooring.github import GitHubError
+from mooring.github import GitHubError, Unreachable
 from mooring.hub.routes.files import _resolve_within
 
 
@@ -225,6 +225,12 @@ def api_freshness(request: Request) -> JSONResponse:
     last = hub._state_heads.get(str(cfg.workspace()))
     try:
         head = hub.client().get_branch_head(cfg.branch)
+    except Unreachable:
+        # Offline the staleness guard stays SILENT: it cannot check the head,
+        # and the offline banner already owns the "your view is stale" story.
+        # (The client fails open on errors anyway — this just avoids a 502 +
+        # telemetry error on every Open while the network is down.)
+        return JSONResponse({"fresh": True, "head": ""})
     except (GitHubError, OSError) as exc:
         telemetry.log_error(exc=exc, op="freshness")
         return JSONResponse({"error": str(exc)}, status_code=502)
