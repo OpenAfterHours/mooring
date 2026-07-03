@@ -31,7 +31,7 @@ from pathlib import Path
 
 import tomli_w
 
-from mooring import checks, paths, pyproject_env
+from mooring import checks, connections, paths, pyproject_env
 
 STARTUP_TIMEOUT = 30.0
 
@@ -153,6 +153,7 @@ def ensure_runtime_config(workspace: Path, *, theme: str | None = None) -> None:
     ``~/.marimo.toml``. It is a dotfile, so sync never uploads it.
     """
     checks.install_runtime(workspace)  # best-effort; keeps mooring_checks importable
+    connections.install_runtime(workspace)  # and mooring_connections (shape + local secret)
     path = workspace / ".marimo.toml"
     try:
         data: dict = {}

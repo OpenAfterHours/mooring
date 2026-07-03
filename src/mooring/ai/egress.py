@@ -158,6 +158,7 @@ def build_system_context(
     semantic_models_text: str = "",
     checks_help: str = "",
     sql_help: str = "",
+    connections_help: str = "",
 ) -> str:
     """Assemble the value-blind context handed to the assistant.
 
@@ -188,6 +189,9 @@ def build_system_context(
     instructions_text, _ = scrub_text(instructions_text)
     dictionary_text, _ = scrub_text(dictionary_text)
     semantic_models_text, _ = scrub_text(semantic_models_text)
+    # connections_help carries USER-authored connection shape values (unlike the static
+    # checks_help/sql_help capability notes), so it gets the same scrub backstop.
+    connections_help, _ = scrub_text(connections_help)
 
     has_team = bool(instructions_text.strip() or dictionary_text.strip())
     parts = [
@@ -239,5 +243,11 @@ def build_system_context(
     # the model never sees a result, so it carries no user data and no scrub applies.
     if sql_help.strip():
         parts.append(sql_help.strip())
+    # The connection SHAPES the team defined (see mooring.workspace_config.connections_hint)
+    # — names + shape fields only, NEVER the secret (resolved locally in the kernel, no
+    # channel here). The shape VALUES are user-authored, so unlike checks_help/sql_help this
+    # fragment was scrubbed above.
+    if connections_help.strip():
+        parts.append(connections_help.strip())
     parts.append(f"CURRENT NOTEBOOK ({notebook_rel}) SOURCE:\n{notebook_source.strip()}")
     return "\n\n".join(parts)

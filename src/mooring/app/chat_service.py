@@ -254,6 +254,9 @@ class ChatService:
             # Likewise, let it author marimo SQL (mo.sql / DuckDB) cells — authored code
             # the model never sees the result of, so no new egress channel either.
             sql_help=tools.sql_cell_guide(),
+            # The team's value-free connection SHAPES (names + fields, never the secret),
+            # so the copilot can write connection code that references them.
+            connections_help=workspace_config.connections_hint(workspace),
         )
         return context, (index if has_dict else DictionaryIndex()), pii_banner, live_text, models
 
