@@ -156,6 +156,52 @@ its number, **Verify** it.
     [`mooring_checks`](#checking-your-numbers-tie-out) and review the logic with the
     copilot's [Review logic](ai-copilot.md#review-my-logic).
 
+## Fingerprinting your inputs
+
+*"Same inputs, same numbers?"* — the question an auditor (or you, three months later)
+asks about a report. Pin the exact data a run read with the built-in **`mooring_inputs`**
+helper, right after you load each input:
+
+```python
+import mooring_inputs as mi
+mi.reset()                                               # start fresh each run
+
+sales = pl.read_csv("data/sales.csv")
+mi.fingerprint(sales, "sales", path="data/sales.csv")    # hash + shape + schema
+```
+
+Each call records a **value-free** fingerprint — the file's **content hash**, its
+**shape** (row/column counts), and its **schema** (column names + types), **never a data
+value** — and compares it to the previous run. If an input changed under you (different
+content, more rows, a new column), the cell prints `[CHANGED] …` and the hub shows an
+amber **⚠ input changed** badge on the notebook's row; otherwise a green **⛓ N inputs
+pinned** badge. `mooring inputs` lists them from the terminal, and `mooring inputs --clear`
+resets them.
+
+Always pass **`path=`** to the source file — that's what gives the *content* guarantee
+(the file hash catches a same-shape value change). Without a `path`, only the shape and
+schema are compared. Starting the cell with `mi.reset()` keeps the badge honest if you
+later rename or drop an input.
+
+Because `mi.fingerprint(...)` returns falsy when the input changed, you can even make it a
+guard:
+
+```python
+assert mi.fingerprint(sales, "sales", path="data/sales.csv"), "sales.csv moved — re-check the totals"
+```
+
+!!! info "Value-free, local, and never pushed"
+
+    The fingerprint is a hash, two counts, and column names/types — never a value. The
+    receipt lives in the `.mooring` folder, which **never syncs**, and the AI never sees
+    it. (A container format like `.xlsx`/`.parquet` can re-compress to different bytes for
+    the same data, so treat the hash as a *file* fingerprint, backed up by the shape and
+    schema.)
+
+!!! tip "Let the copilot add them"
+
+    Ask the copilot to *"fingerprint the inputs"* — it reads your schema and source (never
+    your data) and proposes the `mooring_inputs` cell for you to review and apply.
 ## Connecting to a database
 
 Pulling from a warehouse (Snowflake, SQL Server, …)? mooring lets the team share the

@@ -452,6 +452,10 @@ button.caret:disabled { opacity: 0.4; cursor: default; }
 .badge.verify-ok { color: var(--ok); border-color: var(--ok); }
 .badge.verify-fail { color: var(--warn); border-color: var(--warn); }
 
+/* value-free input fingerprints (mooring_inputs): green when pinned & unchanged, amber on a change */
+.badge.inputs-ok { color: var(--ok); border-color: var(--ok); }
+.badge.inputs-changed { color: var(--warn); border-color: var(--warn); }
+
 /* catalog: the filter box + a notebook's harvested title (subtitle under its filename) */
 .file-search {
   width: 100%;
