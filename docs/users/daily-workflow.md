@@ -40,6 +40,13 @@ page that opens when you run the app). The same actions are available from the
 Power BI projects appear as a **single grouped row** (expand with the ▸ caret
 to see individual files); everything else is one row per file.
 
+!!! tip "Finding a notebook in a growing repo"
+
+    Each notebook shows its **title** — the first heading in its own first markdown
+    cell — beneath its filename, so a file like `q3_recon_v2.py` is legible at a
+    glance. Use the **filter box** above the list to find one by filename or title.
+    Titles are read from the notebook's own text on your machine; nothing leaves it.
+
 ## A typical session
 
 1. **Pull** first to grab a teammate's notebook and start from the team's latest.

@@ -50,6 +50,41 @@ def is_marimo_app(source: str) -> bool:
     return _MARIMO_APP_RE.search(source) is not None
 
 
+# A markdown cell is authored as ``mo.md("…")`` (the template writes the title as
+# ``mo.md(r"""# {title}""")``). Match the FIRST such call's string body — triple- or
+# single-quoted, with an optional string prefix — non-greedily up to the matching quote.
+_MD_CALL_RE = re.compile(r"""mo\.md\(\s*[rRfFbBuU]*('''|\"\"\"|'|")(.*?)\1""", re.DOTALL)
+# A markdown H1: `# Heading` (allow up to 3 leading spaces and trailing ATX `#`s).
+_MD_H1_RE = re.compile(r"^ {0,3}#\s+(.+?)\s*#*\s*$", re.MULTILINE)
+
+
+def _clean_title(text: str) -> str:
+    return " ".join(text.split())[:120]
+
+
+def notebook_title(source: str) -> str:
+    """A human title for a notebook, harvested VALUE-FREE from its first markdown cell.
+
+    Prefers the first ``# H1`` heading found across the ``mo.md(...)`` cells; failing
+    that, the first non-empty line of the first markdown cell (its leading ``#``s
+    trimmed). This is authored text — the same kind of content the notebook source
+    already carries, never a data value — surfaced only in the local hub listing so a
+    growing repo of files like ``q3_recon_v2.py`` is legible. Returns ``""`` when there
+    is no markdown cell / heading. Best-effort and content-only (not a full parse)."""
+    first_line = ""
+    for match in _MD_CALL_RE.finditer(source):
+        body = match.group(2)
+        h1 = _MD_H1_RE.search(body)
+        if h1:
+            return _clean_title(h1.group(1))
+        if not first_line:
+            for line in body.splitlines():
+                if line.strip():
+                    first_line = _clean_title(line.strip().lstrip("#").strip())
+                    break
+    return first_line
+
+
 def opens_as_notebook(name: str, source: str) -> bool:
     """Whether the ``.py`` at ``name`` (a filename or workspace-relative path) with body
     ``source`` should open in the marimo editor.

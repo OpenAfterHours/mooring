@@ -72,3 +72,29 @@ test("group: does not mutate the input files", () => {
   FT.group(input, ["notebooks"]);
   assert.equal("rel" in input[0], false);
 });
+
+// -- matches(): the catalog search filter -----------------------------------
+
+test("matches: empty query matches everything", () => {
+  assert.equal(FT.matches({ path: "notebooks/a.py" }, ""), true);
+  assert.equal(FT.matches({ path: "notebooks/a.py" }, "   "), true);
+});
+
+test("matches: searches path, title, and tags, case-insensitively", () => {
+  const f = { path: "notebooks/q3_recon_v2.py", title: "Quarterly Reconciliation", tags: ["finance"] };
+  assert.equal(FT.matches(f, "recon"), true); // path
+  assert.equal(FT.matches(f, "quarterly"), true); // title
+  assert.equal(FT.matches(f, "FINANCE"), true); // tag, case-insensitive
+  assert.equal(FT.matches(f, "sales"), false);
+});
+
+test("matches: space-separated terms are ANDed", () => {
+  const f = { path: "notebooks/sales.py", title: "Monthly Sales Report" };
+  assert.equal(FT.matches(f, "sales report"), true);
+  assert.equal(FT.matches(f, "sales quarterly"), false); // one term misses
+});
+
+test("matches: missing title/tags don't throw", () => {
+  assert.equal(FT.matches({ path: "a.py" }, "a"), true);
+  assert.equal(FT.matches({ path: "a.py", tags: null }, "a"), true);
+});

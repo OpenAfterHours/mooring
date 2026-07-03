@@ -63,7 +63,22 @@ const FilesTree = (function () {
     return result;
   }
 
-  return { group, folderOf, norm };
+  // Whether a file row matches a free-text catalog query. Space-separated terms are
+  // ANDed; each must appear (case-insensitively) in the file's path, its harvested
+  // title, or any of its tags. An empty query matches everything. Pure — used to filter
+  // the listing client-side so an analyst can find a notebook in a big repo.
+  function matches(file, query) {
+    const q = String(query == null ? "" : query).trim().toLowerCase();
+    if (!q) return true;
+    const hay = [file.path, file.title]
+      .concat(Array.isArray(file.tags) ? file.tags : [])
+      .filter(Boolean)
+      .join(" ")
+      .toLowerCase();
+    return q.split(/\s+/).every((term) => hay.includes(term));
+  }
+
+  return { group, folderOf, norm, matches };
 })();
 
 if (typeof window !== "undefined") window.FilesTree = FilesTree;
