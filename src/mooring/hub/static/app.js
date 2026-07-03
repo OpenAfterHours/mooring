@@ -370,6 +370,14 @@ function deliverAction(path) {
   return action("/api/deliver", { path }, false);
 }
 
+// Verify: smoke-run this notebook once on your machine and record whether it ran clean
+// (the trust badge). Runs in the real environment; nothing is committed and no value
+// leaves the machine — the receipt is a boolean keyed to the file's content, so the
+// badge auto-clears the moment you edit the notebook. Refresh after so the badge shows.
+function verifyAction(path) {
+  return action("/api/verify", { path });
+}
+
 // A safe playground: byte-copy this notebook to a personal {stem}-{login}-draft.py
 // sibling. To the three-way engine the draft is just a new local file — it can never
 // conflict with the team file and is only shared by an explicit push. The response's
@@ -843,6 +851,12 @@ function fileActions(file, opts) {
   if (isNotebook && file.has_local) {
     actions.push(["Deliver", () => deliverAction(file.path)]);
   }
+  // Verify: smoke-run the notebook on this machine and badge the row with whether it
+  // ran clean (a value-free trust receipt). The "does this still run before I share it?"
+  // step. Notebooks only; the badge auto-clears when the file is edited.
+  if (isNotebook && file.has_local) {
+    actions.push(["Verify runs", () => verifyAction(file.path)]);
+  }
   // A plain helper module (non-marimo .py) can't open in marimo (it would be rewritten
   // into notebook form), so instead of Open it gets Reveal — open it in the file manager
   // to edit in your own editor. Edits still sync/push like any other file.
@@ -994,6 +1008,30 @@ function checksBadge(checks) {
   return span;
 }
 
+// A green/red trust badge from the value-free .mooring/verify receipt a Verify run
+// wrote: did the notebook run clean end-to-end on this machine. The server only sends
+// `verified` when the receipt still matches the file's current content SHA, so this is
+// gone the moment the notebook is edited — a stale "verified" never rides edited code.
+function verifiedBadge(v) {
+  const span = document.createElement("span");
+  const when = v.ran_at ? ` (${v.ran_at.slice(0, 10)})` : "";
+  if (v.passed) {
+    span.className = "badge verify-ok";
+    span.textContent = "✓ ran clean";
+    span.title = `This notebook ran clean end-to-end when last verified${when}. ` +
+      "Value-free and local; clears when you edit it.";
+  } else {
+    span.className = "badge verify-fail";
+    const cells = v.cells_failed
+      ? `${v.cells_failed} cell${v.cells_failed === 1 ? "" : "s"} failed`
+      : "failed to run";
+    span.textContent = `⚠ ${cells}`;
+    span.title = `This notebook did not run clean when last verified${when} — open it to ` +
+      "see which cell failed.";
+  }
+  return span;
+}
+
 function buildFileRow(file, opts) {
   opts = opts || {};
   // Inside a folder section the row shows its folder-relative path (`rel`); elsewhere
@@ -1005,6 +1043,8 @@ function buildFileRow(file, opts) {
   if (file.shadows) extras.push(" ", shadowBadge(file.shadows));
   if (file.is_module) extras.push(" ", moduleBadge());
   if (file.checks && file.checks.total) extras.push(" ", checksBadge(file.checks));
+  // The trust badge from a Verify run (present only while it matches the file's SHA).
+  if (file.verified) extras.push(" ", verifiedBadge(file.verified));
   // A watched file with a teammate change waiting gets its promotion badge —
   // quiet otherwise (watching an in-sync file must not add row noise).
   if (watchedPaths.has(file.path) && PULL_STATES.has(file.state)) {

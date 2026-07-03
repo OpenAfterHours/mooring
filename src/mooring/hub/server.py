@@ -38,6 +38,7 @@ from mooring import (
     sync,
     telemetry,
     trash,
+    verify,
     workspace_config,
 )
 from mooring.app import notebooks as nb_ops
@@ -299,6 +300,11 @@ class Hub:
         # written by mooring_checks calls in the kernel — surfaced as a green/red
         # row badge. Counts + names only; local-only, never synced, never seen by AI.
         check_results = checks.read_results(workspace)
+        # Value-free run-verification receipts per notebook (.mooring/verify/*.json):
+        # did a local smoke re-run go clean, keyed to the file's content SHA. Only
+        # SHA-current receipts are returned, so an edited notebook drops its badge —
+        # the trust badge auto-clears the instant the code moves on. Local-only.
+        verify_results = verify.read_results(workspace)
         # Notebooks whose filename shadows an importable module (e.g. polars.py) —
         # surfaced as a per-row badge instead of an inscrutable kernel traceback.
         shadowed: dict[str, str] = {}
@@ -334,6 +340,7 @@ class Hub:
                 **({"ai_disabled": True} if f.path.endswith(".py") and f.path in ai_off else {}),
                 **({"shadows": shadowed[f.path]} if f.path in shadowed else {}),
                 **({"checks": check_results[f.path]} if f.path in check_results else {}),
+                **({"verified": verify_results[f.path]} if f.path in verify_results else {}),
                 **({"is_notebook": True} if f.path in notebooks else {}),
                 **({"title": titles[f.path]} if f.path in titles else {}),
                 **(
@@ -971,6 +978,7 @@ def create_app(hub: Hub) -> Starlette:
             Route("/api/open", files.api_open, methods=["POST"]),
             Route("/api/reveal", files.api_reveal, methods=["POST"]),
             Route("/api/deliver", files.api_deliver, methods=["POST"]),
+            Route("/api/verify", files.api_verify, methods=["POST"]),
             Route("/api/delete", files.api_delete, methods=["POST"]),
             Route("/api/rollback", files.api_rollback, methods=["POST"]),
             Route("/api/undo", files.api_undo, methods=["POST"]),

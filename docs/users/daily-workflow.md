@@ -33,6 +33,7 @@ page that opens when you run the app). The same actions are available from the
 | **Open** | Open a notebook in the bundled marimo editor (a new browser tab), or a Power BI project in **Power BI Desktop** — see [Power BI reports](power-bi.md). |
 | **New notebook** | Create a fresh marimo notebook from a template and open it. A bare name lands in `notebooks/`; type a path (e.g. `packages/finance/notebooks/sales`) to place it in a sub-folder — mooring registers that folder so it syncs for the team. |
 | **Deliver** | Render a notebook to a **self-contained HTML snapshot** (code hidden) you can email a stakeholder who won't open marimo. See [Delivering a result](#delivering-a-result-for-a-stakeholder). |
+| **Verify runs** | Smoke-run the notebook once on your machine and badge the row with whether it **ran clean** — the "does this still run before I share it?" check. See [Verifying a notebook runs](#verifying-a-notebook-runs). |
 | **Push** | Upload your changed files to the team repo — **one commit per file**. Blocked for any file that's in conflict. |
 | **Propose** | Like Push, but uploads to a **review branch** instead of the shared branch, so a teammate can review the changes as a pull request before they land. See [Proposing changes](#proposing-changes-for-review). |
 | **Revert** | Appears on a *modified* or locally-deleted file. Discards your local changes and restores the last version you pulled or pushed. Your current version is snapshotted first, so a Revert can itself be undone. See [Reverting a file](#reverting-a-file). |
@@ -124,6 +125,36 @@ current; if you remove the checks cell entirely, clear the leftover badge with
     Open the copilot and type **`/checks`** (or just ask). It reads your schema and
     source — never your data — and proposes a `mooring_checks` cell tailored to the
     notebook for you to review and apply. See [AI copilot](ai-copilot.md).
+
+## Verifying a notebook runs
+
+A notebook you inherited — or one you haven't opened in weeks — might not run any more:
+a dependency moved, an input path changed, a cell was left half-edited. Before you share
+its number, **Verify** it.
+
+1. On a notebook's **Actions ▾** menu, choose **Verify runs**. Mooring runs the whole
+   notebook once **on your machine**, top to bottom, in the same locked environment the
+   editor uses, and records the outcome.
+2. The row then shows a green **✓ ran clean** badge, or an amber **⚠ … failed to run**
+   badge if a cell errored — open the notebook to see which one. On the command line
+   this is [`mooring verify <path>`](cli.md).
+3. The badge is tied to the notebook's **current contents**: the moment you edit the
+   file, the badge **clears itself**, because "it ran clean" is no longer a claim about
+   the code that's now there. Re-verify after your edits.
+
+!!! info "Value-free, local, and never committed"
+
+    Verify only records **whether** the notebook ran — a green/red boolean and a
+    date, **never a value or an error message**. The run's rendered output (which *does*
+    contain values) is written to the `.mooring` folder and deleted straight away, and
+    the receipt stays on your machine — it never syncs and the AI never sees it.
+
+!!! warning "A green badge means it *ran*, not that the number is *right*"
+
+    Verify proves the notebook executes without error. It can't tell you the answer is
+    correct — for that, tie your numbers out with
+    [`mooring_checks`](#checking-your-numbers-tie-out) and review the logic with the
+    copilot's [Review logic](ai-copilot.md#review-my-logic).
 
 ## Proposing changes for review
 

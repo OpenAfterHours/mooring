@@ -194,6 +194,12 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     deliver_cmd.add_argument("path", help="workspace-relative notebook path to deliver")
 
+    verify_cmd = sub.add_parser(
+        "verify",
+        help="smoke-run a notebook locally and record whether it ran clean (the trust badge)",
+    )
+    verify_cmd.add_argument("path", help="workspace-relative notebook path to verify")
+
     checks_cmd = sub.add_parser(
         "checks",
         help="show the tie-out / data-quality check results recorded per notebook",
@@ -1078,6 +1084,26 @@ def cmd_deliver(cfg: config.Config, rel_path: str) -> int:
         "email/Teams yourself."
     )
     return 0
+
+
+def cmd_verify(cfg: config.Config, rel_path: str) -> int:
+    from mooring.app import verify_run
+
+    try:
+        result = verify_run.verify_notebook(cfg, rel_path)
+    except (ValueError, FileNotFoundError, verify_run.VerifyError) as exc:
+        sys.exit(str(exc))
+    telemetry.log_event("verify", ok=int(result.passed))  # value-free: a boolean, no path
+    if result.passed:
+        print(f"{result.notebook_rel}: ran clean.")
+        return 0
+    if result.cells_failed:
+        cells = "cell" if result.cells_failed == 1 else "cells"
+        print(f"{result.notebook_rel}: {result.cells_failed} {cells} failed to run.")
+    else:
+        print(f"{result.notebook_rel}: failed to run.")
+    print("Open it in the editor to see which cell failed. (The badge clears when you edit it.)")
+    return 1
 
 
 def cmd_checks(cfg: config.Config, args: argparse.Namespace) -> int:
@@ -2079,6 +2105,8 @@ def _dispatch(
         return cmd_duplicate(cfg, args.path)
     if command == "deliver":
         return cmd_deliver(cfg, args.path)
+    if command == "verify":
+        return cmd_verify(cfg, args.path)
     if command == "checks":
         return cmd_checks(cfg, args)
     if command == "init":

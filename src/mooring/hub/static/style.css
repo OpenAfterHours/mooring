@@ -448,6 +448,10 @@ button.caret:disabled { opacity: 0.4; cursor: default; }
 .badge.checks-ok { color: var(--ok); border-color: var(--ok); }
 .badge.checks-fail { color: var(--warn); border-color: var(--warn); }
 
+/* value-free run-verification (the trust badge): green when it ran clean, amber on a failure */
+.badge.verify-ok { color: var(--ok); border-color: var(--ok); }
+.badge.verify-fail { color: var(--warn); border-color: var(--warn); }
+
 /* catalog: the filter box + a notebook's harvested title (subtitle under its filename) */
 .file-search {
   width: 100%;
