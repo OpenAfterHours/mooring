@@ -303,8 +303,11 @@ class Hub:
         # Value-free run-verification receipts per notebook (.mooring/verify/*.json):
         # did a local smoke re-run go clean, keyed to the file's content SHA. Only
         # SHA-current receipts are returned, so an edited notebook drops its badge —
-        # the trust badge auto-clears the instant the code moves on. Local-only.
-        verify_results = verify.read_results(workspace)
+        # the trust badge auto-clears the instant the code moves on. Local-only. The
+        # report already carries each file's local_sha, so pass it in to spare
+        # read_results from re-hashing every verified notebook on each poll.
+        local_shas = {f.path: f.local_sha for f in report.files if f.local_sha is not None}
+        verify_results = verify.read_results(workspace, local_shas)
         # Notebooks whose filename shadows an importable module (e.g. polars.py) —
         # surfaced as a per-row badge instead of an inscrutable kernel traceback.
         shadowed: dict[str, str] = {}

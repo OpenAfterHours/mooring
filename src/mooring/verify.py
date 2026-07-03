@@ -82,15 +82,22 @@ def record(
         pass
 
 
-def read_results(workspace: Path | str) -> dict[str, dict]:
+def read_results(
+    workspace: Path | str, local_shas: dict[str, str] | None = None
+) -> dict[str, dict]:
     """Map notebook rel-path -> ``{passed, cells_failed, ran_at}`` — but ONLY for
     receipts still valid for the file on disk.
 
     A receipt is surfaced only when its notebook still exists AND its stored content
     SHA still equals the file's current blob SHA. A notebook edited since it was
     verified has a different SHA, so its receipt is dropped here and the badge
-    disappears — the "auto-clear the instant the SHA advances" rule. Recomputing the
-    SHA per poll is cheap (only the handful of verified notebooks are hashed).
+    disappears — the "auto-clear the instant the SHA advances" rule.
+
+    ``local_shas`` (rel -> current blob SHA) lets the caller pass SHAs it already
+    computed — the hub's sync StatusReport carries ``local_sha`` for every file, so the
+    per-poll comparison costs nothing there. A rel absent from the map (or a ``None``
+    entry, as in no-repo mode) falls back to hashing the file. When ``local_shas`` is
+    None every match is computed here (the CLI / test path).
 
     Value-free; best-effort (unreadable / foreign / corrupt receipts are skipped)."""
     out: dict[str, dict] = {}
@@ -111,14 +118,18 @@ def read_results(workspace: Path | str) -> dict[str, dict]:
         sha = data.get("sha")
         if not isinstance(rel, str) or not isinstance(sha, str):
             continue
-        target = ws / rel
-        try:
-            if not target.is_file():
-                continue  # notebook deleted — never badge a file that's gone
-            if gitsha.local_blob_sha(target, rel) != sha:
-                continue  # edited since verify — the badge auto-clears
-        except OSError:
-            continue
+        current = local_shas.get(rel) if local_shas is not None else None
+        if current is None:
+            # Not supplied (or no map) — hash it ourselves, dropping a gone file.
+            target = ws / rel
+            try:
+                if not target.is_file():
+                    continue  # notebook deleted — never badge a file that's gone
+                current = gitsha.local_blob_sha(target, rel)
+            except OSError:
+                continue
+        if current != sha:
+            continue  # edited since verify — the badge auto-clears
         cells = data.get("cells_failed")
         out[rel] = {
             "passed": bool(data.get("passed")),

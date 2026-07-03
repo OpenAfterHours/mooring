@@ -198,7 +198,15 @@ def _build_parser() -> argparse.ArgumentParser:
         "verify",
         help="smoke-run a notebook locally and record whether it ran clean (the trust badge)",
     )
-    verify_cmd.add_argument("path", help="workspace-relative notebook path to verify")
+    verify_cmd.add_argument("path", nargs="?", help="workspace-relative notebook path to verify")
+    verify_cmd.add_argument(
+        "--clear",
+        nargs="?",
+        const=True,
+        default=False,
+        metavar="PATH",
+        help="clear recorded verify receipts (all, or just one notebook path) instead of running",
+    )
 
     checks_cmd = sub.add_parser(
         "checks",
@@ -1086,24 +1094,30 @@ def cmd_deliver(cfg: config.Config, rel_path: str) -> int:
     return 0
 
 
-def cmd_verify(cfg: config.Config, rel_path: str) -> int:
+def cmd_verify(cfg: config.Config, args: argparse.Namespace) -> int:
+    from mooring import verify
     from mooring.app import verify_run
 
+    clear = getattr(args, "clear", False)
+    if clear is not False:
+        # `--clear` with no value clears all; `--clear PATH` (or a bare `verify PATH
+        # --clear`) clears one. Normal editing already clears a badge (the SHA moves) —
+        # this is the rarer "forget it entirely" case, mirroring `mooring checks --clear`.
+        rel = clear if isinstance(clear, str) else (args.path or None)
+        removed = verify.clear(cfg.workspace(), rel)
+        print(f"Cleared {removed} verify receipt(s)." if removed else "No verify receipts to clear.")
+        return 0
+    if not args.path:
+        sys.exit("Give a notebook path to verify (or `--clear` to reset recorded results).")
     try:
-        result = verify_run.verify_notebook(cfg, rel_path)
+        result = verify_run.verify_notebook(cfg, args.path)
     except (ValueError, FileNotFoundError, verify_run.VerifyError) as exc:
         sys.exit(str(exc))
     telemetry.log_event("verify", ok=int(result.passed))  # value-free: a boolean, no path
-    if result.passed:
-        print(f"{result.notebook_rel}: ran clean.")
-        return 0
-    if result.cells_failed:
-        cells = "cell" if result.cells_failed == 1 else "cells"
-        print(f"{result.notebook_rel}: {result.cells_failed} {cells} failed to run.")
-    else:
-        print(f"{result.notebook_rel}: failed to run.")
-    print("Open it in the editor to see which cell failed. (The badge clears when you edit it.)")
-    return 1
+    print(verify_run.describe_result(result))
+    if not result.passed:
+        print("(The badge clears automatically when you edit the notebook.)")
+    return 0 if result.passed else 1
 
 
 def cmd_checks(cfg: config.Config, args: argparse.Namespace) -> int:
@@ -2106,7 +2120,7 @@ def _dispatch(
     if command == "deliver":
         return cmd_deliver(cfg, args.path)
     if command == "verify":
-        return cmd_verify(cfg, args.path)
+        return cmd_verify(cfg, args)
     if command == "checks":
         return cmd_checks(cfg, args)
     if command == "init":

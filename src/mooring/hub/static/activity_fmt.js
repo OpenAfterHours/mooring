@@ -24,6 +24,7 @@ const ActivityFmt = (function () {
         : `you deleted ${name(e.path || (e.paths || [])[0])}`;
     },
     duplicate: (e) => `you duplicated ${name(e.path)} as a draft (${name(e.draft)})`,
+    verify: (e) => `you verified ${name(e.path)} — ${e.ok ? "ran clean" : "a cell failed"}`,
     rollback: (e) => `you reverted ${name(e.path)} to the last synced version`,
     undo: (e) => `you undid a revert of ${name(e.path)}`,
     trash_restore: (e) => `you restored ${name(e.path)} from the trash`,

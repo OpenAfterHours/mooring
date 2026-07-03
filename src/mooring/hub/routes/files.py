@@ -176,17 +176,9 @@ def _verify(hub, rel_path: str) -> JSONResponse:
     # The activity-ledger entry is written inside verify_notebook (the app layer), so
     # both adapters get it — the route only adds the value-free telemetry counter.
     telemetry.log_event("verify", ok=int(result.passed))  # a boolean, never a path
-    if result.passed:
-        line = f"Verified {result.notebook_rel} — ran clean."
-    elif result.cells_failed:
-        cells = "cell" if result.cells_failed == 1 else "cells"
-        line = (
-            f"Verified {result.notebook_rel} — {result.cells_failed} {cells} failed to run "
-            "(open the notebook to see which)."
-        )
-    else:
-        line = f"Verified {result.notebook_rel} — it failed to run (open the notebook to see why)."
-    return JSONResponse({"path": rel_path, "ok": result.passed, "lines": [line]})
+    return JSONResponse(
+        {"path": rel_path, "ok": result.passed, "lines": [verify_run.describe_result(result)]}
+    )
 
 
 async def api_delete(request: Request) -> JSONResponse:
