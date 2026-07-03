@@ -21,6 +21,11 @@ It carries these — paths and policy tokens only, never a data value:
 - ``[guard] push`` — the push guard's team policy: ``"warn"`` (the default;
   findings need an explicit acknowledge) or ``"block"`` (findings must be fixed
   or pragma-suppressed — no override). See :mod:`mooring.pushguard`.
+- ``[connections]`` — value-free database connection SHAPE (host/database/
+  warehouse/role/…) that travels with the repo so the whole team (and the
+  copilot) can reference it by name. A secret-shaped field is REFUSED on write —
+  the secret NEVER goes here; it stays local (env var / a sync-excluded local
+  file), so it can never ride a push. See :mod:`mooring.connections`.
 """
 
 from __future__ import annotations
@@ -363,3 +368,207 @@ def add_extra_folders(workspace: Path, folders: Iterable[str]) -> None:
         sync["folders"] = sorted(merged)  # stable diffs and sync merges
         data["sync"] = sync
         _write_data(workspace, data)
+
+
+# -- connection definitions (value-free shape; the secret stays local) ----------
+# A team can define a database connection's SHAPE — host, database, warehouse,
+# role, and so on — in the synced mooring.toml so everyone (and the copilot) uses
+# the same names, WITHOUT the credential ever travelling. The load-bearing rule:
+# a secret-shaped field is REFUSED here on write, and the secret lives only in a
+# LOCAL, sync-excluded store (see mooring.connections). Definitions travel; the
+# secret does not. Only scalar shape values are kept — never a data value.
+
+# Field-name substrings that mark a value as a SECRET, so it can never be written
+# into the synced definitions. Deliberately broad (a false refusal is safe — put
+# the field in the local store instead); the exact-name set catches bare fields the
+# substrings miss without tripping legit shape names (host/role/warehouse/…).
+# NOTE: kept in sync with mooring._connections_runtime (the injected kernel module can't
+# import this one); tests/test_connections.py pins that the two lists match, so broadening
+# one side without the other fails CI rather than silently disagreeing.
+_SECRET_TOKENS = (
+    "password",
+    "passwd",
+    "passphrase",
+    "pwd",
+    "secret",
+    "token",
+    "apikey",
+    "api_key",
+    "credential",
+    "sas",
+    "connectionstring",
+    "connection_string",
+    "conn_str",
+    "dsn",
+    "private_key",
+    "privatekey",
+    "access_key",
+    "accesskey",
+    "account_key",
+    "accountkey",
+    "signing",
+    "bearer",
+    "cert",
+    "key",  # substring: catches app_key / signing_key / encryption_key / accountkey
+)
+_SECRET_EXACT = {"pass", "auth", "pat", "cred", "creds"}
+
+
+def is_secret_field(name: str) -> bool:
+    """Whether a connection field NAME looks like a secret (so it must not be synced).
+    Fail-safe: broad matching — over-refusing a field just means it goes to the local
+    secret store, which is where any credential belongs anyway."""
+    norm = str(name).strip().lower().replace("-", "_")
+    return norm in _SECRET_EXACT or any(tok in norm for tok in _SECRET_TOKENS)
+
+
+_SECRET_VALUE_RE = None  # compiled lazily in _value_looks_secret
+
+
+def _value_looks_secret(value) -> bool:
+    """Whether a VALUE looks like a credential even under an innocent field name — an
+    embedded ``password=…`` / ``token:…`` pair, or a DSN with inline credentials. The
+    structural floor at this L1 layer (which cannot import the richer ``ai.secrets``
+    scanner); the CLI and the push guard add ``ai.secrets`` on top."""
+    import re
+
+    global _SECRET_VALUE_RE
+    if _SECRET_VALUE_RE is None:
+        _SECRET_VALUE_RE = re.compile(
+            r"(?:password|passwd|passphrase|pwd|secret|token|api[_-]?key|access[_-]?key|"
+            r"private[_-]?key|account[_-]?key|credential|bearer)\s*[=:]"
+            r"|[a-z][a-z0-9+.\-]*://[^\s/@]+:[^\s/@]+@",
+            re.IGNORECASE,
+        )
+    return isinstance(value, str) and bool(_SECRET_VALUE_RE.search(value))
+
+
+def normalize_connection_name(name: str) -> str:
+    """A connection's identity key: a bare token (letters/digits/``_-.``), LOWER-CASED so
+    lookups are case-insensitive. Used as the ``[connections.<name>]`` table key and the
+    env-var / local-secret key."""
+    return str(name).strip().strip("/").replace(" ", "_").lower()
+
+
+def _scalar(value):
+    """A shape value kept in the synced definition — a str/int/float/bool only (a
+    nested table or list is not a connection shape field). ``None`` drops it."""
+    if isinstance(value, bool) or isinstance(value, (int, float)):
+        return value
+    if isinstance(value, str):
+        return value
+    return None
+
+
+def _connections(data: dict) -> dict[str, dict]:
+    """The value-free connection shapes from already-parsed data: ``{name: {field:
+    scalar}}`` with any secret-shaped field DROPPED (defence in depth on the READ side —
+    even a hand-edited secret never reaches a caller or the copilot). Tolerant of a
+    malformed table."""
+    conns = data.get("connections")
+    if not isinstance(conns, dict):
+        return {}
+    out: dict[str, dict] = {}
+    for name, shape in conns.items():
+        if not isinstance(shape, dict):
+            continue
+        clean = {
+            k: _scalar(v)
+            for k, v in shape.items()
+            if not is_secret_field(k) and _scalar(v) is not None
+        }
+        out[normalize_connection_name(name)] = clean
+    return out
+
+
+def connections(workspace: Path) -> dict[str, dict]:
+    """The repo's value-free connection shapes (``{name: {field: value}}``), secret
+    fields dropped. Fails open like the rest of the read side (a malformed file → no
+    connections)."""
+    return _connections(_read_data(workspace))
+
+
+def connections_raw(workspace: Path) -> dict[str, dict]:
+    """The RAW ``[connections]`` table as written (secret-shaped fields NOT dropped) —
+    for the pre-flight ``mooring connections check`` only, which must be able to SEE a
+    hand-added secret in order to warn about it. Every other consumer uses
+    :func:`connections`, which drops them."""
+    conns = _read_data(workspace).get("connections")
+    return {
+        normalize_connection_name(n): dict(s)
+        for n, s in conns.items()
+        if isinstance(s, dict)
+    } if isinstance(conns, dict) else {}
+
+
+def set_connection(workspace: Path, name: str, fields: dict) -> None:
+    """Write a connection's value-free SHAPE to ``mooring.toml``, preserving every other
+    key/section (the :func:`set_ai_disabled` idiom). REFUSES a secret-shaped field with a
+    ``ValueError`` — the credential must go to the local store (:mod:`mooring.connections`),
+    never the synced file. Non-scalar values are dropped. Raises
+    ``tomllib.TOMLDecodeError`` on a corrupt file rather than overwriting it."""
+    key = normalize_connection_name(name)
+    if not key:
+        raise ValueError("A connection needs a name.")
+    # Refuse a secret by NAME or by VALUE — a credential must never reach the synced file.
+    bad = sorted(k for k in fields if is_secret_field(k) or _value_looks_secret(fields[k]))
+    if bad:
+        raise ValueError(
+            "These fields look like secrets and must not be synced: "
+            f"{', '.join(bad)}. Store the credential locally with "
+            "`mooring connections set-secret` instead."
+        )
+    clean = {k: _scalar(v) for k, v in fields.items() if _scalar(v) is not None}
+    with _WRITE_LOCK:
+        data = _read_data_strict(workspace)
+        conns = data.get("connections")
+        if not isinstance(conns, dict):
+            conns = {}
+        # MERGE into the existing shape (the verb is "add"/update), so a second call that
+        # sets one more field never silently drops the fields defined earlier.
+        existing = conns.get(key)
+        merged = dict(existing) if isinstance(existing, dict) else {}
+        merged.update(clean)
+        conns[key] = merged
+        data["connections"] = conns
+        _write_data(workspace, data)
+
+
+def remove_connection(workspace: Path, name: str) -> bool:
+    """Delete a connection definition, preserving everything else. Returns whether one
+    was removed. Prunes an emptied ``[connections]`` table (and a wholly empty file)."""
+    key = normalize_connection_name(name)
+    with _WRITE_LOCK:
+        data = _read_data_strict(workspace)
+        conns = data.get("connections")
+        if not isinstance(conns, dict) or key not in conns:
+            return False
+        del conns[key]
+        if conns:
+            data["connections"] = conns
+        else:
+            data.pop("connections", None)
+        if data:
+            _write_data(workspace, data)
+        else:
+            config_path(workspace).unlink(missing_ok=True)
+    return True
+
+
+def connections_hint(workspace: Path) -> str:
+    """A value-free, one-block capability note for the AI system context: the connection
+    NAMES and their shape FIELDS (never a value or a secret), so the copilot can write
+    connection code that references them via ``mooring_connections``. ``""`` when none."""
+    conns = connections(workspace)
+    if not conns:
+        return ""
+    lines = ["CONNECTIONS (value-free shapes; the copilot NEVER sees the secret):"]
+    for name in sorted(conns):
+        fields = ", ".join(f"{k}={v}" for k, v in sorted(conns[name].items()))
+        lines.append(f"- {name}: {fields}" if fields else f"- {name}")
+    lines.append(
+        "To use one, propose a cell that calls `import mooring_connections as mc; "
+        'c = mc.get("<name>")` — it merges this shape with the LOCAL secret (env var or a '
+        "sync-excluded local file) at runtime. Never inline a credential; reference c.secret."
+    )
+    return "\n".join(lines)

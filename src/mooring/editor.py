@@ -31,7 +31,7 @@ from pathlib import Path
 
 import tomli_w
 
-from mooring import checks, inputs, paths, pyproject_env
+from mooring import checks, inputs, connections, paths, pyproject_env
 
 STARTUP_TIMEOUT = 30.0
 
@@ -154,6 +154,7 @@ def ensure_runtime_config(workspace: Path, *, theme: str | None = None) -> None:
     """
     checks.install_runtime(workspace)  # best-effort; keeps mooring_checks importable
     inputs.install_runtime(workspace)  # and mooring_inputs (input fingerprints)
+    connections.install_runtime(workspace)  # and mooring_connections (shape + local secret)
     path = workspace / ".marimo.toml"
     try:
         data: dict = {}

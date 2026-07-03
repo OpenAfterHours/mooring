@@ -202,6 +202,52 @@ assert mi.fingerprint(sales, "sales", path="data/sales.csv"), "sales.csv moved �
 
     Ask the copilot to *"fingerprint the inputs"* — it reads your schema and source (never
     your data) and proposes the `mooring_inputs` cell for you to review and apply.
+## Connecting to a database
+
+Pulling from a warehouse (Snowflake, SQL Server, …)? mooring lets the team share the
+**connection details** without anyone's **password** ever leaving their machine — the
+two are kept structurally apart.
+
+Define the connection's **shape** once; it travels with the repo like any synced setting:
+
+```bash
+mooring connections add warehouse kind=snowflake account=acme-eu \
+        database=ANALYTICS warehouse=REPORTING_WH role=ANALYST
+```
+
+Then each teammate stores their **own** secret **locally** — it is never synced:
+
+```bash
+mooring connections set-secret warehouse   # prompts; saved under .mooring, never pushed
+```
+
+(or set a `MOORING_CONN_WAREHOUSE_SECRET` environment variable, or use integrated auth and
+store no secret at all).
+
+In a notebook, assemble the two at run time:
+
+```python
+import mooring_connections as mc
+c = mc.get("warehouse")
+
+import snowflake.connector
+conn = snowflake.connector.connect(
+    account=c.account, database=c.database, warehouse=c.warehouse, role=c.role,
+    user="svc_analyst",
+    password=c.secret,   # resolved locally — never in the repo, the source, or the AI
+)
+```
+
+The copilot can see the connection **shape** (its name and fields) and will write this
+wiring for you — but it never sees `c.secret`.
+
+!!! warning "The secret is refused from the synced file — by construction"
+
+    mooring **refuses** to write a `password`/`token`/`key`-shaped field into the synced
+    `mooring.toml` (`mooring connections check` flags any that slipped in by hand), and the
+    local secret lives under `.mooring`, which **never syncs**. mooring does **not** install
+    database drivers — your own environment supplies `snowflake-connector` / `pyodbc` / etc.
+    (add them with `mooring deps add`).
 
 ## Proposing changes for review
 

@@ -257,6 +257,9 @@ class ChatService:
             # And author value-free input fingerprints (mooring_inputs) on request — a
             # hash/shape/schema receipt, never a value, so no new egress channel.
             inputs_help=inputs.copilot_guide(),
+            # The team's value-free connection SHAPES (names + fields, never the secret),
+            # so the copilot can write connection code that references them.
+            connections_help=workspace_config.connections_hint(workspace),
         )
         return context, (index if has_dict else DictionaryIndex()), pii_banner, live_text, models
 
