@@ -402,6 +402,27 @@ test("checksLabel: the compact visible transcript row, also a constant", () => {
   assert.equal(C.checksLabel(), C.checksLabel());
 });
 
+test("sqlPrompt: a pure constant that names the value-free mo.sql/DuckDB idiom", () => {
+  const p = C.sqlPrompt();
+  assert.equal(typeof p, "string");
+  assert.equal(p, C.sqlPrompt()); // no interpolation, no user text, no values
+  assert.match(p, /mo\.sql/);
+  assert.match(p, /DuckDB/);
+  // Propose (review-then-apply), schema-only, no SELECT * to "peek" and no data values.
+  assert.match(p, /mooring_propose_cell/);
+  assert.match(p, /no SELECT \*/);
+  assert.match(p, /never inline a /);
+});
+
+test("sqlLabel: the compact visible transcript row, also a constant", () => {
+  assert.equal(C.sqlLabel(), "/sql — propose a SQL cell for this notebook");
+  assert.equal(C.sqlLabel(), C.sqlLabel());
+});
+
+test("COMMANDS includes /sql", () => {
+  assert.ok(C.COMMANDS.some((c) => c.name === "sql"));
+});
+
 test("notesCellPrompt: mooring_propose_cell ONLY — edit/rewrite tools forbidden", () => {
   const p = C.notesCellPrompt();
   assert.equal(p, C.notesCellPrompt()); // constant

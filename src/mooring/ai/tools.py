@@ -46,6 +46,30 @@ _CELL_FORMAT = (
     "'def _():', or a trailing 'return (...)'; those are added automatically."
 )
 
+
+def sql_cell_guide() -> str:
+    """A value-free capability note telling the copilot it can author marimo SQL cells.
+
+    Threaded into the system context as ``sql_help`` (mirrors
+    :func:`mooring.checks.copilot_guide`) so the model knows the ``mo.sql`` idiom and can
+    PROPOSE a SQL cell from the schema + source it already sees. It reads no data value —
+    SQL is authored code and marimo runs it locally; the model never sees the result, so
+    this opens no new egress channel. Deliberately terse (a few lines) to stay cheap on
+    every turn; the fuller instruction rides the on-demand ``/sql`` command.
+
+    A marimo SQL cell is just a normal Python cell whose body is
+    ``name = mo.sql(...)`` — marimo detects the SQL and runs it with DuckDB — so it
+    round-trips through the same value-free codegen as any proposed cell (no new path)."""
+    return (
+        "SQL CELLS (value-free): you can propose a marimo SQL cell that runs on DuckDB via "
+        '`result = mo.sql("""<query>""")` (`mo` is already imported; marimo detects the SQL). '
+        "Query any dataframe already in scope BY ITS VARIABLE NAME and refer to columns by the "
+        "names in the schema — never inline a data value, and prefer an explicit column list "
+        "over SELECT *. Assign the result to a well-named dataframe variable so later cells can "
+        "use it. Use this when the analyst asks for SQL or to translate a query, and propose it "
+        "with mooring_propose_cell like any other cell (the BODY only)."
+    )
+
 # Added only when the workspace has a parsed data dictionary. Each is value-free:
 # it serves the already five-slot-allowlisted in-memory index, looking up by table
 # NAME (never a filesystem path), so it can reach no data file or value.

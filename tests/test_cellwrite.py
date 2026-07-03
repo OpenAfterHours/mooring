@@ -52,6 +52,25 @@ def test_markdown_cell_is_preserved_even_if_reformatted(tmp_path):
     assert len(MarimoConvert.from_py(out).to_ir().cells) == 2
 
 
+def test_sql_cell_round_trips_through_codegen(tmp_path):
+    # A marimo SQL cell is just a normal Python cell whose body is `x = mo.sql(...)`
+    # (marimo detects and runs the SQL with DuckDB). It must round-trip through the same
+    # value-free codegen as any proposed cell — no SQL-specific path, no mangling — so
+    # the copilot's "Speak SQL" feature needs no new apply channel.
+    p = tmp_path / "nb.py"
+    p.write_text(NB, "utf-8")
+    body = 'monthly = mo.sql("""SELECT region, SUM(amount) AS total FROM sales GROUP BY region""")'
+    append_cell(p, body)
+    out = p.read_text("utf-8")
+    assert "mo.sql(" in out and "SELECT region, SUM(amount)" in out
+    from marimo._convert.converters import MarimoConvert
+
+    assert len(MarimoConvert.from_py(out).to_ir().cells) == 2
+    # And it is NOT mistaken for a markdown cell (the one place a "kind" is inferred),
+    # so it is emitted as an ordinary visible code cell.
+    assert marimo_rt.is_markdown_cell(body) is False
+
+
 def test_writes_no_bom(tmp_path):
     p = tmp_path / "nb.py"
     p.write_text(NB, "utf-8")

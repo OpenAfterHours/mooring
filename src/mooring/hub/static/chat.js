@@ -1205,6 +1205,18 @@ function runCommand(cmd) {
       stick = true;
       submitMessage(ChatCore.checksPrompt(), ChatCore.checksLabel());
       break;
+    case "sql":
+      // Propose a marimo SQL (DuckDB) cell: the fixed prompt (chat_core.js) sent over
+      // the ordinary path, so the PII valve and per-notebook off-switch apply. SQL is
+      // authored code marimo runs locally — the model never sees the result — so this
+      // opens no new data channel. The copilot proposes; the analyst reviews and applies.
+      if (isBusy() || turnState === "connecting") {
+        addSysRow("Wait for the session to be ready.");
+        break;
+      }
+      stick = true;
+      submitMessage(ChatCore.sqlPrompt(), ChatCore.sqlLabel());
+      break;
     case "review":
       // A whole-notebook LOGIC review: the fixed, value-free prompt (chat_core.js) over
       // the ordinary send path (PII valve + per-notebook off-switch apply). It reasons

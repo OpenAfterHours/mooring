@@ -18,6 +18,7 @@ const ChatCore = (function () {
     { name: "explain", help: "walk through what this notebook does" },
     { name: "review", help: "review the notebook's logic for correctness risks" },
     { name: "checks", help: "propose tie-out / data-quality checks" },
+    { name: "sql", help: "propose a marimo SQL (DuckDB) cell for this notebook" },
     { name: "clear", help: "clear the transcript (keeps the session)" },
     { name: "model", help: "switch model — /model [name]" },
     { name: "apply", help: "apply the latest proposal" },
@@ -213,6 +214,34 @@ const ChatCore = (function () {
   // The compact row shown in the transcript in place of the canned prompt.
   function checksLabel() {
     return "/checks — propose tie-out checks for this notebook";
+  }
+
+  // -- /sql: propose a marimo SQL (DuckDB) cell ------------------------------
+  // A fixed prompt (no user text, no values) asking the copilot to author a marimo
+  // `mo.sql` cell from the schema + source it already sees. Value-free by construction:
+  // SQL is authored code run locally by marimo; the model never sees the result. Over
+  // the EXISTING chat channel — the copilot proposes, the analyst reviews and applies.
+  // Pinned by tests/js/chat_core.test.js.
+  function sqlPrompt() {
+    return (
+      "Propose a marimo SQL cell for this notebook, running on DuckDB.\n" +
+      "\n" +
+      "First call mooring_read_notebook_source to see the current cells, and " +
+      "mooring_get_schema for the datasets involved, so you use real dataframe and " +
+      "column names. Then propose ONE new cell (mooring_propose_cell) that:\n" +
+      '- runs the query with `result = mo.sql("""...""")` (assign it to a well-named ' +
+      "dataframe variable so later cells can use it);\n" +
+      "- queries the dataframes already in scope BY THEIR VARIABLE NAME;\n" +
+      "- lists the columns explicitly (no SELECT *) using the names from the schema.\n" +
+      "\n" +
+      "Choose the tables and columns from the schema and the source only — never inline a " +
+      "data value or ask for one. Briefly say what the query returns. The analyst reviews " +
+      "and applies it."
+    );
+  }
+
+  function sqlLabel() {
+    return "/sql — propose a SQL cell for this notebook";
   }
 
   // -- input history (in-memory ONLY) --------------------------------------
@@ -510,6 +539,8 @@ const ChatCore = (function () {
     reviewLabel,
     checksPrompt,
     checksLabel,
+    sqlPrompt,
+    sqlLabel,
     notesCellPrompt,
     HistoryRing,
     mentionMatch,

@@ -144,6 +144,26 @@ changes; if you want a fix for a finding, just ask.
     a number is right. A clean review of a wrong constant is still wrong — check
     each cited cell yourself.
 
+## Speak SQL
+
+Prefer SQL to dataframe code for a query? The copilot writes **Polars** by default, but
+it can also propose a **marimo SQL cell** — a cell that runs your query with **DuckDB**
+right inside the notebook. Just ask (*"write that as SQL"*), or type **`/sql`** in an
+open chat to have it propose a SQL cell for the current notebook.
+
+It writes the marimo idiom for you — `result = mo.sql("""SELECT …""")` — and:
+
+- queries the **dataframes already in your notebook by name** (DuckDB sees them
+  automatically), so you can mix SQL and Polars cells freely;
+- refers to **columns by the names in your schema**, and lists them explicitly rather
+  than `SELECT *`;
+- assigns the result to a named dataframe, so later cells can build on it.
+
+You **Apply** it like any other proposed cell, and marimo renders it as a SQL cell (with
+DuckDB bundled, nothing to install). Like everything else in the chat it's schema-only:
+SQL is authored code that marimo runs **locally** — the copilot writes the query from
+your column names, never your data, and never sees the query's results.
+
 ## Turn on the PII guard
 
 The copilot is schema-only by design, so your **data** never reaches the model. On
