@@ -115,45 +115,6 @@ def read_results(workspace: Path | str) -> dict[str, dict]:
     return out
 
 
-def fingerprints(workspace: Path | str, rel: str) -> list[dict]:
-    """The value-free per-input fingerprints recorded for notebook ``rel`` — a list of
-    ``{name, path, sha, rows, cols, changed}`` (no schema detail, never a value), or an
-    empty list when none. Used to stamp a delivered artifact's provenance footer with the
-    exact inputs a run read (see :mod:`mooring.app.deliver`)."""
-    want = str(rel).replace("\\", "/")
-    directory = inputs_dir(workspace)
-    try:
-        files = list(directory.glob("*.json"))
-    except OSError:
-        return []
-    for path in files:
-        try:
-            data = json.loads(path.read_text("utf-8"))
-        except (OSError, ValueError):
-            continue
-        if not (isinstance(data, dict) and data.get("notebook") == want):
-            continue
-        entries = data.get("inputs")
-        if not isinstance(entries, dict):
-            return []
-        out: list[dict] = []
-        for name, entry in entries.items():
-            if not isinstance(entry, dict):
-                continue
-            out.append(
-                {
-                    "name": str(name),
-                    "path": str(entry.get("path", "")),
-                    "sha": str(entry.get("sha", "")),
-                    "rows": entry.get("rows"),
-                    "cols": entry.get("cols"),
-                    "changed": bool(entry.get("changed")),
-                }
-            )
-        return out
-    return []
-
-
 def clear(workspace: Path | str, rel: str | None = None) -> int:
     """Delete recorded fingerprint receipts — all of them, or just ``rel``'s. Returns
     the number removed. Best-effort; never raises."""
@@ -190,7 +151,9 @@ def copilot_guide() -> str:
         'pin its inputs for reproducibility — mi.fingerprint(df, "name", path="data/x.csv") '
         "records the file's content hash + shape + column schema (never a value) and flags the "
         "input if it changed since the last run. When asked to pin / fingerprint / track inputs "
-        "or check reproducibility, propose a cell that fingerprints each input dataframe right "
-        "after it is loaded; pick the name and path from the source, and never request data "
-        "values. Each call records only a value-free receipt."
+        "or check reproducibility, propose ONE cell that begins with `mi.reset()` (so a removed "
+        "input does not linger) and then fingerprints each input dataframe right after it is "
+        "loaded. ALWAYS pass path= to the source file — that is what gives the content guarantee; "
+        "without it only shape+schema are compared. Pick the name and path from the source, and "
+        "never request data values. Each call records only a value-free receipt."
     )

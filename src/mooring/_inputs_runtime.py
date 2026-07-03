@@ -70,50 +70,79 @@ class Result:
 # -- dataframe introspection (duck-typed: polars OR pandas, never imported) ------
 
 
-def _shape(df) -> tuple[int, int]:
-    """(rows, cols) of a polars or pandas dataframe — counts only, never a value."""
+def _typename(dtype) -> str:
+    """A VALUE-FREE dtype name: the leading identifier only, dropping any parenthesised
+    detail. This is load-bearing for value-blindness — a polars ``Enum``/``Categorical``
+    stringifies WITH its category labels (real data values), e.g.
+    ``"Enum(categories=['EMEA', 'APAC'])"``; taking the part before ``(`` keeps ``"Enum"``
+    and drops the values. (``"Int64"`` -> ``"Int64"``, ``"List(Int64)"`` -> ``"List"``.)"""
+    return str(dtype).split("(", 1)[0].strip()
+
+
+def _columns(df) -> list[str]:
+    """Column names of a polars/pandas frame. Prefer a polars LazyFrame's
+    ``collect_schema().names()`` (no data materialised, and no PerformanceWarning that
+    ``LazyFrame.columns`` would raise); fall back to ``.columns`` for an eager frame."""
+    collect = getattr(df, "collect_schema", None)
+    if callable(collect):
+        try:
+            return [str(c) for c in collect().names()]
+        except Exception:  # noqa: BLE001
+            pass
+    try:
+        return [str(c) for c in df.columns]
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def _shape(df) -> tuple[int | None, int]:
+    """``(rows, cols)`` — counts only, never a value. ``rows`` is ``None`` when it cannot
+    be known cheaply (e.g. an un-materialised polars LazyFrame): NEVER fabricate ``0``,
+    which would make a real row-count change compare equal to "no rows"."""
     shape = getattr(df, "shape", None)
     if isinstance(shape, tuple) and len(shape) >= 2:
         try:
             return int(shape[0]), int(shape[1])
         except (TypeError, ValueError):
             pass
+    cols = len(_columns(df))
     try:
-        rows = int(len(df))
+        rows: int | None = int(len(df))
     except TypeError:
-        rows = 0
-    try:
-        cols = len(list(df.columns))
-    except Exception:  # noqa: BLE001  # best-effort duck-typing
-        cols = 0
+        rows = None  # unknown (a lazy frame has no __len__) — not zero
     return rows, cols
 
 
 def _schema(df) -> list[list[str]]:
-    """``[[name, dtype], ...]`` for a polars or pandas dataframe — column NAMES and
-    type names only (both are schema, never a data value)."""
-    try:
-        names = [str(c) for c in df.columns]
-    except Exception:  # noqa: BLE001
-        return []
-    # polars: df.schema is an ordered {name: dtype} mapping.
+    """``[[name, dtype], ...]`` — column NAMES and value-free type NAMES only (via
+    :func:`_typename`). Handles a polars DataFrame, a polars LazyFrame (schema without
+    materialising data), and a pandas DataFrame."""
+    # polars LazyFrame: collect_schema() reads the schema without touching data.
+    collect = getattr(df, "collect_schema", None)
+    if callable(collect):
+        try:
+            return [[str(n), _typename(t)] for n, t in collect().items()]
+        except Exception:  # noqa: BLE001
+            pass
+    # polars DataFrame: df.schema is an ordered {name: dtype} mapping.
     sch = getattr(df, "schema", None)
     if sch is not None and hasattr(sch, "items"):
         try:
-            return [[str(n), str(t)] for n, t in sch.items()]
+            return [[str(n), _typename(t)] for n, t in sch.items()]
         except Exception:  # noqa: BLE001
             pass
     # pandas: df.dtypes is a Series (name -> dtype).
     dtypes = getattr(df, "dtypes", None)
     if dtypes is not None and hasattr(dtypes, "items"):
         try:
-            return [[str(n), str(t)] for n, t in dtypes.items()]
+            return [[str(n), _typename(t)] for n, t in dtypes.items()]
         except Exception:  # noqa: BLE001
             pass
     # polars .dtypes is a list aligned with columns.
+    names = _columns(df)
     if dtypes is not None:
         try:
-            return [[str(n), str(t)] for n, t in zip(names, list(dtypes))]
+            return [[str(n), _typename(t)] for n, t in zip(names, list(dtypes))]
         except Exception:  # noqa: BLE001
             pass
     return [[n, ""] for n in names]
@@ -153,13 +182,15 @@ def fingerprint(df=None, name: str | None = None, *, path: str | None = None) ->
         name = os.path.basename(str(path)) or str(path)
     if not name:
         raise ValueError("fingerprint() needs a name or a path")
-    rows, cols = (_shape(df) if df is not None else (0, 0))
+    rows, cols = (_shape(df) if df is not None else (None, 0))
     schema = _schema(df) if df is not None else []
-    sha = _file_sha(path) if path is not None else None
+    hashed = path is not None  # a content hash was INTENDED (a path was supplied)
+    sha = _file_sha(path) if hashed else None
     entry = {
         "path": str(path).replace(os.sep, "/") if path is not None else "",
-        "sha": sha or "",
-        "rows": rows,
+        "hashed": hashed,
+        "sha": sha,  # the hex digest, or None — NEVER "" (which would fake a hash)
+        "rows": rows,  # int, or None when unknown (a lazy frame)
         "cols": cols,
         "schema": schema,
     }
@@ -200,11 +231,21 @@ def reset(name: str | None = None) -> None:
 
 
 def _differs(prior: dict, entry: dict) -> bool:
-    """Whether ``entry`` differs from the stored ``prior`` fingerprint. Prefer the
-    content hash when both have one; otherwise fall back to shape + schema (so a
-    df-only fingerprint still detects a moved input)."""
-    if prior.get("sha") and entry.get("sha"):
-        return prior["sha"] != entry["sha"]
+    """Whether ``entry`` differs from the stored ``prior`` fingerprint — FAIL-CLOSED.
+
+    When a content hash was INTENDED (a ``path`` was supplied) but could not be computed,
+    report CHANGED rather than risk a false "unchanged". With a content hash on both sides
+    the hash is definitive. A df-only fingerprint (no ``path``) can only compare shape +
+    schema — which cannot see a same-shape VALUE change — so pass ``path=`` for the real
+    content guarantee."""
+    if entry.get("hashed"):
+        es = entry.get("sha")
+        if es is None:
+            return True  # intended a content hash but it failed -> cannot confirm same
+        ps = prior.get("sha")
+        if ps:
+            return ps != es  # both hashed: definitive
+        return False  # first content hash for this input (prior was df-only) -> new baseline
     return (
         prior.get("rows") != entry.get("rows")
         or prior.get("cols") != entry.get("cols")
@@ -214,13 +255,17 @@ def _differs(prior: dict, entry: dict) -> bool:
 
 def _describe(prior, entry, seen_before: bool, changed: bool) -> str:
     """A value-free one-line note (counts and structural facts only)."""
-    shape = f"{entry['rows']}x{entry['cols']}"
+    rows = entry.get("rows")
+    shape = f"{'?' if rows is None else rows}x{entry.get('cols')}"
     if not seen_before:
         return f"first fingerprint ({shape})"
     if not changed:
         return f"unchanged ({shape})"
     bits = []
-    if prior.get("sha") and entry.get("sha") and prior["sha"] != entry["sha"]:
+    ps, es = prior.get("sha"), entry.get("sha")
+    if entry.get("hashed") and es is None:
+        bits.append("could not hash the file")
+    elif ps and es and ps != es:
         bits.append("content changed")
     if prior.get("rows") != entry.get("rows"):
         bits.append(f"rows {prior.get('rows')}->{entry.get('rows')}")
@@ -241,9 +286,14 @@ def _workspace() -> Path | None:
 
 
 def _detect_notebook(ws: Path) -> str | None:
-    """The workspace-relative path of the notebook that called us — via the ``__file__``
-    global marimo sets in each cell's namespace (its ``frame.filename`` is a temporary
-    compiled path). Best-effort; ``None`` outside marimo."""
+    """The workspace-relative path of the NOTEBOOK that triggered this call.
+
+    marimo sets ``__file__`` in each cell's namespace to the real notebook ``.py`` (the
+    caller's ``frame.filename`` is a temporary compiled path). We take the OUTERMOST
+    workspace ``.py`` frame — the notebook cell is the outer frame, a helper module it
+    calls is inner — so a ``fingerprint`` made from a helper is still attributed to the
+    notebook that drove it, not the helper. Best-effort; ``None`` outside marimo."""
+    found: str | None = None
     try:
         for frame_info in inspect.stack(0)[1:]:  # context=0: don't read source lines
             filename = frame_info.frame.f_globals.get("__file__")
@@ -255,10 +305,10 @@ def _detect_notebook(ws: Path) -> str | None:
                 continue
             if _STATE_DIR in rel.parts:
                 continue  # our own module lives at .mooring/pylib/mooring_inputs.py
-            return str(rel).replace(os.sep, "/")
+            found = str(rel).replace(os.sep, "/")  # keep walking: prefer the OUTERMOST
     except Exception:  # noqa: BLE001  # detection is best-effort; never break a run
         pass
-    return None
+    return found
 
 
 def _slug(rel: str) -> str:

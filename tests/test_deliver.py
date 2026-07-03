@@ -7,12 +7,11 @@ and the failure/refusal paths.
 
 from __future__ import annotations
 
-import json
 import subprocess
 
 import pytest
 
-from mooring import activity, inputs, sync
+from mooring import activity, sync
 from mooring.app import deliver
 from mooring.config import Config
 
@@ -92,42 +91,6 @@ def test_deliver_links_to_github_only_when_synced(tmp_path, monkeypatch):
     assert "acme/nbs@abcdef1" in html  # short head commit
     assert "View on GitHub" in html
     assert "/blob/" in html and "notebooks/sales.py" in html
-
-
-def test_deliver_stamps_value_free_input_fingerprints(tmp_path, monkeypatch):
-    # When the notebook recorded input fingerprints (via mooring_inputs) during the
-    # render, Deliver stamps them into the provenance footer — filename + content hash +
-    # shape, never a value — so the reader can answer "same inputs, same numbers?".
-    cfg = _cfg(tmp_path)
-    ws = cfg.workspace()
-    (ws / "notebooks").mkdir(parents=True)
-    (ws / "notebooks" / "sales.py").write_text(NOTEBOOK, encoding="utf-8")
-    rec_dir = inputs.inputs_dir(ws)
-    rec_dir.mkdir(parents=True)
-    (rec_dir / "notebooks__sales.py.json").write_text(
-        json.dumps(
-            {
-                "notebook": "notebooks/sales.py",
-                "updated": "2026-07-03T00:00:00+00:00",
-                "inputs": {
-                    "sales": {
-                        "path": "data/sales.csv",
-                        "sha": "abcdef1234567890",
-                        "rows": 1000,
-                        "cols": 12,
-                        "schema": [["id", "Int64"]],
-                        "changed": False,
-                    }
-                },
-            }
-        ),
-        encoding="utf-8",
-    )
-    monkeypatch.setattr(deliver.subprocess, "run", _fake_export)
-
-    result = deliver.deliver_html(cfg, "notebooks/sales.py")
-    html = result.out_path.read_text("utf-8")
-    assert "Inputs: sales (abcdef1, 1000×12)" in html
 
 
 def test_deliver_records_a_value_free_activity_entry(tmp_path, monkeypatch):

@@ -164,9 +164,10 @@ helper, right after you load each input:
 
 ```python
 import mooring_inputs as mi
+mi.reset()                                               # start fresh each run
 
 sales = pl.read_csv("data/sales.csv")
-mi.fingerprint(sales, "sales", path="data/sales.csv")   # hash + shape + schema
+mi.fingerprint(sales, "sales", path="data/sales.csv")    # hash + shape + schema
 ```
 
 Each call records a **value-free** fingerprint — the file's **content hash**, its
@@ -174,7 +175,13 @@ Each call records a **value-free** fingerprint — the file's **content hash**, 
 value** — and compares it to the previous run. If an input changed under you (different
 content, more rows, a new column), the cell prints `[CHANGED] …` and the hub shows an
 amber **⚠ input changed** badge on the notebook's row; otherwise a green **⛓ N inputs
-pinned** badge. `mooring inputs` lists them from the terminal.
+pinned** badge. `mooring inputs` lists them from the terminal, and `mooring inputs --clear`
+resets them.
+
+Always pass **`path=`** to the source file — that's what gives the *content* guarantee
+(the file hash catches a same-shape value change). Without a `path`, only the shape and
+schema are compared. Starting the cell with `mi.reset()` keeps the badge honest if you
+later rename or drop an input.
 
 Because `mi.fingerprint(...)` returns falsy when the input changed, you can even make it a
 guard:
@@ -182,10 +189,6 @@ guard:
 ```python
 assert mi.fingerprint(sales, "sales", path="data/sales.csv"), "sales.csv moved — re-check the totals"
 ```
-
-When you [**Deliver**](#delivering-a-result-for-a-stakeholder) the notebook, the fingerprint
-is stamped into the HTML's provenance footer (*"Inputs: sales (1a2b3c4, 1000×12)"*), so the
-stakeholder holds proof of exactly which data the numbers came from.
 
 !!! info "Value-free, local, and never pushed"
 

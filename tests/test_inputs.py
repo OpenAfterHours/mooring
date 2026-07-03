@@ -97,10 +97,25 @@ def test_receipt_is_value_free(tmp_path):
     blob = json.dumps(receipt)
     assert SECRET not in blob  # THE guarantee: no data value reaches the receipt
     entry = receipt["inputs"]["d"]
-    assert set(entry) == {"path", "sha", "rows", "cols", "schema", "changed", "ts"}
+    assert set(entry) == {"path", "hashed", "sha", "rows", "cols", "schema", "changed", "ts"}
     assert entry["rows"] == 2 and entry["cols"] == 2
     assert entry["schema"] == [["id", "Int64"], ["customer", "String"]]  # names + types only
     assert len(entry["sha"]) == 64  # a sha256 hex digest
+
+
+def test_categorical_dtype_categories_do_not_leak(tmp_path):
+    # Value-blindness: a polars Enum/Categorical dtype STRINGIFIES with its category
+    # labels (real data values) — the receipt must record only the type NAME, never them.
+    ws = _ws(tmp_path)
+    mi = _load_payload(ws)
+    df = pl.DataFrame(
+        {"region": pl.Series(["EMEA", "APAC", "EMEA"], dtype=pl.Enum(["EMEA", "APAC", "LATAM"]))}
+    )
+    _call(mi, ws / "notebooks" / "recon.py", df, "d")
+    blob = (inputs.inputs_dir(ws) / "notebooks__recon.py.json").read_text("utf-8")
+    assert "EMEA" not in blob and "APAC" not in blob and "LATAM" not in blob
+    entry = json.loads(blob)["inputs"]["d"]
+    assert entry["schema"] == [["region", "Enum"]]  # the type name only
 
 
 def test_detects_new_same_and_changed(tmp_path):
@@ -174,17 +189,32 @@ def test_receipts_are_keyed_per_notebook(tmp_path):
     assert set(inputs.read_results(ws)) == {"notebooks/recon.py", "notebooks/other.py"}
 
 
-def test_fingerprints_accessor_is_value_free(tmp_path):
+def test_failed_hash_fails_closed_not_silently_same(tmp_path):
+    # If a path was given but the file can't be hashed this run, we must NOT report the
+    # input unchanged (a false "same inputs") — fail closed and flag it changed.
     ws = _ws(tmp_path)
     mi = _load_payload(ws)
-    csv = ws / "d.csv"
-    csv.write_text(f"id,name\n1,{SECRET}\n", "utf-8")
-    _call(mi, ws / "notebooks" / "recon.py", pl.read_csv(csv), "sales", path=csv)
-    fps = inputs.fingerprints(ws, "notebooks/recon.py")
-    assert len(fps) == 1 and fps[0]["name"] == "sales"
-    assert set(fps[0]) == {"name", "path", "sha", "rows", "cols", "changed"}
-    assert SECRET not in json.dumps(fps)
-    assert inputs.fingerprints(ws, "notebooks/missing.py") == []
+    nb = ws / "notebooks" / "recon.py"
+    csv = ws / "sales.csv"
+    csv.write_text("a,b\n1,2\n", "utf-8")
+    assert bool(_call(mi, nb, pl.read_csv(csv), "sales", path=csv))  # baseline (hashed)
+    # Now fingerprint with a path that can't be read (same df shape) -> must be CHANGED.
+    r = _call(mi, nb, pl.read_csv(csv), "sales", path=ws / "gone.csv")
+    assert r.changed is True
+
+
+def test_lazyframe_row_count_is_unknown_not_zero(tmp_path):
+    # A polars LazyFrame has no cheap row count; recording 0 would make a real row change
+    # compare equal. It must be None (unknown), and the schema still resolves.
+    ws = _ws(tmp_path)
+    mi = _load_payload(ws)
+    lazy = pl.LazyFrame({"a": [1, 2, 3], "b": ["x", "y", "z"]})
+    _call(mi, ws / "notebooks" / "recon.py", lazy, "big")
+    entry = json.loads((inputs.inputs_dir(ws) / "notebooks__recon.py.json").read_text("utf-8"))
+    e = entry["inputs"]["big"]
+    assert e["rows"] is None  # unknown, NOT 0
+    assert e["cols"] == 2
+    assert e["schema"] == [["a", "Int64"], ["b", "String"]]
 
 
 def test_reset_clears_this_notebooks_receipt(tmp_path):
