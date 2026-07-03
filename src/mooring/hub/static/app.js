@@ -244,6 +244,7 @@ function showUndoToast(trashed) {
 function openChatWindow(path, opts) {
   let url = `/ai/chat?notebook=${encodeURIComponent(path)}`;
   if (opts && opts.explain) url += "&explain=1";
+  if (opts && opts.review) url += "&review=1";
   const name = "mooringAI_" + path.replace(/[^a-z0-9]/gi, "_");
   const height = Math.min(960, window.screen?.availHeight || 900);
   const win = window.open(url, name, `popup,width=560,height=${height},left=80,top=60`);
@@ -853,6 +854,10 @@ function fileActions(file, opts) {
       // cell-anchored walkthrough for picking up a teammate's notebook. Same gate
       // as AI (and it IS a model turn, so the ai_disabled opt-out applies).
       actions.push(["Explain", () => openChatWindow(file.path, { explain: true })]);
+      // Review logic: the same window, auto-runs /review once ready — a value-blind
+      // pass over source + schema that flags structural correctness risks (fan-out
+      // joins, hardcoded periods, un-run cells). Same gate; it is a model turn too.
+      actions.push(["Review logic", () => openChatWindow(file.path, { review: true })]);
     }
     const label = file.ai_disabled ? "Enable AI" : "Disable AI";
     actions.push([label, () =>

@@ -10,8 +10,10 @@
 const $ = (id) => document.getElementById(id);
 const NOTEBOOK = new URLSearchParams(location.search).get("notebook") || "";
 // The hub's "Explain" action opens this window with &explain=1: run /explain
-// automatically once the session is ready (see maybeAutoExplain).
+// automatically once the session is ready (see maybeAutoExplain). "Review logic"
+// opens the same window with &review=1 and auto-runs /review the same way.
 const EXPLAIN = new URLSearchParams(location.search).get("explain") === "1";
+const REVIEW = new URLSearchParams(location.search).get("review") === "1";
 const LS_MODEL = "mooring.ai.model";
 const LS_EFFORT = "mooring.ai.effort";
 const LS_THEME = "mooring.ui.theme"; // shared with the hub (same origin)
@@ -72,6 +74,7 @@ let lastUserLabel = ""; // its compact visible label (so /retry re-shows it too)
 let explainFired = false; // &explain=1 auto-runs at most ONCE per window — openChat()
 // is re-invoked on model/effort switches, sign-in, and AI re-enable, and none of
 // those may silently burn a second explain turn.
+let reviewFired = false; // &review=1 auto-runs /review at most ONCE per window (same reason)
 let explainTurnActive = false; // the turn answering /explain (offers "Add as notes cell")
 let currentGuard = null; // outbound-PII guard status for this session (topbar badge)
 const history = new ChatCore.HistoryRing(); // in-memory ONLY (never persisted)
@@ -790,6 +793,14 @@ function maybeAutoExplain() {
   runCommand({ cmd: "explain", arg: "" });
 }
 
+// Opened with &review=1 (the hub's "Review logic" action): run /review once the
+// session can take a turn. Same once-per-window discipline as maybeAutoExplain.
+function maybeAutoReview() {
+  if (!REVIEW || reviewFired || !sid) return;
+  reviewFired = true;
+  runCommand({ cmd: "review", arg: "" });
+}
+
 function closeStream() {
   if (source) {
     source.close();
@@ -842,6 +853,7 @@ async function openChat() {
   source.addEventListener("ready", () => {
     if (turnState === "connecting") setTurnState("idle");
     maybeAutoExplain();
+    maybeAutoReview();
   });
   source.addEventListener("pii", (e) => {
     const d = JSON.parse(e.data);
@@ -906,7 +918,10 @@ async function openChat() {
   // and keep the input disabled until the "ready" event arrives; an already-ready
   // session (data.ready) is usable immediately.
   setTurnState(data.ready === false ? "connecting" : "idle");
-  if (data.ready !== false) maybeAutoExplain(); // still-connecting: the "ready" event fires it
+  if (data.ready !== false) {
+    maybeAutoExplain(); // still-connecting: the "ready" event fires it
+    maybeAutoReview();
+  }
 }
 
 // -- per-notebook AI off-switch ---------------------------------------------
@@ -1178,6 +1193,22 @@ function runCommand(cmd) {
       );
       stick = true;
       submitMessage(ChatCore.explainPrompt(), ChatCore.explainLabel());
+      break;
+    case "review":
+      // A whole-notebook LOGIC review: the fixed, value-free prompt (chat_core.js) over
+      // the ordinary send path (PII valve + per-notebook off-switch apply). It reasons
+      // only over source + schema — never a data value — and is a REVIEW, not an answer
+      // checker: it flags structural risks, it cannot confirm a number is correct.
+      if (isBusy() || turnState === "connecting") {
+        addSysRow("Wait for the session to be ready.");
+        break;
+      }
+      addSysRow(
+        "A logic review from the notebook's code and schema — it flags structural risks " +
+        "(it can't confirm a number is correct). Check each point against the notebook."
+      );
+      stick = true;
+      submitMessage(ChatCore.reviewPrompt(), ChatCore.reviewLabel());
       break;
     case "clear":
       $("messages").innerHTML = "";

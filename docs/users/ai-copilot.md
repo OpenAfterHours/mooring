@@ -119,6 +119,31 @@ from your notebook's code and column names, never your data.
     copilot can be confidently wrong — read the cited cells before acting on
     "change this each month" advice.
 
+## Review my logic
+
+Before you share a number, sanity-check the reasoning behind it. On the notebook's
+row, open **Actions** and click **Review logic** (or type `/review` in an open
+chat). The copilot reads the notebook's **code and schema** and returns a findings
+list of *structural* correctness risks, worst first, each citing its `cell N`:
+
+- a join that could **fan out** and double-count a sum (a one-to-many join on a
+  key that isn't actually unique),
+- an aggregation at the **wrong grain**, or a sum over a column that can be null,
+- **hardcoded** dates, periods or magic numbers that must change each run,
+- filters that could **silently drop rows**, off-by-one period boundaries, and
+  unit or currency mismatches,
+- cells that define something **never used**, or that must be re-run in order.
+
+Because it is schema-only — it sees your code and column names, never your data —
+this is a **logic review, not an answer checker**: it flags risks to investigate,
+it can't confirm that a specific number is correct. It's read-only and proposes no
+changes; if you want a fix for a finding, just ask.
+
+!!! warning "A green review is not proof"
+    The review opens with a reminder that it flags *risks* from the code, not that
+    a number is right. A clean review of a wrong constant is still wrong — check
+    each cited cell yourself.
+
 ## Turn on the PII guard
 
 The copilot is schema-only by design, so your **data** never reaches the model. On
