@@ -40,6 +40,9 @@ let lastFiles = [];
 let lastArtifacts = [];
 let lastFolders = [];
 let lastReview = null;
+// The catalog search box's current text — filters the file listing client-side. Kept
+// across /api/state re-renders so a poll doesn't clear an in-progress filter.
+let fileQuery = "";
 let aiChatEnabled = false;
 // When the last /api/state landed (client clock) and whether it was logged in —
 // the freshness banner's inputs. There is no server-side "last refreshed" time:
@@ -968,8 +971,19 @@ function buildFileRow(file, opts) {
   if (watchedPaths.has(file.path) && PULL_STATES.has(file.state)) {
     extras.push(" ", watchBadge());
   }
+  // The notebook's own title (harvested value-free from its first markdown cell) as a
+  // muted subtitle under the filename, so a repo of q3_recon_v2.py files is legible.
+  if (file.title) extras.push(titleHint(file.title));
   const pathCell = extras.length ? [display, ...extras] : display;
   return buildRow(pathCell, file.state, fileActions(file, opts), file.path);
+}
+
+// A muted, block-level subtitle showing a notebook's harvested title beneath its path.
+function titleHint(title) {
+  const span = document.createElement("span");
+  span.className = "file-title";
+  span.textContent = title;
+  return span;
 }
 
 function buildArtifactRows(artifact, files) {
@@ -1104,21 +1118,48 @@ function buildFolderSection(section) {
 function renderFiles(files, artifacts, declaredFolders) {
   const tbody = $("files-table").querySelector("tbody");
   tbody.innerHTML = "";
+  const q = fileQuery.trim();
   // PBIP artifacts keep their own collapsible grouping; the rest group by folder so the
   // structure (incl. an adopted/declared folder that is still empty) is visible.
   const nonArtifact = files.filter((f) => !f.artifact);
-  const sections = FilesTree.group(nonArtifact, declaredFolders || []);
-  const hasRows = files.length > 0 || sections.length > 0;
-  $("files-table").classList.toggle("hidden", !hasRows);
+  // Catalog presence (UNFILTERED): declared-but-empty folders still count, so the
+  // table/empty-hint/search toggles keep the original "structure is visible" behaviour.
+  const baseSections = FilesTree.group(nonArtifact, declaredFolders || []);
+  const hasCatalog = baseSections.length > 0 || artifacts.length > 0;
+  $("files-table").classList.toggle("hidden", !hasCatalog);
   // The empty-hint and the table are mutually exclusive: declared folders seed empty
   // folder sections (each with its own "New here"), so once any row renders the hint
   // would just duplicate that nudge — show it only when there's truly nothing.
-  $("empty-hint").classList.toggle("hidden", hasRows);
-  for (const artifact of artifacts) {
+  $("empty-hint").classList.toggle("hidden", hasCatalog);
+  // The search box appears once there's a catalog to filter (find a notebook by name/title).
+  $("file-search").classList.toggle("hidden", !hasCatalog);
+
+  // Filtered view for rendering: match path/title/tags; while filtering, drop empty
+  // declared-folder sections (they're noise) and any artifact that doesn't match.
+  const shownArtifacts = artifacts.filter((a) =>
+    FilesTree.matches({ path: a.pointer || a.name || a.key }, q),
+  );
+  const sections = q
+    ? FilesTree.group(nonArtifact.filter((f) => FilesTree.matches(f, q)), declaredFolders || []).filter(
+        (s) => s.files.length,
+      )
+    : baseSections;
+
+  for (const artifact of shownArtifacts) {
     for (const row of buildArtifactRows(artifact, files)) tbody.appendChild(row);
   }
   for (const section of sections) {
     for (const row of buildFolderSection(section)) tbody.appendChild(row);
+  }
+  const shown = shownArtifacts.length + sections.reduce((n, s) => n + s.files.length, 0);
+  if (q && shown === 0) {
+    const tr = document.createElement("tr");
+    const td = document.createElement("td");
+    td.colSpan = 3;
+    td.className = "muted";
+    td.textContent = `No notebooks match “${q}”.`;
+    tr.appendChild(td);
+    tbody.appendChild(tr);
   }
 }
 
@@ -1235,6 +1276,13 @@ function renderChecklist() {
 }
 
 $("checklist-dismiss").addEventListener("click", () => checklistSet("dismissed"));
+
+// Catalog search: filter the file listing as you type (client-side, no network). Re-render
+// from the last /api/state rows so the filter is instant and survives background polls.
+$("file-search").addEventListener("input", (event) => {
+  fileQuery = event.target.value || "";
+  renderFiles(lastFiles, lastArtifacts, lastFolders);
+});
 
 // The repo identity discovery last ran for. Discovery costs a full-tree fetch on
 // the server, so we run it once per repo-session (on login / repo switch), NOT on
