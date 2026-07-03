@@ -444,6 +444,10 @@ button.caret:disabled { opacity: 0.4; cursor: default; }
 /* a watched file with a teammate change waiting (the What's-new promotion) */
 .badge.watched { color: var(--accent); border-color: var(--accent); font-style: italic; }
 
+/* value-free tie-out check results (mooring_checks): green when all pass, amber on any fail */
+.badge.checks-ok { color: var(--ok); border-color: var(--ok); }
+.badge.checks-fail { color: var(--warn); border-color: var(--warn); }
+
 /* What's-new: the window's collapsed "pushes" (author — message · when) above the table */
 .whatsnew-groups { margin: 0.35rem 0 0.5rem; }
 .whatsnew-groups div { padding: 0.1rem 0; }

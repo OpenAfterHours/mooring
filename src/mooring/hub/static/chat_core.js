@@ -16,6 +16,7 @@ const ChatCore = (function () {
   const COMMANDS = [
     { name: "help", help: "show commands and key bindings" },
     { name: "explain", help: "walk through what this notebook does" },
+    { name: "checks", help: "propose tie-out / data-quality checks" },
     { name: "clear", help: "clear the transcript (keeps the session)" },
     { name: "model", help: "switch model — /model [name]" },
     { name: "apply", help: "apply the latest proposal" },
@@ -130,6 +131,36 @@ const ChatCore = (function () {
       "fallback you judge safe to append (for example a triple-quoted markdown " +
       "string as the cell body)."
     );
+  }
+
+  // -- /checks: propose value-free tie-out checks ----------------------------
+  // A fixed prompt (no user text, no values) asking the copilot to author a
+  // mooring_checks cell from the schema + source it already sees. Value-free by
+  // construction, over the EXISTING chat channel: the copilot proposes; the analyst
+  // reviews and applies. Pinned by tests/js/chat_core.test.js.
+  function checksPrompt() {
+    return (
+      "Add tie-out / data-quality checks for this notebook using the value-free " +
+      "`mooring_checks` API.\n" +
+      "\n" +
+      "First call mooring_read_notebook_source to see the current cells, and " +
+      "mooring_get_schema for the datasets involved, so you pick real column and key " +
+      "names. Then propose ONE new cell (mooring_propose_cell) that:\n" +
+      "- begins with `import mooring_checks as mc` and `mc.reset()`;\n" +
+      "- asserts the checks that fit THIS notebook — e.g. mc.unique_key(df, \"id\") on any " +
+      "key you expect to be unique, mc.no_fanout(left, right, on=\"key\") before a join, " +
+      "mc.not_null(df, ...) on columns that must be populated, mc.row_delta(df, prior) " +
+      "where a row count should be stable, and mc.reconciles(a, b, tol=...) where a total " +
+      "should match a control.\n" +
+      "\n" +
+      "Choose the columns and keys from the schema and the source only — never ask for " +
+      "data values. Briefly say why each check matters. The analyst reviews and applies it."
+    );
+  }
+
+  // The compact row shown in the transcript in place of the canned prompt.
+  function checksLabel() {
+    return "/checks — propose tie-out checks for this notebook";
   }
 
   // -- input history (in-memory ONLY) --------------------------------------
@@ -423,6 +454,8 @@ const ChatCore = (function () {
     isSlashTyping,
     explainPrompt,
     explainLabel,
+    checksPrompt,
+    checksLabel,
     notesCellPrompt,
     HistoryRing,
     mentionMatch,

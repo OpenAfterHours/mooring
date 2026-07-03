@@ -21,7 +21,7 @@ import contextlib
 import threading
 from pathlib import Path
 
-from mooring import workspace_config
+from mooring import checks, workspace_config
 from mooring.app import notebooks
 
 
@@ -247,6 +247,10 @@ class ChatService:
             instructions_text=repo_ctx.instructions,
             dictionary_text=dictionary_text,
             semantic_models_text=semantic_models_text,
+            # Let the copilot AUTHOR value-free tie-out checks on request. This is a
+            # static capability note (the mooring_checks API), never a receipt or a
+            # value — so it opens no new egress channel.
+            checks_help=checks.copilot_guide(),
         )
         return context, (index if has_dict else DictionaryIndex()), pii_banner, live_text, models
 

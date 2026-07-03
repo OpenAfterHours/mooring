@@ -28,6 +28,7 @@ from starlette.staticfiles import StaticFiles
 from mooring import (
     activity,
     auth,
+    checks,
     config,
     notebook_template,
     pbip,
@@ -294,6 +295,10 @@ class Hub:
         artifact_of = {m.path: a.key for a in artifacts for m in a.members}
         # Notebooks the team has turned the copilot off for (synced mooring.toml).
         ai_off = workspace_config.disabled_notebooks(workspace)
+        # Value-free tie-out check results per notebook (.mooring/checks/*.json),
+        # written by mooring_checks calls in the kernel — surfaced as a green/red
+        # row badge. Counts + names only; local-only, never synced, never seen by AI.
+        check_results = checks.read_results(workspace)
         # Notebooks whose filename shadows an importable module (e.g. polars.py) —
         # surfaced as a per-row badge instead of an inscrutable kernel traceback.
         shadowed: dict[str, str] = {}
@@ -323,6 +328,7 @@ class Hub:
                 **({"artifact": artifact_of[f.path]} if f.path in artifact_of else {}),
                 **({"ai_disabled": True} if f.path.endswith(".py") and f.path in ai_off else {}),
                 **({"shadows": shadowed[f.path]} if f.path in shadowed else {}),
+                **({"checks": check_results[f.path]} if f.path in check_results else {}),
                 **({"is_notebook": True} if f.path in notebooks else {}),
                 **(
                     {"is_module": True}
@@ -952,6 +958,7 @@ def create_app(hub: Hub) -> Starlette:
             Route("/api/duplicate", files.api_duplicate, methods=["POST"]),
             Route("/api/open", files.api_open, methods=["POST"]),
             Route("/api/reveal", files.api_reveal, methods=["POST"]),
+            Route("/api/deliver", files.api_deliver, methods=["POST"]),
             Route("/api/delete", files.api_delete, methods=["POST"]),
             Route("/api/rollback", files.api_rollback, methods=["POST"]),
             Route("/api/undo", files.api_undo, methods=["POST"]),

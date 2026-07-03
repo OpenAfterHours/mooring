@@ -62,12 +62,16 @@ def test_apply_theme_rewrites_existing_config(tmp_path):
 
 def test_writes_workspace_root_to_pythonpath(tmp_path):
     # The workspace root goes on the notebook kernel's sys.path so a notebook in any
-    # sub-folder can import the repo's helper modules (`from lib import helpers`). It
-    # must be ABSOLUTE — marimo doesn't resolve a .marimo.toml pythonpath entry.
+    # sub-folder can import the repo's helper modules (`from lib import helpers`), and
+    # the .mooring/pylib dir so a notebook can `import mooring_checks`. Both ABSOLUTE —
+    # marimo doesn't resolve a .marimo.toml pythonpath entry.
     ws = tmp_path / "ws"
     ws.mkdir()
     EditorServer(ws)._ensure_marimo_config()
-    assert _read(ws)["runtime"]["pythonpath"] == [str(ws.resolve())]
+    assert _read(ws)["runtime"]["pythonpath"] == [
+        str(ws.resolve()),
+        str((ws / ".mooring" / "pylib").resolve()),
+    ]
 
 
 def test_pythonpath_is_absolute_for_a_relative_workspace(tmp_path, monkeypatch):
@@ -89,7 +93,11 @@ def test_pythonpath_preserves_existing_entries_with_root_first(tmp_path):
         '[runtime]\npythonpath = ["/some/other/dir"]\n', encoding="utf-8"
     )
     EditorServer(ws)._ensure_marimo_config()
-    assert _read(ws)["runtime"]["pythonpath"] == [str(ws.resolve()), "/some/other/dir"]
+    assert _read(ws)["runtime"]["pythonpath"] == [
+        str(ws.resolve()),
+        str((ws / ".mooring" / "pylib").resolve()),
+        "/some/other/dir",
+    ]
 
 
 def test_idempotent(tmp_path):

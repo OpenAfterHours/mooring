@@ -48,7 +48,7 @@ test("isSlashTyping: shows the menu only while typing the command word", () => {
 
 test("filterCommands: prefix filter", () => {
   const names = C.filterCommands("c").map((c) => c.name);
-  assert.deepEqual(names, ["clear"]);
+  assert.deepEqual(names, ["checks", "clear"]);
   assert.equal(C.filterCommands("").length, C.COMMANDS.length);
 });
 
@@ -372,6 +372,34 @@ test("explainPrompt: opens with the verify-first header and fixes the sections",
 test("explainLabel: the compact visible transcript row, also a constant", () => {
   assert.equal(C.explainLabel(), "/explain — walk me through this notebook");
   assert.equal(C.explainLabel(), C.explainLabel());
+});
+
+// /checks: propose value-free tie-out checks. Same value-free-constant discipline as
+// /explain — the fixed prompt has no user text and no data values, so any wording
+// change is review-visible here.
+
+test("checks is a command: parseSlash and filterCommands pick it up", () => {
+  assert.ok(C.COMMANDS.some((c) => c.name === "checks"));
+  assert.deepEqual(C.parseSlash("/checks"), { cmd: "checks", arg: "" });
+  assert.ok(C.filterCommands("che").map((c) => c.name).includes("checks"));
+});
+
+test("checksPrompt: a pure constant that names the value-free mooring_checks API", () => {
+  const p = C.checksPrompt();
+  assert.equal(typeof p, "string");
+  assert.equal(p, C.checksPrompt()); // no interpolation, no user text, no values
+  assert.match(p, /mooring_checks/);
+  for (const fn of ["unique_key", "no_fanout", "not_null", "reconciles", "row_delta"]) {
+    assert.ok(p.includes(fn), fn);
+  }
+  // It must propose (review-then-apply), never ask for data values.
+  assert.match(p, /mooring_propose_cell/);
+  assert.match(p, /never ask for data values/);
+});
+
+test("checksLabel: the compact visible transcript row, also a constant", () => {
+  assert.equal(C.checksLabel(), "/checks — propose tie-out checks for this notebook");
+  assert.equal(C.checksLabel(), C.checksLabel());
 });
 
 test("notesCellPrompt: mooring_propose_cell ONLY — edit/rewrite tools forbidden", () => {

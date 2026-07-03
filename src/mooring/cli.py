@@ -188,6 +188,25 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     dup.add_argument("path", help="workspace-relative notebook path to duplicate")
 
+    deliver_cmd = sub.add_parser(
+        "deliver",
+        help="render a notebook to a shareable HTML snapshot (code hidden) in the local outbox",
+    )
+    deliver_cmd.add_argument("path", help="workspace-relative notebook path to deliver")
+
+    checks_cmd = sub.add_parser(
+        "checks",
+        help="show the tie-out / data-quality check results recorded per notebook",
+    )
+    checks_cmd.add_argument(
+        "--clear",
+        nargs="?",
+        const=True,
+        default=False,
+        metavar="PATH",
+        help="clear recorded results (all, or just one notebook path) — resets a stale badge",
+    )
+
     delete_cmd = sub.add_parser(
         "delete",
         help="delete a notebook from the workspace (push afterwards to remove it remotely)",
@@ -291,6 +310,8 @@ def _build_parser() -> argparse.ArgumentParser:
         open_cmd,
         new,
         dup,
+        deliver_cmd,
+        checks_cmd,
         delete_cmd,
         rollback_cmd,
         history_cmd,
@@ -1041,6 +1062,48 @@ def cmd_duplicate(cfg: config.Config, rel_path: str) -> int:
     _record_activity(cfg, "duplicate", path=rel_path, draft=new_rel)
     print(f"Created {new_rel}")
     return cmd_open(cfg, new_rel)
+
+
+def cmd_deliver(cfg: config.Config, rel_path: str) -> int:
+    from mooring.app import deliver
+
+    try:
+        result = deliver.deliver_html(cfg, rel_path)
+    except (ValueError, FileNotFoundError, deliver.DeliverError) as exc:
+        sys.exit(str(exc))
+    telemetry.log_event("deliver")  # value-free: no path, just that a deliver ran
+    print(f"Delivered {result.notebook_rel} -> {result.out_rel}")
+    print(
+        "It's local only (in .mooring/outbox) and never pushed — attach it to "
+        "email/Teams yourself."
+    )
+    return 0
+
+
+def cmd_checks(cfg: config.Config, args: argparse.Namespace) -> int:
+    from mooring import checks
+
+    clear = getattr(args, "clear", False)
+    if clear is not False:
+        rel = clear if isinstance(clear, str) else None
+        removed = checks.clear(cfg.workspace(), rel)
+        print(f"Cleared {removed} check receipt(s)." if removed else "No check receipts to clear.")
+        return 0
+    results = checks.read_results(cfg.workspace())
+    if not results:
+        print(
+            'No check results yet. In a notebook cell: import mooring_checks as mc; '
+            'mc.unique_key(df, "id").'
+        )
+        return 0
+    for rel in sorted(results):
+        result = results[rel]
+        mark = "ok  " if result["failed"] == 0 else "FAIL"
+        if result["failed"]:
+            print(f"{mark} {rel}: {result['failed']} of {result['total']} check(s) failing")
+        else:
+            print(f"{mark} {rel}: {result['total']} check(s) passing")
+    return 0
 
 
 def cmd_init(cfg: config.Config) -> int:
@@ -2014,6 +2077,10 @@ def _dispatch(
         return cmd_new(cfg, args.name)
     if command == "duplicate":
         return cmd_duplicate(cfg, args.path)
+    if command == "deliver":
+        return cmd_deliver(cfg, args.path)
+    if command == "checks":
+        return cmd_checks(cfg, args)
     if command == "init":
         return cmd_init(cfg)
     if command == "deps":
