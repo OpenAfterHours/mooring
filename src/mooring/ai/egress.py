@@ -158,6 +158,7 @@ def build_system_context(
     semantic_models_text: str = "",
     checks_help: str = "",
     sql_help: str = "",
+    connections_help: str = "",
 ) -> str:
     """Assemble the value-blind context handed to the assistant.
 
@@ -239,5 +240,10 @@ def build_system_context(
     # the model never sees a result, so it carries no user data and no scrub applies.
     if sql_help.strip():
         parts.append(sql_help.strip())
+    # The value-free connection SHAPES the team defined (see mooring.workspace_config.
+    # connections_hint) — names + shape fields only, NEVER the secret (which is resolved
+    # locally in the kernel and has no channel here). Carries no user data; no scrub.
+    if connections_help.strip():
+        parts.append(connections_help.strip())
     parts.append(f"CURRENT NOTEBOOK ({notebook_rel}) SOURCE:\n{notebook_source.strip()}")
     return "\n\n".join(parts)

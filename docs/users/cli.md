@@ -172,6 +172,22 @@ branch, so the changes can be reviewed as a pull request (see
   by `import mooring_checks` calls (value-free: names and pass/fail counts only).
   See [Checking your numbers tie out](daily-workflow.md#checking-your-numbers-tie-out).
 
+### `connections` — share a DB connection shape, keep the secret local
+
+Define a database connection's **shape** (host/database/warehouse/role/…) in the
+synced `mooring.toml` so the whole team — and the copilot — use the same names,
+while the **secret stays on each machine**. See
+[Connecting to a database](daily-workflow.md#connecting-to-a-database).
+
+- `connections list` — the defined connections and whether a local secret is set.
+- `connections add <name> field=value …` — define/update a connection shape (e.g.
+  `connections add warehouse kind=snowflake account=acme database=ANALYTICS`). A
+  `password`/`token`/`key`-shaped field is **refused** — it must go local.
+- `connections set-secret <name>` — store the secret **locally** (prompted, or
+  `--stdin`); it lives under `.mooring`, which never syncs. `--clear` removes it.
+- `connections rm <name>` — remove a connection definition.
+- `connections check` — scan the synced definitions for anything secret-shaped.
+
 ### `init` / `deps` — notebook dependencies
 
 A repo declares the packages its notebooks need in a `pyproject.toml` + `uv.lock`

@@ -352,6 +352,35 @@ def _build_parser() -> argparse.ArgumentParser:
     shadow_unignore.add_argument("path", help="workspace-relative notebook path")
     shadow_unignore.add_argument("--repo", default=None, metavar="ALIAS", help=_REPO_ARG_HELP)
 
+    conn_cmd = sub.add_parser(
+        "connections",
+        help="define value-free DB connection shapes (synced); the secret stays local",
+    )
+    conn_sub = conn_cmd.add_subparsers(dest="connections_command", required=True)
+    conn_sub.add_parser("list", help="list the defined connections and whether a secret is set")
+    conn_add = conn_sub.add_parser(
+        "add", help="define/update a connection SHAPE, e.g. add warehouse kind=snowflake host=..."
+    )
+    conn_add.add_argument("name", help="a connection name (e.g. warehouse)")
+    conn_add.add_argument(
+        "fields", nargs="+", metavar="field=value", help="value-free shape fields (NO secrets)"
+    )
+    conn_rm = conn_sub.add_parser("rm", help="remove a connection definition")
+    conn_rm.add_argument("name", help="the connection name to remove")
+    conn_secret = conn_sub.add_parser(
+        "set-secret", help="store a connection's secret LOCALLY (never synced)"
+    )
+    conn_secret.add_argument("name", help="the connection name")
+    conn_secret.add_argument(
+        "--stdin", action="store_true", help="read the secret from stdin instead of prompting"
+    )
+    conn_secret.add_argument(
+        "--clear", action="store_true", help="remove the stored local secret instead of setting it"
+    )
+    conn_sub.add_parser(
+        "check", help="scan the synced connection definitions for anything secret-shaped"
+    )
+
     ai = sub.add_parser("ai", help="AI copilot: sign in to Copilot and check status")
     ai_sub = ai.add_subparsers(dest="ai_command", required=True)
     ai_sub.add_parser("status", help="show the AI provider's sign-in status")
@@ -1035,6 +1064,110 @@ def cmd_shadow(cfg: config.Config, args: argparse.Namespace) -> int:
     telemetry.log_event("shadow", action=args.shadow_command)
     print(f"{rel} is {'now ignored by' if ignoring else 'no longer ignored by'} the shadow guard.")
     return 0
+
+
+def _coerce_field(value: str):
+    """A shape field value from the CLI: ``true``/``false`` -> bool, an int-looking token
+    -> int, else the string. Keeps the synced definition typed and readable."""
+    low = value.strip().lower()
+    if low in ("true", "false"):
+        return low == "true"
+    if value.strip().lstrip("-").isdigit():
+        return int(value.strip())
+    return value
+
+
+def cmd_connections(cfg: config.Config, args: argparse.Namespace) -> int:
+    from mooring import connections, workspace_config
+
+    ws = cfg.workspace()
+    sub = args.connections_command
+    if sub == "list":
+        conns = workspace_config.connections(ws)
+        if not conns:
+            print("No connections defined. Add one, e.g.:")
+            print("  mooring connections add warehouse kind=snowflake account=acme database=ANALYTICS")
+            return 0
+        for name in sorted(conns):
+            fields = ", ".join(f"{k}={v}" for k, v in sorted(conns[name].items()))
+            has = connections.local_secret(ws, name) is not None
+            mark = "secret set" if has else "no local secret"
+            print(f"{name}: {fields or '(no fields)'}  [{mark}]")
+        return 0
+    if sub == "add":
+        fields: dict = {}
+        for item in args.fields:
+            if "=" not in item:
+                sys.exit(f"Bad field {item!r} — use field=value (e.g. host=db.example.com).")
+            key, value = item.split("=", 1)
+            fields[key.strip()] = _coerce_field(value)
+        try:
+            workspace_config.set_connection(ws, args.name, fields)
+        except ValueError as exc:
+            sys.exit(str(exc))
+        name = workspace_config.normalize_connection_name(args.name)
+        telemetry.log_event("connections", action="add")  # value-free: just the action
+        print(f"Defined connection '{name}'. Push mooring.toml to share the shape with the team.")
+        print(f"Store its secret locally (never synced): mooring connections set-secret {name}")
+        return 0
+    if sub == "rm":
+        removed = workspace_config.remove_connection(ws, args.name)
+        print("Removed the connection." if removed else "No such connection.")
+        return 0
+    if sub == "set-secret":
+        name = workspace_config.normalize_connection_name(args.name)
+        if args.clear:
+            removed = connections.clear_local_secret(ws, name)
+            print("Cleared the local secret." if removed else "No local secret to clear.")
+            return 0
+        if args.stdin:
+            secret = sys.stdin.readline().rstrip("\n")
+        elif sys.stdin.isatty():
+            import getpass
+
+            secret = getpass.getpass(f"Secret for '{name}' (stored locally, never synced): ")
+        else:
+            sys.exit(
+                "Not a terminal — pass the secret on stdin (`--stdin`), or set the "
+                f"{connections.env_var_name(name)} environment variable instead."
+            )
+        if not secret:
+            sys.exit("No secret given.")
+        path = connections.set_local_secret(ws, name, secret)
+        telemetry.log_event("connections", action="set_secret")  # value-free: the action only
+        print(f"Stored the secret for '{name}' locally in {path.relative_to(ws).as_posix()} "
+              "(under .mooring, which never syncs).")
+        return 0
+    if sub == "check":
+        return _connections_check(ws)
+    return 0
+
+
+def _connections_check(ws) -> int:
+    """Pre-flight scan of the SYNCED connection definitions for anything secret-shaped —
+    a hand-added secret-named field or a secret-looking value. Value-free output; the
+    push guard also catches these at push time, this just surfaces them earlier."""
+    from mooring.ai import secrets as ai_secrets
+
+    raw = workspace_config.connections_raw(ws)
+    problems: list[str] = []
+    for name in sorted(raw):
+        for field in raw[name]:
+            if workspace_config.is_secret_field(field):
+                problems.append(f"{name}.{field}: field name looks like a secret — move it local")
+    # Scan the values too (a secret pasted into an innocently-named field).
+    for name in sorted(raw):
+        for field, value in raw[name].items():
+            for finding in ai_secrets.scan(str(value)):
+                problems.append(f"{name}.{field}: {finding.kind}")
+    if not problems:
+        print("No secrets found in the connection definitions.")
+        return 0
+    print("Found secret-shaped content in mooring.toml [connections] — it must NOT be synced:")
+    for line in problems:
+        print(f"  {line}")
+    print("Store the credential locally: mooring connections set-secret <name>")
+    return 1
 
 
 def cmd_new(cfg: config.Config, name: str) -> int:
@@ -2127,6 +2260,8 @@ def _dispatch(
         return cmd_init(cfg)
     if command == "deps":
         return cmd_deps(cfg, args)
+    if command == "connections":
+        return cmd_connections(cfg, args)
     if command == "shadow":
         return cmd_shadow(cfg, args)
     if command == "build-requirements":
