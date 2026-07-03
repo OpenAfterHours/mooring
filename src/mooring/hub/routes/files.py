@@ -105,6 +105,50 @@ async def api_reveal(request: Request) -> JSONResponse:
     return JSONResponse({"path": rel_path, "lines": [f"Revealed {name} in the file manager"]})
 
 
+async def api_deliver(request: Request) -> JSONResponse:
+    """Render a notebook to a self-contained HTML snapshot in the sync-excluded
+    ``.mooring/outbox``, reveal it in the file manager, and open it for preview.
+
+    The render EXECUTES the notebook locally (``marimo export html``) and can be
+    slow, so it runs off the event loop. The artifact embeds data values, but it
+    lives under ``.mooring/`` — which :func:`mooring.sync.is_synced_path` excludes
+    structurally — so it can never ride a push. No channel here reaches the AI."""
+    hub = request.app.state.hub
+    data = await request.json()
+    rel_path = str(data.get("path", ""))
+    return await run_in_threadpool(_deliver, hub, rel_path)
+
+
+def _deliver(hub, rel_path: str) -> JSONResponse:
+    import contextlib
+    import webbrowser
+
+    from mooring.app import deliver
+
+    try:
+        result = deliver.deliver_html(hub.cfg, rel_path)
+    except (ValueError, FileNotFoundError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    except deliver.DeliverError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=502)
+    telemetry.log_event("deliver")
+    with contextlib.suppress(Exception):
+        reveal.reveal(result.out_path)  # best-effort: no-op off Windows
+    with contextlib.suppress(Exception):
+        webbrowser.open(result.out_path.as_uri())  # preview the rendered HTML
+    name = result.out_rel.rsplit("/", 1)[-1]
+    return JSONResponse(
+        {
+            "path": rel_path,
+            "out": result.out_rel,
+            "lines": [
+                f"Delivered {result.notebook_rel} → {name}",
+                "Saved to .mooring/outbox (local only, never pushed) and opened for preview.",
+            ],
+        }
+    )
+
+
 async def api_delete(request: Request) -> JSONResponse:
     from mooring import deletion
 

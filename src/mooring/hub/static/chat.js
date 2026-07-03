@@ -1194,6 +1194,17 @@ function runCommand(cmd) {
       stick = true;
       submitMessage(ChatCore.explainPrompt(), ChatCore.explainLabel());
       break;
+    case "checks":
+      // Propose value-free tie-out checks: the fixed prompt (chat_core.js) sent over
+      // the ordinary path, so the PII valve and per-notebook off-switch apply. The
+      // copilot proposes a mooring_checks cell; the analyst reviews and applies it.
+      if (isBusy() || turnState === "connecting") {
+        addSysRow("Wait for the session to be ready.");
+        break;
+      }
+      stick = true;
+      submitMessage(ChatCore.checksPrompt(), ChatCore.checksLabel());
+      break;
     case "review":
       // A whole-notebook LOGIC review: the fixed, value-free prompt (chat_core.js) over
       // the ordinary send path (PII valve + per-notebook off-switch apply). It reasons

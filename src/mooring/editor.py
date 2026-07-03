@@ -31,7 +31,7 @@ from pathlib import Path
 
 import tomli_w
 
-from mooring import pyproject_env
+from mooring import checks, paths, pyproject_env
 
 STARTUP_TIMEOUT = 30.0
 
@@ -67,6 +67,146 @@ def free_port() -> int:
         return sock.getsockname()[1]
 
 
+def _launch_prefix(workspace: Path) -> tuple[list[str], dict[str, str] | None]:
+    """The command prefix that runs ``marimo`` in the right environment for
+    ``workspace``, plus an optional env override (None = inherit).
+
+    Shared by the edit server (:meth:`EditorServer._invocation`) and the one-shot
+    HTML export (:func:`export_html_command`), so both pick the same backend: the
+    team's locked uv project when available, else the frozen bundle. On the uv path
+    the bundled-site-packages ``PYTHONPATH`` bridge is stripped so it can't shadow
+    the project env uv builds (uv's venv is self-contained).
+    """
+    if not uses_uv(workspace):
+        return [sys.executable, "-m", "marimo"], None
+    run = ["uv", "run"]
+    if pyproject_env.lock_path(workspace).is_file():
+        run.append("--frozen")
+    run += ["--project", str(workspace)]
+    if not pyproject_env.declares(workspace, "marimo"):
+        run += ["--with", "marimo"]  # safety net: always startable
+    run.append("marimo")
+    # Drop the bundled-site-packages PYTHONPATH so it can't shadow the project env
+    # uv builds; uv's venv is self-contained.
+    env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
+    return run, env
+
+
+def export_html_command(
+    workspace: Path,
+    notebook_rel: str,
+    out_path: Path,
+    *,
+    include_code: bool = False,
+) -> tuple[list[str], dict[str, str] | None]:
+    """Command (and optional env override) to render ``notebook_rel`` to a
+    self-contained HTML file at ``out_path`` via ``marimo export html``.
+
+    Runs in the SAME backend as the editor (uv project or frozen bundle), so the
+    notebook executes against the team's locked deps. ``--no-include-code`` hides
+    the source for a stakeholder-facing snapshot; ``-f`` overwrites an existing
+    file. The notebook executes LOCALLY to capture its outputs — the data values it
+    reads never leave the machine (the rendered HTML lands in the sync-excluded
+    ``.mooring`` outbox, see :mod:`mooring.app.deliver`).
+    """
+    prefix, env = _launch_prefix(workspace)
+    args = [
+        "export",
+        "html",
+        notebook_rel.replace("\\", "/"),
+        "-o",
+        str(out_path),
+        "-f",
+        "--include-code" if include_code else "--no-include-code",
+    ]
+    return [*prefix, *args], env
+
+
+def ensure_runtime_config(workspace: Path, *, theme: str | None = None) -> None:
+    """Write the workspace ``.marimo.toml`` mooring relies on, and install the
+    value-free checks runtime. Idempotent, atomic, and best-effort (never raises).
+
+    Five things:
+
+    1. Turn marimo's OWN AI off (``ai.enabled``/``completion.copilot`` = false).
+       marimo's built-in AI would send real column *sample values* to whatever
+       model is configured — a data-confidentiality leak outside mooring's control.
+       mooring never uses marimo's AI (its copilot is schema-only and value-blind).
+    2. ``runtime.watcher_on_save = "autorun"`` so that when the copilot applies a
+       cell (by writing the .py source), ``--watch`` reloads AND runs it — matching
+       the "Apply = add + run" behaviour.
+    3. ``runtime.pythonpath`` = the workspace root **and** the ``.mooring/pylib``
+       dir, so a notebook in any sub-folder can import the repo's shared helper
+       modules AND ``import mooring_checks`` (the injected value-free tie-out
+       helper — see :mod:`mooring.checks`). marimo only auto-adds the notebook's own
+       directory to ``sys.path``; ``runtime.pythonpath`` is its sanctioned fix
+       (inserted at the head of ``sys.path`` at kernel init). ABSOLUTE paths —
+       marimo does NOT resolve a ``.marimo.toml`` pythonpath entry — and any
+       existing entries are preserved.
+    4. ``display.theme`` = ``theme`` (the hub's appearance) so notebooks open in the
+       theme the user picked. mooring owns this key: the hub is the single control
+       point. When ``theme`` is None the existing value is PRESERVED (used by the
+       one-shot HTML export, which must not disturb an open editor's theme).
+
+    marimo resolves its user config from the first ``.marimo.toml`` found searching
+    the cwd (the workspace) upward, so a file written here wins over any personal
+    ``~/.marimo.toml``. It is a dotfile, so sync never uploads it.
+    """
+    checks.install_runtime(workspace)  # best-effort; keeps mooring_checks importable
+    path = workspace / ".marimo.toml"
+    try:
+        data: dict = {}
+        if path.is_file():
+            data = tomllib.loads(path.read_text("utf-8"))
+        ai = data.get("ai")
+        completion = data.get("completion")
+        runtime = data.get("runtime")
+        display = data.get("display")
+        if not isinstance(ai, dict):
+            ai = data["ai"] = {}
+        if not isinstance(completion, dict):
+            completion = data["completion"] = {}
+        if not isinstance(runtime, dict):
+            runtime = data["runtime"] = {}
+        if not isinstance(display, dict):
+            display = data["display"] = {}
+        ws_root = str(workspace.resolve())
+        pylib = str(checks.pylib_dir(workspace).resolve())
+        raw_pp = runtime.get("pythonpath")
+        existing_pp = [p for p in raw_pp if isinstance(p, str)] if isinstance(raw_pp, list) else []
+        heads = [ws_root, pylib]
+        desired_pp = [*heads, *(p for p in existing_pp if p not in heads)]
+        # Theme: mooring owns display.theme when a theme is GIVEN (the hub is the
+        # single control point). theme=None means "leave display.theme untouched" —
+        # used by the one-shot HTML export, which must never disturb an open editor's
+        # appearance (nor introduce a theme key on a workspace that had none).
+        theme_ok = theme is None or display.get("theme") == theme
+        already = (
+            ai.get("enabled") is False
+            and completion.get("copilot") is False
+            and runtime.get("watcher_on_save") == "autorun"
+            and runtime.get("pythonpath") == desired_pp
+            and theme_ok
+        )
+        if already:
+            return  # nothing to change — don't rewrite the file
+        ai["enabled"] = False
+        completion["copilot"] = False
+        runtime["watcher_on_save"] = "autorun"
+        runtime["pythonpath"] = desired_pp
+        if theme is not None:
+            display["theme"] = theme
+        # Write atomically through a UNIQUE temp file (safe_write_text uses mkstemp):
+        # apply_theme() runs on the hub's event loop while a Deliver export runs on a
+        # threadpool worker, so both can reach this concurrently — a FIXED tmp name
+        # could interleave into a corrupt config, which would make marimo fall back to
+        # its AI-on default (re-enabling the value-leaking built-in AI). Distinct tmp
+        # files keep each os.replace atomic (last writer wins, never a partial file).
+        paths.safe_write_text(path, tomli_w.dumps(data))
+    except (OSError, tomllib.TOMLDecodeError):
+        pass
+
+
 class EditorServer:
     def __init__(self, workspace: Path, theme: str = "system") -> None:
         self.workspace = workspace
@@ -89,6 +229,7 @@ class EditorServer:
 
     def _invocation(self) -> tuple[list[str], dict[str, str] | None]:
         """The launch command and an optional env override (None = inherit)."""
+        prefix, env = _launch_prefix(self.workspace)
         marimo_args = [
             "edit",
             str(self.workspace),
@@ -105,19 +246,7 @@ class EditorServer:
             # open tab. (See ai/cellwrite.py and docs/admins/ai-privacy.md.)
             "--watch",
         ]
-        if not self.use_uv():
-            return [sys.executable, "-m", "marimo", *marimo_args], None
-        run = ["uv", "run"]
-        if pyproject_env.lock_path(self.workspace).is_file():
-            run.append("--frozen")
-        run += ["--project", str(self.workspace)]
-        if not pyproject_env.declares(self.workspace, "marimo"):
-            run += ["--with", "marimo"]  # safety net: always startable
-        run.append("marimo")
-        # Drop the bundled-site-packages PYTHONPATH so it can't shadow the
-        # project env uv builds; uv's venv is self-contained.
-        env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
-        return [*run, *marimo_args], env
+        return [*prefix, *marimo_args], env
 
     def ensure_started(self) -> None:
         if self.running:
@@ -142,88 +271,10 @@ class EditorServer:
         self._wait_ready()
 
     def _ensure_marimo_config(self) -> None:
-        """Write the workspace ``.marimo.toml`` mooring relies on, for every editor.
-
-        Four things:
-        1. Turn marimo's OWN AI off (``ai.enabled``/``completion.copilot`` =
-           false). marimo's built-in AI would send real column *sample values* to
-           whatever model is configured — a data-confidentiality leak outside
-           mooring's control. mooring never uses marimo's AI (its copilot is
-           schema-only and value-blind).
-        2. ``runtime.watcher_on_save = "autorun"`` so that when the copilot applies
-           a cell (by writing the .py source), ``--watch`` reloads AND runs it —
-           matching the "Apply = add + run" behaviour.
-        3. ``runtime.pythonpath`` = the workspace root, so a notebook in any
-           sub-folder can import the repo's shared helper modules (marimo only
-           auto-adds the notebook's own directory to sys.path). See the inline note.
-        4. ``display.theme`` = the hub's appearance (``self.theme``) so notebooks
-           open in the same light/dark/system theme the user picked on the hub.
-           mooring owns this key: the hub is the single control point, so a value
-           set here intentionally overrides marimo's own appearance toggle.
-
-        marimo resolves its user config from the first ``.marimo.toml`` found
-        searching the cwd (the workspace) upward, so a file written here wins over
-        any personal ``~/.marimo.toml``. It is a dotfile, so sync never uploads
-        it. Residual: a ``[tool.marimo.ai]`` section committed to the repo's
-        ``pyproject.toml`` is a higher-precedence project override — see
-        docs/admins/ai-privacy.md. Best-effort: never block the editor on it.
-        """
-        path = self.workspace / ".marimo.toml"
-        try:
-            data: dict = {}
-            if path.is_file():
-                data = tomllib.loads(path.read_text("utf-8"))
-            ai = data.get("ai")
-            completion = data.get("completion")
-            runtime = data.get("runtime")
-            display = data.get("display")
-            if not isinstance(ai, dict):
-                ai = data["ai"] = {}
-            if not isinstance(completion, dict):
-                completion = data["completion"] = {}
-            if not isinstance(runtime, dict):
-                runtime = data["runtime"] = {}
-            if not isinstance(display, dict):
-                display = data["display"] = {}
-            # Put the workspace ROOT on the notebook kernel's sys.path so a notebook in
-            # any sub-folder can import the repo's helper modules (e.g. `from lib import
-            # helpers`). marimo only puts the notebook's OWN directory on sys.path[0], so
-            # cross-folder imports otherwise fail; runtime.pythonpath is its sanctioned
-            # fix (inserted at the head of sys.path at kernel init). An ABSOLUTE path —
-            # marimo does NOT resolve a .marimo.toml pythonpath entry (only a pyproject
-            # one), so a relative path would be ambiguous. Preserve any existing entries,
-            # keeping the workspace root first.
-            ws_root = str(self.workspace.resolve())
-            raw_pp = runtime.get("pythonpath")
-            existing_pp = (
-                [p for p in raw_pp if isinstance(p, str)] if isinstance(raw_pp, list) else []
-            )
-            desired_pp = [ws_root, *(p for p in existing_pp if p != ws_root)]
-            already = (
-                ai.get("enabled") is False
-                and completion.get("copilot") is False
-                and runtime.get("watcher_on_save") == "autorun"
-                and runtime.get("pythonpath") == desired_pp
-                and display.get("theme") == self.theme
-            )
-            if already:
-                return  # nothing to change — don't rewrite the file
-            ai["enabled"] = False
-            completion["copilot"] = False
-            runtime["watcher_on_save"] = "autorun"
-            runtime["pythonpath"] = desired_pp
-            display["theme"] = self.theme
-            # Write atomically: apply_theme() can rewrite this WHILE marimo is
-            # running, and marimo re-reads the file on every page render. A
-            # truncated read would make marimo fall back to its AI-on default —
-            # momentarily re-enabling the value-leaking built-in AI this very
-            # file disables. os.replace swaps it in one step, so a render sees
-            # either the old or the new file, never a partial one.
-            tmp = path.parent / (path.name + ".tmp")
-            tmp.write_text(tomli_w.dumps(data), encoding="utf-8")
-            os.replace(tmp, path)
-        except (OSError, tomllib.TOMLDecodeError):
-            pass
+        """Write this workspace's ``.marimo.toml`` for the editor's current theme
+        and install the value-free checks runtime — see
+        :func:`ensure_runtime_config`."""
+        ensure_runtime_config(self.workspace, theme=self.theme)
 
     def apply_theme(self, theme: str) -> None:
         """Re-theme this workspace's notebooks: update ``self.theme`` and rewrite

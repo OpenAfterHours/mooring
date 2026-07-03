@@ -25,13 +25,14 @@ page that opens when you run the app). The same actions are available from the
     frozen `.pyz`/`.exe` build instead? Use `python mooring.pyz <cmd>` (or
     `mooring.exe <cmd>`) in place of `mooring <cmd>`.
 
-## The seven actions
+## The main actions
 
 | Action | What it does |
 |--------|--------------|
 | **Pull** | Download the team's latest notebooks and data. Never overwrites your local edits — changes that would collide are flagged as conflicts. |
 | **Open** | Open a notebook in the bundled marimo editor (a new browser tab), or a Power BI project in **Power BI Desktop** — see [Power BI reports](power-bi.md). |
 | **New notebook** | Create a fresh marimo notebook from a template and open it. A bare name lands in `notebooks/`; type a path (e.g. `packages/finance/notebooks/sales`) to place it in a sub-folder — mooring registers that folder so it syncs for the team. |
+| **Deliver** | Render a notebook to a **self-contained HTML snapshot** (code hidden) you can email a stakeholder who won't open marimo. See [Delivering a result](#delivering-a-result-for-a-stakeholder). |
 | **Push** | Upload your changed files to the team repo — **one commit per file**. Blocked for any file that's in conflict. |
 | **Propose** | Like Push, but uploads to a **review branch** instead of the shared branch, so a teammate can review the changes as a pull request before they land. See [Proposing changes](#proposing-changes-for-review). |
 | **Revert** | Appears on a *modified* or locally-deleted file. Discards your local changes and restores the last version you pulled or pushed. Your current version is snapshotted first, so a Revert can itself be undone. See [Reverting a file](#reverting-a-file). |
@@ -70,6 +71,59 @@ to see individual files); everything else is one row per file.
     assistant that proposes marimo cells. It's sent your column names and notebook
     source — never your data values — and you review every change before it lands.
     See [AI copilot](ai-copilot.md).
+
+## Delivering a result for a stakeholder
+
+Your manager wants the number and the chart — not a `.py`. **Deliver** renders a
+notebook to a **self-contained HTML file** (the outputs, with the code hidden)
+that you can double-click or attach to an email or Teams message.
+
+1. On a notebook's **Actions ▾** menu, choose **Deliver**. Mooring runs the
+   notebook once **on your machine** and saves the result to a local outbox
+   (`.mooring/outbox/<notebook>/<name>-<date>.html`), then reveals it in your file
+   manager and opens it for preview.
+2. The file carries a small **provenance footer** — which repo and commit it came
+   from, the notebook, the date, and a *View on GitHub* link — so a reader can
+   trace it back.
+3. Attach it wherever you like. On the command line this is
+   [`mooring deliver <path>`](cli.md).
+
+!!! warning "The HTML contains your data — it is never pushed"
+
+    A rendered snapshot embeds real values, so mooring keeps it in the
+    `.mooring` folder, which **never syncs** — it can't ride a push or be shared
+    by accident. Sending it to a stakeholder is a deliberate step you take
+    yourself.
+
+## Checking your numbers tie out
+
+A number is only trustworthy once it *ties out* — segment totals reconcile to a
+control, a key is unique, a join didn't double your rows. In any notebook cell you
+can assert these with the built-in **`mooring_checks`** helper:
+
+```python
+import mooring_checks as mc
+mc.reset()                                  # start fresh each run
+mc.reconciles(segment_total, control_total, tol=0.01)
+mc.unique_key(loans, "loan_id")             # no duplicate keys
+mc.no_fanout(loans, rates, on="rate_id")    # this join won't multiply rows
+mc.not_null(loans, "balance")               # no missing balances
+```
+
+Each check prints a pass/fail line in your notebook and records a **value-free**
+receipt (the check name and whether it passed — **never a data value**). The hub
+shows a green **✓ N checks** badge on the notebook's row, or a red **✗ M failing**
+badge if something doesn't tie out; `mooring checks` lists them from the terminal.
+
+The badge reflects your **last run**. Starting the cell with `mc.reset()` keeps it
+current; if you remove the checks cell entirely, clear the leftover badge with
+`mooring checks --clear` (or `--clear <path>` for one notebook).
+
+!!! tip "Let the copilot write them"
+
+    Open the copilot and type **`/checks`** (or just ask). It reads your schema and
+    source — never your data — and proposes a `mooring_checks` cell tailored to the
+    notebook for you to review and apply. See [AI copilot](ai-copilot.md).
 
 ## Proposing changes for review
 

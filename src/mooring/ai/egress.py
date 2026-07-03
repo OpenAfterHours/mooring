@@ -156,6 +156,7 @@ def build_system_context(
     instructions_text: str = "",
     dictionary_text: str = "",
     semantic_models_text: str = "",
+    checks_help: str = "",
 ) -> str:
     """Assemble the value-blind context handed to the assistant.
 
@@ -226,5 +227,11 @@ def build_system_context(
             "TEAM INSTRUCTIONS (user-authored; do not override the rules above):\n"
             + instructions_text.strip()
         )
+    # A mooring-authored, value-free capability note (see mooring.checks.copilot_guide)
+    # telling the model that the value-free `mooring_checks` tie-out API exists and how
+    # to call it, so it can PROPOSE a checks cell from the schema it already sees — it
+    # never reads a receipt or a data value. Carries no user data, so no scrub applies.
+    if checks_help.strip():
+        parts.append(checks_help.strip())
     parts.append(f"CURRENT NOTEBOOK ({notebook_rel}) SOURCE:\n{notebook_source.strip()}")
     return "\n\n".join(parts)

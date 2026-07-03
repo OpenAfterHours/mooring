@@ -361,6 +361,15 @@ function revealAction(path) {
   return action("/api/reveal", { path });
 }
 
+// Deliver: render this notebook to a self-contained HTML snapshot (code hidden) in
+// the local .mooring/outbox and reveal/open it — a thing you can email a stakeholder
+// who won't open marimo. Executes locally; the artifact embeds values but lives in
+// .mooring, which sync excludes, so it is never pushed. The server also opens it for
+// preview, so refresh is unnecessary.
+function deliverAction(path) {
+  return action("/api/deliver", { path }, false);
+}
+
 // A safe playground: byte-copy this notebook to a personal {stem}-{login}-draft.py
 // sibling. To the three-way engine the draft is just a new local file — it can never
 // conflict with the team file and is only shared by an explicit push. The response's
@@ -829,6 +838,11 @@ function fileActions(file, opts) {
   if (isNotebook && file.has_local) {
     actions.push(["Duplicate as draft", () => duplicateAction(file.path)]);
   }
+  // Deliver: render a shareable HTML snapshot (code hidden) into the local outbox —
+  // the "hand it to a stakeholder" step. Notebooks only; the output never syncs.
+  if (isNotebook && file.has_local) {
+    actions.push(["Deliver", () => deliverAction(file.path)]);
+  }
   // A plain helper module (non-marimo .py) can't open in marimo (it would be rewritten
   // into notebook form), so instead of Open it gets Reveal — open it in the file manager
   // to edit in your own editor. Edits still sync/push like any other file.
@@ -961,6 +975,25 @@ function moduleBadge() {
   return span;
 }
 
+// A green/red tie-out badge from the value-free .mooring/checks receipts a notebook
+// wrote via `import mooring_checks`. Counts only — never a data value; local, never
+// synced.
+function checksBadge(checks) {
+  const span = document.createElement("span");
+  const failed = checks.failed || 0;
+  const total = checks.total || 0;
+  if (failed > 0) {
+    span.className = "badge checks-fail";
+    span.textContent = `✗ ${failed} failing`;
+    span.title = `${failed} of ${total} tie-out check(s) are failing — open the notebook to see which.`;
+  } else {
+    span.className = "badge checks-ok";
+    span.textContent = `✓ ${total} check${total === 1 ? "" : "s"}`;
+    span.title = `${total} tie-out check(s) passing (mooring_checks). Value-free and never pushed.`;
+  }
+  return span;
+}
+
 function buildFileRow(file, opts) {
   opts = opts || {};
   // Inside a folder section the row shows its folder-relative path (`rel`); elsewhere
@@ -971,6 +1004,7 @@ function buildFileRow(file, opts) {
   const extras = [];
   if (file.shadows) extras.push(" ", shadowBadge(file.shadows));
   if (file.is_module) extras.push(" ", moduleBadge());
+  if (file.checks && file.checks.total) extras.push(" ", checksBadge(file.checks));
   // A watched file with a teammate change waiting gets its promotion badge —
   // quiet otherwise (watching an in-sync file must not add row noise).
   if (watchedPaths.has(file.path) && PULL_STATES.has(file.state)) {

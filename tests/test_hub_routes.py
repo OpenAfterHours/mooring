@@ -48,6 +48,7 @@ EXPECTED_ROUTES = {
     ("/api/duplicate", ("POST",), "api_duplicate"),  # the fearless personal draft copy
     ("/api/open", ("POST",), "api_open"),
     ("/api/reveal", ("POST",), "api_reveal"),
+    ("/api/deliver", ("POST",), "api_deliver"),  # render a notebook to the local outbox
     ("/api/delete", ("POST",), "api_delete"),
     ("/api/rollback", ("POST",), "api_rollback"),
     ("/api/undo", ("POST",), "api_undo"),
