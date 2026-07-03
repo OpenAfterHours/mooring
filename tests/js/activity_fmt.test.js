@@ -19,6 +19,13 @@ test("sentence: file ops name the file, not the whole path", () => {
     "the copilot applied a change to sales.py (you approved it)");
 });
 
+test("sentence: verify names the notebook and the outcome", () => {
+  assert.equal(AF.sentence({ op: "verify", path: "notebooks/sales.py", ok: true }),
+    "you verified sales.py — ran clean");
+  assert.equal(AF.sentence({ op: "verify", path: "notebooks/sales.py", ok: false }),
+    "you verified sales.py — a cell failed");
+});
+
 test("sentence: delete counts multi-file artifacts", () => {
   assert.equal(AF.sentence({ op: "delete", path: "reports/Sales.pbip", paths: ["a", "b", "c"] }),
     "you deleted Sales.pbip (3 files)");

@@ -149,6 +149,38 @@ def _deliver(hub, rel_path: str) -> JSONResponse:
     )
 
 
+async def api_verify(request: Request) -> JSONResponse:
+    """Smoke-run a notebook locally and record a value-free trust receipt: did it run
+    clean? The row then badges "✓ ran clean" (kept only while the file's SHA matches,
+    so it auto-clears on the next edit) or "⚠ failed to run".
+
+    The run EXECUTES the notebook (``marimo export html``) and can be slow, so it runs
+    off the event loop. The rendered HTML embeds values but is written under
+    ``.mooring/`` and DELETED immediately (see :mod:`mooring.app.verify_run`); the
+    receipt is value-free and no channel here reaches the AI."""
+    hub = request.app.state.hub
+    data = await request.json()
+    rel_path = str(data.get("path", ""))
+    return await run_in_threadpool(_verify, hub, rel_path)
+
+
+def _verify(hub, rel_path: str) -> JSONResponse:
+    from mooring.app import verify_run
+
+    try:
+        result = verify_run.verify_notebook(hub.cfg, rel_path)
+    except (ValueError, FileNotFoundError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    except verify_run.VerifyError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=502)
+    # The activity-ledger entry is written inside verify_notebook (the app layer), so
+    # both adapters get it — the route only adds the value-free telemetry counter.
+    telemetry.log_event("verify", ok=int(result.passed))  # a boolean, never a path
+    return JSONResponse(
+        {"path": rel_path, "ok": result.passed, "lines": [verify_run.describe_result(result)]}
+    )
+
+
 async def api_delete(request: Request) -> JSONResponse:
     from mooring import deletion
 

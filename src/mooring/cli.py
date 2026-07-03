@@ -194,6 +194,20 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     deliver_cmd.add_argument("path", help="workspace-relative notebook path to deliver")
 
+    verify_cmd = sub.add_parser(
+        "verify",
+        help="smoke-run a notebook locally and record whether it ran clean (the trust badge)",
+    )
+    verify_cmd.add_argument("path", nargs="?", help="workspace-relative notebook path to verify")
+    verify_cmd.add_argument(
+        "--clear",
+        nargs="?",
+        const=True,
+        default=False,
+        metavar="PATH",
+        help="clear recorded verify receipts (all, or just one notebook path) instead of running",
+    )
+
     checks_cmd = sub.add_parser(
         "checks",
         help="show the tie-out / data-quality check results recorded per notebook",
@@ -1078,6 +1092,32 @@ def cmd_deliver(cfg: config.Config, rel_path: str) -> int:
         "email/Teams yourself."
     )
     return 0
+
+
+def cmd_verify(cfg: config.Config, args: argparse.Namespace) -> int:
+    from mooring import verify
+    from mooring.app import verify_run
+
+    clear = getattr(args, "clear", False)
+    if clear is not False:
+        # `--clear` with no value clears all; `--clear PATH` (or a bare `verify PATH
+        # --clear`) clears one. Normal editing already clears a badge (the SHA moves) —
+        # this is the rarer "forget it entirely" case, mirroring `mooring checks --clear`.
+        rel = clear if isinstance(clear, str) else (args.path or None)
+        removed = verify.clear(cfg.workspace(), rel)
+        print(f"Cleared {removed} verify receipt(s)." if removed else "No verify receipts to clear.")
+        return 0
+    if not args.path:
+        sys.exit("Give a notebook path to verify (or `--clear` to reset recorded results).")
+    try:
+        result = verify_run.verify_notebook(cfg, args.path)
+    except (ValueError, FileNotFoundError, verify_run.VerifyError) as exc:
+        sys.exit(str(exc))
+    telemetry.log_event("verify", ok=int(result.passed))  # value-free: a boolean, no path
+    print(verify_run.describe_result(result))
+    if not result.passed:
+        print("(The badge clears automatically when you edit the notebook.)")
+    return 0 if result.passed else 1
 
 
 def cmd_checks(cfg: config.Config, args: argparse.Namespace) -> int:
@@ -2079,6 +2119,8 @@ def _dispatch(
         return cmd_duplicate(cfg, args.path)
     if command == "deliver":
         return cmd_deliver(cfg, args.path)
+    if command == "verify":
+        return cmd_verify(cfg, args)
     if command == "checks":
         return cmd_checks(cfg, args)
     if command == "init":

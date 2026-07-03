@@ -156,13 +156,18 @@ branch, so the changes can be reviewed as a pull request (see
   `new packages/finance/notebooks/sales`); mooring registers that folder so it
   syncs for the team. A bare name goes in `notebooks/`.
 
-### `deliver` / `checks`
+### `deliver` / `verify` / `checks`
 
 - `deliver <workspace-relative-path>` — render a notebook to a self-contained
   HTML snapshot (code hidden) in the local `.mooring/outbox/` and print its path
   (e.g. `deliver notebooks/sales.py`). The notebook runs on your machine; the
   HTML embeds the values but lives in `.mooring`, which never syncs — attach it to
   email/Teams yourself. See [Delivering a result](daily-workflow.md#delivering-a-result-for-a-stakeholder).
+- `verify <workspace-relative-path>` — smoke-run a notebook once on your machine and
+  print whether it ran clean; exits non-zero if a cell failed. Records a value-free
+  trust receipt (a boolean, never a value) that badges the notebook's row in the hub
+  and clears itself when you edit the file. See
+  [Verifying a notebook runs](daily-workflow.md#verifying-a-notebook-runs).
 - `checks` — list the tie-out / data-quality check results recorded per notebook
   by `import mooring_checks` calls (value-free: names and pass/fail counts only).
   See [Checking your numbers tie out](daily-workflow.md#checking-your-numbers-tie-out).
