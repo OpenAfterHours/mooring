@@ -16,6 +16,7 @@ const ChatCore = (function () {
   const COMMANDS = [
     { name: "help", help: "show commands and key bindings" },
     { name: "explain", help: "walk through what this notebook does" },
+    { name: "review", help: "review the notebook's logic for correctness risks" },
     { name: "checks", help: "propose tie-out / data-quality checks" },
     { name: "clear", help: "clear the transcript (keeps the session)" },
     { name: "model", help: "switch model — /model [name]" },
@@ -108,6 +109,57 @@ const ChatCore = (function () {
   // The compact row shown in the transcript in place of the canned prompt.
   function explainLabel() {
     return "/explain — walk me through this notebook";
+  }
+
+  // -- /review: a whole-notebook value-blind logic review --------------------
+  // The single thing a value-blind copilot is genuinely great at: reasoning over
+  // authored code + schema to flag STRUCTURAL correctness risks (fan-out joins,
+  // wrong grain, hardcoded periods, dropped rows, un-run cells) — never confirming a
+  // number, which would need the data it structurally cannot see. Like /explain this
+  // is a pure CONSTANT (no user text, no values), pinned by chat_core.test.js.
+
+  // The verify-first line the review must open with — a logic review is not proof a
+  // number is right; it flags risks to check.
+  const REVIEW_DISCLAIMER =
+    "Logic review from the code and schema — it flags risks; it can't confirm a " +
+    "number is correct. Check each point against the notebook.";
+
+  function reviewPrompt() {
+    return (
+      "Review this notebook's LOGIC for correctness risks, so I can trust the numbers " +
+      "before I share them.\n" +
+      "\n" +
+      "First call mooring_read_notebook_source to read the current source — its output " +
+      "numbers every cell with a `# === cell N ===` header, and those numbers are your " +
+      "anchors. Use mooring_get_schema on the datasets involved to reason about columns, " +
+      "keys, grain and types.\n" +
+      "\n" +
+      "Open your reply with exactly this line:\n" +
+      REVIEW_DISCLAIMER +
+      "\n" +
+      "\n" +
+      "You can see only the code and the schema, never the data values — so review " +
+      "STRUCTURE and LOGIC, not whether a specific number is correct. Look for:\n" +
+      "- Joins that could fan out (a supposedly one-to-many join on a non-unique key) and " +
+      "double-count a sum.\n" +
+      "- Aggregations at the wrong grain, or a sum/mean over a column that can be null.\n" +
+      "- Hardcoded dates, periods, paths or magic numbers that must change each run.\n" +
+      "- Filters that could silently drop rows (an inner join or a strict comparison where " +
+      "missing keys or NULLs disappear).\n" +
+      "- Period/boundary errors (off-by-one date ranges, inclusive vs exclusive bounds) and " +
+      "unit or currency mismatches in arithmetic.\n" +
+      "- Cells that define something never used, or that must be re-run in order.\n" +
+      "\n" +
+      "Return a findings list ordered most-serious first. For each: the `cell N` it is in, " +
+      "the risk in one line, and why it matters. If you are unsure, say so rather than " +
+      "inventing a problem. Do NOT propose code changes and do NOT ask for data values — " +
+      "this is a read-only review; I'll ask if I want a fix."
+    );
+  }
+
+  // The compact row shown in the transcript in place of the canned prompt.
+  function reviewLabel() {
+    return "/review — check this notebook's logic for risks";
   }
 
   // The canned follow-up behind "Add as notes cell": ONE new appended markdown
@@ -454,6 +506,8 @@ const ChatCore = (function () {
     isSlashTyping,
     explainPrompt,
     explainLabel,
+    reviewPrompt,
+    reviewLabel,
     checksPrompt,
     checksLabel,
     notesCellPrompt,

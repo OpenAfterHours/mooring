@@ -338,3 +338,40 @@ def test_draft_stem_is_never_an_identifier(tmp_path):
         rel = notebook_template.duplicate_as_draft(tmp_path, "notebooks/polars.py", owner=owner)
         stem = rel.rsplit("/", 1)[-1].removesuffix(".py")
         assert not stem.isidentifier()
+
+
+def test_notebook_title_from_template():
+    src = notebook_template.TEMPLATE.format(version="0", title="Quarterly Report")
+    assert notebook_template.notebook_title(src) == "Quarterly Report"
+
+
+def test_notebook_title_prefers_the_h1_across_cells():
+    src = (
+        'import marimo\napp = marimo.App()\n\n'
+        '@app.cell\ndef _(mo):\n    mo.md("""some preamble prose""")\n    return\n\n'
+        '@app.cell\ndef _(mo):\n    mo.md(r"""# The Real Title\nbody""")\n    return\n'
+    )
+    assert notebook_template.notebook_title(src) == "The Real Title"
+
+
+def test_notebook_title_falls_back_to_first_line_without_h1():
+    src = 'import marimo\napp = marimo.App()\n\n@app.cell\ndef _(mo):\n    mo.md("""Just a note, no heading""")\n    return\n'
+    assert notebook_template.notebook_title(src) == "Just a note, no heading"
+
+
+def test_notebook_title_handles_single_quoted_md():
+    src = 'import marimo\napp = marimo.App()\n\n@app.cell\ndef _(mo):\n    mo.md("# Inline Title")\n    return\n'
+    assert notebook_template.notebook_title(src) == "Inline Title"
+
+
+def test_notebook_title_empty_when_no_markdown():
+    src = "import marimo\napp = marimo.App()\n\n@app.cell\ndef _():\n    x = 1\n    return\n"
+    assert notebook_template.notebook_title(src) == ""
+
+
+def test_notebook_title_is_bounded_and_whitespace_collapsed():
+    long = "A " * 200
+    src = f'import marimo\napp = marimo.App()\n\n@app.cell\ndef _(mo):\n    mo.md(r"""#   {long}""")\n    return\n'
+    title = notebook_template.notebook_title(src)
+    assert len(title) <= 120
+    assert "  " not in title

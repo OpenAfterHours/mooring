@@ -312,14 +312,19 @@ class Hub:
             # carries no sha); a sync row reports presence via its local_sha.
             return f.state is sync.FileState.LOCAL or f.local_sha is not None
 
-        # Tell a runnable marimo notebook from a plain helper module (sniffed off disk).
-        # Only meaningful for a .py that exists locally; drives the Open/AI buttons and
-        # the "module" badge, and keeps the editor from opening (and rewriting) a module.
-        notebooks = {
-            f.path
-            for f in report.files
-            if f.path.endswith(".py") and _has_local(f) and self._is_notebook(workspace, f.path)
-        }
+        # Tell a runnable marimo notebook from a plain helper module (sniffed off disk),
+        # and harvest each notebook's value-free title in the same read. Only meaningful
+        # for a .py that exists locally; drives the Open/AI buttons, the "module" badge,
+        # the catalog title/search, and keeps the editor from opening a module.
+        notebooks: set[str] = set()
+        titles: dict[str, str] = {}
+        for f in report.files:
+            if f.path.endswith(".py") and _has_local(f):
+                is_notebook, title = self._sniff_notebook(workspace, f.path)
+                if is_notebook:
+                    notebooks.add(f.path)
+                    if title:
+                        titles[f.path] = title
         files = [
             {
                 "path": f.path,
@@ -330,6 +335,7 @@ class Hub:
                 **({"shadows": shadowed[f.path]} if f.path in shadowed else {}),
                 **({"checks": check_results[f.path]} if f.path in check_results else {}),
                 **({"is_notebook": True} if f.path in notebooks else {}),
+                **({"title": titles[f.path]} if f.path in titles else {}),
                 **(
                     {"is_module": True}
                     if f.path.endswith(".py") and _has_local(f) and f.path not in notebooks
@@ -405,31 +411,37 @@ class Hub:
         self._model_summary_cache[cache_key] = (sig, summary)
         return summary
 
-    def _is_notebook(self, workspace: Path, rel: str) -> bool:
-        """Whether the local ``.py`` at ``rel`` is a marimo notebook (vs a plain helper
-        module). A blank/whitespace-only file counts as a notebook — it opens as a fresh
-        notebook, matching the open guards (so the hub never badges a blank stub a
-        'module' while /api/open would happily open it) — EXCEPT a dunder package marker
-        like ``__init__.py``, which is a module even when empty (see
-        :func:`notebook_template.opens_as_notebook`). Reads the whole file (the marimo
-        marker can sit past a large header) but caches by mtime, so the per-row sniff on
-        every /api/state doesn't re-read unchanged files. Missing/unreadable → False."""
+    def _sniff_notebook(self, workspace: Path, rel: str) -> tuple[bool, str]:
+        """``(is_notebook, title)`` for the local ``.py`` at ``rel``, from ONE mtime-cached
+        file read (this runs per row on every /api/state).
+
+        ``is_notebook``: whether it is a marimo notebook (vs a plain helper module). A
+        blank/whitespace-only file counts as a notebook — it opens as a fresh notebook,
+        matching the open guards — EXCEPT a dunder package marker like ``__init__.py``
+        (see :func:`notebook_template.opens_as_notebook`). ``title``: the notebook's own
+        first-markdown-cell heading, harvested value-free (authored text, never a data
+        value; ``""`` for a module or a title-less notebook). The whole file is read (the
+        marimo marker can sit past a large header). Missing/unreadable → ``(False, "")``."""
         path = workspace / rel
         try:
             mtime = path.stat().st_mtime_ns
         except OSError:
-            return False
+            return (False, "")
         key = str(path)
         cached = self._notebook_cache.get(key)
         if cached is not None and cached[0] == mtime:
-            return cached[1]
+            return (cached[1], cached[2])
         try:
             source = path.read_bytes().decode("utf-8", "ignore")
         except OSError:
-            return False
-        result = notebook_template.opens_as_notebook(rel, source)
-        self._notebook_cache[key] = (mtime, result)
-        return result
+            return (False, "")
+        is_notebook = notebook_template.opens_as_notebook(rel, source)
+        title = notebook_template.notebook_title(source) if is_notebook else ""
+        self._notebook_cache[key] = (mtime, is_notebook, title)
+        return (is_notebook, title)
+
+    def _is_notebook(self, workspace: Path, rel: str) -> bool:
+        return self._sniff_notebook(workspace, rel)[0]
 
     def _installed_top_level(self) -> list[str]:
         if self._top_level_pkgs is None:
