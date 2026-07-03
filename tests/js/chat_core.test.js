@@ -400,3 +400,36 @@ test("notesCellPrompt: disclaimer INSIDE the cell; mo.md only if marimo is impor
   assert.match(p, /mo\.md\(\.\.\.\) only if `import marimo as mo` already exists/);
   assert.match(p, /never add that import/);
 });
+
+// /review: a whole-notebook value-blind LOGIC review. Same value-free-constant
+// discipline as /explain — no user text, no data values; wording changes are
+// review-visible here.
+
+test("review is a command: parseSlash and filterCommands pick it up", () => {
+  assert.ok(C.COMMANDS.some((c) => c.name === "review"));
+  assert.deepEqual(C.parseSlash("/review"), { cmd: "review", arg: "" });
+  assert.ok(C.filterCommands("rev").map((c) => c.name).includes("review"));
+});
+
+test("reviewPrompt: a pure constant — identical bytes on every call", () => {
+  const p = C.reviewPrompt();
+  assert.equal(typeof p, "string");
+  assert.equal(p, C.reviewPrompt()); // no interpolation, no user text, no values
+});
+
+test("reviewPrompt: reads source + schema, cites cell N, and is read-only", () => {
+  const p = C.reviewPrompt();
+  assert.match(p, /mooring_read_notebook_source/);
+  assert.match(p, /mooring_get_schema/);
+  assert.match(p, /`cell N`/); // anchors findings to checkable cells
+  assert.match(p, /# === cell N ===/); // the exact framing the tool emits
+  // Value-blind + read-only guardrails must be present.
+  assert.match(p, /never the data values/i);
+  assert.match(p, /do NOT ask for data values/i);
+  assert.match(p, /do NOT propose code changes/i);
+});
+
+test("reviewLabel: the compact visible transcript row, also a constant", () => {
+  assert.equal(C.reviewLabel(), "/review — check this notebook's logic for risks");
+  assert.equal(C.reviewLabel(), C.reviewLabel());
+});
