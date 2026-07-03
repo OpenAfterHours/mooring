@@ -93,6 +93,62 @@ def test_is_secret_field_allows_shape_names(tmp_path):
         assert workspace_config.is_secret_field(bad) is True
 
 
+def test_is_secret_field_catches_broadened_credential_names(tmp_path):
+    # Review [4]: real credential field names that the first cut missed.
+    for bad in (
+        "account_key",
+        "AccountKey",
+        "passphrase",
+        "bearer_token",
+        "signing_key",
+        "app_key",
+        "encryption_key",
+    ):
+        assert workspace_config.is_secret_field(bad) is True, bad
+
+
+def test_set_connection_refuses_a_secret_shaped_value(tmp_path):
+    # Review [0]: a credential in an innocently-NAMED field must still be refused.
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    for value in (f"user=u;password={SECRET}", f"postgres://u:{SECRET}@host/db", "token: abc123"):
+        with pytest.raises(ValueError):
+            workspace_config.set_connection(ws, "wh", {"options": value})
+    assert workspace_config.connections(ws) == {}
+
+
+def test_set_connection_merges_rather_than_replaces(tmp_path):
+    # Review [12]: a second `add` must not drop the fields defined by the first.
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    workspace_config.set_connection(ws, "warehouse", {"kind": "snowflake", "account": "acme"})
+    workspace_config.set_connection(ws, "warehouse", {"role": "ANALYST"})
+    assert workspace_config.connections(ws)["warehouse"] == {
+        "kind": "snowflake",
+        "account": "acme",
+        "role": "ANALYST",
+    }
+
+
+def test_connection_names_are_case_insensitive(tmp_path):
+    # Review [8]: normalize lower-cases, so `add Warehouse` then mc.get("warehouse") works.
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    workspace_config.set_connection(ws, "Warehouse", {"host": "h"})
+    assert "warehouse" in workspace_config.connections(ws)
+    mc = _load_payload(ws)
+    assert mc.get("WAREHOUSE").host == "h"  # any casing resolves
+
+
+def test_secret_token_lists_match_the_runtime(tmp_path):
+    # Review [7]: the duplicated detector must not drift between the two modules.
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    mc = _load_payload(ws)
+    assert tuple(mc._SECRET_TOKENS) == tuple(workspace_config._SECRET_TOKENS)
+    assert set(mc._SECRET_EXACT) == set(workspace_config._SECRET_EXACT)
+
+
 def test_connections_hint_is_value_free(tmp_path):
     ws = tmp_path / "ws"
     ws.mkdir()
@@ -235,6 +291,24 @@ def test_build_system_context_folds_in_connections_help(tmp_path):
     assert "CONNECTIONS" not in without  # omitted unless explicitly provided
 
 
+def test_connections_help_is_scrubbed_in_the_context(tmp_path):
+    # Review [2]: connection shape values are user-authored, so a checksum-PII value in a
+    # field must be scrubbed out of the copilot context like every other value-bearing part.
+    from mooring.ai import egress
+
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    card = "5500005555555559"  # a checksum-validated payment card (a scrubbed PII kind)
+    workspace_config.set_connection(ws, "warehouse", {"host": "h", "note": card})
+    ctx = egress.build_system_context(
+        schema_text="a: int",
+        notebook_source="df = 1",
+        notebook_rel="nb.py",
+        connections_help=workspace_config.connections_hint(ws),
+    )
+    assert card not in ctx  # the whole hint line carrying the card is dropped
+
+
 # -- the CLI --------------------------------------------------------------------
 
 
@@ -292,3 +366,25 @@ def test_cli_check_clean(tmp_path, capsys):
     workspace_config.set_connection(cfg.workspace(), "warehouse", {"host": "h", "database": "d"})
     assert cli.cmd_connections(cfg, _ns(connections_command="check")) == 0
     assert "No secrets" in capsys.readouterr().out
+
+
+def test_cli_coerce_field_edges_do_not_crash(tmp_path):
+    # Review [5]: multi-dash must not raise; a leading-zero id must stay a string.
+    cfg = _cfg(tmp_path)
+    cli.cmd_connections(
+        cfg, _ns(connections_command="add", name="wh", fields=["retries=--5", "acct=007", "n=5"])
+    )
+    shape = workspace_config.connections(cfg.workspace())["wh"]
+    assert shape == {"retries": "--5", "acct": "007", "n": 5}  # only a clean int coerces
+
+
+def test_cli_add_rejects_a_high_entropy_secret_value(tmp_path):
+    # Review [0] defence in depth: the CLI's ai.secrets scan catches a token pasted as a
+    # value under an INNOCENT field name (one the name/inline-value floor wouldn't flag).
+    cfg = _cfg(tmp_path)
+    token = "ghp_" + "0123456789" * 3 + "0123456"  # a GitHub-PAT shape (40 chars)
+    with pytest.raises(SystemExit):
+        cli.cmd_connections(
+            cfg, _ns(connections_command="add", name="wh", fields=[f"endpoint={token}"])
+        )
+    assert workspace_config.connections(cfg.workspace()) == {}  # nothing written

@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import os
+import re
 import subprocess
 import sys
 from collections.abc import Mapping
@@ -1067,13 +1068,15 @@ def cmd_shadow(cfg: config.Config, args: argparse.Namespace) -> int:
 
 
 def _coerce_field(value: str):
-    """A shape field value from the CLI: ``true``/``false`` -> bool, an int-looking token
-    -> int, else the string. Keeps the synced definition typed and readable."""
-    low = value.strip().lower()
+    """A shape field value from the CLI: ``true``/``false`` -> bool, a clean integer ->
+    int, else the string. Only coerces when ``int()`` round-trips exactly, so ``--5``
+    can't crash it and a leading-zero id like ``007`` stays a string."""
+    text = value.strip()
+    low = text.lower()
     if low in ("true", "false"):
         return low == "true"
-    if value.strip().lstrip("-").isdigit():
-        return int(value.strip())
+    if re.fullmatch(r"-?\d+", text) and str(int(text)) == text:
+        return int(text)
     return value
 
 
@@ -1095,12 +1098,23 @@ def cmd_connections(cfg: config.Config, args: argparse.Namespace) -> int:
             print(f"{name}: {fields or '(no fields)'}  [{mark}]")
         return 0
     if sub == "add":
+        from mooring.ai import secrets as ai_secrets
+
         fields: dict = {}
         for item in args.fields:
             if "=" not in item:
                 sys.exit(f"Bad field {item!r} — use field=value (e.g. host=db.example.com).")
             key, value = item.split("=", 1)
             fields[key.strip()] = _coerce_field(value)
+        # Defence in depth over set_connection's own guard: the richer ai.secrets scanner
+        # (AWS/GitHub/Slack tokens, JWTs, DSNs) catches a high-entropy credential pasted as
+        # a value that the field-name/inline-value floor would miss. Value-free: names only.
+        leaky = sorted(k for k, v in fields.items() if isinstance(v, str) and ai_secrets.has_secrets(v))
+        if leaky:
+            sys.exit(
+                f"These field values look like secrets: {', '.join(leaky)}. "
+                "Store the credential locally with `mooring connections set-secret` instead."
+            )
         try:
             workspace_config.set_connection(ws, args.name, fields)
         except ValueError as exc:

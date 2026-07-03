@@ -382,9 +382,13 @@ def add_extra_folders(workspace: Path, folders: Iterable[str]) -> None:
 # into the synced definitions. Deliberately broad (a false refusal is safe — put
 # the field in the local store instead); the exact-name set catches bare fields the
 # substrings miss without tripping legit shape names (host/role/warehouse/…).
+# NOTE: kept in sync with mooring._connections_runtime (the injected kernel module can't
+# import this one); tests/test_connections.py pins that the two lists match, so broadening
+# one side without the other fails CI rather than silently disagreeing.
 _SECRET_TOKENS = (
     "password",
     "passwd",
+    "passphrase",
     "pwd",
     "secret",
     "token",
@@ -400,8 +404,14 @@ _SECRET_TOKENS = (
     "privatekey",
     "access_key",
     "accesskey",
+    "account_key",
+    "accountkey",
+    "signing",
+    "bearer",
+    "cert",
+    "key",  # substring: catches app_key / signing_key / encryption_key / accountkey
 )
-_SECRET_EXACT = {"key", "pass", "auth", "pat", "cred", "creds"}
+_SECRET_EXACT = {"pass", "auth", "pat", "cred", "creds"}
 
 
 def is_secret_field(name: str) -> bool:
@@ -412,10 +422,32 @@ def is_secret_field(name: str) -> bool:
     return norm in _SECRET_EXACT or any(tok in norm for tok in _SECRET_TOKENS)
 
 
+_SECRET_VALUE_RE = None  # compiled lazily in _value_looks_secret
+
+
+def _value_looks_secret(value) -> bool:
+    """Whether a VALUE looks like a credential even under an innocent field name — an
+    embedded ``password=…`` / ``token:…`` pair, or a DSN with inline credentials. The
+    structural floor at this L1 layer (which cannot import the richer ``ai.secrets``
+    scanner); the CLI and the push guard add ``ai.secrets`` on top."""
+    import re
+
+    global _SECRET_VALUE_RE
+    if _SECRET_VALUE_RE is None:
+        _SECRET_VALUE_RE = re.compile(
+            r"(?:password|passwd|passphrase|pwd|secret|token|api[_-]?key|access[_-]?key|"
+            r"private[_-]?key|account[_-]?key|credential|bearer)\s*[=:]"
+            r"|[a-z][a-z0-9+.\-]*://[^\s/@]+:[^\s/@]+@",
+            re.IGNORECASE,
+        )
+    return isinstance(value, str) and bool(_SECRET_VALUE_RE.search(value))
+
+
 def normalize_connection_name(name: str) -> str:
-    """A connection's identity key: a bare token (letters/digits/``_-.``), lower-cased.
-    Used as the ``[connections.<name>]`` table key and the env-var / local-secret key."""
-    return str(name).strip().strip("/").replace(" ", "_")
+    """A connection's identity key: a bare token (letters/digits/``_-.``), LOWER-CASED so
+    lookups are case-insensitive. Used as the ``[connections.<name>]`` table key and the
+    env-var / local-secret key."""
+    return str(name).strip().strip("/").replace(" ", "_").lower()
 
 
 def _scalar(value):
@@ -478,7 +510,8 @@ def set_connection(workspace: Path, name: str, fields: dict) -> None:
     key = normalize_connection_name(name)
     if not key:
         raise ValueError("A connection needs a name.")
-    bad = sorted(k for k in fields if is_secret_field(k))
+    # Refuse a secret by NAME or by VALUE — a credential must never reach the synced file.
+    bad = sorted(k for k in fields if is_secret_field(k) or _value_looks_secret(fields[k]))
     if bad:
         raise ValueError(
             "These fields look like secrets and must not be synced: "
@@ -491,7 +524,12 @@ def set_connection(workspace: Path, name: str, fields: dict) -> None:
         conns = data.get("connections")
         if not isinstance(conns, dict):
             conns = {}
-        conns[key] = clean
+        # MERGE into the existing shape (the verb is "add"/update), so a second call that
+        # sets one more field never silently drops the fields defined earlier.
+        existing = conns.get(key)
+        merged = dict(existing) if isinstance(existing, dict) else {}
+        merged.update(clean)
+        conns[key] = merged
         data["connections"] = conns
         _write_data(workspace, data)
 

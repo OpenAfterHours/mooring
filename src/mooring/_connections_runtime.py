@@ -43,9 +43,12 @@ _ENV_PREFIX = "MOORING_CONN_"
 # SYNCED definitions is dropped here too (defence in depth — mirrors
 # mooring.workspace_config.is_secret_field; the secret only ever comes from the local
 # sources below).
+# Kept in sync with mooring.workspace_config._SECRET_TOKENS/_SECRET_EXACT — a test pins
+# that the two match (this standalone kernel module can't import workspace_config).
 _SECRET_TOKENS = (
     "password",
     "passwd",
+    "passphrase",
     "pwd",
     "secret",
     "token",
@@ -61,8 +64,14 @@ _SECRET_TOKENS = (
     "privatekey",
     "access_key",
     "accesskey",
+    "account_key",
+    "accountkey",
+    "signing",
+    "bearer",
+    "cert",
+    "key",
 )
-_SECRET_EXACT = {"key", "pass", "auth", "pat", "cred", "creds"}
+_SECRET_EXACT = {"pass", "auth", "pat", "cred", "creds"}
 
 
 class Connection:
@@ -94,7 +103,7 @@ class Connection:
 
 
 def _normalize(name: str) -> str:
-    return str(name).strip().strip("/").replace(" ", "_")
+    return str(name).strip().strip("/").replace(" ", "_").lower()
 
 
 def _is_secret_field(name: str) -> bool:
