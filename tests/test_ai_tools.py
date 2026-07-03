@@ -165,6 +165,52 @@ def test_propose_cell_emits_and_does_not_inject(ws):
     assert "apply" in res.text_result_for_llm.lower()  # the agent did not inject
 
 
+def test_propose_cell_preserves_a_mo_sql_body(ws):
+    # "Speak SQL": a marimo SQL cell is just `x = mo.sql(...)` — it flows through the
+    # SAME propose path as any cell, unchanged (no SQL-specific handling, no mangling).
+    proposals = []
+    tools = _tools(ws, proposals)
+    body = 'monthly = mo.sql("""SELECT region, SUM(amount) AS total FROM sales GROUP BY region""")'
+    tools["mooring_propose_cell"].handler(_invocation(code=body))
+    assert proposals == [(body, "")]
+
+
+def test_sql_cell_guide_is_value_free_and_names_the_idiom():
+    from mooring.ai import tools
+
+    guide = tools.sql_cell_guide()
+    assert "mo.sql" in guide and "DuckDB" in guide
+    assert "mooring_propose_cell" in guide
+    # It teaches the schema-only discipline, never a data value.
+    assert "never inline a data value" in guide
+    # The two "applied cell must actually run" requirements (review findings).
+    assert "import marimo as mo" in guide
+    assert "duckdb" in guide.lower()
+    # The value-blindness caveat: a value->header pivot would smuggle data values into the
+    # column names the live-schema probe reports to the model.
+    assert "PIVOT" in guide
+    assert SECRET not in guide
+
+
+def test_build_system_context_folds_in_the_sql_help():
+    # The SQL capability reaches the model through the ONE context choke point, and only
+    # when passed (default omits it). It introduces no data value — SQL is authored code.
+    from mooring.ai import egress, tools
+
+    ctx = egress.build_system_context(
+        schema_text="amount: float",
+        notebook_source=f"{SECRET} = 1\ndf = pl.read_csv('x')",
+        notebook_rel="nb.py",
+        sql_help=tools.sql_cell_guide(),
+    )
+    assert "mo.sql" in ctx and "DuckDB" in ctx
+
+    without = egress.build_system_context(
+        schema_text="amount: float", notebook_source="df = 1", notebook_rel="nb.py"
+    )
+    assert "mo.sql" not in without  # omitted unless explicitly provided
+
+
 def test_edit_tools_added_only_with_patch_callback(ws):
     base = _tools(ws, [])
     assert all(name not in base for name in EDIT_TOOL_NAMES)  # off without the callback

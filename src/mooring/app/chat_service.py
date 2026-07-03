@@ -140,7 +140,7 @@ class ChatService:
 
         from mooring import pbip_model, schema
         from mooring.ai import context as ctxmod
-        from mooring.ai import egress, locality, ner, pii
+        from mooring.ai import egress, locality, ner, pii, tools
         from mooring.ai.datadictionary import DictionaryIndex
 
         pii_banner: list[dict] = []
@@ -251,6 +251,9 @@ class ChatService:
             # static capability note (the mooring_checks API), never a receipt or a
             # value — so it opens no new egress channel.
             checks_help=checks.copilot_guide(),
+            # Likewise, let it author marimo SQL (mo.sql / DuckDB) cells — authored code
+            # the model never sees the result of, so no new egress channel either.
+            sql_help=tools.sql_cell_guide(),
         )
         return context, (index if has_dict else DictionaryIndex()), pii_banner, live_text, models
 

@@ -157,6 +157,7 @@ def build_system_context(
     dictionary_text: str = "",
     semantic_models_text: str = "",
     checks_help: str = "",
+    sql_help: str = "",
 ) -> str:
     """Assemble the value-blind context handed to the assistant.
 
@@ -233,5 +234,10 @@ def build_system_context(
     # never reads a receipt or a data value. Carries no user data, so no scrub applies.
     if checks_help.strip():
         parts.append(checks_help.strip())
+    # A sibling value-free capability note (see mooring.ai.tools.sql_cell_guide) telling
+    # the model it can author marimo `mo.sql` (DuckDB) cells — authored code, run locally;
+    # the model never sees a result, so it carries no user data and no scrub applies.
+    if sql_help.strip():
+        parts.append(sql_help.strip())
     parts.append(f"CURRENT NOTEBOOK ({notebook_rel}) SOURCE:\n{notebook_source.strip()}")
     return "\n\n".join(parts)
