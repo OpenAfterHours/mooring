@@ -47,6 +47,7 @@ nav = [
   { "AI that never sees your data" = [
     { "What the copilot can do" = "users/ai-copilot.md" },
     { "Why it can't see your data" = "admins/ai-privacy.md" },
+    { "Threat model (for security reviewers)" = "admins/threat-model.md" },
   ] },
   { "Get started — just Python 3.12+" = [
     { "Install & sign in" = "users/index.md" },
