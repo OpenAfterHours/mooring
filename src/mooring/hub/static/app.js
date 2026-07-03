@@ -1032,6 +1032,28 @@ function verifiedBadge(v) {
   return span;
 }
 
+// A reproducibility badge from the value-free .mooring/inputs receipts a notebook wrote
+// via `import mooring_inputs`. Green when every pinned input matches the previous run,
+// amber when one changed under you (content hash / row count / schema). Counts only —
+// never a data value; local, never synced.
+function inputsBadge(inp) {
+  const span = document.createElement("span");
+  const changed = inp.changed || 0;
+  const total = inp.total || 0;
+  if (changed > 0) {
+    span.className = "badge inputs-changed";
+    span.textContent = `⚠ ${changed} input${changed === 1 ? "" : "s"} changed`;
+    span.title = `${changed} of ${total} pinned input(s) changed since the last run ` +
+      "(content, row count, or schema) — check the numbers still hold. Value-free and local.";
+  } else {
+    span.className = "badge inputs-ok";
+    span.textContent = `⛓ ${total} input${total === 1 ? "" : "s"} pinned`;
+    span.title = `${total} input(s) fingerprinted (content hash + shape + schema), unchanged ` +
+      "since the last run. Value-free and never pushed.";
+  }
+  return span;
+}
+
 function buildFileRow(file, opts) {
   opts = opts || {};
   // Inside a folder section the row shows its folder-relative path (`rel`); elsewhere
@@ -1045,6 +1067,8 @@ function buildFileRow(file, opts) {
   if (file.checks && file.checks.total) extras.push(" ", checksBadge(file.checks));
   // The trust badge from a Verify run (present only while it matches the file's SHA).
   if (file.verified) extras.push(" ", verifiedBadge(file.verified));
+  // The input-fingerprint badge: N inputs pinned, amber if one changed since last run.
+  if (file.inputs && file.inputs.total) extras.push(" ", inputsBadge(file.inputs));
   // A watched file with a teammate change waiting gets its promotion badge —
   // quiet otherwise (watching an in-sync file must not add row noise).
   if (watchedPaths.has(file.path) && PULL_STATES.has(file.state)) {

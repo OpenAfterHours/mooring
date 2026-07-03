@@ -158,6 +158,7 @@ def build_system_context(
     semantic_models_text: str = "",
     checks_help: str = "",
     sql_help: str = "",
+    inputs_help: str = "",
 ) -> str:
     """Assemble the value-blind context handed to the assistant.
 
@@ -239,5 +240,10 @@ def build_system_context(
     # the model never sees a result, so it carries no user data and no scrub applies.
     if sql_help.strip():
         parts.append(sql_help.strip())
+    # A sibling value-free capability note (see mooring.inputs.copilot_guide) telling the
+    # model it can author input fingerprints (mooring_inputs) — hash/shape/schema only,
+    # never a value, so it carries no user data and no scrub applies.
+    if inputs_help.strip():
+        parts.append(inputs_help.strip())
     parts.append(f"CURRENT NOTEBOOK ({notebook_rel}) SOURCE:\n{notebook_source.strip()}")
     return "\n\n".join(parts)

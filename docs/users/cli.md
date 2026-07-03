@@ -156,7 +156,7 @@ branch, so the changes can be reviewed as a pull request (see
   `new packages/finance/notebooks/sales`); mooring registers that folder so it
   syncs for the team. A bare name goes in `notebooks/`.
 
-### `deliver` / `verify` / `checks`
+### `deliver` / `verify` / `checks` / `inputs`
 
 - `deliver <workspace-relative-path>` — render a notebook to a self-contained
   HTML snapshot (code hidden) in the local `.mooring/outbox/` and print its path
@@ -171,6 +171,10 @@ branch, so the changes can be reviewed as a pull request (see
 - `checks` — list the tie-out / data-quality check results recorded per notebook
   by `import mooring_checks` calls (value-free: names and pass/fail counts only).
   See [Checking your numbers tie out](daily-workflow.md#checking-your-numbers-tie-out).
+- `inputs` — list the value-free input fingerprints recorded per notebook by
+  `import mooring_inputs` calls (content hash + shape + schema, never a value), and how
+  many changed since the last run. `--clear [PATH]` resets them. See
+  [Fingerprinting your inputs](daily-workflow.md#fingerprinting-your-inputs).
 
 ### `init` / `deps` — notebook dependencies
 

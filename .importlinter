@@ -176,6 +176,7 @@ source_modules =
     mooring.activity
     mooring.checks
     mooring.verify
+    mooring.inputs
     mooring.config
     mooring.config_store
     mooring.ai_config

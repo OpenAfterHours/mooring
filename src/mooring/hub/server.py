@@ -30,6 +30,7 @@ from mooring import (
     auth,
     checks,
     config,
+    inputs,
     notebook_template,
     pbip,
     pbip_model,
@@ -308,6 +309,10 @@ class Hub:
         # read_results from re-hashing every verified notebook on each poll.
         local_shas = {f.path: f.local_sha for f in report.files if f.local_sha is not None}
         verify_results = verify.read_results(workspace, local_shas)
+        # Value-free input fingerprints per notebook (.mooring/inputs/*.json), written by
+        # mooring_inputs.fingerprint calls in the kernel — content hash + shape + schema,
+        # never a value. Surfaced as a row badge: N inputs pinned, M changed since last run.
+        input_results = inputs.read_results(workspace)
         # Notebooks whose filename shadows an importable module (e.g. polars.py) —
         # surfaced as a per-row badge instead of an inscrutable kernel traceback.
         shadowed: dict[str, str] = {}
@@ -344,6 +349,7 @@ class Hub:
                 **({"shadows": shadowed[f.path]} if f.path in shadowed else {}),
                 **({"checks": check_results[f.path]} if f.path in check_results else {}),
                 **({"verified": verify_results[f.path]} if f.path in verify_results else {}),
+                **({"inputs": input_results[f.path]} if f.path in input_results else {}),
                 **({"is_notebook": True} if f.path in notebooks else {}),
                 **({"title": titles[f.path]} if f.path in titles else {}),
                 **(

@@ -156,6 +156,50 @@ its number, **Verify** it.
     [`mooring_checks`](#checking-your-numbers-tie-out) and review the logic with the
     copilot's [Review logic](ai-copilot.md#review-my-logic).
 
+## Fingerprinting your inputs
+
+*"Same inputs, same numbers?"* — the question an auditor (or you, three months later)
+asks about a report. Pin the exact data a run read with the built-in **`mooring_inputs`**
+helper, right after you load each input:
+
+```python
+import mooring_inputs as mi
+
+sales = pl.read_csv("data/sales.csv")
+mi.fingerprint(sales, "sales", path="data/sales.csv")   # hash + shape + schema
+```
+
+Each call records a **value-free** fingerprint — the file's **content hash**, its
+**shape** (row/column counts), and its **schema** (column names + types), **never a data
+value** — and compares it to the previous run. If an input changed under you (different
+content, more rows, a new column), the cell prints `[CHANGED] …` and the hub shows an
+amber **⚠ input changed** badge on the notebook's row; otherwise a green **⛓ N inputs
+pinned** badge. `mooring inputs` lists them from the terminal.
+
+Because `mi.fingerprint(...)` returns falsy when the input changed, you can even make it a
+guard:
+
+```python
+assert mi.fingerprint(sales, "sales", path="data/sales.csv"), "sales.csv moved — re-check the totals"
+```
+
+When you [**Deliver**](#delivering-a-result-for-a-stakeholder) the notebook, the fingerprint
+is stamped into the HTML's provenance footer (*"Inputs: sales (1a2b3c4, 1000×12)"*), so the
+stakeholder holds proof of exactly which data the numbers came from.
+
+!!! info "Value-free, local, and never pushed"
+
+    The fingerprint is a hash, two counts, and column names/types — never a value. The
+    receipt lives in the `.mooring` folder, which **never syncs**, and the AI never sees
+    it. (A container format like `.xlsx`/`.parquet` can re-compress to different bytes for
+    the same data, so treat the hash as a *file* fingerprint, backed up by the shape and
+    schema.)
+
+!!! tip "Let the copilot add them"
+
+    Ask the copilot to *"fingerprint the inputs"* — it reads your schema and source (never
+    your data) and proposes the `mooring_inputs` cell for you to review and apply.
+
 ## Proposing changes for review
 
 If your team prefers changes to be reviewed before they land, use **Propose**

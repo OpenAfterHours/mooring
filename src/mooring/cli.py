@@ -221,6 +221,19 @@ def _build_parser() -> argparse.ArgumentParser:
         help="clear recorded results (all, or just one notebook path) — resets a stale badge",
     )
 
+    inputs_cmd = sub.add_parser(
+        "inputs",
+        help="show the value-free input fingerprints (content hash + shape + schema) per notebook",
+    )
+    inputs_cmd.add_argument(
+        "--clear",
+        nargs="?",
+        const=True,
+        default=False,
+        metavar="PATH",
+        help="clear recorded input fingerprints (all, or just one notebook path)",
+    )
+
     delete_cmd = sub.add_parser(
         "delete",
         help="delete a notebook from the workspace (push afterwards to remove it remotely)",
@@ -1143,6 +1156,32 @@ def cmd_checks(cfg: config.Config, args: argparse.Namespace) -> int:
             print(f"{mark} {rel}: {result['failed']} of {result['total']} check(s) failing")
         else:
             print(f"{mark} {rel}: {result['total']} check(s) passing")
+    return 0
+
+
+def cmd_inputs(cfg: config.Config, args: argparse.Namespace) -> int:
+    from mooring import inputs
+
+    clear = getattr(args, "clear", False)
+    if clear is not False:
+        rel = clear if isinstance(clear, str) else None
+        removed = inputs.clear(cfg.workspace(), rel)
+        print(f"Cleared {removed} input receipt(s)." if removed else "No input receipts to clear.")
+        return 0
+    results = inputs.read_results(cfg.workspace())
+    if not results:
+        print(
+            "No input fingerprints yet. In a notebook cell: import mooring_inputs as mi; "
+            'mi.fingerprint(df, "sales", path="data/sales.csv").'
+        )
+        return 0
+    for rel in sorted(results):
+        result = results[rel]
+        mark = "ok    " if result["changed"] == 0 else "CHANGED"
+        if result["changed"]:
+            print(f"{mark} {rel}: {result['changed']} of {result['total']} input(s) changed")
+        else:
+            print(f"{mark} {rel}: {result['total']} input(s) pinned, unchanged")
     return 0
 
 
@@ -2123,6 +2162,8 @@ def _dispatch(
         return cmd_verify(cfg, args)
     if command == "checks":
         return cmd_checks(cfg, args)
+    if command == "inputs":
+        return cmd_inputs(cfg, args)
     if command == "init":
         return cmd_init(cfg)
     if command == "deps":
