@@ -234,6 +234,11 @@ const ChatCore = (function () {
       "- queries the dataframes already in scope BY THEIR VARIABLE NAME;\n" +
       "- lists the columns explicitly (no SELECT *) using the names from the schema.\n" +
       "\n" +
+      "The cell needs `import marimo as mo` in the notebook (add it if the source lacks it) " +
+      "and the `duckdb` package in the environment — if duckdb may be missing, note that it " +
+      "can be added with `mooring deps add duckdb`. Do NOT pivot or crosstab row values into " +
+      "column headers (e.g. DuckDB PIVOT); the resulting column names would be data values.\n" +
+      "\n" +
       "Choose the tables and columns from the schema and the source only — never inline a " +
       "data value or ask for one. Briefly say what the query returns. The analyst reviews " +
       "and applies it."

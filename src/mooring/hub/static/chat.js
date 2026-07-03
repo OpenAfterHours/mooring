@@ -1172,66 +1172,55 @@ async function submitMessage(message, visibleLabel) {
   }
 }
 
+// The canned-prompt commands (/explain, /review, /checks, /sql) share one shape: refuse
+// if a turn is in flight or the session is still connecting, optionally show a one-line
+// advisory, then send a FIXED, value-free prompt (chat_core.js) over the ordinary send
+// path so the PII valve and the per-notebook off-switch apply. send() can't reach
+// runCommand while busy, but the auto-run path can — hence the guard here.
+function submitFixedCommand(prompt, label, advisory) {
+  if (isBusy() || turnState === "connecting") {
+    addSysRow("Wait for the session to be ready.");
+    return;
+  }
+  if (advisory) addSysRow(advisory);
+  stick = true;
+  submitMessage(prompt, label);
+}
+
 function runCommand(cmd) {
   switch (cmd.cmd) {
     case "help":
       printHelp();
       break;
     case "explain":
-      // The handover walkthrough: send the fixed, value-free prompt (chat_core.js)
-      // through the ordinary send path — the PII valve and the per-notebook
-      // off-switch apply like any turn. The transcript shows the compact label.
-      // send() doesn't reach runCommand while busy, but the auto-run path can —
-      // so guard both a turn in flight and a still-connecting session here.
-      if (isBusy() || turnState === "connecting") {
-        addSysRow("Wait for the session to be ready.");
-        break;
-      }
-      addSysRow(
+      // The handover walkthrough: generated from the notebook source, so it carries an
+      // advisory to verify it against the notebook.
+      submitFixedCommand(
+        ChatCore.explainPrompt(),
+        ChatCore.explainLabel(),
         "The walkthrough is generated from the notebook source — verify it against " +
-        "the notebook before relying on it."
+          "the notebook before relying on it."
       );
-      stick = true;
-      submitMessage(ChatCore.explainPrompt(), ChatCore.explainLabel());
       break;
     case "checks":
-      // Propose value-free tie-out checks: the fixed prompt (chat_core.js) sent over
-      // the ordinary path, so the PII valve and per-notebook off-switch apply. The
-      // copilot proposes a mooring_checks cell; the analyst reviews and applies it.
-      if (isBusy() || turnState === "connecting") {
-        addSysRow("Wait for the session to be ready.");
-        break;
-      }
-      stick = true;
-      submitMessage(ChatCore.checksPrompt(), ChatCore.checksLabel());
+      // Propose value-free tie-out checks (a mooring_checks cell); the analyst applies it.
+      submitFixedCommand(ChatCore.checksPrompt(), ChatCore.checksLabel());
       break;
     case "sql":
-      // Propose a marimo SQL (DuckDB) cell: the fixed prompt (chat_core.js) sent over
-      // the ordinary path, so the PII valve and per-notebook off-switch apply. SQL is
-      // authored code marimo runs locally — the model never sees the result — so this
-      // opens no new data channel. The copilot proposes; the analyst reviews and applies.
-      if (isBusy() || turnState === "connecting") {
-        addSysRow("Wait for the session to be ready.");
-        break;
-      }
-      stick = true;
-      submitMessage(ChatCore.sqlPrompt(), ChatCore.sqlLabel());
+      // Propose a marimo SQL (DuckDB) cell. SQL is authored code marimo runs locally — the
+      // model never sees the result — so this opens no new data channel.
+      submitFixedCommand(ChatCore.sqlPrompt(), ChatCore.sqlLabel());
       break;
     case "review":
-      // A whole-notebook LOGIC review: the fixed, value-free prompt (chat_core.js) over
-      // the ordinary send path (PII valve + per-notebook off-switch apply). It reasons
-      // only over source + schema — never a data value — and is a REVIEW, not an answer
-      // checker: it flags structural risks, it cannot confirm a number is correct.
-      if (isBusy() || turnState === "connecting") {
-        addSysRow("Wait for the session to be ready.");
-        break;
-      }
-      addSysRow(
+      // A whole-notebook LOGIC review: it reasons only over source + schema and is a
+      // REVIEW, not an answer checker, so it carries the "flags risks, can't confirm a
+      // number" advisory.
+      submitFixedCommand(
+        ChatCore.reviewPrompt(),
+        ChatCore.reviewLabel(),
         "A logic review from the notebook's code and schema — it flags structural risks " +
-        "(it can't confirm a number is correct). Check each point against the notebook."
+          "(it can't confirm a number is correct). Check each point against the notebook."
       );
-      stick = true;
-      submitMessage(ChatCore.reviewPrompt(), ChatCore.reviewLabel());
       break;
     case "clear":
       $("messages").innerHTML = "";

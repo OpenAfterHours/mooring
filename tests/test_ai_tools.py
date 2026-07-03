@@ -183,6 +183,12 @@ def test_sql_cell_guide_is_value_free_and_names_the_idiom():
     assert "mooring_propose_cell" in guide
     # It teaches the schema-only discipline, never a data value.
     assert "never inline a data value" in guide
+    # The two "applied cell must actually run" requirements (review findings).
+    assert "import marimo as mo" in guide
+    assert "duckdb" in guide.lower()
+    # The value-blindness caveat: a value->header pivot would smuggle data values into the
+    # column names the live-schema probe reports to the model.
+    assert "PIVOT" in guide
     assert SECRET not in guide
 
 

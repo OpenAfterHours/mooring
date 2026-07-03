@@ -159,10 +159,13 @@ It writes the marimo idiom for you — `result = mo.sql("""SELECT …""")` — a
   than `SELECT *`;
 - assigns the result to a named dataframe, so later cells can build on it.
 
-You **Apply** it like any other proposed cell, and marimo renders it as a SQL cell (with
-DuckDB bundled, nothing to install). Like everything else in the chat it's schema-only:
-SQL is authored code that marimo runs **locally** — the copilot writes the query from
-your column names, never your data, and never sees the query's results.
+You **Apply** it like any other proposed cell and marimo renders it as a SQL cell. SQL
+cells run on **DuckDB**, so your repo's environment needs the `duckdb` package — add it
+once with `mooring deps add duckdb` (or ask an admin to include it in a frozen build) if
+it isn't already there, and make sure a cell does `import marimo as mo`. Like everything
+else in the chat it's schema-only: SQL is authored code that marimo runs **locally** —
+the copilot writes the query from your column names, never your data, and never sees the
+query's results.
 
 ## Turn on the PII guard
 

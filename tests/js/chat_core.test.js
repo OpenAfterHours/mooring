@@ -412,6 +412,11 @@ test("sqlPrompt: a pure constant that names the value-free mo.sql/DuckDB idiom",
   assert.match(p, /mooring_propose_cell/);
   assert.match(p, /no SELECT \*/);
   assert.match(p, /never inline a /);
+  // The applied cell must actually run: the import + the duckdb dependency (review).
+  assert.match(p, /import marimo as mo/);
+  assert.match(p, /duckdb/);
+  // Value-blindness caveat: no value->header pivots (their column names would be values).
+  assert.match(p, /PIVOT/);
 });
 
 test("sqlLabel: the compact visible transcript row, also a constant", () => {

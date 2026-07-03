@@ -59,15 +59,24 @@ def sql_cell_guide() -> str:
 
     A marimo SQL cell is just a normal Python cell whose body is
     ``name = mo.sql(...)`` — marimo detects the SQL and runs it with DuckDB — so it
-    round-trips through the same value-free codegen as any proposed cell (no new path)."""
+    round-trips through the same value-free codegen as any proposed cell (no new path).
+
+    The no-PIVOT caveat is a value-blindness rule, not a style one: a pivot/crosstab
+    names the output columns after the row VALUES it pivots on, and the live-kernel schema
+    probe reports column NAMES back to the model — so a value→header pivot would smuggle
+    data values into the schema the model sees. The value-blind contract holds only if the
+    copilot never generates one."""
     return (
-        "SQL CELLS (value-free): you can propose a marimo SQL cell that runs on DuckDB via "
-        '`result = mo.sql("""<query>""")` (`mo` is already imported; marimo detects the SQL). '
-        "Query any dataframe already in scope BY ITS VARIABLE NAME and refer to columns by the "
-        "names in the schema — never inline a data value, and prefer an explicit column list "
-        "over SELECT *. Assign the result to a well-named dataframe variable so later cells can "
-        "use it. Use this when the analyst asks for SQL or to translate a query, and propose it "
-        "with mooring_propose_cell like any other cell (the BODY only)."
+        "SQL CELLS (value-free): propose a marimo SQL cell that runs on DuckDB via "
+        '`result = mo.sql("""<query>""")` (marimo detects the SQL). It requires '
+        "`import marimo as mo` in the notebook — add it if the source you see lacks it — and "
+        "the `duckdb` package in the notebook's environment; if duckdb may be missing, say so "
+        "(the analyst can add it with `mooring deps add duckdb`). Query any dataframe already "
+        "in scope BY ITS VARIABLE NAME and refer to columns by the names in the schema — never "
+        "inline a data value, and prefer an explicit column list over SELECT *. Do NOT pivot or "
+        "crosstab row VALUES into column headers (e.g. DuckDB PIVOT): the resulting column names "
+        "would BE data values. Assign the result to a well-named dataframe variable so later "
+        "cells can use it, and propose it with mooring_propose_cell (the BODY only)."
     )
 
 # Added only when the workspace has a parsed data dictionary. Each is value-free:
