@@ -49,6 +49,9 @@ class Config:
     warn_file_mb: int = 10
     max_file_mb: int = 45
     warn_shadowed_notebooks: bool = True
+    # Whether Propose OPENS the pull request for you (else it just links to the compare
+    # page — the pre-Slice-2 behaviour). Per-machine ([review] open_pr).
+    open_pr: bool = True
     workspace_path: str = ""
     # Local trash retention (the pre-image safety net; see mooring.trash).
     trash_keep_days: int = 14
@@ -94,6 +97,7 @@ class AppConfig:
     warn_file_mb: int = 10
     max_file_mb: int = 45
     warn_shadowed_notebooks: bool = True
+    open_pr: bool = True  # Propose opens the PR for you (see Config.open_pr).
     # Local trash retention (the pre-image safety net; see mooring.trash).
     trash_keep_days: int = 14
     trash_keep_per_file: int = 10
@@ -153,6 +157,7 @@ class AppConfig:
                     warn_file_mb=self.warn_file_mb,
                     max_file_mb=self.max_file_mb,
                     warn_shadowed_notebooks=self.warn_shadowed_notebooks,
+                    open_pr=self.open_pr,
                     trash_keep_days=self.trash_keep_days,
                     trash_keep_per_file=self.trash_keep_per_file,
                     trash_max_file_mb=self.trash_max_file_mb,
@@ -171,6 +176,7 @@ class AppConfig:
             warn_file_mb=self.warn_file_mb,
             max_file_mb=self.max_file_mb,
             warn_shadowed_notebooks=self.warn_shadowed_notebooks,
+            open_pr=self.open_pr,
             workspace_path=s.workspace_path,
             trash_keep_days=self.trash_keep_days,
             trash_keep_per_file=self.trash_keep_per_file,
@@ -388,6 +394,7 @@ def load_app_config(
     ui = data.get("ui", {})
     ai = data.get("ai", {})
     trash = data.get("trash", {})
+    review = data.get("review", {})
 
     specs, active = repo_specs_from_data(data)
     if env.get("MOORING_ACTIVE_REPO") in {s.alias for s in specs}:
@@ -435,6 +442,7 @@ def load_app_config(
         warn_file_mb=int(sync.get("warn_file_mb", 10)),
         max_file_mb=int(sync.get("max_file_mb", 45)),
         warn_shadowed_notebooks=_as_bool(sync.get("warn_shadowed_notebooks"), True),
+        open_pr=_as_bool(review.get("open_pr"), True),
         trash_keep_days=int(trash.get("keep_days", 14)),
         trash_keep_per_file=int(trash.get("keep_per_file", 10)),
         trash_max_file_mb=int(trash.get("max_file_mb", 45)),

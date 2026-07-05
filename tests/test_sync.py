@@ -556,7 +556,11 @@ def test_propose_happy_path(cfg):
     assert result.proposed == 1
     assert result.review_branch == BRANCH1
     assert result.compare_url == (f"https://github.com/acme/nbs/compare/main...{BRANCH1}?expand=1")
-    assert any(result.compare_url in line for line in result.lines)
+    # Slice 2: Propose opens the PR (open_pr defaults True), so the proposal lands in a
+    # teammate's Reviews inbox without touching GitHub.
+    assert result.pull_number == 1 and result.pull_url == "https://github.com/acme/nbs/pull/1"
+    assert client.pulls[BRANCH1]["base"]["ref"] == "main"
+    assert any("opened pull request #1" in line for line in result.lines)
     # main untouched, review branch carries the edit
     assert client.blobs[client.tree["notebooks/a.py"]] == b"v1\n"
     assert client.blobs[client.trees[BRANCH1]["notebooks/a.py"]] == b"v2\n"
@@ -569,6 +573,50 @@ def test_propose_happy_path(cfg):
     assert [f.state for f in report.files] == [FileState.IN_REVIEW]
     assert report.review_branch == BRANCH1
     assert "1 in review" in report.summary()
+
+
+def test_repeat_propose_reuses_the_open_pull(cfg):
+    # A second propose to the same review branch must NOT open a second PR.
+    client = FakeClient({"notebooks/a.py": b"v1\n"})
+    sync.pull(client, cfg)
+    write_local(cfg, "notebooks/a.py", "v2\n")
+    r1 = sync.propose(client, cfg, sleep=lambda s: None, now=NOW1)
+    write_local(cfg, "notebooks/a.py", "v3\n")
+    r2 = sync.propose(client, cfg, sleep=lambda s: None, now=NOW2)
+    assert r1.pull_number == r2.pull_number == 1  # the same PR
+    assert list(client.pulls) == [BRANCH1]  # exactly one PR opened
+
+
+def test_propose_open_pr_off_only_links(cfg):
+    import dataclasses
+
+    off = dataclasses.replace(cfg, open_pr=False)
+    client = FakeClient({"notebooks/a.py": b"v1\n"})
+    sync.pull(client, off)
+    write_local(off, "notebooks/a.py", "v2\n")
+    result = sync.propose(client, off, sleep=lambda s: None, now=NOW1)
+    assert result.pull_number == 0 and result.pull_url == ""
+    assert client.pulls == {}  # no PR opened
+    assert any(result.compare_url in line for line in result.lines)  # the compare link
+
+
+def test_propose_pr_open_failure_is_best_effort(cfg):
+    # Opening the PR can fail (permissions / PR API off) — the propose must still
+    # succeed with the branch pushed, falling back to the compare link.
+    from mooring.github import GitHubError
+
+    client = FakeClient({"notebooks/a.py": b"v1\n"})
+
+    def _boom(**kwargs):
+        raise GitHubError("no pull-request permission")
+
+    client.create_pull = _boom
+    sync.pull(client, cfg)
+    write_local(cfg, "notebooks/a.py", "v2\n")
+    result = sync.propose(client, cfg, sleep=lambda s: None, now=NOW1)
+    assert result.proposed == 1  # the propose itself succeeded
+    assert result.pull_number == 0 and result.pull_url == ""
+    assert any(result.compare_url in line for line in result.lines)  # fell back to the link
 
 
 def test_propose_compare_url_uses_enterprise_host(cfg):

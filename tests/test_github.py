@@ -487,3 +487,41 @@ def test_history_reads_surface_auth_and_rate_errors():
     )
     with pytest.raises(RateLimited):
         client().list_commits_for_path("a.py", "main")
+
+
+@responses.activate
+def test_create_pull_opens_a_new_pr():
+    responses.add(
+        responses.POST,
+        f"{REPO}/pulls",
+        json={"number": 12, "html_url": "https://github.com/acme/nbs/pull/12"},
+        status=201,
+    )
+    pr = client().create_pull(title="Propose x", head="mooring/phil/x", base="main")
+    assert pr["number"] == 12
+    body = responses.calls[0].request.body
+    assert b'"head": "mooring/phil/x"' in body and b'"base": "main"' in body
+
+
+@responses.activate
+def test_create_pull_returns_the_existing_pr_when_one_is_open():
+    # A repeated propose to the same branch: POST 422, then find the open PR.
+    responses.add(
+        responses.POST,
+        f"{REPO}/pulls",
+        json={"message": "A pull request already exists for acme:mooring/phil/x."},
+        status=422,
+    )
+    responses.add(
+        responses.GET,
+        f"{REPO}/pulls",
+        json=[{"number": 7, "html_url": "https://github.com/acme/nbs/pull/7"}],
+    )
+    pr = client().create_pull(title="t", head="mooring/phil/x", base="main")
+    assert pr["number"] == 7  # the already-open PR, not a failure
+
+
+@responses.activate
+def test_find_open_pull_none_when_no_match():
+    responses.add(responses.GET, f"{REPO}/pulls", json=[])
+    assert client().find_open_pull("mooring/phil/x") is None

@@ -137,8 +137,10 @@ branch, so the changes can be reviewed as a pull request (see
 - `propose` with no paths proposes **all** changed files;
   `propose notebooks/a.py` proposes only that path. `-m` sets the commit
   message, as with `push`.
-- The output ends with a `.../compare/...` link on your GitHub host — open it
-  to create the pull request. Mooring never creates the PR itself.
+- Mooring **opens the pull request** for you and prints its link, so the
+  proposal appears in teammates' Reviews inbox in the hub. Set
+  `[review] open_pr = false` in your config to only get the `.../compare/...`
+  link and open the PR on GitHub yourself.
 - Repeating `propose` while the pull request is open updates the same branch;
   once it merges (or its branch is deleted), the next `propose` starts a
   fresh one.

@@ -28,6 +28,7 @@ from mooring import gitsha, manifest as manifest_mod, trash
 from mooring.config import Config
 from mooring.github import (
     GitHubClientProtocol,
+    GitHubError,
     NotFound,
     RefAlreadyExists,
     RemoteConflict,
@@ -250,6 +251,10 @@ class SyncResult:
     reverted: int = 0
     review_branch: str = ""
     compare_url: str = ""
+    # The pull request Propose opened (or found already open) for the review branch —
+    # 0/"" when no PR was opened (auto-open off, or a best-effort failure).
+    pull_number: int = 0
+    pull_url: str = ""
     skipped_conflicts: list[str] = field(default_factory=list)
     blocked_conflicts: list[str] = field(default_factory=list)
     # (rel_path, trash token) for every local pre-image this operation banked
@@ -1367,9 +1372,36 @@ def propose(
         result.compare_url = compare_url(
             cfg.owner, cfg.repo, cfg.branch, branch_name, host=cfg.host
         )
-        result.lines.append(f"open a pull request: {result.compare_url}")
+        # Slice 2: open (or find) the PR so the proposal lands in a teammate's Reviews
+        # inbox without the author touching GitHub. Best-effort and opt-out-able — a
+        # failure (or open_pr off) leaves the branch pushed and the compare link as the
+        # fallback, so a propose is never failed by the PR step.
+        pull = _ensure_pull(client, cfg, branch_name, message) if cfg.open_pr else None
+        if pull:
+            result.pull_number = int(pull.get("number", 0) or 0)
+            result.pull_url = str(pull.get("html_url", ""))
+            result.lines.append(f"opened pull request #{result.pull_number}: {result.pull_url}")
+        else:
+            result.lines.append(f"open a pull request: {result.compare_url}")
     manifest_mod.save(workspace, mft)
     return result
+
+
+def _ensure_pull(client, cfg: Config, branch: str, message: str | None) -> dict | None:
+    """Open (or find already-open) the PR for ``branch`` -> ``cfg.branch``. Best-effort:
+    returns the PR dict, or ``None`` when the PR API can't be used (offline, disabled,
+    permissions) — so a propose is never failed by the PR step."""
+    title = (message or "").strip().splitlines()[0] if (message or "").strip() else ""
+    title = (title or f"mooring: {branch}")[:250]
+    try:
+        return client.create_pull(
+            title=title,
+            head=branch,
+            base=cfg.branch,
+            body="Proposed via mooring — review the cell-aware diff in the hub's Reviews inbox.",
+        )
+    except (GitHubError, OSError):
+        return None
 
 
 def resolve(

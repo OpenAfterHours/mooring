@@ -454,6 +454,18 @@ EDITABLE: tuple[SettingSpec, ...] = (
         help="Hard limit: refuse to push a file larger than this. Raising it too far "
         "risks GitHub’s size limits.",
     ),
+    SettingSpec(
+        key="review.open_pr",
+        accessor="open_pr",
+        label="Open the pull request on Propose",
+        group="sync",
+        type="bool",
+        control="toggle",
+        default=True,
+        help="When you Propose, mooring opens the pull request for you (it appears in "
+        "teammates' Reviews inbox). Turn off to only get the compare link, and open the "
+        "PR on GitHub yourself.",
+    ),
 )
 
 
