@@ -23,6 +23,15 @@ def _configured(hub) -> bool:
     return cfg.is_configured and bool(auth.get_token(host=cfg.host))
 
 
+def _whoami(hub) -> str | None:
+    """The logged-in login, or ``None`` when it can't be determined (a transient /user
+    failure). ``None`` means "can't safely say what's yours" — the caller fails closed."""
+    try:
+        return hub.username()
+    except (GitHubError, OSError):
+        return None
+
+
 async def api_reviews(request: Request) -> JSONResponse:
     """Open proposals awaiting review — mooring review branches, never your own."""
     hub = request.app.state.hub
@@ -30,10 +39,11 @@ async def api_reviews(request: Request) -> JSONResponse:
         return JSONResponse({"reviews": []})
 
     def _run() -> dict:
-        try:
-            me = hub.username()
-        except (GitHubError, OSError):
-            me = ""  # can't identify you -> can't exclude your own, but still list
+        me = _whoami(hub)
+        if me is None:
+            # Can't identify you -> can't exclude your own proposals -> don't risk
+            # listing them (approving your own is a GitHub-422 dead end). Fail closed.
+            return {"reviews": []}
         items = reviews.list_reviews(hub.client(), me)
         return {"reviews": [dataclasses.asdict(r) for r in items]}
 
@@ -51,16 +61,17 @@ async def api_review_detail(request: Request) -> JSONResponse:
     """The cell-aware diff of one proposal (PR ``number``)."""
     hub = request.app.state.hub
     data = await request.json()
-    try:
-        number = int(data.get("number", 0))
-    except (TypeError, ValueError):
-        number = 0
+    number = _pull_number(data)
     if number <= 0:
         return JSONResponse({"error": "No pull request given."}, status_code=400)
     if not _configured(hub):
         return JSONResponse({"error": "Log in to review changes."}, status_code=400)
     try:
-        body = await asyncio.to_thread(reviews.review_detail, hub.client(), number)
+        body = await asyncio.to_thread(
+            reviews.review_detail, hub.client(), number, _whoami(hub) or ""
+        )
+    except reviews.NotReviewable as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
     except (GitHubError, OSError) as exc:
         telemetry.log_error(exc=type(exc)("review detail failed"), op="reviews")
         return JSONResponse({"error": str(exc)}, status_code=502)
@@ -71,17 +82,18 @@ async def api_review_submit(request: Request) -> JSONResponse:
     """Approve or request changes on PR ``number`` with a whole-change note."""
     hub = request.app.state.hub
     data = await request.json()
-    try:
-        number = int(data.get("number", 0))
-    except (TypeError, ValueError):
-        number = 0
+    number = _pull_number(data)
     event = str(data.get("event", ""))
     note = str(data.get("body", ""))
     if number <= 0:
         return JSONResponse({"error": "No pull request given."}, status_code=400)
+    if not _configured(hub):
+        return JSONResponse({"error": "Log in to review changes."}, status_code=400)
     try:
-        await asyncio.to_thread(reviews.submit, hub.client(), number, event, note)
-    except ValueError as exc:  # bad event / missing required note
+        await asyncio.to_thread(
+            reviews.submit, hub.client(), number, event, note, _whoami(hub) or ""
+        )
+    except ValueError as exc:  # bad event / missing note / NotReviewable
         return JSONResponse({"error": str(exc)}, status_code=400)
     except (GitHubError, OSError) as exc:
         telemetry.log_error(exc=type(exc)("review submit failed"), op="reviews")
@@ -89,3 +101,10 @@ async def api_review_submit(request: Request) -> JSONResponse:
     telemetry.log_event("review", action=event.lower())  # value-free: the action only
     verb = "approved" if event.upper() == "APPROVE" else "requested changes on"
     return JSONResponse({"ok": True, "lines": [f"You {verb} #{number}."]})
+
+
+def _pull_number(data: dict) -> int:
+    try:
+        return int(data.get("number", 0))
+    except (TypeError, ValueError):
+        return 0

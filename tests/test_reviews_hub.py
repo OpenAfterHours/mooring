@@ -49,14 +49,33 @@ def test_api_reviews_lists_proposals(tmp_path, monkeypatch):
     assert row["number"] == 7 and row["author"] == "alice" and row["title"] == "recon fix"
 
 
+def test_api_reviews_empty_when_login_unknown(tmp_path, monkeypatch):
+    # If we can't identify you (a transient /user failure), fail closed — don't risk
+    # listing your OWN proposals (which you can't approve anyway).
+    from mooring.github import Unreachable
+
+    hub, ws = _hub(tmp_path, monkeypatch)
+    monkeypatch.setattr(auth, "get_token", lambda host=None: "tok")
+    def _boom():
+        raise Unreachable("offline")
+    monkeypatch.setattr(hub, "username", _boom)
+    called = []
+    monkeypatch.setattr(rv, "list_reviews", lambda client, me: called.append(me) or [])
+    with TestClient(create_app(hub)) as client:
+        resp = client.get("/api/reviews")
+    assert resp.status_code == 200 and resp.json() == {"reviews": []}
+    assert called == []  # list_reviews never ran without a known login
+
+
 def test_api_review_detail(tmp_path, monkeypatch):
     hub, ws = _hub(tmp_path, monkeypatch)
     monkeypatch.setattr(auth, "get_token", lambda host=None: "tok")
+    monkeypatch.setattr(hub, "username", lambda: "me")
     monkeypatch.setattr(
         rv,
         "review_detail",
-        lambda client, number: {"number": number, "title": "t", "author": "alice", "url": "u",
-                                "files": [{"path": "nb.py", "status": "modified", "diff": {"kind": "cells", "cells": []}}]},
+        lambda client, number, me="": {"number": number, "title": "t", "author": "alice", "url": "u",
+                                       "files": [{"path": "nb.py", "status": "modified", "diff": {"kind": "cells", "cells": []}}]},
     )
     with TestClient(create_app(hub)) as client:
         resp = client.post("/api/reviews/detail", json={"number": 7})
@@ -74,8 +93,9 @@ def test_api_review_detail_rejects_no_number(tmp_path, monkeypatch):
 def test_api_review_submit_approve(tmp_path, monkeypatch):
     hub, ws = _hub(tmp_path, monkeypatch)
     monkeypatch.setattr(auth, "get_token", lambda host=None: "tok")
+    monkeypatch.setattr(hub, "username", lambda: "me")
     calls = []
-    monkeypatch.setattr(rv, "submit", lambda client, number, event, body: calls.append((number, event, body)))
+    monkeypatch.setattr(rv, "submit", lambda client, number, event, body, me="": calls.append((number, event, body)))
     with TestClient(create_app(hub)) as client:
         resp = client.post("/api/reviews/submit", json={"number": 5, "event": "APPROVE", "body": ""})
     assert resp.status_code == 200
@@ -89,6 +109,7 @@ def test_api_review_submit_missing_note_is_400(tmp_path, monkeypatch):
     # before any GitHub call. A token is set so hub.client() constructs without network.
     hub, ws = _hub(tmp_path, monkeypatch)
     monkeypatch.setattr(auth, "get_token", lambda host=None: "tok")
+    monkeypatch.setattr(hub, "username", lambda: "me")  # keep the login lookup offline
     with TestClient(create_app(hub)) as client:
         resp = client.post("/api/reviews/submit", json={"number": 5, "event": "REQUEST_CHANGES", "body": ""})
     assert resp.status_code == 400

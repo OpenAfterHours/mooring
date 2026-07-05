@@ -386,18 +386,30 @@ class GitHubClient:
 
     # -- pull requests (the reviewer inbox) ----------------------------------
 
-    def list_open_pulls(self) -> list[dict]:
-        """Open pull requests, most-recently-updated first (one page, capped at 100 —
-        plenty for a review inbox). Returns the raw PR dicts. All PR operations fall
-        under the ``repo`` scope this client already holds."""
-        data = self._check(
-            self._send(
-                "GET",
-                self._repo_url("pulls?state=open&per_page=100&sort=updated&direction=desc"),
-                timeout=30,
+    def _get_all(self, tail: str, cap_pages: int = 30) -> list[dict]:
+        """GET a list endpoint, following ``?page=N`` until a short (final) page or the
+        cap — so a review is never computed from a silently truncated first page. ``tail``
+        already carries ``per_page=100`` + any other query. All PR operations fall under
+        the ``repo`` scope this client already holds."""
+        out: list[dict] = []
+        page = 1
+        sep = "&" if "?" in tail else "?"
+        while page <= cap_pages:
+            data = self._check(
+                self._send("GET", self._repo_url(f"{tail}{sep}page={page}"), timeout=30)
             )
-        )
-        return data if isinstance(data, list) else []
+            if not isinstance(data, list) or not data:
+                break
+            out.extend(data)
+            if len(data) < 100:  # a short page is the last page
+                break
+            page += 1
+        return out
+
+    def list_open_pulls(self) -> list[dict]:
+        """Open pull requests, most-recently-updated first (all pages). Returns the raw
+        PR dicts."""
+        return self._get_all("pulls?state=open&per_page=100&sort=updated&direction=desc")
 
     def get_pull(self, number: int) -> dict:
         """One pull request — carries ``base``/``head`` with their immutable ``sha``,
@@ -405,12 +417,10 @@ class GitHubClient:
         return self._check(self._send("GET", self._repo_url(f"pulls/{number}"), timeout=30))
 
     def list_pull_files(self, number: int) -> list[dict]:
-        """The files changed in PR ``number`` — each ``{filename, status, patch?, …}``
-        (``patch`` is GitHub's unified diff, absent for binary/oversized files)."""
-        data = self._check(
-            self._send("GET", self._repo_url(f"pulls/{number}/files?per_page=100"), timeout=30)
-        )
-        return data if isinstance(data, list) else []
+        """Every file changed in PR ``number`` (all pages) — each ``{filename, status,
+        previous_filename?, patch?, …}`` (``patch`` is GitHub's unified diff, absent for
+        binary/oversized files)."""
+        return self._get_all(f"pulls/{number}/files?per_page=100")
 
     def submit_review(self, number: int, event: str, body: str = "") -> dict:
         """Submit a review on PR ``number``: ``event`` is ``APPROVE`` /
