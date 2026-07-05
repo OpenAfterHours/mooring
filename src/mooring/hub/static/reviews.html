@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>mooring · Reviews</title>
+  <!-- Apply the theme before first paint (mirrors the hub): last-used theme, else
+       the server's inlined default. -->
+  <script>
+    try {
+      document.documentElement.dataset.theme =
+        localStorage.getItem("mooring.ui.theme") || "__MOORING_DEFAULT_THEME__";
+    } catch {
+      // localStorage may be unavailable (private mode); the CSS default applies.
+    }
+  </script>
+  <link rel="stylesheet" href="/static/style.css">
+  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+</head>
+<body class="settings-body">
+  <header>
+    <h1><svg class="brand-mark" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 6v16M19 13l2-1a9 9 0 0 1-18 0l2 1M9 11h6"/><circle cx="12" cy="4" r="2"/></svg>Reviews</h1>
+    <a class="header-link" href="/" title="Back to the hub">&#8592; Back to hub</a>
+  </header>
+
+  <main>
+    <p class="muted">
+      Approve a teammate's proposed changes without leaving mooring. These are the open
+      <b>Propose</b> requests on review branches — <b>not your own</b> (GitHub won't let you
+      approve your own). The diff is cell-aware and value-free; Approve / Request changes
+      posts a review on GitHub.
+    </p>
+    <div id="error-banner" class="hidden"></div>
+
+    <section class="card">
+      <div class="toolbar">
+        <h2 style="margin:0">Awaiting your review</h2>
+        <button id="reviews-refresh" class="small">&#8635; Refresh</button>
+      </div>
+      <ul id="reviews-list" class="activity-list"></ul>
+      <div id="reviews-empty" class="muted hidden">No proposals are waiting for your review.</div>
+    </section>
+
+    <section id="review-detail" class="card hidden">
+      <div class="toolbar">
+        <h2 id="detail-title" style="margin:0">Review</h2>
+        <a id="detail-gh" class="header-link" href="#" target="_blank" rel="noopener noreferrer">View on GitHub &#8599;</a>
+      </div>
+      <div id="detail-author" class="muted"></div>
+      <div id="detail-files"></div>
+      <label for="review-note-text" class="muted" style="display:block;margin-top:0.75rem">
+        Note <span id="note-required" class="hidden">(required to request changes)</span>
+      </label>
+      <textarea id="review-note-text" rows="3" placeholder="One note for the whole change…"></textarea>
+      <div class="toolbar">
+        <button id="btn-approve" class="small">&#10003; Approve</button>
+        <button id="btn-request" class="small">&#9998; Request changes</button>
+      </div>
+    </section>
+  </main>
+
+  <!-- Pure diff helpers first (bare global), then the page script. -->
+  <script src="/static/diff_fmt.js"></script>
+  <script src="/static/reviews.js"></script>
+</body>
+</html>

@@ -130,6 +130,14 @@ class GitHubClientProtocol(Protocol):
 
     def delete_file(self, path: str, message: str, branch: str, base_sha: str) -> dict: ...
 
+    def list_open_pulls(self) -> list[dict]: ...
+
+    def get_pull(self, number: int) -> dict: ...
+
+    def list_pull_files(self, number: int) -> list[dict]: ...
+
+    def submit_review(self, number: int, event: str, body: str = "") -> dict: ...
+
 
 class GitHubClient:
     def __init__(
@@ -374,4 +382,43 @@ class GitHubClient:
         body = {"message": message, "sha": base_sha, "branch": branch}
         return self._check(
             self._send("DELETE", self._repo_url(f"contents/{path}"), json=body, timeout=60)
+        )
+
+    # -- pull requests (the reviewer inbox) ----------------------------------
+
+    def list_open_pulls(self) -> list[dict]:
+        """Open pull requests, most-recently-updated first (one page, capped at 100 —
+        plenty for a review inbox). Returns the raw PR dicts. All PR operations fall
+        under the ``repo`` scope this client already holds."""
+        data = self._check(
+            self._send(
+                "GET",
+                self._repo_url("pulls?state=open&per_page=100&sort=updated&direction=desc"),
+                timeout=30,
+            )
+        )
+        return data if isinstance(data, list) else []
+
+    def get_pull(self, number: int) -> dict:
+        """One pull request — carries ``base``/``head`` with their immutable ``sha``,
+        so a review diffs the exact snapshot the PR proposes."""
+        return self._check(self._send("GET", self._repo_url(f"pulls/{number}"), timeout=30))
+
+    def list_pull_files(self, number: int) -> list[dict]:
+        """The files changed in PR ``number`` — each ``{filename, status, patch?, …}``
+        (``patch`` is GitHub's unified diff, absent for binary/oversized files)."""
+        data = self._check(
+            self._send("GET", self._repo_url(f"pulls/{number}/files?per_page=100"), timeout=30)
+        )
+        return data if isinstance(data, list) else []
+
+    def submit_review(self, number: int, event: str, body: str = "") -> dict:
+        """Submit a review on PR ``number``: ``event`` is ``APPROVE`` /
+        ``REQUEST_CHANGES`` / ``COMMENT`` (GitHub requires a ``body`` for the latter
+        two). GitHub rejects approving your OWN PR with a 422 (surfaced as GitHubError)."""
+        payload: dict = {"event": event}
+        if body.strip():
+            payload["body"] = body
+        return self._check(
+            self._send("POST", self._repo_url(f"pulls/{number}/reviews"), json=payload, timeout=30)
         )

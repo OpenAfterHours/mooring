@@ -64,6 +64,11 @@ EXPECTED_ROUTES = {
     ("/api/trash", ("GET",), "api_trash"),
     ("/api/trash/restore", ("POST",), "api_trash_restore"),
     ("/api/activity", ("GET",), "api_activity"),
+    # The reviewer inbox: four-eyes in the hub (roadmap: reviewer-inbox).
+    ("/reviews", ("GET",), "reviews_page"),
+    ("/api/reviews", ("GET",), "api_reviews"),
+    ("/api/reviews/detail", ("POST",), "api_review_detail"),
+    ("/api/reviews/submit", ("POST",), "api_review_submit"),
     ("/ai/chat", ("GET",), "chat_page"),
     ("/api/ai/datasets", ("GET",), "api_chat_datasets"),
     ("/api/ai/models", ("GET",), "api_chat_models"),
