@@ -48,3 +48,8 @@ def settings_page(request: Request) -> HTMLResponse:
 def activity_page(request: Request) -> HTMLResponse:
     """The Activity page (the local ledger + the Trash panel), themed like the rest."""
     return _themed(request.app.state.hub, "activity.html")
+
+
+def reviews_page(request: Request) -> HTMLResponse:
+    """The Reviews inbox (approve a teammate's proposal in the hub), themed like the rest."""
+    return _themed(request.app.state.hub, "reviews.html")
