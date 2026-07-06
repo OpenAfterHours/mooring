@@ -278,6 +278,27 @@ instead of Push:
     (GitHub offers this right after merging), and the reviewer's version
     arrives with your next pull.
 
+## Reviewing a teammate's changes
+
+When someone on your team **Proposes** a change, you can approve it **without leaving
+mooring** — no GitHub UI, no git. Open **Reviews** in the header:
+
+1. The inbox lists open proposals awaiting review — everyone's except your own (GitHub
+   won't let you approve your own change, which is the point of four-eyes).
+2. Click one to see a **cell-aware diff**: for a marimo notebook, exactly which *cells*
+   changed, were added, or removed — the same value-free view as **Review changes**, so
+   no data ever leaves the machine.
+3. Leave one **note** for the whole change and click **Approve** or **Request changes**
+   (a note is required to request changes). mooring posts it as a review on the pull
+   request; the author sees it on GitHub and, once approved, can merge.
+
+!!! info "You review the PR that exists"
+
+    The inbox shows proposals that already have a pull request open (the author created it
+    from their Propose link). It reviews only mooring's own review branches
+    (`mooring/<name>/…`), never unrelated PRs. Approving or requesting changes uses the
+    same GitHub sign-in you already have — no extra permission to grant.
+
 ## Reverting a file
 
 Changed a notebook and want to throw those edits away? **Revert** restores it to

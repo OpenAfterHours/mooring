@@ -953,7 +953,7 @@ def create_app(hub: Hub) -> Starlette:
     # constants) never form an import cycle: by the time create_app runs, this
     # module is fully initialized.
     from mooring.hub import pages
-    from mooring.hub.routes import batch, chat, files, settings, setup
+    from mooring.hub.routes import batch, chat, files, reviews, settings, setup
     from mooring.hub.routes import sync as sync_routes
 
     app = Starlette(
@@ -996,6 +996,10 @@ def create_app(hub: Hub) -> Starlette:
             Route("/api/restore", files.api_restore, methods=["POST"]),
             Route("/api/diff", files.api_diff, methods=["POST"]),
             Route("/activity", pages.activity_page),
+            Route("/reviews", pages.reviews_page),
+            Route("/api/reviews", reviews.api_reviews),
+            Route("/api/reviews/detail", reviews.api_review_detail, methods=["POST"]),
+            Route("/api/reviews/submit", reviews.api_review_submit, methods=["POST"]),
             Route("/api/trash", files.api_trash),
             Route("/api/trash/restore", files.api_trash_restore, methods=["POST"]),
             Route("/api/activity", files.api_activity),

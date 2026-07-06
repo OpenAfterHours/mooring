@@ -130,6 +130,14 @@ class GitHubClientProtocol(Protocol):
 
     def delete_file(self, path: str, message: str, branch: str, base_sha: str) -> dict: ...
 
+    def list_open_pulls(self) -> list[dict]: ...
+
+    def get_pull(self, number: int) -> dict: ...
+
+    def list_pull_files(self, number: int) -> list[dict]: ...
+
+    def submit_review(self, number: int, event: str, body: str = "") -> dict: ...
+
 
 class GitHubClient:
     def __init__(
@@ -374,4 +382,53 @@ class GitHubClient:
         body = {"message": message, "sha": base_sha, "branch": branch}
         return self._check(
             self._send("DELETE", self._repo_url(f"contents/{path}"), json=body, timeout=60)
+        )
+
+    # -- pull requests (the reviewer inbox) ----------------------------------
+
+    def _get_all(self, tail: str, cap_pages: int = 30) -> list[dict]:
+        """GET a list endpoint, following ``?page=N`` until a short (final) page or the
+        cap — so a review is never computed from a silently truncated first page. ``tail``
+        already carries ``per_page=100`` + any other query. All PR operations fall under
+        the ``repo`` scope this client already holds."""
+        out: list[dict] = []
+        page = 1
+        sep = "&" if "?" in tail else "?"
+        while page <= cap_pages:
+            data = self._check(
+                self._send("GET", self._repo_url(f"{tail}{sep}page={page}"), timeout=30)
+            )
+            if not isinstance(data, list) or not data:
+                break
+            out.extend(data)
+            if len(data) < 100:  # a short page is the last page
+                break
+            page += 1
+        return out
+
+    def list_open_pulls(self) -> list[dict]:
+        """Open pull requests, most-recently-updated first (all pages). Returns the raw
+        PR dicts."""
+        return self._get_all("pulls?state=open&per_page=100&sort=updated&direction=desc")
+
+    def get_pull(self, number: int) -> dict:
+        """One pull request — carries ``base``/``head`` with their immutable ``sha``,
+        so a review diffs the exact snapshot the PR proposes."""
+        return self._check(self._send("GET", self._repo_url(f"pulls/{number}"), timeout=30))
+
+    def list_pull_files(self, number: int) -> list[dict]:
+        """Every file changed in PR ``number`` (all pages) — each ``{filename, status,
+        previous_filename?, patch?, …}`` (``patch`` is GitHub's unified diff, absent for
+        binary/oversized files)."""
+        return self._get_all(f"pulls/{number}/files?per_page=100")
+
+    def submit_review(self, number: int, event: str, body: str = "") -> dict:
+        """Submit a review on PR ``number``: ``event`` is ``APPROVE`` /
+        ``REQUEST_CHANGES`` / ``COMMENT`` (GitHub requires a ``body`` for the latter
+        two). GitHub rejects approving your OWN PR with a 422 (surfaced as GitHubError)."""
+        payload: dict = {"event": event}
+        if body.strip():
+            payload["body"] = body
+        return self._check(
+            self._send("POST", self._repo_url(f"pulls/{number}/reviews"), json=payload, timeout=30)
         )
