@@ -84,13 +84,17 @@ function showLog(data) {
   if (data.warning) lines.push("⚠ " + data.warning);
   if (data.summary) lines.push("", data.summary);
   $("log").textContent = lines.join("\n");
-  // The <pre> is plain text; the compare link needs a real anchor.
+  // The <pre> is plain text; the PR link needs a real anchor. When mooring opened the
+  // PR (Slice 2), link straight to it; otherwise fall back to the compare page.
   const linkBox = $("log-link");
-  linkBox.classList.toggle("hidden", !data.compare_url);
-  if (data.compare_url) {
+  const link = data.pull_url || data.compare_url;
+  linkBox.classList.toggle("hidden", !link);
+  if (link) {
     const a = linkBox.querySelector("a");
-    a.href = data.compare_url;
-    a.textContent = "Create / view the pull request on GitHub ↗";
+    a.href = link;
+    a.textContent = data.pull_url
+      ? `View pull request #${data.pull_number} on GitHub ↗ (opened for you)`
+      : "Create / view the pull request on GitHub ↗";
   }
 }
 

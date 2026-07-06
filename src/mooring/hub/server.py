@@ -675,6 +675,9 @@ class Hub:
         if result.review_branch:
             body["review_branch"] = result.review_branch
             body["compare_url"] = result.compare_url
+            if result.pull_url:  # Slice 2: the PR mooring opened for this proposal
+                body["pull_url"] = result.pull_url
+                body["pull_number"] = result.pull_number
         return body, 200
 
     def _sync_op(self, name: str, op) -> JSONResponse:

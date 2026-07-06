@@ -28,6 +28,7 @@ from mooring import gitsha, manifest as manifest_mod, trash
 from mooring.config import Config
 from mooring.github import (
     GitHubClientProtocol,
+    GitHubError,
     NotFound,
     RefAlreadyExists,
     RemoteConflict,
@@ -250,6 +251,10 @@ class SyncResult:
     reverted: int = 0
     review_branch: str = ""
     compare_url: str = ""
+    # The pull request Propose opened (or found already open) for the review branch —
+    # 0/"" when no PR was opened (auto-open off, or a best-effort failure).
+    pull_number: int = 0
+    pull_url: str = ""
     skipped_conflicts: list[str] = field(default_factory=list)
     blocked_conflicts: list[str] = field(default_factory=list)
     # (rel_path, trash token) for every local pre-image this operation banked
@@ -1367,9 +1372,58 @@ def propose(
         result.compare_url = compare_url(
             cfg.owner, cfg.repo, cfg.branch, branch_name, host=cfg.host
         )
-        result.lines.append(f"open a pull request: {result.compare_url}")
+        # Slice 2: open (or find) the PR so the proposal lands in a teammate's Reviews
+        # inbox without the author touching GitHub. Best-effort and opt-out-able — a
+        # failure (or open_pr off) leaves the branch pushed and the compare link as the
+        # fallback, so a propose is never failed by the PR step. Space it from the last
+        # contents write (the same secondary-rate-limit guard the write loop uses).
+        pull = None
+        if cfg.open_pr:
+            if result.proposed and throttle:
+                sleep(throttle)
+            pull = _ensure_pull(client, cfg, branch_name, message, [c.path for c in candidates])
+        number = pull.get("number") if pull else None
+        result.pull_url = str((pull or {}).get("html_url", "") or "")
+        result.pull_number = number if isinstance(number, int) else 0
+        if result.pull_url:
+            result.lines.append(f"opened pull request #{result.pull_number}: {result.pull_url}")
+        else:
+            result.lines.append(f"open a pull request: {result.compare_url}")
     manifest_mod.save(workspace, mft)
     return result
+
+
+def _ensure_pull(client, cfg: Config, branch: str, message: str | None, paths: list[str]):
+    """Open (or find already-open) the PR for ``branch`` -> ``cfg.branch``. Best-effort:
+    returns the PR dict, or ``None`` when the PR API can't be used (offline, disabled,
+    permissions) — so a propose is never failed by the PR step. Looks for an existing PR
+    FIRST (a repeat propose already has one), so it never fires a guaranteed-rejected
+    create; ``create_pull`` still self-recovers from a concurrent-create race."""
+    try:
+        existing = client.find_open_pull(branch, base=cfg.branch)
+        if existing is not None:
+            return existing
+        return client.create_pull(
+            title=_pull_title(message, paths),
+            head=branch,
+            base=cfg.branch,
+            body="Proposed via mooring — review the cell-aware diff in the hub's Reviews inbox.",
+        )
+    except (GitHubError, OSError):
+        return None
+
+
+def _pull_title(message: str | None, paths: list[str]) -> str:
+    """The opened PR's title: the commit message's first line, or a human default naming
+    the files (never the opaque branch name)."""
+    lines = (message or "").strip().splitlines()
+    if lines and lines[0].strip():
+        return lines[0].strip()[:250]
+    if len(paths) == 1:
+        return f"Propose {paths[0]} via mooring"[:250]
+    if paths:
+        return f"Propose {len(paths)} files via mooring"
+    return "mooring proposal"
 
 
 def resolve(

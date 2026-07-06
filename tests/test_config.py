@@ -27,6 +27,15 @@ def test_warn_shadowed_notebooks_can_be_disabled(tmp_path):
     assert app.config_for().warn_shadowed_notebooks is False
 
 
+def test_open_pr_defaults_on_and_can_be_disabled(tmp_path):
+    # Propose opens the PR by default (Slice 2); [review] open_pr = false opts out.
+    assert load_config(user_config_path=tmp_path / "missing.toml", env={}).open_pr is True
+    p = tmp_path / "config.toml"
+    p.write_text("[review]\nopen_pr = false\n", "utf-8")
+    assert load_config(user_config_path=p, env={}).open_pr is False
+    assert load_app_config(user_config_path=p, env={}).config_for().open_pr is False
+
+
 def test_ai_config_is_nested_with_flat_shims(tmp_path):
     # The canonical store is the nested ai/ai.pii config; the flat ai_*/ai_pii_*
     # accessors forward to it, and the guard defaults OFF.

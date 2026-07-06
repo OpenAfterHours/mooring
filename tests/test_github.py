@@ -487,3 +487,71 @@ def test_history_reads_surface_auth_and_rate_errors():
     )
     with pytest.raises(RateLimited):
         client().list_commits_for_path("a.py", "main")
+
+
+@responses.activate
+def test_create_pull_opens_a_new_pr():
+    responses.add(
+        responses.POST,
+        f"{REPO}/pulls",
+        json={"number": 12, "html_url": "https://github.com/acme/nbs/pull/12"},
+        status=201,
+    )
+    pr = client().create_pull(title="Propose x", head="mooring/phil/x", base="main")
+    assert pr["number"] == 12
+    body = responses.calls[0].request.body
+    assert b'"head": "mooring/phil/x"' in body and b'"base": "main"' in body
+
+
+@responses.activate
+def test_create_pull_returns_the_existing_pr_on_already_exists_422():
+    # A concurrent-create race: POST 422 "already exists", then find the open PR — and the
+    # GET must carry the head=owner:branch AND base= filters (a regression there would
+    # recover the wrong PR, or none).
+    responses.add(
+        responses.POST,
+        f"{REPO}/pulls",
+        json={"message": "A pull request already exists for acme:mooring/phil/x."},
+        status=422,
+    )
+    responses.add(
+        responses.GET,
+        f"{REPO}/pulls",
+        match=[
+            responses.matchers.query_param_matcher(
+                {"state": "open", "head": "acme:mooring/phil/x", "base": "main", "per_page": "1"}
+            )
+        ],
+        json=[{"number": 7, "html_url": "https://github.com/acme/nbs/pull/7",
+               "base": {"ref": "main"}}],
+    )
+    pr = client().create_pull(title="t", head="mooring/phil/x", base="main")
+    assert pr["number"] == 7  # the already-open PR, not a failure
+
+
+@responses.activate
+def test_create_pull_raises_on_a_non_already_exists_422():
+    # Any OTHER 422 (e.g. no diff) is a real error — never mis-read as "already exists".
+    responses.add(
+        responses.POST,
+        f"{REPO}/pulls",
+        json={"message": "No commits between main and mooring/phil/x"},
+        status=422,
+    )
+    with pytest.raises(GitHubError):
+        client().create_pull(title="t", head="mooring/phil/x", base="main")
+
+
+@responses.activate
+def test_find_open_pull_filters_by_head_and_base():
+    responses.add(
+        responses.GET,
+        f"{REPO}/pulls",
+        match=[
+            responses.matchers.query_param_matcher(
+                {"state": "open", "head": "acme:mooring/phil/x", "base": "main", "per_page": "1"}
+            )
+        ],
+        json=[],
+    )
+    assert client().find_open_pull("mooring/phil/x", base="main") is None

@@ -257,9 +257,11 @@ instead of Push:
 1. **Propose** uploads your changed files to a personal review branch
    (named like `mooring/your-username/20260612-0900`) — the shared branch is
    untouched.
-2. The hub shows a link: **create / view the pull request**. Click it and
-   press *Create pull request* on GitHub. That's the only step that happens
-   on GitHub itself — mooring never opens the PR for you.
+2. Mooring **opens the pull request for you** and the hub links straight to it
+   (**View pull request #N**). It lands in your teammates' [Reviews
+   inbox](#reviewing-a-teammates-changes) automatically — nobody has to touch
+   GitHub. (Prefer to open it yourself? Turn off **Open the pull request on
+   Propose** in Settings, and you'll get the compare link instead.)
 3. Proposed files show an *in review* badge. They are left out of **Push all**
    so you can't accidentally bypass the review.
 4. Need to update the proposal after feedback? Edit the file and **Propose**
@@ -269,6 +271,12 @@ instead of Push:
    normal **Pull** brings your workspace in line. If the pull request is
    closed and its branch deleted instead, the files simply go back to
    *modified* — nothing is lost, and your next Propose starts a fresh branch.
+
+!!! note "Propose from the machine you started on"
+
+    The review branch is tracked locally (in `.mooring`), so proposing the *same* change
+    from a **second machine** starts a fresh branch and opens a **second** pull request.
+    Keep a given proposal on one machine, or close the extra PR on GitHub.
 
 !!! note "If a reviewer edits the pull request"
 
