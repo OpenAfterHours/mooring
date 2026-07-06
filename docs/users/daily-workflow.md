@@ -272,6 +272,12 @@ instead of Push:
    closed and its branch deleted instead, the files simply go back to
    *modified* — nothing is lost, and your next Propose starts a fresh branch.
 
+!!! note "Propose from the machine you started on"
+
+    The review branch is tracked locally (in `.mooring`), so proposing the *same* change
+    from a **second machine** starts a fresh branch and opens a **second** pull request.
+    Keep a given proposal on one machine, or close the extra PR on GitHub.
+
 !!! note "If a reviewer edits the pull request"
 
     The *in review* badge clears when your exact change lands on the shared

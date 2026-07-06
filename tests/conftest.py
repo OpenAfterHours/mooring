@@ -42,6 +42,7 @@ class FakeClient:
         # Open pull requests keyed by head branch (the reviewer-inbox / auto-open flow).
         self.pulls: dict[str, dict] = {}
         self._next_pull = 1
+        self.create_pull_calls = 0
         for path, data in (files or {}).items():
             self.seed(path, data)
 
@@ -127,10 +128,14 @@ class FakeClient:
         self.heads[branch] = sha
         return {"ref": f"refs/heads/{branch}", "object": {"sha": sha}}
 
-    def find_open_pull(self, head_ref):
-        return self.pulls.get(head_ref)
+    def find_open_pull(self, head_ref, base=None):
+        pr = self.pulls.get(head_ref)
+        if pr is None or (base and pr.get("base", {}).get("ref") != base):
+            return None
+        return pr
 
     def create_pull(self, title, head, base, body=""):
+        self.create_pull_calls += 1
         if head in self.pulls:  # already open -> return it (a repeated propose)
             return self.pulls[head]
         pr = {

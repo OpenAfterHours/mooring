@@ -130,7 +130,7 @@ class GitHubClientProtocol(Protocol):
 
     def delete_file(self, path: str, message: str, branch: str, base_sha: str) -> dict: ...
 
-    def find_open_pull(self, head_ref: str) -> dict | None: ...
+    def find_open_pull(self, head_ref: str, base: str | None = None) -> dict | None: ...
 
     def create_pull(self, title: str, head: str, base: str, body: str = "") -> dict: ...
 
@@ -382,29 +382,37 @@ class GitHubClient:
 
     # -- pull requests -------------------------------------------------------
 
-    def find_open_pull(self, head_ref: str) -> dict | None:
-        """The open PR whose head is ``head_ref`` on THIS repo, or ``None``. The
-        ``head=owner:branch`` filter targets exactly the branch (no listing scan)."""
-        data = self._check(
-            self._send(
-                "GET",
-                self._repo_url(
-                    f"pulls?state=open&head={quote(f'{self.owner}:{head_ref}', safe='')}&per_page=1"
-                ),
-                timeout=30,
-            )
-        )
-        return data[0] if isinstance(data, list) and data else None
+    def find_open_pull(self, head_ref: str, base: str | None = None) -> dict | None:
+        """The open PR whose head is ``head_ref`` — and, when given, whose base is
+        ``base`` — on THIS repo, or ``None``. Filtering by BASE too matters: a review
+        branch can have an unrelated PR open into a different base (e.g. ``develop``), and
+        returning that would point the author at the wrong PR."""
+        query = f"pulls?state=open&head={quote(f'{self.owner}:{head_ref}', safe='')}&per_page=1"
+        if base:
+            query += f"&base={quote(base, safe='')}"
+        data = self._check(self._send("GET", self._repo_url(query), timeout=30))
+        if not (isinstance(data, list) and data):
+            return None
+        pr = data[0]
+        if base and (pr.get("base") or {}).get("ref") != base:
+            return None  # never claim a PR into a different base than the caller asked for
+        return pr
 
     def create_pull(self, title: str, head: str, base: str, body: str = "") -> dict:
         """Open a pull request from ``head`` into ``base`` and return it. If one is
-        already open for ``head`` (a repeated propose to the same review branch), return
-        that existing PR instead of failing — the caller wants "ensure a PR exists". Falls
-        under the ``repo`` scope this client already holds."""
+        already open for exactly this ``head``->``base`` (a race with a concurrent
+        propose), return it instead of failing. Only an "already exists" 422 triggers that
+        fallback — any OTHER 422 (e.g. "No commits between…") is a real error and raised."""
         payload = {"title": title, "head": head, "base": base, "body": body}
         resp = self._send("POST", self._repo_url("pulls"), json=payload, timeout=30)
         if resp.status_code == 422:
-            existing = self.find_open_pull(head)
-            if existing is not None:
-                return existing
-        return self._check(resp)  # a new PR, or raise for any other error
+            message = ""
+            try:
+                message = str(resp.json().get("message", ""))
+            except ValueError:
+                pass
+            if "already exist" in message.lower():
+                existing = self.find_open_pull(head, base=base)
+                if existing is not None:
+                    return existing
+        return self._check(resp)  # a new PR, or raise (incl. a non-already-exists 422)

@@ -585,6 +585,8 @@ def test_repeat_propose_reuses_the_open_pull(cfg):
     r2 = sync.propose(client, cfg, sleep=lambda s: None, now=NOW2)
     assert r1.pull_number == r2.pull_number == 1  # the same PR
     assert list(client.pulls) == [BRANCH1]  # exactly one PR opened
+    # find-first: the repeat propose reused the open PR without a second create POST.
+    assert client.create_pull_calls == 1
 
 
 def test_propose_open_pr_off_only_links(cfg):
