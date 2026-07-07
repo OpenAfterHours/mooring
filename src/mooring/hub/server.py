@@ -1007,6 +1007,7 @@ def create_app(hub: Hub) -> Starlette:
             Route("/api/trash/restore", files.api_trash_restore, methods=["POST"]),
             Route("/api/activity", files.api_activity),
             Route("/ai/chat", pages.chat_page),
+            Route("/workbench", pages.workbench_page),
             Route("/api/ai/datasets", chat.api_chat_datasets),
             Route("/api/ai/models", chat.api_chat_models),
             Route("/api/ai/status", chat.api_ai_status),

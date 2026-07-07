@@ -70,6 +70,7 @@ EXPECTED_ROUTES = {
     ("/api/reviews/detail", ("POST",), "api_review_detail"),
     ("/api/reviews/submit", ("POST",), "api_review_submit"),
     ("/ai/chat", ("GET",), "chat_page"),
+    ("/workbench", ("GET",), "workbench_page"),
     ("/api/ai/datasets", ("GET",), "api_chat_datasets"),
     ("/api/ai/models", ("GET",), "api_chat_models"),
     ("/api/ai/status", ("GET",), "api_ai_status"),

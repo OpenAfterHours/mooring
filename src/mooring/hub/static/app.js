@@ -230,21 +230,36 @@ function showUndoToast(trashed) {
   }
 }
 
-// Pop the copilot out into its own window (not a tab) so it sits beside the
-// notebook. The window features are what make the browser open a window rather
-// than a tab; a per-notebook name reuses/focuses an already-open chat window —
-// keyed on the path ALONE, so "Explain" (opts.explain adds &explain=1, which
-// auto-runs /explain once the session is ready) targets the same window as "AI"
-// instead of spawning a second chat for the notebook.
-function openChatWindow(path, opts) {
-  let url = `/ai/chat?notebook=${encodeURIComponent(path)}`;
+// "Open with AI" launches the Workbench: a hub page that puts the REAL marimo
+// editor (a cross-origin iframe — mooring can't script into it, so the copilot
+// stays value-blind) beside the copilot in a resizable, collapsible panel. Opens
+// in a NEW TAB, named per notebook. We keep the tab reference so a PLAIN re-click
+// (no command) just FOCUSES the open workbench instead of reloading its live editor.
+// Explain/Review DO re-navigate (that runs the command — the point of the button);
+// they pass &explain=1/&review=1 through to the embedded chat, which auto-runs them.
+// The notebook opens in app view by default (results, not code).
+const workbenchWindows = {};
+function openWorkbench(path, opts) {
+  const hasCmd = !!(opts && (opts.explain || opts.review));
+  const existing = workbenchWindows[path];
+  if (existing && !existing.closed && !hasCmd) {
+    existing.focus(); // already open — focus it; don't reload the live editor
+    return;
+  }
+  let url = `/workbench?notebook=${encodeURIComponent(path)}`;
   if (opts && opts.explain) url += "&explain=1";
   if (opts && opts.review) url += "&review=1";
-  const name = "mooringAI_" + path.replace(/[^a-z0-9]/gi, "_");
-  const height = Math.min(960, window.screen?.availHeight || 900);
-  const win = window.open(url, name, `popup,width=560,height=${height},left=80,top=60`);
-  if (win) win.focus();
-  else window.open(url, "_blank"); // popup blocked → fall back to a tab
+  const name = "mooringWB_" + path.replace(/[^a-z0-9]/gi, "_");
+  const win = window.open(url, name);
+  if (!win) {
+    // window.open runs after an awaited freshness fetch (see guardedOpen), so a
+    // strict pop-up blocker can null it — say so rather than silently no-op.
+    showError("Couldn't open the workbench — allow pop-ups for this site, then retry.");
+    return;
+  }
+  workbenchWindows[path] = win;
+  win.focus();
+  checklistSet("opened"); // opening a notebook (with AI) ticks the onboarding step
 }
 
 // Opening a notebook may need to start the marimo editor subprocess (cold the
@@ -301,7 +316,7 @@ const STALE_COPY = {
     "you can still open your copy to look.",
 };
 
-function showStaleDialog(file, kind) {
+function showStaleDialog(file, kind, opener) {
   const dialog = $("stale-dialog");
   const name = file.path.split("/").pop();
   $("stale-message").textContent = STALE_COPY[kind](name);
@@ -316,13 +331,13 @@ function showStaleDialog(file, kind) {
     const fresh = lastFiles.find((f) => f.path === file.path);
     if (!fresh || !fresh.has_local) return; // gone with the pull (deleted remotely)
     const still = Freshness.warnState(fresh, staleDismissed);
-    if (still) return showStaleDialog(fresh, still);
-    doOpen(file.path);
+    if (still) return showStaleDialog(fresh, still, opener);
+    opener();
   };
   $("stale-open").onclick = () => {
     dialog.close();
     staleDismissed.set(file.path, Freshness.dismissKey(file));
-    doOpen(file.path);
+    opener();
   };
   $("stale-cancel").onclick = () => dialog.close();
   dialog.showModal();
@@ -335,7 +350,11 @@ function showStaleDialog(file, kind) {
 // file (remote changed / deleted remotely / conflict) instead of letting the
 // user discover it as a blocked push two hours later. The check is advisory and
 // client-side only — /api/open itself gates nothing new.
-async function openAction(path) {
+// The stale guard, shared by plain Open and "Open with AI" (both now open the
+// notebook): warn at the moment of choice when the remote moved under this file,
+// then run `opener` to actually open it — a plain marimo tab (doOpen) or the
+// Workbench (openWorkbench).
+async function guardedOpen(path, opener) {
   let file = lastFiles.find((f) => f.path === path);
   // The dialog decision is only as good as the cached rows: if the branch head
   // moved since the last /api/state, re-render first (timeboxed; see isStateFresh).
@@ -345,8 +364,18 @@ async function openAction(path) {
     if (!file) return; // the row vanished with the fresh state — nothing to open
   }
   const kind = Freshness.warnState(file, staleDismissed);
-  if (kind) return showStaleDialog(file, kind);
-  return doOpen(path);
+  if (kind) return showStaleDialog(file, kind, opener);
+  return opener();
+}
+
+function openAction(path) {
+  return guardedOpen(path, () => doOpen(path));
+}
+
+// "Open with AI" (and Explain / Review): same stale guard, but the opener launches
+// the Workbench instead of a plain marimo tab.
+function openWorkbenchAction(path, opts) {
+  return guardedOpen(path, () => openWorkbench(path, opts));
 }
 
 // A plain helper module (a non-marimo .py) can't open in the marimo editor — that
@@ -864,23 +893,24 @@ function fileActions(file, opts) {
   if (file.github_url) {
     actions.push(["View on GitHub", () => openExternal(file.github_url)]);
   }
-  // AI copilot pops out into its own window (not a tab) so it can sit beside the
-  // notebook. One window per notebook; clicking again focuses the existing one.
-  // A notebook can be opted out of AI (synced mooring.toml) — when it is, the open
-  // button is hidden and the toggle offers to turn it back on. The toggle is the
-  // off switch for "this notebook now handles PII; don't let AI touch it by mistake".
-  // Modules (non-notebook .py) get no AI: the copilot operates on notebooks.
+  // "Open with AI" launches the Workbench — the notebook and the copilot side by
+  // side in one tab (see openWorkbench). One workbench per notebook; clicking again
+  // focuses the existing one. A notebook can be opted out of AI (synced mooring.toml)
+  // — when it is, these actions are hidden and the toggle offers to turn it back on.
+  // The toggle is the off switch for "this notebook now handles PII; don't let AI
+  // touch it by mistake". Modules (non-notebook .py) get no AI: the copilot operates
+  // on notebooks. Plain "Open" (a raw marimo tab, no AI) is added above, unchanged.
   if (aiChatEnabled && isNotebook && file.has_local) {
     if (!file.ai_disabled) {
-      actions.push(["AI", () => openChatWindow(file.path)]);
-      // Explain: the same chat window, but it auto-runs /explain once ready — a
-      // cell-anchored walkthrough for picking up a teammate's notebook. Same gate
-      // as AI (and it IS a model turn, so the ai_disabled opt-out applies).
-      actions.push(["Explain", () => openChatWindow(file.path, { explain: true })]);
-      // Review logic: the same window, auto-runs /review once ready — a value-blind
-      // pass over source + schema that flags structural correctness risks (fan-out
-      // joins, hardcoded periods, un-run cells). Same gate; it is a model turn too.
-      actions.push(["Review logic", () => openChatWindow(file.path, { review: true })]);
+      actions.push(["Open with AI", () => openWorkbenchAction(file.path)]);
+      // Explain: opens the Workbench and auto-runs /explain once the copilot is
+      // ready — a cell-anchored walkthrough for picking up a teammate's notebook.
+      // Same gate as AI (and it IS a model turn, so the ai_disabled opt-out applies).
+      actions.push(["Explain", () => openWorkbenchAction(file.path, { explain: true })]);
+      // Review logic: opens the Workbench and auto-runs /review — a value-blind pass
+      // over source + schema that flags structural correctness risks (fan-out joins,
+      // hardcoded periods, un-run cells). Same gate; it is a model turn too.
+      actions.push(["Review logic", () => openWorkbenchAction(file.path, { review: true })]);
     }
     const label = file.ai_disabled ? "Enable AI" : "Disable AI";
     actions.push([label, () =>

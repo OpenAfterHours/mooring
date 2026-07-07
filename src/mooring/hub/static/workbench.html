@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>mooring · workbench</title>
+  <!-- Apply the theme before first paint (mirrors the hub/chat): last-used theme,
+       else the server's inlined default. The chat iframe below is same-origin, so
+       it shares this localStorage and follows the same theme automatically. -->
+  <script>
+    try {
+      document.documentElement.dataset.theme =
+        localStorage.getItem("mooring.ui.theme") || "__MOORING_DEFAULT_THEME__";
+    } catch {
+      // localStorage may be unavailable (private mode); the CSS default applies.
+    }
+  </script>
+  <!-- Restore the saved copilot-panel width BEFORE first paint so the split-pane
+       opens at the remembered size with no flash. Set on :root so it cascades into
+       #workbench's `var(--chat-w, …)`. Clamped to the viewport later by workbench.js. -->
+  <script>
+    try {
+      var _w = parseInt(localStorage.getItem("mooring.workbench.chatWidth") || "", 10);
+      if (_w > 0) document.documentElement.style.setProperty("--chat-w", _w + "px");
+    } catch {}
+  </script>
+  <link rel="stylesheet" href="/static/style.css">
+  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+</head>
+<body class="workbench-body">
+  <div id="workbench">
+    <!-- Notebook: the REAL marimo editor, on its OWN origin, framed CROSS-ORIGIN.
+         The browser's same-origin policy means this page (and the copilot) can
+         never script into it or read the data values it renders — that boundary
+         is what keeps the copilot value-blind. src is resolved LIVE from
+         POST /api/open by workbench.js (the marimo port + token change per launch,
+         so it must never be baked in). -->
+    <section id="nb-pane">
+      <iframe id="nb-frame" title="notebook editor" src="about:blank"
+              allow="clipboard-read; clipboard-write; fullscreen"></iframe>
+      <div id="nb-status" class="nb-status">Starting the editor…</div>
+      <div id="nb-warning" class="hidden"></div>
+    </section>
+
+    <div id="splitter" role="separator" aria-orientation="vertical"
+         aria-label="Resize the copilot panel" tabindex="0"></div>
+
+    <!-- Copilot: the existing /ai/chat page, embedded SAME-ORIGIN so it shares the
+         theme + localStorage and needs no changes. It talks only to the hub over
+         fetch/SSE and is never wired to the notebook frame. -->
+    <aside id="chat-col">
+      <iframe id="chat-frame" title="AI copilot" src="about:blank"
+              allow="clipboard-read; clipboard-write"></iframe>
+      <!-- Toolbar at the bottom of the copilot panel: flip the notebook between
+           app view (results only) and the code editor, and collapse the panel. -->
+      <div id="wb-toolbar">
+        <button id="view-toggle" type="button" class="wb-btn"
+          title="Toggle the notebook between app view (results only) and the code editor">
+          Show code
+        </button>
+        <span class="wb-spacer"></span>
+        <button id="collapse-toggle" type="button" class="wb-btn"
+          title="Hide the copilot and give the notebook the full width">Hide AI &rsaquo;</button>
+      </div>
+    </aside>
+  </div>
+
+  <!-- When the copilot is collapsed, a slim tab on the edge brings it back. -->
+  <button id="reopen-ai" class="hidden" type="button" title="Show the AI copilot">&lsaquo; AI</button>
+
+  <script src="/static/theme.js"></script>
+  <script src="/static/workbench.js"></script>
+</body>
+</html>

@@ -33,6 +33,17 @@ def chat_page(request: Request) -> HTMLResponse | JSONResponse:
     return _themed(hub, "chat.html")
 
 
+def workbench_page(request: Request) -> HTMLResponse | JSONResponse:
+    """The Workbench: the marimo notebook and the AI copilot side by side in one
+    page — the notebook in a cross-origin ``<iframe>`` (so mooring can't script into
+    it, keeping the copilot value-blind) and the copilot as a resizable panel. Gated
+    on the copilot being enabled, like :func:`chat_page`, since it embeds it."""
+    hub = request.app.state.hub
+    if not hub.app_cfg.ai_enabled:
+        return JSONResponse({"error": "The AI copilot is disabled."}, status_code=404)
+    return _themed(hub, "workbench.html")
+
+
 def batch_page(request: Request) -> HTMLResponse | JSONResponse:
     hub = request.app.state.hub
     if not hub.app_cfg.ai_enabled:
