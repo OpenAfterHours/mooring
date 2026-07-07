@@ -2115,6 +2115,36 @@ def test_batch_page_404_when_ai_off(tmp_path, monkeypatch):
         assert client.post("/api/ai/batch/open", json={"jobs": [{"brief": "x"}]}).status_code == 404
 
 
+def test_workbench_page_served_when_ai_enabled(unconfigured_client):
+    # The Workbench composes the notebook editor and the copilot in one page: it
+    # ships both iframes and the app/code view toggle. Served like chat/batch.
+    client, _ = unconfigured_client
+    resp = client.get("/workbench")
+    assert resp.status_code == 200
+    assert 'id="workbench"' in resp.text
+    assert 'id="nb-frame"' in resp.text  # the notebook editor iframe
+    assert 'id="chat-frame"' in resp.text  # the embedded copilot iframe
+    assert 'id="view-toggle"' in resp.text  # the app/code view toggle
+
+
+def test_workbench_page_inlines_the_default_theme(unconfigured_client):
+    # Like every themed page, the pre-paint script's server default is rendered
+    # (not the literal token) so the split-pane paints in the right theme, no flash.
+    client, hub = unconfigured_client
+    text = client.get("/workbench").text
+    assert "__MOORING_DEFAULT_THEME__" not in text
+    assert hub.app_cfg.ui_theme in text
+
+
+def test_workbench_page_404_when_ai_off(tmp_path, monkeypatch):
+    # It embeds the copilot, so it is gated on the copilot being enabled.
+    monkeypatch.setattr(paths, "user_config_dir", lambda: tmp_path / "appdata")
+    spec = config.RepoSpec(alias="ws", owner="", repo="", workspace_path=str(tmp_path / "ws"))
+    hub = Hub(config.AppConfig(repos=(spec,), active_alias="ws", ai=config.AiConfig(enabled=False)))
+    with TestClient(create_app(hub)) as client:
+        assert client.get("/workbench").status_code == 404
+
+
 def test_batch_add_appends_more_jobs_to_an_open_run(batch_client):
     # Kick off one job, then add another to the SAME run while it builds â€” the tray
     # accumulates both. This is the "write the next while the first runs" workflow.
