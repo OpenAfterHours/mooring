@@ -123,9 +123,15 @@
       </svg>
     </div>
   </div>
+
+  {#- Hints there's more below the fold; jumps to the feature shelf and
+      smooth-scrolls there when JS is available (landing.js). -#}
+  <a class="mr-scroll-cue" href="#mr-shelf" aria-label="Scroll down to see more" data-mr-scroll-cue>
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>
+  </a>
 </section>
 
-<section class="mr-shelf-wrap">
+<section class="mr-shelf-wrap" id="mr-shelf">
   {#- Visually-hidden so the four feature <h3>s nest under a level-2 heading
       (keeps the h1 → h2 → h3 outline valid for screen-reader navigation). -#}
   <h2 class="mr-sr-only">Why mooring</h2>

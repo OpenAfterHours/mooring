@@ -34,6 +34,20 @@
     host.appendChild(frag);
   }
 
+  function wireScrollCue(root) {
+    var cue = root.querySelector("[data-mr-scroll-cue]");
+    if (!cue || cue.dataset.mrWired) return;
+    cue.dataset.mrWired = "1";
+    cue.addEventListener("click", function (e) {
+      var target = document.getElementById(cue.getAttribute("href").slice(1));
+      if (!target) return; // fall back to the plain anchor jump
+      e.preventDefault();
+      var mq = window.matchMedia;
+      var reduce = mq && mq("(prefers-reduced-motion: reduce)").matches;
+      target.scrollIntoView({ behavior: reduce ? "auto" : "smooth", block: "start" });
+    });
+  }
+
   function wireCopyButtons(root) {
     var buttons = root.querySelectorAll("[data-mr-install]");
     buttons.forEach(function (btn) {
@@ -250,6 +264,7 @@
   function init() {
     document.querySelectorAll(".mr-stars[data-count]").forEach(renderStars);
     wireCopyButtons(document);
+    wireScrollCue(document);
     bootVoyage(document);
   }
 
