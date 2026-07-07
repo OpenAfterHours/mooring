@@ -219,8 +219,10 @@ h1 { letter-spacing: -0.02em; }
 
 header {
   display: flex;
-  align-items: baseline;
+  flex-wrap: wrap;
+  align-items: center;
   gap: 1rem;
+  row-gap: 0.5rem; /* tighter when the action cluster wraps below the brand row */
   padding: 0.8rem 1.5rem;
   background: var(--card);
   border-bottom: 1px solid var(--border);
@@ -239,7 +241,18 @@ header h1 { font-size: 1.2rem; margin: 0; display: flex; align-items: center; ga
   vertical-align: -0.16em;
   flex: none;
 }
-#repo-info { color: var(--muted); flex: 1; }
+/* The standing status line. flex-grows to absorb slack on a wide bar, but truncates
+   with an ellipsis (full text on the title attr, set in refresh()) rather than
+   shoving the action cluster off-screen — the header used to have no such slack and
+   would overflow / trigger body horizontal-scroll on a narrow window. */
+#repo-info {
+  color: var(--muted);
+  flex: 1 1 10rem;
+  min-width: 6rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 #repo-select,
 #theme-select {
   font: inherit;
@@ -282,6 +295,37 @@ header h1 { font-size: 1.2rem; margin: 0; display: flex; align-items: center; ga
   box-shadow: 0 6px 20px rgba(0, 0, 0, 0.18);
 }
 .header-menu-panel p { margin-top: 0; }
+
+/* The right-hand control cluster (repo switch, Copilot, appearance, account menu).
+   Wraps as ONE group to a second row on a narrow window — and its own pills reflow
+   again if still tight — so the header never overflows horizontally. */
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+
+/* Full-width rows inside the account menu panel (the page links). */
+.menu-nav { display: flex; flex-direction: column; gap: 0.1rem; }
+.header-menu-item {
+  display: block;
+  padding: 0.4rem 0.5rem;
+  border-radius: 6px;
+  color: var(--ink);
+  text-decoration: none;
+  white-space: nowrap;
+}
+.header-menu-item:hover { background: var(--bg); }
+
+/* Identity block at the top of the account panel ("Signed in as @user" + Log out),
+   set off from the page links by a divider. Empty (and borderless) when logged out. */
+.account-identity:not(:empty) {
+  padding-bottom: 0.6rem;
+  margin-bottom: 0.4rem;
+  border-bottom: 1px solid var(--border);
+}
+.account-identity button { margin-top: 0.5rem; }
 
 main { max-width: 60rem; margin: 1.5rem auto; padding: 0 1rem; }
 
@@ -563,29 +607,52 @@ tr.folder-header b { font-weight: 600; }
 .activity-time { display: inline-block; min-width: 8.5rem; }
 #activity-filter { flex: 1; min-width: 12rem; }
 
-/* Freshness: "Last checked N ago — M teammate update(s) waiting." Informational
-   (amber, not an error); hidden unless updates wait or the view has aged. */
-#freshness-banner {
-  border: 1px solid var(--warn);
-  color: var(--warn);
+/* Files-card status notices — one visual language for every alert line. Each is
+   [icon][message (+ inline action)] with a coloured left rule; severity is carried
+   by BOTH the leading icon AND the colour, so offline (stale data) and freshness
+   (an aged view) can no longer be confused the way two amber boxes could. Replaces
+   the separately-styled #offline/#freshness/#adopt boxes; #error-banner (above)
+   opts in via .notice-error for the same rhythm while keeping its louder box. */
+.notice {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--muted);
   border-radius: 8px;
-  padding: 0.5rem 1rem;
-  margin: 0.4rem 0 0.8rem;
+  padding: 0.5rem 0.8rem;
+  margin: 0.4rem 0 0;
   font-size: 0.9rem;
 }
+.notice::before { flex: none; width: 1.1em; text-align: center; }
+.notice-content { flex: 1; min-width: 0; }
 
-/* Offline: GitHub is unreachable — the rows below are the LAST OBSERVED sync
-   state, not live. Amber and louder than freshness (bold): stale data must
-   never read as the normal quiet chrome. */
-#offline-banner {
-  border: 1px solid var(--warn);
-  color: var(--warn);
-  border-radius: 8px;
-  padding: 0.5rem 1rem;
-  margin: 0.4rem 0 0.8rem;
-  font-size: 0.9rem;
-  font-weight: 600;
-}
+/* offline — GitHub unreachable; the rows below are the last observed state, not
+   live. The loudest of the four: amber + bold, set apart from freshness by icon. */
+.notice-offline { border-left-color: var(--warn); color: var(--warn); font-weight: 600; }
+.notice-offline::before { content: "\26A0\FE0E"; }   /* ⚠ forced to text, not emoji */
+
+/* open proposal — a review branch / PR is live for this workspace. Informational. */
+.notice-review { border-left-color: var(--accent); }
+.notice-review::before { content: "\2197"; color: var(--accent); }   /* ↗ */
+
+/* adopt prompt — notebook folders kept outside the synced set; carries inline
+   Adopt buttons, so its content stacks (icon top-aligned) rather than inline. */
+.notice-adopt { border-left-color: var(--accent); align-items: flex-start; }
+.notice-adopt::before { content: "\2295"; color: var(--accent); }   /* ⊕ */
+.notice-adopt .adopt-actions { margin-top: 0.45rem; }
+
+/* freshness — your view has aged / teammate updates wait. The quietest: muted,
+   never amber, so it can never be mistaken for the offline stale-data warning. */
+.notice-fresh { border-left-color: var(--muted); color: var(--muted); }
+.notice-fresh::before { content: "\21BB"; }   /* ↻ */
+
+/* error — reuses the filled-red #error-banner box (above) and just adds the icon
+   + flex rhythm so it reads as the loudest, top-of-workspace member of the family. */
+.notice-error::before { content: "\2715"; }   /* ✕ */
+
+/* The quiet count caption sitting directly above the file table. */
+.files-summary { margin: 0.2rem 0 0.5rem; }
 
 /* Hub confirm dialogs (staleness at Open, the push guard): native <dialog>s
    with explicit buttons — the safe action gets focus, never the risky one. */
@@ -611,17 +678,6 @@ tr.folder-header b { font-weight: 600; }
   max-height: 12rem;
   overflow-y: auto;
 }
-
-/* Adopt prompt: notebook folders the repo keeps outside the synced folders. An
-   informational accent banner (not an error), shown until the folders are adopted. */
-#adopt-banner {
-  border: 1px solid var(--accent);
-  border-radius: 8px;
-  padding: 0.6rem 1rem;
-  margin: 0.4rem 0 0.8rem;
-  font-size: 0.9rem;
-}
-#adopt-banner .adopt-actions { margin-top: 0.45rem; }
 
 pre {
   background: var(--bg);
@@ -1006,8 +1062,8 @@ footer {
 
 /* -- Settings page + header entry ----------------------------------------- */
 
-/* The header Settings link + the @username profile link both navigate to the
-   Settings page; style them to sit quietly beside the theme select / Log out. */
+/* A small quiet bordered link that sits inside header/toolbar rows (e.g. the
+   reviews page's "View on GitHub" link). */
 .header-link {
   font-size: 0.85rem;
   padding: 0.25rem 0.4rem;
@@ -1018,8 +1074,21 @@ footer {
   white-space: nowrap;
 }
 .header-link:hover { background: var(--bg); }
-.profile-link { color: var(--ink); text-decoration: none; font-weight: 600; }
-.profile-link:hover { text-decoration: underline; }
+
+/* Sub-page brand-as-home: the ⚓ mooring brand in the settings/activity/reviews
+   header links back to the hub (the conventional logo-as-home), with the page
+   name trailing as a quiet breadcrumb — this replaced a separate "← Back to hub"
+   link on each page. The "/" separator absorbs the h1's own 0.4rem flex gap on
+   its left, so the spacing reads even around it. */
+.brand-home {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  color: var(--ink);
+  text-decoration: none;
+}
+.brand-home:hover { color: var(--accent); }
+.page-crumb::before { content: "/"; color: var(--muted); margin: 0 0.45rem 0 0.1rem; }
 
 /* General severity badges (the chat scopes its own; the settings rows need them
    page-wide). */

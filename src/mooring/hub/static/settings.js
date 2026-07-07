@@ -6,16 +6,11 @@
 // Privacy-weakening flips come back as 409 needs_confirm and must be confirmed.
 
 const $ = (id) => document.getElementById(id);
-const LS_THEME = "mooring.ui.theme";
 
-function applyTheme(theme) {
-  document.documentElement.dataset.theme = theme;
-  try {
-    if (localStorage.getItem(LS_THEME) !== theme) localStorage.setItem(LS_THEME, theme);
-  } catch {
-    // localStorage may be unavailable (private mode); theming is best-effort.
-  }
-}
+// Appearance is owned by the shared theme.js module (loaded before this file):
+// it writes the localStorage key and follows a cross-tab change live. The theme
+// control below calls applyTheme when the user changes it here; alias it.
+const applyTheme = window.MooringTheme.applyTheme;
 
 async function api(path, body) {
   const opts = body === undefined
@@ -302,10 +297,8 @@ async function loadModels() {
   modelsLoaded = ok;
 }
 
-// Cross-tab theme sync: if the hub changes the theme, follow it here.
-window.addEventListener("storage", (e) => {
-  if (e.key === LS_THEME && e.newValue) applyTheme(e.newValue);
-});
+// Cross-tab theme sync (following the hub / another tab) is handled by the
+// shared theme.js module.
 
 (async function init() {
   await loadModels(); // best-effort; empty when AI is off (the model row falls back)
