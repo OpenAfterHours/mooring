@@ -1,5 +1,6 @@
 """Editor launch-backend selection (frozen bundle vs the team's uv project)."""
 
+import socket
 import subprocess
 
 import pytest
@@ -108,3 +109,24 @@ def test_posix_spawns_marimo_without_creationflags(tmp_path, monkeypatch):
     monkeypatch.setattr(editor_mod.sys, "platform", "linux")
     EditorServer(tmp_path).ensure_started()
     assert "creationflags" not in captured["kwargs"]
+
+
+def test_bind_or_free_prefers_the_requested_port():
+    # A free port stays free between free_port() closing its probe and bind_or_free
+    # rebinding it, so the hub gets the SAME stable origin each launch — which is
+    # what keeps the browser's per-origin localStorage (checklist, watch set) alive.
+    preferred = editor_mod.free_port()
+    assert editor_mod.bind_or_free(preferred) == preferred
+
+
+def test_bind_or_free_falls_back_when_port_taken():
+    # Hold a port open so the preferred bind fails and bind_or_free must yield a
+    # different, genuinely-free port rather than crashing the launch.
+    with socket.socket() as busy:
+        busy.bind(("127.0.0.1", 0))
+        busy.listen()
+        taken = busy.getsockname()[1]
+        got = editor_mod.bind_or_free(taken)
+        assert got != taken
+    with socket.socket() as check:
+        check.bind(("127.0.0.1", got))  # the fallback port is real and bindable
