@@ -22,19 +22,9 @@
     return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   }
 
-  // Appearance follows the hub, exactly like chat.js: applied from
-  // /api/ai/batch/state (which carries ui_theme) and live via a same-origin
-  // `storage` event when the hub's toggle changes it.
-  const LS_THEME = "mooring.ui.theme"; // shared with the hub (same origin)
-  function applyTheme(theme) {
-    if (!theme) return;
-    document.documentElement.dataset.theme = theme;
-    try {
-      if (localStorage.getItem(LS_THEME) !== theme) localStorage.setItem(LS_THEME, theme);
-    } catch {
-      // localStorage may be unavailable (private mode); theming is best-effort.
-    }
-  }
+  // Appearance is owned by the shared theme.js module (loaded before this file):
+  // it applies the /api/ai/batch/state theme and follows a cross-tab change live.
+  const applyTheme = window.MooringTheme.applyTheme;
 
   async function fetchJSON(url, opts) {
     let r;
@@ -514,10 +504,7 @@
   }
 
   document.addEventListener("DOMContentLoaded", () => {
-    // The hub changed the appearance (same origin) — re-theme this window live.
-    window.addEventListener("storage", (event) => {
-      if (event.key === LS_THEME) applyTheme(event.newValue);
-    });
+    // Cross-tab appearance changes are followed by the shared theme.js module.
     $("build-btn").addEventListener("click", submitJobs);
     $("add-job").addEventListener("click", () => addJobCard());
     $("batch-model").addEventListener("change", () => {

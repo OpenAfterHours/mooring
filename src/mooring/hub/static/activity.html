@@ -19,8 +19,9 @@
 </head>
 <body class="settings-body">
   <header>
-    <h1><svg class="brand-mark" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 6v16M19 13l2-1a9 9 0 0 1-18 0l2 1M9 11h6"/><circle cx="12" cy="4" r="2"/></svg>Activity</h1>
-    <a class="header-link" href="/" title="Back to the hub">&#8592; Back to hub</a>
+    <!-- Brand-as-home (see settings.html): ⚓ mooring links to the hub; the page
+         name follows as a breadcrumb crumb, replacing a separate back link. -->
+    <h1><a class="brand-home" href="/" title="Back to the hub"><svg class="brand-mark" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 6v16M19 13l2-1a9 9 0 0 1-18 0l2 1M9 11h6"/><circle cx="12" cy="4" r="2"/></svg>mooring</a><span class="page-crumb">Activity</span></h1>
   </header>
 
   <main>
@@ -59,6 +60,7 @@
   </main>
 
   <!-- Pure helpers first (bare globals), then the page script. -->
+  <script src="/static/theme.js"></script>
   <script src="/static/activity_fmt.js"></script>
   <script src="/static/activity.js"></script>
 </body>

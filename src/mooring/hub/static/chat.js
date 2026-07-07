@@ -16,19 +16,10 @@ const EXPLAIN = new URLSearchParams(location.search).get("explain") === "1";
 const REVIEW = new URLSearchParams(location.search).get("review") === "1";
 const LS_MODEL = "mooring.ai.model";
 const LS_EFFORT = "mooring.ai.effort";
-const LS_THEME = "mooring.ui.theme"; // shared with the hub (same origin)
-
-// Appearance follows the hub: applied here from /api/state, and live via a
-// same-origin `storage` event when the hub's toggle changes it.
-function applyTheme(theme) {
-  if (!theme) return;
-  document.documentElement.dataset.theme = theme;
-  try {
-    if (localStorage.getItem(LS_THEME) !== theme) localStorage.setItem(LS_THEME, theme);
-  } catch {
-    // localStorage may be unavailable (private mode); theming is best-effort.
-  }
-}
+// Appearance is owned by the shared theme.js module (loaded before this file):
+// it follows the hub's /api/state theme and re-themes this window live on a
+// cross-tab change. Alias applyTheme for the /api/state follow below.
+const applyTheme = window.MooringTheme.applyTheme;
 
 const TOOL_LABELS = {
   mooring_list_datasets: "listing datasets",
@@ -1521,10 +1512,7 @@ async function init() {
   // a/s apply/skip the latest proposal — only when the prompt isn't focused, so
   // they never hijack typing.
   document.addEventListener("keydown", onGlobalKeydown);
-  // The hub changed the appearance (same origin) — re-theme this window live.
-  window.addEventListener("storage", (event) => {
-    if (event.key === LS_THEME) applyTheme(event.newValue);
-  });
+  // Cross-tab appearance changes are followed by the shared theme.js module.
 
   await openChat();
 }

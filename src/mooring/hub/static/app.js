@@ -19,20 +19,11 @@ const STATE_BADGES = {
 const PUSH_STATES = new Set(["modified", "new local", "deleted locally"]);
 const PULL_STATES = new Set(["remote changed", "new remote", "deleted remotely"]);
 
-// Appearance, shared with the chat window (same origin) via this localStorage
-// key; a `storage` event lets an open chat re-theme live. The server is the
-// source of truth — /api/state carries the value and we mirror it here.
-const LS_THEME = "mooring.ui.theme";
-
-function applyTheme(theme) {
-  document.documentElement.dataset.theme = theme;
-  try {
-    // Only rewrite on a real change so we don't fire redundant storage events.
-    if (localStorage.getItem(LS_THEME) !== theme) localStorage.setItem(LS_THEME, theme);
-  } catch {
-    // localStorage may be unavailable (private mode / blocked); theming is best-effort.
-  }
-}
+// Appearance lives in the shared theme.js module (loaded before this file): it
+// owns applyTheme + the localStorage key and installs the cross-tab `storage`
+// follower used by every mooring page. Alias it so the hub's call sites read as
+// before; the server (/api/state) stays the source of truth.
+const applyTheme = window.MooringTheme.applyTheme;
 
 let busy = false;
 let showAddRepo = false;
@@ -1328,8 +1319,8 @@ function renderReviewBanner(review) {
 }
 
 // -- first-run checklist (the self-ticking ramp; pure derivation in checklist.js) --
-// Progress lives in localStorage under a per-repo key (the LS_THEME posture:
-// best-effort, private mode just means the checklist re-derives what it can from
+// Progress lives in localStorage under a per-repo key (the same best-effort
+// posture as the theme key: private mode just means the checklist re-derives from
 // the /api/state rows). Repo mode only — it teaches the pull→push rhythm, which
 // needs a connected repo. Null key = no checklist surface (local mode/login wall).
 
@@ -1458,7 +1449,12 @@ function renderAdoptBanner(candidates) {
     all.addEventListener("click", () => adoptFolders(names));
     actions.append(all);
   }
-  banner.append(summary, actions);
+  // Wrap in .notice-content so the summary + action buttons stack (block) beside
+  // the leading icon rather than becoming inline flex items next to it.
+  const content = document.createElement("div");
+  content.className = "notice-content";
+  content.append(summary, actions);
+  banner.append(content);
 }
 
 function adoptFolders(folders) {
@@ -1503,9 +1499,13 @@ async function refresh() {
   const showFiles = state.logged_in || localMode;
 
   const hostSuffix = state.host && state.host !== "github.com" ? ` · ${state.host}` : "";
-  $("repo-info").textContent = state.repo
+  const repoInfoText = state.repo
     ? `${state.repo} @ ${state.branch}${hostSuffix}`
     : (localMode ? "Local workspace — not connected to a repo" : "");
+  const repoInfoEl = $("repo-info");
+  repoInfoEl.textContent = repoInfoText;
+  repoInfoEl.title = repoInfoText; // the line ellipsis-truncates when the bar is tight
+
   $("workspace-info").textContent = `Workspace: ${state.workspace}`;
   const hint = $("workspace-hint");
   hint.textContent = state.workspace_hint || "";
@@ -1590,15 +1590,22 @@ async function refresh() {
     : null;
   lastReview = (state.logged_in && state.review) || null;
 
+  // Reviews only makes sense against a logged-in repo; Activity (machine-local) and
+  // Settings (per-machine config) stay reachable everywhere, so only Reviews is gated.
+  $("reviews-link").classList.toggle("hidden", !state.logged_in);
+  const accountSummary = $("account-summary");
   if (state.logged_in) {
+    // The @handle labels the account menu; the panel repeats it with the Log out it
+    // acts on. (This replaced a second, redundant @username → /settings link.)
+    accountSummary.textContent = `@${state.user}`;
     const userInfo = $("user-info");
     userInfo.innerHTML = "";
-    const profile = document.createElement("a");
-    profile.href = "/settings";
-    profile.className = "profile-link";
-    profile.title = "Settings & preferences";
-    profile.textContent = `@${state.user}`;
-    userInfo.append(profile, " ");
+    const who = document.createElement("div");
+    who.className = "muted";
+    who.append("Signed in as ");
+    const handle = document.createElement("b");
+    handle.textContent = `@${state.user}`;
+    who.appendChild(handle);
     const logoutBtn = document.createElement("button");
     logoutBtn.className = "small";
     logoutBtn.textContent = "Log out";
@@ -1606,10 +1613,11 @@ async function refresh() {
       await api("/api/logout", {});
       location.reload();
     });
-    userInfo.appendChild(logoutBtn);
+    userInfo.append(who, logoutBtn);
     $("summary").textContent = state.summary || "";
     renderReviewBanner(state.review);
   } else {
+    accountSummary.textContent = "☰ Menu";
     $("user-info").textContent = "";
     $("summary").textContent = "";
     renderReviewBanner(null);
@@ -1774,12 +1782,10 @@ async function pollCopilotLogin() {
 
 // A native <details> stays open until its summary is clicked again; close any open
 // menu when the user clicks outside it, the way a menu should. This covers the header
-// Copilot menu and every per-row actions menu — and, because clicking one row's summary
-// runs here too, opening a menu closes any other row menu that was left open.
+// menus (Copilot + account) and every per-row actions menu — and, because clicking one
+// menu's summary runs here too, opening a menu closes any other menu left open.
 document.addEventListener("click", (e) => {
-  const copilot = $("copilot-menu");
-  if (copilot.open && !copilot.contains(e.target)) copilot.open = false;
-  for (const menu of document.querySelectorAll("details.row-menu[open]")) {
+  for (const menu of document.querySelectorAll("details.header-menu[open], details.row-menu[open]")) {
     if (!menu.contains(e.target)) menu.open = false;
   }
 });
@@ -1936,12 +1942,10 @@ $("theme-select").addEventListener("change", async (event) => {
   if (data.error) showError(data.error);
 });
 
-// Another same-origin window (the open chat) changed the theme — follow it.
-window.addEventListener("storage", (event) => {
-  if (event.key === LS_THEME && event.newValue) {
-    applyTheme(event.newValue);
-    $("theme-select").value = event.newValue;
-  }
+// theme.js applies a cross-tab appearance change to <html>; the hub just keeps
+// its Appearance select in sync with it.
+window.addEventListener("mooring:theme", (event) => {
+  $("theme-select").value = event.detail;
 });
 
 // Match the toggle to the theme the pre-paint script already applied, so it's

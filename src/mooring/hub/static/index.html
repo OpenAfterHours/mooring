@@ -94,47 +94,69 @@
   <header>
     <h1><svg class="brand-mark" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 6v16M19 13l2-1a9 9 0 0 1-18 0l2 1M9 11h6"/><circle cx="12" cy="4" r="2"/></svg>mooring</h1>
     <div id="repo-info"></div>
-    <select id="repo-select" class="hidden" title="Switch repo" aria-label="Switch repo"></select>
-    <button id="connect-repo" class="small hidden" title="Connect a team repo to sync &amp; share">&#9875; Connect a repo</button>
-    <details id="copilot-menu" class="header-menu hidden">
-      <summary title="AI copilot sign-in">&#129302; Copilot</summary>
-      <div class="header-menu-panel">
-        <p class="muted">The copilot uses GitHub Copilot, which signs in
-          <b>separately</b> from your GitHub login &mdash; it can even be a
-          different account.</p>
-        <div id="copilot-status" class="muted"></div>
-        <!-- "Signed in, but this account can't USE Copilot" (e.g. a 403 not-authorized).
-             Distinct from not-signed-in: the fix is Switch account or ask an admin. -->
-        <div id="copilot-authz" class="copilot-authz hidden"></div>
-        <div class="toolbar">
-          <button id="copilot-connect" class="primary small hidden">Sign in to Copilot</button>
-          <button id="copilot-switch" class="small hidden">Switch account</button>
-          <button id="copilot-check" class="small">Check status</button>
+    <!-- Right-hand controls, grouped so the whole cluster WRAPS to a second row on a
+         narrow window instead of overflowing. Standing controls (repo switch, Copilot,
+         appearance) stay on the bar; occasional pages (Reviews/Activity/Settings) and
+         the account/Log out fold into the single account menu on the far right. -->
+    <div class="header-actions">
+      <select id="repo-select" class="hidden" title="Switch repo" aria-label="Switch repo"></select>
+      <button id="connect-repo" class="small hidden" title="Connect a team repo to sync &amp; share">&#9875; Connect a repo</button>
+      <details id="copilot-menu" class="header-menu hidden">
+        <summary title="AI copilot sign-in">&#129302; Copilot</summary>
+        <div class="header-menu-panel">
+          <p class="muted">The copilot uses GitHub Copilot, which signs in
+            <b>separately</b> from your GitHub login &mdash; it can even be a
+            different account.</p>
+          <div id="copilot-status" class="muted"></div>
+          <!-- "Signed in, but this account can't USE Copilot" (e.g. a 403 not-authorized).
+               Distinct from not-signed-in: the fix is Switch account or ask an admin. -->
+          <div id="copilot-authz" class="copilot-authz hidden"></div>
+          <div class="toolbar">
+            <button id="copilot-connect" class="primary small hidden">Sign in to Copilot</button>
+            <button id="copilot-switch" class="small hidden">Switch account</button>
+            <button id="copilot-check" class="small">Check status</button>
+          </div>
+          <div id="copilot-note" class="muted"></div>
+          <!-- The device-flow code `copilot login` prints (its own clipboard copy
+               often fails). Shown while polling so switching account is possible. -->
+          <div id="copilot-code-box" class="hidden">
+            <p>In the browser, enter this code at
+              <a id="copilot-link" href="https://github.com/login/device" target="_blank" rel="noopener">github.com/login/device</a>:
+            </p>
+            <div id="copilot-code" class="code"></div>
+            <div class="toolbar"><button id="copilot-copy" class="small">Copy code</button></div>
+          </div>
         </div>
-        <div id="copilot-note" class="muted"></div>
-        <!-- The device-flow code `copilot login` prints (its own clipboard copy
-             often fails). Shown while polling so switching account is possible. -->
-        <div id="copilot-code-box" class="hidden">
-          <p>In the browser, enter this code at
-            <a id="copilot-link" href="https://github.com/login/device" target="_blank" rel="noopener">github.com/login/device</a>:
-          </p>
-          <div id="copilot-code" class="code"></div>
-          <div class="toolbar"><button id="copilot-copy" class="small">Copy code</button></div>
+      </details>
+      <select id="theme-select" title="Appearance (hub, chat &amp; notebooks)" aria-label="Appearance (hub, chat &amp; notebooks)">
+        <option value="light">&#9728; Light</option>
+        <option value="dark">&#9789; Dark</option>
+        <option value="system">&#9681; System</option>
+      </select>
+      <!-- Account & pages menu: identity + Log out (filled in by refresh()) plus the
+           occasional-use page links. A <details> menu-button, never a <select> as an
+           action menu (the documented Windows single-ArrowDown footgun). -->
+      <details id="account-menu" class="header-menu">
+        <summary id="account-summary" title="Account &amp; pages" aria-label="Account and pages menu">&#9776; Menu</summary>
+        <div class="header-menu-panel">
+          <div id="user-info" class="account-identity"></div>
+          <nav class="menu-nav" aria-label="Pages">
+            <a id="reviews-link" class="header-menu-item hidden" href="/reviews" title="Review teammates' proposed changes">&#9998; Reviews</a>
+            <a id="activity-link" class="header-menu-item" href="/activity" title="Recent activity &amp; trash (local to this machine)">&#9201; Activity</a>
+            <a id="settings-link" class="header-menu-item" href="/settings" title="Settings &amp; preferences">&#9881; Settings</a>
+          </nav>
         </div>
-      </div>
-    </details>
-    <select id="theme-select" title="Appearance (hub, chat &amp; notebooks)" aria-label="Appearance (hub, chat &amp; notebooks)">
-      <option value="light">&#9728; Light</option>
-      <option value="dark">&#9789; Dark</option>
-      <option value="system">&#9881; System</option>
-    </select>
-    <a id="reviews-link" class="header-link" href="/reviews" title="Review teammates' proposed changes" aria-label="Reviews">&#9998; Reviews</a>
-    <a id="activity-link" class="header-link" href="/activity" title="Recent activity &amp; trash (local to this machine)" aria-label="Activity">&#9201; Activity</a>
-    <a id="settings-link" class="header-link" href="/settings" title="Settings &amp; preferences" aria-label="Settings">&#9881; Settings</a>
-    <div id="user-info"></div>
+      </details>
+    </div>
   </header>
 
   <main>
+    <!-- Errors surface at the top of the workspace, above whichever card is
+         showing, so a failure appears where you're looking — not marooned below
+         the fold. Kept OUTSIDE #files-card (global) so login errors still show
+         while the files card is hidden behind the login wall. -->
+    <div id="error-banner" class="notice notice-error hidden"></div>
+
     <section id="setup-card" class="card hidden">
       <h2>Connect a team repo</h2>
       <p id="setup-intro">Connect to a team repo to sync and share your notebooks. Ask your
@@ -188,11 +210,15 @@
       <input id="file-search" class="file-search hidden" type="search"
              placeholder="&#128269; Filter notebooks by name or title&hellip;"
              aria-label="Filter notebooks by name or title" autocomplete="off">
-      <div id="summary" class="muted"></div>
-      <div id="review-banner" class="muted hidden"></div>
-      <div id="offline-banner" class="hidden" role="status"></div>
-      <div id="freshness-banner" class="hidden" role="status"></div>
-      <div id="adopt-banner" class="hidden"></div>
+      <!-- Status notices — one visual language (icon + coloured left rule) for the
+           files-card alerts, most-urgent first: offline > open-proposal > adopt >
+           freshness. Each is toggled independently by app.js. #summary below is the
+           table's quiet caption ("N notebooks, M changed"), not an alert. -->
+      <div id="offline-banner" class="notice notice-offline hidden" role="status"></div>
+      <div id="review-banner" class="notice notice-review hidden"></div>
+      <div id="adopt-banner" class="notice notice-adopt hidden"></div>
+      <div id="freshness-banner" class="notice notice-fresh hidden" role="status"></div>
+      <div id="summary" class="muted files-summary"></div>
       <table id="files-table">
         <thead><tr><th>File</th><th>Status</th><th>Actions</th></tr></thead>
         <tbody></tbody>
@@ -266,8 +292,6 @@
       </div>
     </section>
 
-    <div id="error-banner" class="hidden"></div>
-
     <!-- Open-time staleness confirm: shown only when the row's remote moved
          (remote changed / deleted remotely / conflict). Three explicit buttons —
          deliberately a <dialog>, not confirm(): the safe action gets focus and
@@ -326,6 +350,10 @@
   <script src="/static/diff_fmt.js"></script>
   <script src="/static/whatsnew_fmt.js"></script>
   <script src="/static/checklist.js"></script>
+  <!-- Shared appearance module (applyTheme + cross-tab follower). Before app.js,
+       which aliases window.MooringTheme. The zero-flash pre-paint stays inline in
+       <head>; this only carries the runtime bits every page shares. -->
+  <script src="/static/theme.js"></script>
   <script src="/static/app.js"></script>
   <!-- Decorative backdrop: deterministic starfield + the one-time boat voyage.
        Last in <body> so the scene is already parsed; no DOM/side effects elsewhere. -->
