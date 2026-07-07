@@ -383,6 +383,43 @@
   .mr-reflection { animation: none; }
 }
 
+/* --- Scroll cue: hints there's more below the fold ------------------------- */
+.mr-scroll-cue {
+  /* Anchored to the right edge (clear of the boat's centred mooring spot,
+     where it sits still for several seconds each voyage loop) rather than
+     centred, so the bouncing chevron never collides with the dropped anchor. */
+  position: absolute;
+  z-index: 5;
+  right: 28px;
+  bottom: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border: 1px solid rgba(216, 222, 233, 0.25);
+  border-radius: 50%;
+  color: var(--oah-slate-300);
+  background: rgba(9, 10, 13, 0.35);
+  backdrop-filter: blur(2px);
+  text-decoration: none;
+  animation: mr-scroll-bounce 2.2s ease-in-out infinite;
+  transition: color 160ms ease, border-color 160ms ease;
+}
+
+.mr-scroll-cue:hover { color: var(--oah-orange); border-color: rgba(255, 145, 0, 0.45); }
+
+.mr-scroll-cue svg { width: 18px; height: 18px; }
+
+@keyframes mr-scroll-bounce {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(6px); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mr-scroll-cue { animation: none; }
+}
+
 /* --- Feature shelf --------------------------------------------------------- */
 .mr-shelf-wrap {
   background: var(--oah-slate-900);
