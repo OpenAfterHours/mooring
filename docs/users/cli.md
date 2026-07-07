@@ -62,8 +62,11 @@ mooring version
 Start the local browser hub (the default when you run with no command).
 
 - `--no-browser` — start the server but don't open a browser tab.
-- `--port PORT` — bind to a fixed port instead of a random free one. The hub
-  always listens on `127.0.0.1` (localhost only).
+- `--port PORT` — pin the hub to a specific port. By default it uses a fixed
+  port (`8724`), falling back to a random free one only if that's already taken;
+  a stable port keeps your in-browser state (the getting-started checklist,
+  watched files, AI model choice) across launches. The hub always listens on
+  `127.0.0.1` (localhost only).
 
 ### `login` / `logout` / `whoami`
 

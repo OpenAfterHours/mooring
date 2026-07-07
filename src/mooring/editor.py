@@ -67,6 +67,19 @@ def free_port() -> int:
         return sock.getsockname()[1]
 
 
+def bind_or_free(preferred: int) -> int:
+    """Return ``preferred`` if it's free to bind on 127.0.0.1, else a random free
+    port. Lets a caller prefer a *stable* port (so the browser origin — and thus
+    its per-origin localStorage — is the same each launch) while still yielding
+    gracefully when something already holds it."""
+    with socket.socket() as sock:
+        try:
+            sock.bind(("127.0.0.1", preferred))
+        except OSError:
+            return free_port()
+        return sock.getsockname()[1]
+
+
 def _launch_prefix(workspace: Path) -> tuple[list[str], dict[str, str] | None]:
     """The command prefix that runs ``marimo`` in the right environment for
     ``workspace``, plus an optional env override (None = inherit).

@@ -46,7 +46,7 @@ from mooring.app import notebooks as nb_ops
 from mooring.app.apply import ApplyGuard
 from mooring.app.batch_service import BatchService
 from mooring.app.chat_service import ChatService
-from mooring.editor import EditorServer, free_port
+from mooring.editor import EditorServer, bind_or_free
 from mooring.github import GitHubClient, GitHubError, Unreachable, blob_url
 from mooring.hub import settings_schema
 
@@ -1038,10 +1038,21 @@ def create_app(hub: Hub) -> Starlette:
     return app
 
 
+# A fixed default so the hub serves from a STABLE origin (http://127.0.0.1:8724)
+# every launch. The browser scopes localStorage per origin *including the port*,
+# so a fresh random port each launch would orphan everything we persist
+# client-side — the first-run checklist (incl. its dismissed flag), the what's-new
+# watch set, the AI model/effort override. A stable port keeps them across
+# relaunches. Chosen outside the OS ephemeral range and clear of common dev ports
+# (3000/5000/8000/8080/8888…). `--port` still overrides, and if 8724 is already
+# taken bind_or_free() falls back to a random free port for that session.
+DEFAULT_HUB_PORT = 8724
+
+
 def run_hub(app_cfg: config.AppConfig, open_browser: bool = True, port: int | None = None) -> int:
     hub = Hub(app_cfg)
     app = create_app(hub)
-    port = port or free_port()
+    port = port or bind_or_free(DEFAULT_HUB_PORT)
     url = f"http://127.0.0.1:{port}/"
     telemetry.log_event("hub_start")
 
