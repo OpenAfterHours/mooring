@@ -1,6 +1,6 @@
 [project]
 name = "mooring"
-version = "0.4.23"
+version = "0.4.24"
 description = "Git-free marimo notebook sharing via GitHub"
 readme = "README.md"
 license = "MIT"
