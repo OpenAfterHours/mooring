@@ -818,6 +818,36 @@ $("whatsnew-close").addEventListener("click", () => {
 function fileActions(file, opts) {
   opts = opts || {};
   const actions = [];
+  // Opening the notebook is by far the most common thing to do from a row, so the
+  // open actions LEAD the menu — plain "Open" first, then the AI Workbench variants —
+  // ahead of the sync/manage actions below, whatever the file's sync state. (The rarer
+  // "Enable/Disable AI" toggle is a config action, so it's kept out of this cluster and
+  // added further down.)
+  //
+  // has_local is server truth (the file exists on disk); some states such as a
+  // remote-deleted conflict have no local file, so Open/Delete must not appear.
+  // A .py is openable only when it's a real marimo notebook (server-sniffed
+  // is_notebook): a plain helper module must NOT be opened in the editor, which
+  // would rewrite it into notebook form on save (the server also refuses).
+  const isNotebook = file.path.endsWith(".py") && file.is_notebook === true;
+  const openable = isNotebook || file.path.endsWith(".pbip");
+  if (openable && file.has_local) {
+    actions.push(["Open", () => openAction(file.path)]);
+  }
+  // "Open with AI" launches the Workbench — the notebook and the copilot side by
+  // side in one tab (see openWorkbench). One workbench per notebook; clicking again
+  // focuses the existing one. Explain / Review logic open the same Workbench and
+  // auto-run /explain or /review once the copilot is ready (both are model turns, so
+  // they share the ai_disabled opt-out). A notebook can be opted out of AI (synced
+  // mooring.toml) — when it is, these are hidden and the "Enable AI" toggle below
+  // offers to turn it back on. Modules (non-notebook .py) get no AI: the copilot
+  // operates on notebooks. Plain "Open" (a raw marimo tab, no AI) is added above.
+  if (aiChatEnabled && isNotebook && file.has_local && !file.ai_disabled) {
+    actions.push(["Open with AI", () => openWorkbenchAction(file.path)]);
+    actions.push(["Explain", () => openWorkbenchAction(file.path, { explain: true })]);
+    actions.push(["Review logic", () => openWorkbenchAction(file.path, { review: true })]);
+  }
+  // --- Sync + manage actions follow the open cluster above. ---
   // Offline every NETWORK action is skipped — the banner explains why. The
   // conflict resolves, Push/Propose, "Review changes…" (fetches the base blob),
   // "Discard my changes" (ditto), and "History…" all need the team repo. A
@@ -854,16 +884,6 @@ function fileActions(file, opts) {
   if (recentlyReverted.has(file.path)) {
     actions.push(["Undo", () => undoAction(file.path)]);
   }
-  // has_local is server truth (the file exists on disk); some states such as a
-  // remote-deleted conflict have no local file, so Open/Delete must not appear.
-  // A .py is openable only when it's a real marimo notebook (server-sniffed
-  // is_notebook): a plain helper module must NOT be opened in the editor, which
-  // would rewrite it into notebook form on save (the server also refuses).
-  const isNotebook = file.path.endsWith(".py") && file.is_notebook === true;
-  const openable = isNotebook || file.path.endsWith(".pbip");
-  if (openable && file.has_local) {
-    actions.push(["Open", () => openAction(file.path)]);
-  }
   // A fearless personal copy: {stem}-{login}-draft.py in the same folder, opened
   // at once. Notebooks only (a PBIP member never satisfies isNotebook) — a draft
   // never flows back into the original automatically; fold work back by hand.
@@ -893,25 +913,11 @@ function fileActions(file, opts) {
   if (file.github_url) {
     actions.push(["View on GitHub", () => openExternal(file.github_url)]);
   }
-  // "Open with AI" launches the Workbench — the notebook and the copilot side by
-  // side in one tab (see openWorkbench). One workbench per notebook; clicking again
-  // focuses the existing one. A notebook can be opted out of AI (synced mooring.toml)
-  // — when it is, these actions are hidden and the toggle offers to turn it back on.
-  // The toggle is the off switch for "this notebook now handles PII; don't let AI
-  // touch it by mistake". Modules (non-notebook .py) get no AI: the copilot operates
-  // on notebooks. Plain "Open" (a raw marimo tab, no AI) is added above, unchanged.
+  // The AI opt-out toggle: the off switch for "this notebook now handles PII; don't let
+  // AI touch it by mistake" (and the way back on). A rare config action, so it sits down
+  // here with the manage actions rather than in the open cluster at the top. Shown
+  // whenever AI is available for this notebook, in either opt state.
   if (aiChatEnabled && isNotebook && file.has_local) {
-    if (!file.ai_disabled) {
-      actions.push(["Open with AI", () => openWorkbenchAction(file.path)]);
-      // Explain: opens the Workbench and auto-runs /explain once the copilot is
-      // ready — a cell-anchored walkthrough for picking up a teammate's notebook.
-      // Same gate as AI (and it IS a model turn, so the ai_disabled opt-out applies).
-      actions.push(["Explain", () => openWorkbenchAction(file.path, { explain: true })]);
-      // Review logic: opens the Workbench and auto-runs /review — a value-blind pass
-      // over source + schema that flags structural correctness risks (fan-out joins,
-      // hardcoded periods, un-run cells). Same gate; it is a model turn too.
-      actions.push(["Review logic", () => openWorkbenchAction(file.path, { review: true })]);
-    }
     const label = file.ai_disabled ? "Enable AI" : "Disable AI";
     actions.push([label, () =>
       action("/api/ai/notebook/toggle", { notebook: file.path, disabled: !file.ai_disabled })]);
