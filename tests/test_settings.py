@@ -17,8 +17,11 @@ from mooring.hub.server import Hub, create_app
 _AI_ENV = [
     "MOORING_UI_THEME",
     "MOORING_AI_ENABLED",
+    "MOORING_AI_PROVIDER",
     "MOORING_AI_MODEL",
     "MOORING_AI_REASONING_EFFORT",
+    "MOORING_AI_OPENAI_BASE_URL",
+    "MOORING_AI_OPENAI_API_VERSION",
     "MOORING_AI_CHAT_IDLE_SEC",
     "MOORING_AI_LIVE_SCHEMA",
     "MOORING_AI_SEMANTIC_MODEL",
@@ -111,6 +114,11 @@ def test_coerce_rejects_bad_input():
 def test_no_admin_or_guarantee_key_is_editable():
     """The allowlist must exclude org/identity/governance keys; the four structural
     value-blindness guarantees have no flag, so they cannot appear at all."""
+    # ai.provider is DELIBERATELY editable (a per-machine choice: GitHub Copilot vs an
+    # OpenAI-compatible endpoint) — it was forbidden while copilot was the only backend
+    # and there was nothing to switch to. It is not identity/telemetry, and switching
+    # stays value-blind; the SettingSpec marks it needs_care and its help spells out the
+    # egress-destination change. Identity/telemetry/model-pin keys stay forbidden.
     forbidden = {
         "logging.endpoint",
         "logging.level",
@@ -118,7 +126,6 @@ def test_no_admin_or_guarantee_key_is_editable():
         "github.owner",
         "github.repo",
         "github.host",
-        "ai.provider",
         "ai.pii.name_model",
         "ai.pii.name_model_revision",
     }

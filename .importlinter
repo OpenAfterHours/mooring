@@ -218,6 +218,8 @@ source_modules =
     mooring.ai.introspect
     mooring.ai.locality
     mooring.ai.ner
+    mooring.ai.openai_provider
+    mooring.ai.openai_session
     mooring.ai.pii
     mooring.ai.scan
     mooring.ai.secrets

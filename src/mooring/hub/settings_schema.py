@@ -98,6 +98,24 @@ EDITABLE: tuple[SettingSpec, ...] = (
         "only changes your machine.",
     ),
     SettingSpec(
+        key="ai.provider",
+        accessor="ai_provider",
+        label="AI backend",
+        group="ai",
+        type="enum",
+        control="select",
+        enum_values=("copilot", "openai"),
+        enum_labels=("GitHub Copilot", "OpenAI-compatible"),
+        default="copilot",
+        sensitivity="needs_care",
+        env_var="MOORING_AI_PROVIDER",
+        help="Which backend answers the copilot. “GitHub Copilot” uses your Copilot "
+        "sign-in; “OpenAI-compatible” uses the OpenAI SDK against the base URL below "
+        "(OpenAI, Azure, a gateway, or a local server) with a key set on the hub’s AI "
+        "card. Switching changes WHERE the value-free schema + notebook source are "
+        "sent — it stays value-blind either way, but the destination changes.",
+    ),
+    SettingSpec(
         key="ai.model",
         accessor="ai_model",
         label="Default model",
@@ -120,6 +138,34 @@ EDITABLE: tuple[SettingSpec, ...] = (
         env_var="MOORING_AI_REASONING_EFFORT",
         help="Your default reasoning effort (empty = the model’s default). You can "
         "still pick it per chat.",
+    ),
+    SettingSpec(
+        key="ai.openai_base_url",
+        accessor="ai_openai_base_url",
+        label="OpenAI base URL",
+        group="ai",
+        type="str",
+        control="text",
+        default="",
+        sensitivity="needs_care",
+        env_var="MOORING_AI_OPENAI_BASE_URL",
+        help="Only for the OpenAI-compatible backend: the API base URL. Empty = OpenAI "
+        "itself. Point it at an Azure resource, a gateway (LiteLLM/OpenRouter), or a "
+        "local server (e.g. http://localhost:11434/v1 for Ollama). A local endpoint "
+        "usually needs no API key.",
+    ),
+    SettingSpec(
+        key="ai.openai_api_version",
+        accessor="ai_openai_api_version",
+        label="OpenAI API version (Azure)",
+        group="ai",
+        type="str",
+        control="text",
+        default="",
+        sensitivity="needs_care",
+        env_var="MOORING_AI_OPENAI_API_VERSION",
+        help="Only for Azure OpenAI: the api-version (e.g. 2024-10-21). Setting it "
+        "selects the Azure client; leave empty for OpenAI or a non-Azure endpoint.",
     ),
     SettingSpec(
         key="ai.chat_idle_timeout_sec",

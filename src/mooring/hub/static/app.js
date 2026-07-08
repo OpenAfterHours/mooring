@@ -2134,7 +2134,11 @@ async function pollLogin() {
 // card surfaces that sign-in + which account is connected, so the user never has
 // to drop to `mooring ai login` in a terminal.
 
+let aiProvider = "copilot";
+
 function renderCopilotStatus(s) {
+  if (s && s.provider) aiProvider = s.provider;
+  const isOpenai = aiProvider === "openai";
   const statusEl = $("copilot-status");
   const connectBtn = $("copilot-connect");
   const switchBtn = $("copilot-switch");
@@ -2146,28 +2150,38 @@ function renderCopilotStatus(s) {
     authzEl.textContent = s.authz_error;
     switchBtn.classList.remove("hidden");
   }
+  const connectLabel = isOpenai ? "Set API key" : "Sign in to Copilot";
   if (!s || s.available === false) {
     statusEl.textContent =
       s?.detail ||
-      "GitHub Copilot isn't available in this build (install the mooring[copilot] extra).";
+      (isOpenai
+        ? "The OpenAI SDK isn't installed (install the mooring[openai] extra)."
+        : "GitHub Copilot isn't available in this build (install the mooring[copilot] extra).");
     connectBtn.classList.add("hidden");
     switchBtn.classList.add("hidden");
     return;
   }
   if (!s.checked) {
     statusEl.textContent = "Sign-in status not checked yet.";
-    connectBtn.textContent = "Sign in to Copilot";
+    connectBtn.textContent = connectLabel;
     connectBtn.classList.remove("hidden");
     switchBtn.classList.add("hidden");
     return;
   }
   if (s.connected) {
-    statusEl.textContent = s.account ? `Signed in as @${s.account}.` : "Signed in.";
+    statusEl.textContent = isOpenai
+      ? s.detail || "OpenAI-compatible endpoint connected."
+      : s.account
+        ? `Signed in as @${s.account}.`
+        : "Signed in.";
     connectBtn.classList.add("hidden");
+    switchBtn.textContent = isOpenai ? "Change API key" : "Switch account";
     switchBtn.classList.remove("hidden");
   } else {
-    statusEl.textContent = "Not signed in to Copilot.";
-    connectBtn.textContent = "Sign in to Copilot";
+    statusEl.textContent = isOpenai
+      ? s.detail || "No OpenAI API key configured."
+      : "Not signed in to Copilot.";
+    connectBtn.textContent = connectLabel;
     connectBtn.classList.remove("hidden");
     switchBtn.classList.add("hidden");
   }
@@ -2249,8 +2263,40 @@ document.addEventListener("click", (e) => {
   }
 });
 
-$("copilot-connect").addEventListener("click", startCopilotLogin);
-$("copilot-switch").addEventListener("click", startCopilotLogin);
+async function setOpenAiKey() {
+  const key = window.prompt(
+    "Paste the API key for your OpenAI-compatible endpoint. It is stored in your OS " +
+      "credential store on this machine only — never synced. (Local endpoints may need none.)"
+  );
+  if (!key || !key.trim()) return;
+  const note = $("copilot-note");
+  const connectBtn = $("copilot-connect");
+  const switchBtn = $("copilot-switch");
+  connectBtn.disabled = true;
+  switchBtn.disabled = true;
+  note.textContent = "Validating the API key…";
+  try {
+    const data = await api("/api/ai/key", { key: key.trim() });
+    note.textContent = "";
+    if (data.error) showError(data.error);
+    else renderCopilotStatus(data.status);
+  } catch (e) {
+    note.textContent = "";
+    showError((e && e.message) || "Couldn't store the API key.");
+  } finally {
+    connectBtn.disabled = false;
+    switchBtn.disabled = false;
+  }
+}
+
+// Copilot signs in via a browser device flow; OpenAI has no such flow, so its
+// "connect" asks for an API key instead. One handler dispatches on the provider.
+function connectAi() {
+  return aiProvider === "openai" ? setOpenAiKey() : startCopilotLogin();
+}
+
+$("copilot-connect").addEventListener("click", connectAi);
+$("copilot-switch").addEventListener("click", connectAi);
 $("copilot-copy").addEventListener("click", () => {
   const code = $("copilot-code").textContent;
   const btn = $("copilot-copy");

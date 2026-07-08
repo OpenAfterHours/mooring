@@ -204,6 +204,14 @@ class AppConfig:
         return self.ai.reasoning_effort
 
     @property
+    def ai_openai_base_url(self) -> str:
+        return self.ai.openai_base_url
+
+    @property
+    def ai_openai_api_version(self) -> str:
+        return self.ai.openai_api_version
+
+    @property
     def ai_chat_idle_timeout(self) -> int:
         return self.ai.chat_idle_timeout
 

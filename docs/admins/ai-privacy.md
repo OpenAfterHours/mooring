@@ -100,6 +100,102 @@ DAX), but never the data itself.
 Nothing about a conversation is persisted: the session store, telemetry, config
 discovery, skills, file hooks, and host-git access are all switched off.
 
+## Choosing the AI backend: Copilot or an OpenAI-compatible endpoint { #ai-backend }
+
+The copilot ships two interchangeable backends. Pick one **per machine** in the hub
+**Settings ▸ AI copilot ▸ AI backend** dropdown, or in `config.toml`:
+
+```toml
+[ai]
+provider = "copilot"   # the default (GitHub Copilot SDK) — or "openai"
+model = ""             # optional: pin a model id (the hub's picker lists what's available)
+```
+
+The `"openai"` backend is a generic **OpenAI-compatible** client: with a base URL it
+talks to OpenAI, Azure OpenAI, an enterprise gateway (LiteLLM), an aggregator
+(OpenRouter / Together / Groq), or a **local server** (vLLM / Ollama / LM Studio).
+Switching backend changes *where* the value-free schema + source are sent — it stays
+value-blind either way, but the destination changes, so it is a deliberate
+(needs-care) choice.
+
+The value-blindness guarantees above are **provider-independent** — they are
+enforced *before* egress, in mooring's own code (`build_system_context`, the
+value-free tool handlers, the PII/traceback guards). Only the dataset **schema**,
+the notebook **source**, and a Power BI model's authored **DAX** ever leave, for
+either backend. Switching provider changes *where* that already-value-free text is
+sent, never *what* leaves.
+
+The OpenAI backend (the `mooring[openai]` extra) is built on the **Chat Completions
+API**, chosen precisely because value-blindness there is *structural*, not a
+convention:
+
+- **No hosted tools, ever.** Chat Completions' `tools=` accepts function specs
+  only — there is no `web_search`, `file_search`, or `code_interpreter` the API
+  will honour — so the model *cannot* reach the web, a file, or a code sandbox.
+  mooring registers **only its own value-free function tools**; a self-driven tool
+  loop dispatches them by name and refuses any unrecognised name. (This replaces
+  Copilot's allowlist + deny-all-permission + empty-working-dir hardening, which
+  guard against a *built-in agent's* file/shell tools that OpenAI simply doesn't
+  have.)
+- **Same single context choke point**, the same value-free tools (re-expressed as
+  function specs from the identical handlers), the same source-only Apply, and
+  marimo's own AI stays off.
+- **No server-side retention.** Every request is sent with `store = false`, so the
+  schema/source are not retained by OpenAI's stored-completions feature; the
+  conversation lives only in memory for the session's life.
+- The OpenAI **API** (unlike the ChatGPT consumer product) does not train on API
+  inputs or outputs by default, and Zero-Data-Retention is available for eligible
+  enterprise accounts.
+
+### The API key stays on your machine (and is optional for local endpoints)
+
+The API key is a secret and is **never** written to the synced `mooring.toml` (that
+would hand it to the whole team on push). It is resolved locally, in order:
+
+1. `MOORING_OPENAI_API_KEY` (env — beats everything, mirrors `MOORING_TOKEN`);
+2. the OS credential store, set with **`mooring ai key set`** (reads the key from a
+   no-echo prompt; `mooring ai key clear` removes it);
+3. `OPENAI_API_KEY` (the SDK's own env var, for convenience).
+
+In the hub, the AI card's **Set API key** button stores the key the same way (the OS
+keyring) and validates it. A **local / self-hosted endpoint usually needs no key** —
+set the base URL and leave the key empty, and the backend connects without one.
+
+### Pointing at your own endpoint
+
+`openai_base_url` and `openai_api_version` (both value-free — a URL and a version,
+never a secret, so they are safe in config and editable in Settings) select the
+endpoint:
+
+```toml
+# OpenAI itself — leave the base URL empty
+[ai]
+provider = "openai"
+model = "gpt-4o"
+
+# A local model server (no key needed)
+[ai]
+provider = "openai"
+openai_base_url = "http://localhost:11434/v1"   # Ollama; vLLM / LM Studio are similar
+model = "llama-3.1-70b"
+
+# An aggregator / gateway
+[ai]
+provider = "openai"
+openai_base_url = "https://openrouter.ai/api/v1"
+model = "meta-llama/llama-3.1-70b-instruct"
+
+# Azure OpenAI — keeps traffic in your own tenant/region
+[ai]
+provider = "openai"
+model = "my-gpt-4o-deployment"                  # on Azure, the DEPLOYMENT name
+openai_base_url = "https://my-res.openai.azure.com"
+openai_api_version = "2024-10-21"               # set → the AzureOpenAI client
+```
+
+Value-blindness is unchanged for every one of these — only the value-free schema,
+source, and DAX ever leave, to whichever endpoint you configure.
+
 ## Turning the copilot off for a notebook
 
 Beyond the global `[ai] enabled` switch, the copilot can be turned off for an

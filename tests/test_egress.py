@@ -172,6 +172,39 @@ def test_to_error_result_clean_message_unchanged():
     assert res.error == "dataset required"
 
 
+# -- the provider-neutral tool-output carrier + the OpenAI mint gateway ----------
+
+
+def test_scrub_error_text_scrubs_and_explains():
+    # A one-line message whose only content is a checksum value scrubs empty, so a
+    # value-free explanation is substituted (never an empty, retry-baiting error).
+    out = egress.scrub_error_text(f"cannot read schema: {VALID_CARD}")
+    assert VALID_CARD not in out and "withheld" in out
+
+
+def test_scrub_error_text_keeps_clean_and_multiline():
+    assert egress.scrub_error_text("dataset required") == "dataset required"
+    multi = egress.scrub_error_text(f"cannot read\nbad {VALID_CARD}\nrow 3")
+    assert VALID_CARD not in multi and "cannot read" in multi and "row 3" in multi
+
+
+def test_to_openai_tool_message_success_is_minted_as_is():
+    # A success output is minted verbatim (each handler owns its own scrub), mirroring
+    # to_tool_result — but as a plain, SDK-free {"role": "tool", ...} dict.
+    msg = egress.to_openai_tool_message("call_1", egress.ToolOutput("col_a: Int64"))
+    assert msg == {"role": "tool", "tool_call_id": "call_1", "content": "col_a: Int64"}
+
+
+def test_to_openai_tool_message_error_gets_the_egress_floor():
+    # The error output carries the RAW text; the OpenAI minter applies the SAME scrub
+    # floor as the copilot error channel, so no checksum value reaches the wire.
+    msg = egress.to_openai_tool_message(
+        "call_2", egress.ToolOutput(f"bad value {VALID_CARD}", is_error=True)
+    )
+    assert VALID_CARD not in msg["content"] and "withheld" in msg["content"]
+    assert msg["role"] == "tool" and msg["tool_call_id"] == "call_2"
+
+
 def test_sanitize_traceback_gateway_rewrites_value_safe():
     # The gateway wraps the sanitiser: detection + fail-closed rewrite + the
     # known-token rescue built from raw session text. Behavioural depth lives in
@@ -228,6 +261,21 @@ def test_only_egress_constructs_the_sdk_tool_result():
         if re.search(r"\bToolResult\s*\(", text) or re.search(r"\btext_result_for_llm\s*=", text):
             offenders.append(path.relative_to(_SRC_ROOT).as_posix())
     assert offenders == [], f"ToolResult minted outside egress.py: {offenders}"
+
+
+def test_only_egress_mints_the_openai_tool_message():
+    """The provider-neutral analogue of the ToolResult mint gateway: nothing outside
+    egress.py constructs a ``{"role": "tool", ...}`` result message, so a backend that
+    runs its OWN tool-calling loop routes every tool output through egress BY
+    CONSTRUCTION. (An assistant / user / system message is a different shape and is
+    fine; only the tool RESULT turn must pass through :func:`egress.to_openai_tool_message`.)"""
+    role_tool = re.compile(r"""["']role["']\s*[:=]\s*["']tool["']""")
+    offenders = [
+        path.relative_to(_SRC_ROOT).as_posix()
+        for path in _SRC_ROOT.rglob("*.py")
+        if path.name != "egress.py" and role_tool.search(path.read_text("utf-8"))
+    ]
+    assert offenders == [], f"OpenAI tool message minted outside egress.py: {offenders}"
 
 
 def test_no_module_bypasses_the_egress_scrub():

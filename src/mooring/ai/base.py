@@ -105,4 +105,12 @@ def get_provider(app_cfg: "AppConfig") -> AIProvider:
         from mooring.ai.copilot import CopilotProvider
 
         return CopilotProvider(model=app_cfg.ai_model)
-    raise AIError(f"Unknown AI provider {name!r}. Known: copilot.")
+    if name == "openai":
+        from mooring.ai.openai_provider import OpenAIProvider
+
+        return OpenAIProvider(
+            model=app_cfg.ai_model,
+            base_url=app_cfg.ai.openai_base_url,
+            api_version=app_cfg.ai.openai_api_version,
+        )
+    raise AIError(f"Unknown AI provider {name!r}. Known: copilot, openai.")

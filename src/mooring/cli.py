@@ -402,6 +402,16 @@ def _build_parser() -> argparse.ArgumentParser:
     ai_login.add_argument(
         "--host", default=None, help="GitHub host URL for Copilot (GHE data residency)"
     )
+    ai_key = ai_sub.add_parser(
+        "key", help="store/clear the OpenAI API key (used when [ai] provider = openai)"
+    )
+    ai_key_sub = ai_key.add_subparsers(dest="ai_key_command", required=True)
+    ai_key_sub.add_parser(
+        "set", help="store an OpenAI API key in the OS credential store (prompt/piped stdin)"
+    )
+    ai_key_sub.add_parser(
+        "clear", help="remove the stored OpenAI API key (environment variables are unaffected)"
+    )
     ai_dict = ai_sub.add_parser(
         "dictionary", help="inspect how the team data dictionary (context/) parses"
     )
@@ -2114,6 +2124,46 @@ def _print_download_progress(done: int, total: int) -> None:
     sys.stdout.flush()
 
 
+def _read_secret(prompt: str) -> str:
+    """Read a secret from an interactive prompt (no echo) or piped stdin — so a key
+    never lands in shell history or the process argument list."""
+    if sys.stdin is not None and sys.stdin.isatty():
+        import getpass
+
+        return getpass.getpass(prompt)
+    return sys.stdin.readline().strip() if sys.stdin is not None else ""
+
+
+def cmd_ai_key(args: argparse.Namespace) -> int:
+    """Store or clear the OpenAI API key in the OS credential store.
+
+    The key is a SECRET and stays per-machine, so — like the GitHub token — it lives
+    in the OS keyring and is NEVER written to the synced ``mooring.toml``. ``set``
+    reads the key from a no-echo prompt (or piped stdin), ``clear`` removes it. The
+    ``MOORING_OPENAI_API_KEY`` / ``OPENAI_API_KEY`` env vars still take precedence and
+    are unaffected. Used when ``[ai] provider = "openai"``.
+    """
+    from mooring.ai import AIError
+    from mooring.ai import openai_provider
+
+    if args.ai_key_command == "set":
+        key = _read_secret("OpenAI API key: ")
+        if not key.strip():
+            sys.exit("No key provided.")
+        try:
+            openai_provider.save_api_key(key)
+        except AIError as exc:
+            sys.exit(str(exc))
+        print("Stored the OpenAI API key in your OS credential store (used when the")
+        print('AI provider is OpenAI: `[ai] provider = "openai"`).')
+        return 0
+    if args.ai_key_command == "clear":
+        openai_provider.delete_api_key()
+        print("Removed any stored OpenAI API key (environment variables are unaffected).")
+        return 0
+    return 2
+
+
 def cmd_ai(app_cfg: config.AppConfig, cfg: config.Config, args: argparse.Namespace) -> int:
     """Manage the AI copilot: Copilot sign-in (login / status), dictionary check,
     the offline PII pre-flight scan (pii check), and the offline traceback-rewrite
@@ -2146,6 +2196,9 @@ def cmd_ai(app_cfg: config.AppConfig, cfg: config.Config, args: argparse.Namespa
         if args.ai_traceback_command == "check":
             return cmd_ai_traceback_check(app_cfg, cfg, args)
         return 2
+
+    if args.ai_command == "key":
+        return cmd_ai_key(args)
 
     try:
         provider = get_provider(app_cfg)
