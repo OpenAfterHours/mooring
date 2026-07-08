@@ -134,74 +134,15 @@ function maybeScroll() {
 }
 
 // -- markdown (escape-first; never inject raw model output) ------------------
-// KEPT BYTE-FOR-BYTE. escapeHtml/inlineMd/formatProse/renderMarkdown are the
-// XSS-safe renderer the whole value-blind posture leans on; do not "improve"
-// them. highlightCode (chat_core.js) is only ever fed escapeHtml(...) output.
+// The XSS-safe assistant-prose renderer now lives in chat_core.js
+// (ChatCore.renderMarkdown) so it can be unit-tested under Node — including the
+// value-blind XSS contract. It escapes ALL model text first, then only ever
+// splices in mooring's own allow-listed tags (never innerHTML of raw output).
+// escapeHtml stays HERE for the code/diff line builder (addCodeLine), which
+// feeds ChatCore.highlightCode already-escaped source.
 
 function escapeHtml(s) {
   return s.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
-}
-
-function inlineMd(s) {
-  return s
-    .replace(/`([^`]+)`/g, "<code>$1</code>")
-    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
-    .replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<em>$2</em>");
-}
-
-// Format a non-code text segment: blank-line paragraphs + "- " bullet lists.
-function formatProse(segment) {
-  const out = [];
-  let list = [];
-  let para = [];
-  const flushList = () => {
-    if (list.length) {
-      out.push("<ul>" + list.map((x) => `<li>${inlineMd(x)}</li>`).join("") + "</ul>");
-      list = [];
-    }
-  };
-  const flushPara = () => {
-    if (para.length) {
-      out.push(`<p>${para.map(inlineMd).join("<br>")}</p>`);
-      para = [];
-    }
-  };
-  for (const line of segment.split("\n")) {
-    const li = line.match(/^\s*[-*]\s+(.*)$/);
-    if (li) {
-      flushPara();
-      list.push(li[1]);
-    } else if (line.trim() === "") {
-      flushPara();
-      flushList();
-    } else {
-      flushList();
-      para.push(line);
-    }
-  }
-  flushPara();
-  flushList();
-  return out.join("");
-}
-
-function renderMarkdown(text) {
-  try {
-    // Escape first, then split on fenced code blocks. The capturing split yields
-    // [text, lang, body, text, lang, body, …]; format text parts, keep code parts
-    // verbatim (already escaped). No sentinels, no innerHTML of raw model output.
-    const parts = escapeHtml(text).split(/```[^\n]*\n?([\s\S]*?)```/g);
-    let html = "";
-    parts.forEach((part, i) => {
-      if (i % 2 === 1) {
-        html += `<pre class="cell-code"><code>${part.replace(/\n+$/, "")}</code></pre>`;
-      } else {
-        html += formatProse(part);
-      }
-    });
-    return html;
-  } catch (_e) {
-    return null; // caller falls back to textContent
-  }
 }
 
 // -- transcript rows --------------------------------------------------------
@@ -269,7 +210,7 @@ function finalizeAssistant(text) {
   const el = streamingRow();
   asstRaw = text || asstRaw;
   el.classList.remove("streaming", "stream-cursor");
-  const html = renderMarkdown(asstRaw);
+  const html = ChatCore.renderMarkdown(asstRaw);
   if (html === null) el.textContent = asstRaw;
   else el.innerHTML = html;
   asstRow = null; // next delta/message starts a new row

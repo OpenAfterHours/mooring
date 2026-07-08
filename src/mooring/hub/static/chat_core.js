@@ -532,6 +532,370 @@ const ChatCore = (function () {
     });
   }
 
+  // -- assistant-prose markdown renderer (escape-first; XSS-safe by contract) -
+  // Renders the copilot's streamed reply into read-friendly HTML: GFM tables,
+  // headings, ordered/unordered/nested/task lists, blockquotes, links, and
+  // inline code/bold/italic/strike. It lives HERE (not chat.js) so it is unit-
+  // tested under `node --test` — including the value-blind XSS contract.
+  //
+  // THE CONTRACT (do not weaken): renderMarkdown escapes ALL model text up front
+  // with mdEscape, then the block/inline passes only ever splice in mooring's own
+  // fixed tags around that already-escaped text — no raw model output ever reaches
+  // innerHTML. The two spots that reintroduce characters mdEscape leaves alone are
+  // handled explicitly: a link href is scheme-allow-listed (http/https/mailto or a
+  // scheme-less relative URL) and quote-encoded (mdSafeHref); everything else stays
+  // inert because < > & are already entities. Perfect CommonMark nesting is a
+  // non-goal — readability is. chat_core.test.js pins this; keep it green.
+
+  function mdEscape(s) {
+    return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  }
+
+  // Caps blockquote recursion and list nesting so an absurdly deep (e.g. 5000×
+  // '>') model reply can't overflow the stack and drop the WHOLE reply to
+  // plaintext. Real content never nests remotely this deep.
+  const MD_MAX_DEPTH = 16;
+
+  // Allow only hrefs that cannot script: http(s)/mailto, or a scheme-less
+  // relative/anchor URL. Returns a quote-encoded href, or null to drop the link.
+  // ASCII control chars (incl. NUL) are stripped FIRST: a browser's URL parser
+  // ignores a leading C0 control (and interior tab/newline) when it resolves a
+  // link, so a byte like U+0001 before "javascript:" would otherwise sneak a live
+  // scheme past the allow-list below — the string wouldn't start with [a-z], the
+  // scheme check would miss it, and the URL would pass as "relative". Strip the
+  // controls so we validate the SAME url the browser will act on.
+  function mdSafeHref(url) {
+    const u = String(url).replace(/[\x00-\x1F\x7F]/g, "").trim();
+    if (!u) return null;
+    const scheme = /^([a-z][a-z0-9+.-]*):/i.exec(u);
+    if (scheme) {
+      const s = scheme[1].toLowerCase();
+      if (s !== "http" && s !== "https" && s !== "mailto") return null;
+    }
+    return u.replace(/"/g, "&quot;"); // < > & are already entities from mdEscape
+  }
+
+  // Emphasis on a PLAIN text run — the scanner in mdInline has already carved out
+  // code spans and links, so a '*' inside `code` or inside a link URL can never
+  // pair with one outside it (no misnesting, no href injection).
+  function mdEmph(t) {
+    return t
+      .replace(/~~([^~]+)~~/g, "<del>$1</del>")
+      // bold/italic require a non-space just inside the markers, so ordinary
+      // prose like "2 * 3 * 4" or "SELECT *" is not italicised (CommonMark
+      // flanking, applied to the '*' forms that collide with everyday text).
+      .replace(/\*\*([^\s*](?:[^*]*?[^\s*])?)\*\*/g, "<strong>$1</strong>")
+      .replace(/(^|[^*])\*([^\s*](?:[^*\n]*?[^\s*])?)\*/g, "$1<em>$2</em>");
+  }
+
+  // Inline rendering on already-escaped text. A left-to-right scan first carves
+  // out the two constructs whose CONTENT must be protected from emphasis — an
+  // inline-code span (emitted VERBATIM) and a link (URL validated by mdSafeHref,
+  // never emphasis-processed) — replacing each with an opaque placeholder
+  // (SENT + index + SENT, where SENT is a U+0000 built at runtime so the source
+  // stays plain ASCII). Emphasis (**/*/~~) then runs ONCE over the reduced
+  // string, so it can legitimately WRAP a code span or link (**`code`**) yet a
+  // '*' INSIDE a code span, or in a URL, can never pair with one outside it.
+  // Placeholders are restored last. renderMarkdown strips U+0000 from the input,
+  // so the sentinel can't collide with model text; the label recurses (a strict
+  // substring, so it terminates). Bounded label/URL lengths keep the link scan
+  // linear on hostile input (a long run of unmatched '[' can't scan to
+  // end-of-line at every '['), and the ']'-ahead memo stops link attempts once
+  // no ']' remains.
+  function mdInline(s) {
+    s = String(s);
+    const SENT = String.fromCharCode(0); // U+0000 placeholder delimiter
+    const store = [];
+    const stash = (html) => {
+      store.push(html);
+      return SENT + (store.length - 1) + SENT;
+    };
+    const linkRe = /\[([^\]]{0,999})\]\(([^)\s]{0,1999})\)/y; // sticky + bounded
+    let acc = "";
+    let i = 0;
+    let noClose = s.length; // once a ']' search from here fails, none lies ahead
+    while (i < s.length) {
+      const ch = s[i];
+      if (ch === "`") {
+        // A run of K backticks opens a code span closed by the next run of
+        // EXACTLY K backticks (CommonMark). This keeps an inline ```cmd``` from
+        // being swallowed (and its text deleted) by the block-fence split, and
+        // renders its content verbatim.
+        let k = 1;
+        while (s[i + k] === "`") k++;
+        let close = -1;
+        for (let j = i + k; j < s.length; ) {
+          if (s[j] === "`") {
+            let r = 1;
+            while (s[j + r] === "`") r++;
+            if (r === k) { close = j; break; }
+            j += r;
+          } else {
+            j++;
+          }
+        }
+        if (close !== -1) {
+          let code = s.slice(i + k, close);
+          // CommonMark: strip ONE flanking space unless the content is all spaces.
+          if (code.length > 1 && code[0] === " " && code[code.length - 1] === " " && code.trim() !== "") {
+            code = code.slice(1, -1);
+          }
+          acc += stash("<code>" + code + "</code>");
+          i = close + k;
+          continue;
+        }
+        acc += s.slice(i, i + k); // an unclosed backtick run -> literal backticks
+        i += k;
+        continue;
+      } else if (ch === "[" && i < noClose) {
+        if (s.indexOf("]", i + 1) === -1) {
+          noClose = i; // no ']' anywhere ahead — stop attempting links entirely
+        } else {
+          linkRe.lastIndex = i;
+          const m = linkRe.exec(s);
+          if (m) {
+            const href = mdSafeHref(m[2]);
+            const label = mdInline(m[1]);
+            acc += href
+              ? stash('<a href="' + href + '" target="_blank" rel="noopener noreferrer">' + label + "</a>")
+              : stash(label); // unsafe/invalid URL -> keep the label as plain text
+            i = linkRe.lastIndex;
+            continue;
+          }
+        }
+      }
+      acc += ch;
+      i++;
+    }
+    const restore = new RegExp(SENT + "(\\d+)" + SENT, "g");
+    return mdEmph(acc).replace(restore, (m, n) => store[+n] || "");
+  }
+
+  // -- table (a '\|' inside a cell is a literal pipe) ----------------------
+  function mdSplitCells(s) {
+    const cells = [];
+    let cur = "";
+    for (let k = 0; k < s.length; k++) {
+      const ch = s[k];
+      if (ch === "\\" && s[k + 1] === "|") { cur += "|"; k++; continue; }
+      if (ch === "|") { cells.push(cur); cur = ""; continue; }
+      cur += ch;
+    }
+    cells.push(cur);
+    return cells;
+  }
+  function mdSplitRow(line) {
+    let s = line.trim();
+    if (s.startsWith("|")) s = s.slice(1);
+    if (s.endsWith("|") && !s.endsWith("\\|")) s = s.slice(0, -1);
+    return mdSplitCells(s).map((c) => c.trim());
+  }
+  // A GFM delimiter row: every cell is optional-colon + dashes + optional-colon.
+  function mdIsDelimRow(line) {
+    if (line.indexOf("-") === -1) return false;
+    const cells = mdSplitRow(line);
+    return cells.length > 0 && cells.every((c) => /^:?-+:?$/.test(c));
+  }
+  function mdAlign(cell) {
+    const c = cell.trim();
+    const l = c.startsWith(":");
+    const r = c.endsWith(":");
+    if (l && r) return "center";
+    if (r) return "right";
+    if (l) return "left";
+    return "";
+  }
+  function mdParseTable(lines, start) {
+    const header = mdSplitRow(lines[start]);
+    const aligns = mdSplitRow(lines[start + 1]).map(mdAlign);
+    const ncol = header.length;
+    let i = start + 2;
+    const rows = [];
+    while (i < lines.length && lines[i].trim() !== "" && lines[i].indexOf("|") !== -1) {
+      rows.push(mdSplitRow(lines[i]));
+      i++;
+    }
+    const cls = (idx) => (aligns[idx] ? ' class="md-al-' + aligns[idx] + '"' : "");
+    const th = header.map((c, idx) => "<th" + cls(idx) + ">" + mdInline(c) + "</th>").join("");
+    const body = rows
+      .map((r) => {
+        let tds = "";
+        for (let idx = 0; idx < ncol; idx++) {
+          tds += "<td" + cls(idx) + ">" + mdInline(r[idx] !== undefined ? r[idx] : "") + "</td>";
+        }
+        return "<tr>" + tds + "</tr>";
+      })
+      .join("");
+    const html =
+      '<div class="md-table-wrap"><table class="md-table"><thead><tr>' +
+      th + "</tr></thead><tbody>" + body + "</tbody></table></div>";
+    return { html, next: i };
+  }
+
+  // -- blockquote (the '>' marker is '&gt;' after mdEscape) ----------------
+  function mdParseBlockquote(lines, start, depth) {
+    const inner = [];
+    let i = start;
+    while (i < lines.length && /^\s*&gt;/.test(lines[i])) {
+      inner.push(lines[i].replace(/^\s*&gt;\s?/, ""));
+      i++;
+    }
+    // Recurse so a quote can hold paragraphs/lists and nested (>>) quotes; depth
+    // is threaded through so mdFormatBlocks can stop before the stack overflows.
+    return { html: "<blockquote>" + mdFormatBlocks(inner.join("\n"), depth + 1) + "</blockquote>", next: i };
+  }
+
+  // -- lists (ordered / unordered / nested / task) -------------------------
+  function mdListLine(line) {
+    const m = /^(\s*)([-*+]|\d+[.)])\s+(.*)$/.exec(line);
+    if (!m) return null;
+    const indent = m[1].replace(/\t/g, "  ").length;
+    const ordered = /\d/.test(m[2]);
+    let text = m[3];
+    let task = false;
+    let checked = false;
+    const tm = /^\[([ xX])\]\s+(.*)$/.exec(text);
+    if (tm) { task = true; checked = tm[1] !== " "; text = tm[2]; }
+    return { indent, ordered, task, checked, text };
+  }
+  function mdParseList(lines, start) {
+    const items = [];
+    let i = start;
+    while (i < lines.length) {
+      const line = lines[i];
+      if (line.trim() === "") {
+        // A single blank between items keeps a "loose" list together.
+        let j = i + 1;
+        while (j < lines.length && lines[j].trim() === "") j++;
+        if (j < lines.length && mdListLine(lines[j])) { i = j; continue; }
+        break;
+      }
+      const li = mdListLine(line);
+      if (li) { items.push(li); i++; continue; }
+      // An indented non-marker line continues the previous item's text.
+      if (items.length && /^\s+\S/.test(line)) {
+        items[items.length - 1].text += " " + line.trim();
+        i++;
+        continue;
+      }
+      break;
+    }
+    return { html: mdBuildList(items), next: i };
+  }
+  // Fold the flat item list into a nested tree by indent width, then emit.
+  function mdBuildList(items) {
+    if (!items.length) return "";
+    const root = { ordered: items[0].ordered, indent: items[0].indent, items: [] };
+    const stack = [root];
+    for (const it of items) {
+      let top = stack[stack.length - 1];
+      if (it.indent > top.indent && top.items.length && stack.length < MD_MAX_DEPTH) {
+        const parent = top.items[top.items.length - 1];
+        const child = { ordered: it.ordered, indent: it.indent, items: [] };
+        parent.children = child;
+        stack.push(child);
+        top = child;
+      } else {
+        while (stack.length > 1 && it.indent < top.indent) {
+          stack.pop();
+          top = stack[stack.length - 1];
+        }
+      }
+      top.items.push({ text: it.text, task: it.task, checked: it.checked, children: null });
+    }
+    return mdEmitList(root);
+  }
+  function mdEmitList(list) {
+    const tag = list.ordered ? "ol" : "ul";
+    const lis = list.items
+      .map((it) => {
+        const body = it.task
+          ? '<span class="md-check">' + (it.checked ? "☑" : "☐") + "</span> " + mdInline(it.text)
+          : mdInline(it.text);
+        const child = it.children ? mdEmitList(it.children) : "";
+        return "<li" + (it.task ? ' class="md-task"' : "") + ">" + body + child + "</li>";
+      })
+      .join("");
+    return "<" + tag + ">" + lis + "</" + tag + ">";
+  }
+
+  // -- block driver: classify each line, consume multi-line blocks whole ---
+  function mdFormatBlocks(segment, depth) {
+    depth = depth || 0;
+    const lines = segment.split("\n");
+    const out = [];
+    let para = [];
+    const flushPara = () => {
+      if (para.length) {
+        out.push("<p>" + para.map(mdInline).join("<br>") + "</p>");
+        para = [];
+      }
+    };
+    let i = 0;
+    while (i < lines.length) {
+      const line = lines[i];
+      if (line.trim() === "") { flushPara(); i++; continue; }
+      const h = /^(#{1,6})\s+(.*?)\s*#*\s*$/.exec(line);
+      if (h) {
+        flushPara();
+        out.push("<h" + h[1].length + ">" + mdInline(h[2]) + "</h" + h[1].length + ">");
+        i++;
+        continue;
+      }
+      if (line.indexOf("|") !== -1 && i + 1 < lines.length && mdIsDelimRow(lines[i + 1])) {
+        flushPara();
+        const t = mdParseTable(lines, i);
+        out.push(t.html);
+        i = t.next;
+        continue;
+      }
+      if (/^\s*&gt;/.test(line) && depth < MD_MAX_DEPTH) {
+        flushPara();
+        const q = mdParseBlockquote(lines, i, depth);
+        out.push(q.html);
+        i = q.next;
+        continue;
+      }
+      if (mdListLine(line)) {
+        flushPara();
+        const l = mdParseList(lines, i);
+        out.push(l.html);
+        i = l.next;
+        continue;
+      }
+      para.push(line);
+      i++;
+    }
+    flushPara();
+    return out.join("");
+  }
+
+  // Escape first, carve out fenced code (kept verbatim, already escaped), then
+  // format the prose blocks. Returns null on any error so chat.js can fall back
+  // to plain textContent — a reply is never lost to a formatting bug.
+  function renderMarkdown(text) {
+    try {
+      // Drop U+0000 up front so model text can't forge the mdInline placeholder
+      // sentinel (which is a U+0000 built at runtime — see mdInline).
+      const clean = mdEscape(text).split(String.fromCharCode(0)).join("");
+      // A fenced block requires a newline after the opening ``` line; a same-line
+      // ```...``` is an inline code span (handled in mdInline), not a block — so
+      // its content is never eaten here.
+      const parts = clean.split(/```[^\n]*\n([\s\S]*?)```/g);
+      let html = "";
+      parts.forEach((part, i) => {
+        if (i % 2 === 1) {
+          html += '<pre class="cell-code"><code>' + part.replace(/\n+$/, "") + "</code></pre>";
+        } else {
+          html += mdFormatBlocks(part);
+        }
+      });
+      return html;
+    } catch (_e) {
+      return null;
+    }
+  }
+
   return {
     COMMANDS,
     parseSlash,
@@ -558,6 +922,7 @@ const ChatCore = (function () {
     scanErrorMessage,
     parseDeviceLogin,
     highlightCode,
+    renderMarkdown,
     cleanJobs,
     PY_KW,
   };
