@@ -1014,6 +1014,7 @@ def create_app(hub: Hub) -> Starlette:
             Route("/api/ai/status", chat.api_ai_status),
             Route("/api/ai/login/start", chat.api_ai_login_start, methods=["POST"]),
             Route("/api/ai/login/poll", chat.api_ai_login_poll),
+            Route("/api/ai/key", chat.api_ai_key_set, methods=["POST"]),
             Route("/api/ai/chat/open", chat.api_chat_open, methods=["POST"]),
             Route("/api/ai/chat/stream/{sid}", chat.api_chat_stream),
             Route("/api/ai/chat/send", chat.api_chat_send, methods=["POST"]),

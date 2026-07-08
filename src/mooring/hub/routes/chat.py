@@ -301,6 +301,38 @@ def api_ai_status(request: Request) -> JSONResponse:
     return JSONResponse(data)
 
 
+async def api_ai_key_set(request: Request) -> JSONResponse:
+    """Store an OpenAI API key from the hub (OS credential store) and re-probe.
+
+    The OpenAI analogue of the Copilot device-flow sign-in: OpenAI has no browser
+    flow, so the user supplies a key instead. It is a SECRET kept per-machine (the
+    keyring — never the synced mooring.toml), mirroring ``mooring ai key set``.
+    Returns the fresh connection status so the UI flips to connected without a
+    reload. Only meaningful for the OpenAI provider."""
+    hub = request.app.state.hub
+    if not hub.app_cfg.ai_enabled:
+        return JSONResponse({"enabled": False}, status_code=404)
+    if (hub.app_cfg.ai_provider or "").strip().lower() != "openai":
+        return JSONResponse(
+            {"error": "Setting an API key applies only to the OpenAI provider."},
+            status_code=400,
+        )
+    data = await request.json() if await request.body() else {}
+    key = str(data.get("key", "")).strip()
+    if not key:
+        return JSONResponse({"error": "No API key provided."}, status_code=400)
+    from mooring.ai import openai_provider
+
+    try:
+        await run_in_threadpool(openai_provider.save_api_key, key)
+    except Exception as exc:  # noqa: BLE001  # no credential store / backend error
+        return JSONResponse({"error": str(exc)}, status_code=500)
+    provider = hub._provider_for()
+    st = await run_in_threadpool(provider.status, True) if hasattr(provider, "status") else None
+    telemetry.log_event("ai_key_set")
+    return JSONResponse({"ok": True, "status": hub._ai_status_dict(st)})
+
+
 async def api_ai_login_start(request: Request) -> JSONResponse:
     """Kick off the Copilot browser sign-in (device flow) in the background.
 

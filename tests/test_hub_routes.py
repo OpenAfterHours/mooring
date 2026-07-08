@@ -77,6 +77,7 @@ EXPECTED_ROUTES = {
     ("/api/ai/status", ("GET",), "api_ai_status"),
     ("/api/ai/login/start", ("POST",), "api_ai_login_start"),
     ("/api/ai/login/poll", ("GET",), "api_ai_login_poll"),
+    ("/api/ai/key", ("POST",), "api_ai_key_set"),
     ("/api/ai/chat/open", ("POST",), "api_chat_open"),
     ("/api/ai/chat/stream/{sid}", ("GET",), "api_chat_stream"),
     ("/api/ai/chat/send", ("POST",), "api_chat_send"),

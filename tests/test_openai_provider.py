@@ -158,3 +158,60 @@ def test_status_force_reports_a_bad_key(monkeypatch):
     provider = _provider_with_client(monkeypatch, _fake_client(error=Exception("401 invalid api key")))
     st = provider.status(force=True)
     assert st.connected is False and "key" in st.detail.lower()
+
+
+# -- the hub POST /api/ai/key route --------------------------------------------
+
+
+class _FakeKeyring:
+    def __init__(self):
+        self.store: dict = {}
+
+    def set_password(self, service, user, value):
+        self.store[(service, user)] = value
+
+    def get_password(self, service, user):
+        return self.store.get((service, user))
+
+    def delete_password(self, service, user):
+        self.store.pop((service, user), None)
+
+
+def _openai_hub_client(tmp_path, monkeypatch, fake_kr, provider="openai"):
+    from starlette.testclient import TestClient
+
+    from mooring import config
+    from mooring.ai_config import AiConfig
+    from mooring.hub.server import Hub, create_app
+
+    monkeypatch.setattr("mooring.ai.openai_provider._keyring", lambda: fake_kr)
+    spec = config.RepoSpec(alias="ws", owner="", repo="", workspace_path=str(tmp_path / "ws"))
+    app_cfg = config.AppConfig(repos=(spec,), active_alias="ws", ai=AiConfig(provider=provider))
+    return TestClient(create_app(Hub(app_cfg)))
+
+
+def test_api_key_stores_for_openai_and_reprobes(tmp_path, monkeypatch):
+    fake_kr = _FakeKeyring()
+    with _openai_hub_client(tmp_path, monkeypatch, fake_kr) as client:
+        resp = client.post("/api/ai/key", json={"key": "sk-hub-test"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is True and "status" in body
+    # The key was stored in the (fake) OS credential store, not any synced file.
+    assert fake_kr.store[("mooring-openai", "default")] == "sk-hub-test"
+
+
+def test_api_key_rejects_non_openai_provider(tmp_path, monkeypatch):
+    fake_kr = _FakeKeyring()
+    with _openai_hub_client(tmp_path, monkeypatch, fake_kr, provider="copilot") as client:
+        resp = client.post("/api/ai/key", json={"key": "sk-x"})
+    assert resp.status_code == 400
+    assert "openai" in resp.json()["error"].lower()
+    assert fake_kr.store == {}  # nothing stored
+
+
+def test_api_key_rejects_empty(tmp_path, monkeypatch):
+    fake_kr = _FakeKeyring()
+    with _openai_hub_client(tmp_path, monkeypatch, fake_kr) as client:
+        resp = client.post("/api/ai/key", json={"key": "   "})
+    assert resp.status_code == 400
