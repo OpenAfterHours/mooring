@@ -78,7 +78,117 @@ const FilesTree = (function () {
     return q.split(/\s+/).every((term) => hay.includes(term));
   }
 
-  return { group, folderOf, norm, matches };
+  // -- focus one folder + declutter (display-only, client-side) ---------------
+  // Everything below narrows or re-roots the SAME flat file list by path. No value
+  // leaves the client — folder structure is a pure function of each row's `path`,
+  // and paths are already visible in the hub. Pure: inputs are never mutated.
+
+  // "Many folders" thresholds: at/above either, folder sections open COLLAPSED so a
+  // crowded repo isn't a wall of rows. Below both, the listing stays fully expanded
+  // (today's behaviour) so small/flat repos are never punished. See `crowded`.
+  const CROWD_FOLDERS = 4;
+  const CROWD_FILES = 20;
+
+  // The files at or under `focus` (a folder prefix). focus "" → every file. Slash-
+  // bounded, so focus "report" never captures "reports/…".
+  function scope(files, focus) {
+    const f = norm(focus);
+    if (!f) return (files || []).slice();
+    return (files || []).filter((x) => x.path === f || x.path.startsWith(f + "/"));
+  }
+
+  // The breadcrumb trail for a focus, outermost segment first:
+  // "reports/2026" → [{label:"reports",prefix:"reports"},{label:"2026",prefix:"reports/2026"}].
+  // The caller renders an "All folders" (prefix "") root ahead of these.
+  function crumbs(focus) {
+    const f = norm(focus);
+    if (!f) return [];
+    const out = [];
+    let acc = "";
+    for (const part of f.split("/")) {
+      acc = acc ? acc + "/" + part : part;
+      out.push({ label: part, prefix: acc });
+    }
+    return out;
+  }
+
+  // The folder sections ONE LEVEL below `focus`, re-rooted so deep structure stops
+  // flattening: with focus "reports", reports/2026/q3/x.py groups under "reports/2026"
+  // (not the single flattened "reports/"). Each section is shaped like `group`'s —
+  // {folder (full prefix), label (segment below focus), files:[{…,rel}], empty} —
+  // plus `here:true` for the leading section of files that live DIRECTLY in the focus.
+  // Declared folders immediately under the focus seed empty sections (the "here's
+  // where notebooks go" nudge, one level down). focus "" delegates to `group`.
+  function subsections(files, declared, focus) {
+    const base = norm(focus);
+    if (!base) return group(files, declared);
+    const prefix = base + "/";
+    const buckets = new Map();
+    const here = [];
+    for (const raw of declared || []) {
+      const d = norm(raw);
+      if (d.startsWith(prefix)) {
+        const child = prefix + d.slice(prefix.length).split("/")[0];
+        if (!buckets.has(child)) buckets.set(child, []);
+      }
+    }
+    for (const file of files || []) {
+      if (file.path !== base && !file.path.startsWith(prefix)) continue;
+      const rest = file.path === base ? file.path : file.path.slice(prefix.length);
+      const slash = rest.indexOf("/");
+      if (slash === -1) {
+        here.push(Object.assign({}, file, { rel: rest }));
+      } else {
+        const full = prefix + rest.slice(0, slash);
+        if (!buckets.has(full)) buckets.set(full, []);
+        buckets.get(full).push(Object.assign({}, file, { rel: file.path.slice(full.length + 1) }));
+      }
+    }
+    const result = Array.from(buckets.keys()).sort().map((full) => ({
+      folder: full,
+      label: full.slice(prefix.length),
+      files: buckets.get(full),
+      empty: buckets.get(full).length === 0,
+      here: false,
+    }));
+    if (here.length) {
+      // The "here" section shares `folder` with the aggregate `group` section for the
+      // same path (both "reports"), so it needs its OWN collapse key or the two fight
+      // over one remembered open/closed bit. A trailing slash can't collide — norm()
+      // strips trailing slashes, so no group folder ever carries one.
+      result.unshift({
+        folder: base, label: base.split("/").pop(), files: here,
+        empty: false, here: true, expandKey: base + "/",
+      });
+    }
+    return result;
+  }
+
+  // Whether the sections about to render should open COLLAPSED by default — true only
+  // for a "crowded" repo. A lone folder never auto-collapses (opening a repo to a
+  // single mysterious collapsed row reads as "where did my files go?"). The caller
+  // layers each folder's remembered choice on top of this default.
+  function crowded(sections) {
+    const real = (sections || []).filter((s) => s.folder !== "" && !s.here);
+    if (real.length <= 1) return false;
+    const files = (sections || []).reduce((n, s) => n + (s.files ? s.files.length : 0), 0);
+    return real.length >= CROWD_FOLDERS || files > CROWD_FILES;
+  }
+
+  // Whether a stored focus still points at something real — a file lives under it, or
+  // a declared folder is at/under/above it. Used to self-heal a focus whose folder a
+  // teammate renamed or deleted (reset to "All folders" instead of a blank card).
+  function focusLive(files, declared, focus) {
+    const f = norm(focus);
+    if (!f) return true;
+    if (scope(files, f).length) return true;
+    return (declared || []).some((raw) => {
+      const d = norm(raw);
+      return d === f || d.startsWith(f + "/") || f.startsWith(d + "/");
+    });
+  }
+
+  return { group, folderOf, norm, matches, scope, crumbs, subsections, crowded, focusLive };
 })();
 
 if (typeof window !== "undefined") window.FilesTree = FilesTree;
