@@ -67,10 +67,10 @@ def ws(tmp_path):
     return tmp_path
 
 
-def _session(ws, scripted, **kw):
+def _session(ws, scripted, model="gpt-4o", **kw):
     client = _FakeClient(scripted)
     session = OpenAIChatSession(
-        model="gpt-4o",
+        model=model,
         system_context="SYSTEM CONTEXT: schema + source only.",
         workspace=ws,
         folders=("data",),
@@ -207,3 +207,93 @@ def test_pii_prompt_is_held_and_never_forwarded(ws):
     session.close()
     assert len(completions.calls) == 1
     assert VALID_CARD in json.dumps(completions.calls[0]["messages"])  # forwarded verbatim on confirm
+
+
+def test_traceback_raw_never_reaches_the_wire(ws):
+    # The inherited traceback valve sanitises-and-holds: only the value-safe rewrite
+    # can ever be forwarded, and only after the analyst confirms.
+    scripted = [[_chunk(content="fixed"), _chunk(finish="stop")]]
+    session, completions = _session(ws, scripted, traceback_guard=True)
+    q = session.subscribe()
+    session.send(
+        "Traceback (most recent call last):\n"
+        '  File "C:\\other\\lib.py", line 2, in f\n'
+        f"KeyError: '{SECRET}'"
+    )
+    tb = _drain(q, until="traceback")
+    ev = next(e for e in tb if e.kind == "traceback")
+    assert SECRET not in ev.data["preview"]  # the held rewrite is value-safe
+    time.sleep(0.3)
+    assert completions.calls == []  # nothing forwarded yet
+
+    session.send_confirmed(ev.data["token"])
+    _drain(q, until="idle")
+    session.close()
+    wire = json.dumps(completions.calls[0]["messages"])
+    assert SECRET not in wire  # the raw paste is dropped by construction
+    assert "redacted" in wire  # the sanitised rewrite is what went out
+
+
+def test_tool_result_is_scrubbed_on_the_wire(ws):
+    # A checksum value in the notebook source must not ride the tool RESULT message
+    # to the model — the handler scrubs, and to_openai_tool_message is the gateway.
+    (ws / "nb.py").write_text(f"import marimo\nacct = {VALID_CARD}\n", "utf-8")
+    scripted = [
+        [_chunk(tool_calls=[_tc(0, tc_id="r1", name="mooring_read_notebook_source", args="{}")]), _chunk(finish="tool_calls")],
+        [_chunk(content="ok"), _chunk(finish="stop")],
+    ]
+    session, completions = _session(ws, scripted)
+    q = session.subscribe()
+    session.send("read the notebook")
+    _drain(q, until="idle")
+    session.close()
+    tool_msg = [m for m in completions.calls[1]["messages"] if m.get("role") == "tool"][0]
+    assert VALID_CARD not in tool_msg["content"]  # the checksum line was withheld
+
+
+def test_reasoning_effort_only_for_reasoning_models(ws):
+    stop = [[_chunk(content="ok"), _chunk(finish="stop")]]
+    # A plain chat model must NOT receive reasoning_effort (it would 400).
+    plain, plain_calls = _session(ws, stop, model="gpt-4o", reasoning_effort="high")
+    q = plain.subscribe()
+    plain.send("hi")
+    _drain(q, until="idle")
+    plain.close()
+    assert "reasoning_effort" not in plain_calls.calls[0]
+
+    # A reasoning model DOES.
+    reasoning, reasoning_calls = _session(ws, stop, model="o3-mini", reasoning_effort="high")
+    q = reasoning.subscribe()
+    reasoning.send("hi")
+    _drain(q, until="idle")
+    reasoning.close()
+    assert reasoning_calls.calls[0]["reasoning_effort"] == "high"
+
+
+def test_parallel_tool_calls_are_each_answered_before_the_next_request(ws):
+    # OpenAI can return several tool_calls in one assistant turn; every tool_call_id
+    # must be answered by exactly one role:"tool" message before the next request.
+    scripted = [
+        [
+            _chunk(
+                tool_calls=[
+                    _tc(0, tc_id="a", name="mooring_list_datasets", args="{}"),
+                    _tc(1, tc_id="b", name="mooring_list_datasets", args="{}"),
+                ]
+            ),
+            _chunk(finish="tool_calls"),
+        ],
+        [_chunk(content="done"), _chunk(finish="stop")],
+    ]
+    session, completions = _session(ws, scripted)
+    q = session.subscribe()
+    session.send("list twice")
+    events = _drain(q, until="idle")
+    session.close()
+
+    assert sum(1 for e in events if e.kind == "tool") == 2
+    second = completions.calls[1]["messages"]
+    assistant = [m for m in second if m.get("role") == "assistant" and m.get("tool_calls")][0]
+    assert [tc["id"] for tc in assistant["tool_calls"]] == ["a", "b"]
+    tool_ids = [m["tool_call_id"] for m in second if m.get("role") == "tool"]
+    assert tool_ids == ["a", "b"]  # both answered, in order, before the 2nd request

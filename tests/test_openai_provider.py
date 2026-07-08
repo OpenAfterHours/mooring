@@ -99,3 +99,62 @@ def test_get_provider_unknown_lists_both():
     with pytest.raises(AIError) as exc:
         base.get_provider(app_cfg)
     assert "openai" in str(exc.value) and "copilot" in str(exc.value)
+
+
+# -- list_models / key validation (a fake client, no network) -------------------
+
+
+class _FakeModels:
+    def __init__(self, ids=None, error=None):
+        self._ids = ids or []
+        self._error = error
+
+    def list(self):
+        if self._error is not None:
+            raise self._error
+        return [types.SimpleNamespace(id=i) for i in self._ids]
+
+
+def _fake_client(ids=None, error=None):
+    return types.SimpleNamespace(models=_FakeModels(ids, error))
+
+
+def _provider_with_client(monkeypatch, client):
+    monkeypatch.setenv("MOORING_OPENAI_API_KEY", "sk-local")
+    provider = OpenAIProvider(model="gpt-4o")
+    monkeypatch.setattr(provider, "available", lambda: True)
+    monkeypatch.setattr(provider, "_make_client", lambda: client)
+    return provider
+
+
+def test_list_models_filters_and_shapes(monkeypatch):
+    client = _fake_client(ids=["gpt-4o", "text-embedding-3-large", "o3-mini", "whisper-1"])
+    provider = _provider_with_client(monkeypatch, client)
+    models = provider.list_models(force=True)
+    assert [m["id"] for m in models] == ["gpt-4o", "o3-mini"]  # non-chat ids dropped, sorted
+    assert models[0] == {
+        "id": "gpt-4o",
+        "name": "gpt-4o",
+        "efforts": [],
+        "default_effort": "",
+        "multiplier": None,
+    }
+    assert provider.models_error() == ""
+
+
+def test_list_models_reports_auth_error(monkeypatch):
+    provider = _provider_with_client(monkeypatch, _fake_client(error=Exception("401 Unauthorized")))
+    assert provider.list_models(force=True) == []
+    assert "key" in provider.models_error().lower()
+
+
+def test_status_force_validates_via_models_list(monkeypatch):
+    provider = _provider_with_client(monkeypatch, _fake_client(ids=["gpt-4o"]))
+    st = provider.status(force=True)
+    assert st.connected is True and st.detail == "Connected."
+
+
+def test_status_force_reports_a_bad_key(monkeypatch):
+    provider = _provider_with_client(monkeypatch, _fake_client(error=Exception("401 invalid api key")))
+    st = provider.status(force=True)
+    assert st.connected is False and "key" in st.detail.lower()
