@@ -361,6 +361,19 @@ button {
     box-shadow 0.15s ease, transform 0.15s ease;
 }
 button:hover { background: var(--bg); }
+/* While an action is in flight, setBusy() adds .busy to <body> and disables the
+   toolbar. That disabled greying is faint, so make the whole surface read as
+   "working": a progress cursor plus a subtle dim on the disabled controls. Both
+   revert the instant the action settles. */
+body.busy,
+body.busy button,
+body.busy select {
+  cursor: progress;
+}
+body.busy button:disabled,
+body.busy select:disabled {
+  opacity: 0.55;
+}
 button.primary {
   background: var(--accent);
   border-color: var(--accent);

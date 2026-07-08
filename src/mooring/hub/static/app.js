@@ -92,12 +92,25 @@ function showLog(data) {
 function setBusy(value) {
   busy = value;
   document.querySelectorAll("button, select").forEach((b) => (b.disabled = value));
+  // A visible "working" cue for the whole surface. The toolbar is disabled while
+  // an action is in flight, but that greying is faint — .busy adds a progress
+  // cursor (+ a subtle dim, in CSS) so even a fast op looks like it did something.
+  document.body.classList.toggle("busy", value);
 }
 
-async function action(path, body, refreshAfter = true) {
+async function action(path, body, refreshAfter = true, status = "") {
   if (busy) return;
   setBusy(true);
   showError("");
+  // Optional in-flight status on the files-summary line (mirrors doOpen's
+  // "Starting the editor…"). Deliver/Verify re-run the WHOLE notebook, so the
+  // disabled toolbar alone reads as "did anything happen?"; a "Rendering…" line
+  // explains the wait. When refreshAfter runs, its re-render resets #summary for
+  // us (see the render path, ~line 1660), so only restore the prior text when it
+  // won't — otherwise we'd clobber the fresh summary with the stale one.
+  const summaryEl = status ? $("summary") : null;
+  const prevSummary = summaryEl ? summaryEl.textContent : "";
+  if (summaryEl) summaryEl.textContent = status;
   let guardData = null;
   try {
     const data = await api(path, body || {});
@@ -118,6 +131,7 @@ async function action(path, body, refreshAfter = true) {
     return data;
   } finally {
     setBusy(false);
+    if (summaryEl && !refreshAfter) summaryEl.textContent = prevSummary;
     if (guardData) showGuardDialog(guardData, path, body || {});
   }
 }
@@ -391,7 +405,8 @@ function revealAction(path) {
 // .mooring, which sync excludes, so it is never pushed. The server also opens it for
 // preview, so refresh is unnecessary.
 function deliverAction(path) {
-  return action("/api/deliver", { path }, false);
+  return action("/api/deliver", { path }, false,
+    "Rendering… this re-runs the whole notebook (can take a minute).");
 }
 
 // Verify: smoke-run this notebook once on your machine and record whether it ran clean
@@ -399,7 +414,8 @@ function deliverAction(path) {
 // leaves the machine — the receipt is a boolean keyed to the file's content, so the
 // badge auto-clears the moment you edit the notebook. Refresh after so the badge shows.
 function verifyAction(path) {
-  return action("/api/verify", { path });
+  return action("/api/verify", { path }, true,
+    "Verifying… this re-runs the whole notebook (can take a minute).");
 }
 
 // A safe playground: byte-copy this notebook to a personal {stem}-{login}-draft.py
