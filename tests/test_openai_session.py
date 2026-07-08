@@ -158,6 +158,18 @@ def test_every_request_is_value_blind(ws):
         assert SECRET not in json.dumps(call, default=str)
 
 
+def test_store_omitted_for_a_custom_endpoint(ws):
+    # The provider passes store=None for a custom base_url (an OpenAI-compatible server
+    # may reject the unknown field); the request then omits it entirely.
+    stop = [[_chunk(content="ok"), _chunk(finish="stop")]]
+    session, completions = _session(ws, stop, store=None)
+    q = session.subscribe()
+    session.send("hi")
+    _drain(q, until="idle")
+    session.close()
+    assert "store" not in completions.calls[0]
+
+
 def test_unknown_tool_is_refused_fail_closed(ws):
     scripted = [
         [_chunk(tool_calls=[_tc(0, tc_id="c1", name="evil_shell", args="{}")]), _chunk(finish="tool_calls")],

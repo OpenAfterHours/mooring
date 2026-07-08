@@ -31,9 +31,12 @@ _STATUS_TTL = 45.0  # cache a (possibly network-validating) status probe this lo
 _MODELS_TTL = 300.0  # cache the model list this long
 _CLIENT_TIMEOUT = 30.0  # bound every OpenAI HTTP call so a hung gateway can't wedge us
 _NO_KEY_DETAIL = (
-    "No OpenAI API key found. Set MOORING_OPENAI_API_KEY (or OPENAI_API_KEY), "
-    "or run `mooring ai key set`."
+    "No API key or endpoint configured. Set MOORING_OPENAI_API_KEY (or OPENAI_API_KEY), "
+    "run `mooring ai key set`, or set a base URL for a keyless endpoint (e.g. a local server)."
 )
+# Sent to a keyless base_url endpoint (local vLLM/Ollama/LM Studio): the SDK still
+# needs SOME api_key string even when the server ignores it.
+_PLACEHOLDER_KEY = "not-needed"
 _OPENAI_UNAVAILABLE = (
     "The OpenAI SDK isn't installed. Install the extra: pip install mooring[openai]"
 )
@@ -186,10 +189,15 @@ class OpenAIProvider:
         key surfaces the SAME :class:`AINotConnectedError` on either path.
         """
         key = self._key()
-        if not key:
+        if not key and not self._base_url:
             raise AINotConnectedError(_NO_KEY_DETAIL)
+        # A base_url with no key = a keyless endpoint (local vLLM/Ollama/LM Studio);
+        # the SDK still needs a non-empty api_key, so pass a harmless placeholder.
         return build_client(
-            key, base_url=self._base_url, api_version=self._api_version, timeout=_CLIENT_TIMEOUT
+            key or _PLACEHOLDER_KEY,
+            base_url=self._base_url,
+            api_version=self._api_version,
+            timeout=_CLIENT_TIMEOUT,
         )
 
     # -- status --------------------------------------------------------------
@@ -203,11 +211,18 @@ class OpenAIProvider:
         path and ``force`` upgrades it to a real /models validation.)"""
         if not self.available():
             return self._unavailable_status()
-        if not self._key():
+        if not self._key() and not self._base_url:
             return ProviderStatus(self.name, available=True, connected=False, detail=_NO_KEY_DETAIL)
         return ProviderStatus(
-            self.name, available=True, connected=True, detail="API key configured."
+            self.name, available=True, connected=True, detail=self._configured_detail()
         )
+
+    def _configured_detail(self) -> str:
+        """A value-free status line: the endpoint host for a custom base_url, else
+        just that a key is set (canonical OpenAI)."""
+        if self._base_url:
+            return f"Endpoint: {_host(self._base_url)}."
+        return "API key configured."
 
     def status(self, force: bool = False) -> ProviderStatus:
         if not self.available():
@@ -236,19 +251,20 @@ class OpenAIProvider:
         return self._cheap_status()
 
     def _probe(self) -> ProviderStatus:
-        """Validate the key with one cheap authenticated call (``models.list``)."""
-        if not self._key():
+        """Validate access with one cheap call (``models.list``)."""
+        if not self._key() and not self._base_url:
             return ProviderStatus(self.name, available=True, connected=False, detail=_NO_KEY_DETAIL)
         try:
             client = self._make_client()
-            next(iter(client.models.list()), None)  # one page is enough to prove auth
+            next(iter(client.models.list()), None)  # one page is enough to prove access
         except AINotConnectedError:
             return ProviderStatus(self.name, available=True, connected=False, detail=_NO_KEY_DETAIL)
         except Exception as exc:  # noqa: BLE001 - report, never raise into a probe
             return ProviderStatus(
                 self.name, available=True, connected=False, detail=friendly_error(str(exc))
             )
-        return ProviderStatus(self.name, available=True, connected=True, detail="Connected.")
+        detail = "Connected" + (f" to {_host(self._base_url)}" if self._base_url else "") + "."
+        return ProviderStatus(self.name, available=True, connected=True, detail=detail)
 
     def connect(self, host: str | None = None) -> ProviderStatus:
         """OpenAI has no browser/device flow — validate the configured key and report.
@@ -279,7 +295,7 @@ class OpenAIProvider:
         it includes non-chat models — so it is filtered to chat ids and the extra
         fields are left empty.
         """
-        if not self.available() or not self._key():
+        if not self.available() or (not self._key() and not self._base_url):
             return []
         fresh = (
             self._cached_models is not None
@@ -289,8 +305,11 @@ class OpenAIProvider:
             return self._cached_models
         try:
             client = self._make_client()
+            # Canonical OpenAI ids match a known chat prefix; a custom endpoint's
+            # ids (llama/qwen/mistral/…) must NOT be prefix-filtered away.
+            require_prefix = not self._base_url
             models = sorted(
-                {m.id for m in client.models.list() if _is_chat_model(m.id)},
+                {m.id for m in client.models.list() if _is_chat_model(m.id, require_prefix)},
             )
             dicts = [
                 {"id": mid, "name": mid, "efforts": [], "default_effort": "", "multiplier": None}
@@ -355,6 +374,11 @@ class OpenAIProvider:
         def client_factory():
             return self._make_client()
 
+        # store=False is OpenAI's own retention control and only canonical OpenAI
+        # honours it; a strict OpenAI-compatible server may reject the unknown field,
+        # so send it only when talking to OpenAI itself (no custom base_url).
+        store = False if not self._base_url else None
+
         session = OpenAIChatSession(
             model=(model or "").strip() or self.model,
             reasoning_effort=reasoning_effort,
@@ -373,13 +397,29 @@ class OpenAIProvider:
             pii_name_backend=backend,
             traceback_guard=traceback_guard,
             client_factory=client_factory,
+            store=store,
         )
         session.start(block=not background)
         return session
 
 
-def _is_chat_model(model_id: str) -> bool:
+def _is_chat_model(model_id: str, require_prefix: bool = True) -> bool:
+    """Whether ``model_id`` looks like a chat model.
+
+    For canonical OpenAI (``require_prefix``) an id must match a known chat-model
+    prefix. For a custom ``base_url`` (a gateway, aggregator, or local server) keep
+    everything that isn't obviously a non-chat model (embeddings / tts / whisper /
+    …), so llama / qwen / mistral / deepseek / etc. are not hidden."""
     low = (model_id or "").lower()
-    if not low.startswith(_CHAT_PREFIXES):
+    if any(marker in low for marker in _NON_CHAT_MARKERS):
         return False
-    return not any(marker in low for marker in _NON_CHAT_MARKERS)
+    if require_prefix and not low.startswith(_CHAT_PREFIXES):
+        return False
+    return True
+
+
+def _host(base_url: str) -> str:
+    """The host[:port] of a base URL — computed without a urllib import (the ai/
+    layer may not import urllib per the marimo-internals-isolated contract)."""
+    tail = base_url.split("://", 1)[-1]
+    return tail.split("/", 1)[0] or base_url

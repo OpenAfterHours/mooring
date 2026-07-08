@@ -40,9 +40,10 @@ def test_resolve_api_key_none_when_unset(monkeypatch):
     assert resolve_api_key() is None
 
 
-def test_chat_model_filter():
+def test_chat_model_filter_canonical_openai():
     from mooring.ai.openai_provider import _is_chat_model
 
+    # require_prefix (canonical OpenAI): only known chat prefixes survive.
     for good in ("gpt-4o", "gpt-4.1", "o3-mini", "o4-mini", "gpt-5", "chatgpt-4o-latest"):
         assert _is_chat_model(good), good
     for bad in (
@@ -53,8 +54,34 @@ def test_chat_model_filter():
         "omni-moderation-latest",
         "gpt-4o-realtime-preview",
         "gpt-4o-search-preview",
+        "llama-3.1-70b",  # a non-OpenAI id is NOT a canonical-OpenAI chat model
     ):
         assert not _is_chat_model(bad), bad
+
+
+def test_chat_model_filter_custom_endpoint_keeps_non_openai_ids():
+    from mooring.ai.openai_provider import _is_chat_model
+
+    # require_prefix=False (a custom base_url): keep anything not obviously non-chat,
+    # so a gateway/local server's models are not hidden.
+    for good in (
+        "llama-3.1-70b",
+        "qwen2.5-coder",
+        "mistral-large",
+        "deepseek-r1",
+        "meta-llama/llama-3.1-70b-instruct",
+    ):
+        assert _is_chat_model(good, require_prefix=False), good
+    for bad in ("text-embedding-3-large", "whisper-large-v3", "tts-1"):
+        assert not _is_chat_model(bad, require_prefix=False), bad
+
+
+def test_host_parses_without_urllib():
+    from mooring.ai.openai_provider import _host
+
+    assert _host("http://localhost:11434/v1") == "localhost:11434"
+    assert _host("https://my-res.openai.azure.com") == "my-res.openai.azure.com"
+    assert _host("https://openrouter.ai/api/v1") == "openrouter.ai"
 
 
 def test_status_reports_missing_key(monkeypatch):
@@ -158,6 +185,31 @@ def test_status_force_reports_a_bad_key(monkeypatch):
     provider = _provider_with_client(monkeypatch, _fake_client(error=Exception("401 invalid api key")))
     st = provider.status(force=True)
     assert st.connected is False and "key" in st.detail.lower()
+
+
+# -- OpenAI-compatible endpoints (base_url): key optional, ids not prefix-filtered --
+
+
+def test_base_url_endpoint_connects_without_a_key(monkeypatch):
+    monkeypatch.delenv("MOORING_OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    provider = OpenAIProvider(model="llama-3.1-70b", base_url="http://localhost:11434/v1")
+    monkeypatch.setattr(provider, "available", lambda: True)
+    st = provider.status()  # cheap path: configured via base_url alone, no key needed
+    assert st.connected is True
+    assert "localhost:11434" in st.detail
+
+
+def test_list_models_keeps_non_openai_ids_for_a_custom_endpoint(monkeypatch):
+    monkeypatch.delenv("MOORING_OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    client = _fake_client(ids=["llama-3.1-70b", "qwen2.5", "text-embedding-3-large"])
+    provider = OpenAIProvider(base_url="http://localhost:11434/v1")
+    monkeypatch.setattr(provider, "available", lambda: True)
+    monkeypatch.setattr(provider, "_make_client", lambda: client)
+    ids = [m["id"] for m in provider.list_models(force=True)]
+    assert "llama-3.1-70b" in ids and "qwen2.5" in ids  # not hidden by an OpenAI prefix filter
+    assert "text-embedding-3-large" not in ids  # non-chat still dropped
 
 
 # -- the hub POST /api/ai/key route --------------------------------------------

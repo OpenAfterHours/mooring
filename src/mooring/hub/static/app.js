@@ -2150,7 +2150,7 @@ function renderCopilotStatus(s) {
     authzEl.textContent = s.authz_error;
     switchBtn.classList.remove("hidden");
   }
-  const connectLabel = isOpenai ? "Set OpenAI API key" : "Sign in to Copilot";
+  const connectLabel = isOpenai ? "Set API key" : "Sign in to Copilot";
   if (!s || s.available === false) {
     statusEl.textContent =
       s?.detail ||
@@ -2170,7 +2170,7 @@ function renderCopilotStatus(s) {
   }
   if (s.connected) {
     statusEl.textContent = isOpenai
-      ? "OpenAI API key configured."
+      ? s.detail || "OpenAI-compatible endpoint connected."
       : s.account
         ? `Signed in as @${s.account}.`
         : "Signed in.";
@@ -2265,8 +2265,8 @@ document.addEventListener("click", (e) => {
 
 async function setOpenAiKey() {
   const key = window.prompt(
-    "Paste your OpenAI API key. It is stored in your OS credential store on this " +
-      "machine only — never synced to the repo."
+    "Paste the API key for your OpenAI-compatible endpoint. It is stored in your OS " +
+      "credential store on this machine only — never synced. (Local endpoints may need none.)"
   );
   if (!key || !key.trim()) return;
   const note = $("copilot-note");

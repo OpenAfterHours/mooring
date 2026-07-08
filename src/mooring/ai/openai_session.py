@@ -62,6 +62,7 @@ class OpenAIChatSession(ChatBroadcaster):
         folders,
         notebook_rel: str,
         client_factory,
+        store: bool | None = False,
         reasoning_effort: str | None = None,
         dictionary=None,
         semantic_models=None,
@@ -102,6 +103,7 @@ class OpenAIChatSession(ChatBroadcaster):
         self._semantic_models = list(semantic_models or [])
         self._pii_enabled = pii_enabled
         self._client_factory = client_factory
+        self._store = store
         self._client: Any = None
         self._tool_specs: list[dict] = []
         self._dispatch: dict = {}
@@ -242,10 +244,13 @@ class OpenAIChatSession(ChatBroadcaster):
             "model": self._model or _DEFAULT_MODEL,
             "messages": self._messages,
             "stream": True,
-            # No server-side retention (the OpenAI analogue of enable_session_store=
-            # False): conversation state lives here, in self._messages, only.
-            "store": False,
         }
+        # No server-side retention (the OpenAI analogue of enable_session_store=False):
+        # conversation state lives here in self._messages only. Sent for canonical
+        # OpenAI; omitted (store is None) for a custom endpoint that may reject the
+        # unknown field — there is no OpenAI-side retention to control there.
+        if self._store is not None:
+            kwargs["store"] = self._store
         if self._tool_specs:
             kwargs["tools"] = self._tool_specs
             kwargs["tool_choice"] = "auto"
