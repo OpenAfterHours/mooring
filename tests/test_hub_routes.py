@@ -25,6 +25,7 @@ EXPECTED_ROUTES = {
     ("/api/repo/switch", ("POST",), "api_repo_switch"),
     ("/api/repo/remove", ("POST",), "api_repo_remove"),
     ("/api/ui/theme", ("POST",), "api_set_theme"),
+    ("/api/hub/feature", ("POST",), "api_set_featured"),  # repo-curated featured folders
     ("/api/doctor", ("POST",), "api_doctor"),  # the on-demand health check
     ("/settings", ("GET",), "settings_page"),
     ("/api/settings", ("GET",), "api_get_settings"),
@@ -228,3 +229,77 @@ def test_model_summary_is_cached_by_definition_signature(local_client):
     )
     (artifact,) = client.get("/api/state").json()["artifacts"]
     assert artifact["model"] == {"tables": 2, "measures": 1}
+
+
+# -- featured folders: /api/state field + /api/hub/feature -----------------------
+
+
+def test_state_featured_folders_default_empty(local_client):
+    client, _hub, _ws = local_client
+    assert client.get("/api/state").json()["featured_folders"] == []
+
+
+def test_feature_round_trip_and_state_field(local_client):
+    client, _hub, ws = local_client
+    resp = client.post("/api/hub/feature", json={"folder": "reports", "featured": True})
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True, "folder": "reports", "featured": True}
+    data = tomllib.loads((ws / "mooring.toml").read_text("utf-8"))
+    assert data["hub"]["featured_folders"] == ["reports"]
+    assert client.get("/api/state").json()["featured_folders"] == ["reports"]
+
+    resp = client.post("/api/hub/feature", json={"folder": "reports", "featured": False})
+    assert resp.status_code == 200
+    assert not (ws / "mooring.toml").exists()  # pruned empty, nothing spurious to sync
+    assert client.get("/api/state").json()["featured_folders"] == []
+
+
+def test_feature_order_is_display_priority(local_client):
+    client, _hub, _ws = local_client
+    client.post("/api/hub/feature", json={"folder": "zeta", "featured": True})
+    client.post("/api/hub/feature", json={"folder": "alpha", "featured": True})
+    assert client.get("/api/state").json()["featured_folders"] == ["zeta", "alpha"]
+
+
+def test_feature_requires_a_folder(local_client):
+    client, _hub, _ws = local_client
+    assert client.post("/api/hub/feature", json={}).status_code == 400
+
+
+def test_feature_rejects_escaping_paths(local_client):
+    client, _hub, _ws = local_client
+    resp = client.post("/api/hub/feature", json={"folder": "../outside", "featured": True})
+    assert resp.status_code == 400
+
+
+def test_feature_409_on_corrupt_mooring_toml(local_client):
+    client, _hub, ws = local_client
+    _write(ws, "mooring.toml", "this is = not valid = toml")
+    resp = client.post("/api/hub/feature", json={"folder": "reports", "featured": True})
+    assert resp.status_code == 409
+    assert (ws / "mooring.toml").read_text("utf-8") == "this is = not valid = toml"
+
+
+def test_feature_rejects_blank_normalized_folder(local_client):
+    # "/" normalizes to "" (which can never be stored) — reject it rather than 200 a no-op.
+    client, _hub, _ws = local_client
+    assert client.post("/api/hub/feature", json={"folder": "/", "featured": True}).status_code == 400
+
+
+def test_feature_409_on_non_utf8_mooring_toml(local_client):
+    # UTF-16 decodes to UnicodeDecodeError, not TOMLDecodeError — still a graceful 409.
+    client, _hub, ws = local_client
+    (ws).mkdir(parents=True, exist_ok=True)
+    (ws / "mooring.toml").write_bytes("[hub]\n".encode("utf-16"))
+    resp = client.post("/api/hub/feature", json={"folder": "reports", "featured": True})
+    assert resp.status_code == 409
+
+
+def test_state_survives_non_utf8_mooring_toml(local_client):
+    # The whole /api/state must not 500 because a synced mooring.toml is UTF-16.
+    client, _hub, ws = local_client
+    (ws).mkdir(parents=True, exist_ok=True)
+    (ws / "mooring.toml").write_bytes("[hub]\n".encode("utf-16"))
+    resp = client.get("/api/state")
+    assert resp.status_code == 200
+    assert resp.json()["featured_folders"] == []

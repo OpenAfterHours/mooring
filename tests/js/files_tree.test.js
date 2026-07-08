@@ -193,6 +193,29 @@ test("expandableCount: counts only steerable nodes, not empty declared leaves", 
   assert.equal(FT.expandableCount(FT.tree([f("reports/2026/x.py"), f("data/y.csv")], [], "")), 3);
 });
 
+// -- partitionFeatured(): repo-curated pin-to-top order ----------------------
+
+test("partitionFeatured: featured folders come first in the curator's order", () => {
+  const t = FT.tree([f("a/x.py"), f("b/y.py"), f("c/z.py")], [], "");
+  const { featured, rest } = FT.partitionFeatured(t.folders, ["c", "a"]);
+  assert.deepEqual(featured.map((n) => n.path), ["c", "a"]); // declared order, not sorted
+  assert.deepEqual(rest.map((n) => n.path), ["b"]);
+});
+
+test("partitionFeatured: empty featured leaves everything in rest", () => {
+  const t = FT.tree([f("a/x.py"), f("b/y.py")], [], "");
+  const { featured, rest } = FT.partitionFeatured(t.folders, []);
+  assert.equal(featured.length, 0);
+  assert.deepEqual(rest.map((n) => n.path), ["a", "b"]);
+});
+
+test("partitionFeatured: unknown / duplicate featured paths are skipped", () => {
+  const t = FT.tree([f("a/x.py"), f("b/y.py")], [], "");
+  const { featured, rest } = FT.partitionFeatured(t.folders, ["a", "gone", "a"]);
+  assert.deepEqual(featured.map((n) => n.path), ["a"]); // "gone" dropped, "a" not doubled
+  assert.deepEqual(rest.map((n) => n.path), ["b"]);
+});
+
 // -- crowdedCount(): the default-collapse heuristic --------------------------
 
 test("crowdedCount: a small/flat repo is not crowded (stays expanded)", () => {
