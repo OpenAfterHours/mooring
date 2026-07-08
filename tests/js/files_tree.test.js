@@ -129,69 +129,84 @@ test("crumbs: builds a cumulative-prefix trail, empty for the root", () => {
   ]);
 });
 
-// -- subsections(): the re-rooted, one-level-below-focus view ----------------
+// -- tree(): the recursive, nesting folder view ------------------------------
 
-test("subsections: focus '' delegates to group() unchanged", () => {
-  const files = [f("notebooks/a.py")];
-  assert.deepEqual(FT.subsections(files, ["notebooks"], ""), FT.group(files, ["notebooks"]));
+test("tree: repo root splits into top-level folder nodes + loose root files", () => {
+  const t = FT.tree([f("reports/a.py"), f("data/b.csv"), f("mooring.toml")], [], "");
+  assert.deepEqual(t.folders.map((n) => n.name).sort(), ["data", "reports"]);
+  assert.deepEqual(t.files.map((x) => x.rel), ["mooring.toml"]);
 });
 
-test("subsections: deep paths group by the segment BELOW the focus, not flattened", () => {
-  const files = [f("reports/2026/q3/x.py"), f("reports/2026/q1/y.py"), f("reports/2025/z.py")];
-  const secs = FT.subsections(files, [], "reports");
-  const byFolder = Object.fromEntries(secs.map((s) => [s.folder, s]));
-  assert.deepEqual(Object.keys(byFolder).sort(), ["reports/2025", "reports/2026"]);
-  assert.equal(byFolder["reports/2026"].label, "2026");
-  assert.equal(byFolder["reports/2026"].files.length, 2);
-  // rel is relative to the sub-section, so the row stays compact.
-  assert.deepEqual(byFolder["reports/2026"].files.map((x) => x.rel).sort(), ["q1/y.py", "q3/x.py"]);
+test("tree: deep sub-folders NEST as their own nodes instead of flattening", () => {
+  const t = FT.tree([f("reports/2026/q3/x.py"), f("reports/2026/q1/y.py"), f("reports/2025/z.py")], [], "");
+  const reports = t.folders.find((n) => n.name === "reports");
+  assert.equal(reports.count, 3); // subtree total, shown on the collapsed header
+  assert.equal(reports.files.length, 0); // no files directly in reports/
+  assert.deepEqual(reports.children.map((n) => n.name), ["2025", "2026"]); // sorted
+  const y2026 = reports.children.find((n) => n.name === "2026");
+  assert.deepEqual(y2026.children.map((n) => n.name), ["q1", "q3"]);
+  assert.equal(y2026.children.find((n) => n.name === "q3").files[0].rel, "x.py");
 });
 
-test("subsections: files DIRECTLY in the focus lead in a `here` section", () => {
-  const files = [f("reports/summary.py"), f("reports/2026/x.py")];
-  const secs = FT.subsections(files, [], "reports");
-  assert.equal(secs[0].here, true);
-  assert.equal(secs[0].folder, "reports");
-  assert.deepEqual(secs[0].files.map((x) => x.rel), ["summary.py"]);
-  // A distinct, collision-proof expand key: it shares `folder` with the aggregate
-  // "reports" section, so its remembered open/closed bit must not be the same key.
-  assert.equal(secs[0].expandKey, "reports/");
+test("tree: files directly in a folder attach to that node (rel = basename)", () => {
+  const t = FT.tree([f("reports/overview.py"), f("reports/2026/x.py")], [], "");
+  const reports = t.folders.find((n) => n.name === "reports");
+  assert.deepEqual(reports.files.map((x) => x.rel), ["overview.py"]);
+  assert.equal(reports.count, 2);
 });
 
-test("subsections: a declared child folder under the focus seeds an empty section", () => {
-  const secs = FT.subsections([], ["reports/2026"], "reports");
-  const empty = secs.find((s) => s.folder === "reports/2026");
-  assert.ok(empty);
-  assert.equal(empty.empty, true);
+test("tree: focus re-roots — returns the subtree below the focused folder", () => {
+  const t = FT.tree([f("reports/2026/q1/x.py"), f("analysis/z.py")], [], "reports/2026");
+  assert.deepEqual(t.folders.map((n) => n.name), ["q1"]);
+  assert.equal(t.folders[0].path, "reports/2026/q1"); // absolute path preserved
 });
 
-test("subsections: does not mutate the input files", () => {
+test("tree: an empty declared LEAF is `empty`; an intermediate on the chain is not", () => {
+  const t = FT.tree([], ["packages/finance/notebooks"], "");
+  const packages = t.folders.find((n) => n.name === "packages");
+  assert.equal(packages.empty, false); // has children — keep a live caret to drill in
+  const leaf = packages.children[0].children[0];
+  assert.equal(leaf.name, "notebooks");
+  assert.equal(leaf.empty, true); // nothing beneath — the "here's where notebooks go" nub
+});
+
+test("tree: does not mutate the input files", () => {
   const input = [f("reports/2026/x.py")];
-  FT.subsections(input, [], "reports");
+  FT.tree(input, [], "");
   assert.equal("rel" in input[0], false);
 });
 
-// -- crowded(): the default-collapse heuristic ------------------------------
+// -- allFolderPaths(): the Expand/Collapse-all target set --------------------
 
-test("crowded: a small/flat repo is not crowded (stays expanded)", () => {
-  const secs = FT.group([f("a/x.py"), f("b/y.py")], []);
-  assert.equal(FT.crowded(secs), false);
+test("allFolderPaths: every node path, depth-first", () => {
+  const t = FT.tree([f("reports/2026/x.py"), f("data/y.csv")], [], "");
+  assert.deepEqual(FT.allFolderPaths(t).sort(),
+    ["data", "reports", "reports/2026"]);
 });
 
-test("crowded: a lone folder never auto-collapses, even with many files", () => {
-  const many = Array.from({ length: 40 }, (_, i) => f(`only/n${i}.py`));
-  assert.equal(FT.crowded(FT.group(many, [])), false);
+test("expandableCount: counts only steerable nodes, not empty declared leaves", () => {
+  // Two declared-but-empty siblings — nothing to expand, so the toggles shouldn't show.
+  assert.equal(FT.expandableCount(FT.tree([], ["notebooks", "reports"], "")), 0);
+  // A real folder + an empty declared sibling → only the real one is steerable.
+  assert.equal(FT.expandableCount(FT.tree([f("data/a.csv")], ["notebooks"], "")), 1);
+  // Nested folders each count once.
+  assert.equal(FT.expandableCount(FT.tree([f("reports/2026/x.py"), f("data/y.csv")], [], "")), 3);
 });
 
-test("crowded: many folders or a long listing collapse by default", () => {
-  const manyFolders = FT.group(
-    [f("a/x.py"), f("b/x.py"), f("c/x.py"), f("d/x.py")], [],
-  );
-  assert.equal(FT.crowded(manyFolders), true); // >= 4 folders
-  const manyFiles = FT.group(
-    Array.from({ length: 25 }, (_, i) => f(`a/x${i}.py`)).concat(f("b/y.py")), [],
-  );
-  assert.equal(FT.crowded(manyFiles), true); // > 20 files
+// -- crowdedCount(): the default-collapse heuristic --------------------------
+
+test("crowdedCount: a small/flat repo is not crowded (stays expanded)", () => {
+  assert.equal(FT.crowdedCount(2, 5), false);
+});
+
+test("crowdedCount: a lone folder never auto-collapses, even with many files", () => {
+  assert.equal(FT.crowdedCount(1, 40), false);
+});
+
+test("crowdedCount: many folders or a long listing collapse by default", () => {
+  assert.equal(FT.crowdedCount(4, 8), true); // >= 4 folders
+  assert.equal(FT.crowdedCount(2, 25), true); // > 20 files
+  assert.equal(FT.crowdedCount(3, 12), false); // neither threshold
 });
 
 // -- focusLive(): self-heal a stale focus -----------------------------------

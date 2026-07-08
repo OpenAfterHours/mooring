@@ -112,67 +112,95 @@ const FilesTree = (function () {
     return out;
   }
 
-  // The folder sections ONE LEVEL below `focus`, re-rooted so deep structure stops
-  // flattening: with focus "reports", reports/2026/q3/x.py groups under "reports/2026"
-  // (not the single flattened "reports/"). Each section is shaped like `group`'s —
-  // {folder (full prefix), label (segment below focus), files:[{…,rel}], empty} —
-  // plus `here:true` for the leading section of files that live DIRECTLY in the focus.
-  // Declared folders immediately under the focus seed empty sections (the "here's
-  // where notebooks go" nudge, one level down). focus "" delegates to `group`.
-  function subsections(files, declared, focus) {
+  // A recursive folder tree rooted at `focus` ("" = the repo root). Unlike the two-level
+  // group(), deep sub-folders nest as their own collapsible nodes instead of flattening:
+  // reports/2026/q3/x.py becomes reports → 2026 → q3 → x.py. Returns the focus LEVEL as
+  // `{ folders: node[], files: directFile[] }`, where each node recurses via node.children.
+  // A node is `{ path (full prefix), name (own segment), files:[{…,rel}], children:[node],
+  // count (files in the whole subtree), empty (a declared folder with nothing beneath) }`.
+  // Declared folders under the focus are seeded so an empty one still shows. Files carry
+  // `rel` = their basename. Pure — inputs are never mutated.
+  function tree(files, declared, focus) {
     const base = norm(focus);
-    if (!base) return group(files, declared);
-    const prefix = base + "/";
-    const buckets = new Map();
-    const here = [];
-    for (const raw of declared || []) {
-      const d = norm(raw);
-      if (d.startsWith(prefix)) {
-        const child = prefix + d.slice(prefix.length).split("/")[0];
-        if (!buckets.has(child)) buckets.set(child, []);
+    const prefix = base ? base + "/" : "";
+    const root = { path: base, name: base ? base.split("/").pop() : "", files: [], kids: new Map() };
+    // Walk/create the chain of nodes for `segments` (already relative to the focus),
+    // returning the leaf. Node paths are absolute (from the repo root).
+    function ensure(segments) {
+      let node = root;
+      let acc = base;
+      for (const seg of segments) {
+        acc = acc ? acc + "/" + seg : seg;
+        if (!node.kids.has(seg)) node.kids.set(seg, { path: acc, name: seg, files: [], kids: new Map() });
+        node = node.kids.get(seg);
       }
+      return node;
+    }
+    // A path relative to the focus (or null if it doesn't live under the focus).
+    function under(p) {
+      if (!base) return p;
+      if (p === base) return "";
+      return p.startsWith(prefix) ? p.slice(prefix.length) : null;
+    }
+    for (const raw of declared || []) {
+      const rest = under(norm(raw));
+      if (rest) ensure(rest.split("/")); // seed empty declared folders (the leaf ends up empty)
     }
     for (const file of files || []) {
-      if (file.path !== base && !file.path.startsWith(prefix)) continue;
-      const rest = file.path === base ? file.path : file.path.slice(prefix.length);
-      const slash = rest.indexOf("/");
-      if (slash === -1) {
-        here.push(Object.assign({}, file, { rel: rest }));
-      } else {
-        const full = prefix + rest.slice(0, slash);
-        if (!buckets.has(full)) buckets.set(full, []);
-        buckets.get(full).push(Object.assign({}, file, { rel: file.path.slice(full.length + 1) }));
-      }
+      const rest = under(file.path);
+      if (rest == null) continue;
+      const segments = rest ? rest.split("/") : [file.path];
+      const name = segments.pop();
+      ensure(segments).files.push(Object.assign({}, file, { rel: name }));
     }
-    const result = Array.from(buckets.keys()).sort().map((full) => ({
-      folder: full,
-      label: full.slice(prefix.length),
-      files: buckets.get(full),
-      empty: buckets.get(full).length === 0,
-      here: false,
-    }));
-    if (here.length) {
-      // The "here" section shares `folder` with the aggregate `group` section for the
-      // same path (both "reports"), so it needs its OWN collapse key or the two fight
-      // over one remembered open/closed bit. A trailing slash can't collide — norm()
-      // strips trailing slashes, so no group folder ever carries one.
-      result.unshift({
-        folder: base, label: base.split("/").pop(), files: here,
-        empty: false, here: true, expandKey: base + "/",
-      });
+    function finalize(node) {
+      node.files.sort((a, b) => (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0));
+      node.children = Array.from(node.kids.values())
+        .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
+        .map(finalize);
+      delete node.kids;
+      node.count = node.children.reduce((n, c) => n + c.count, node.files.length);
+      // Only a true leaf (no files, no sub-folders) is "empty" — an intermediate declared
+      // chain keeps a live caret so you can still drill to the declared leaf beneath it.
+      node.empty = node.files.length === 0 && node.children.length === 0;
+      return node;
     }
-    return result;
+    finalize(root);
+    return { folders: root.children, files: root.files };
   }
 
-  // Whether the sections about to render should open COLLAPSED by default — true only
-  // for a "crowded" repo. A lone folder never auto-collapses (opening a repo to a
-  // single mysterious collapsed row reads as "where did my files go?"). The caller
-  // layers each folder's remembered choice on top of this default.
-  function crowded(sections) {
-    const real = (sections || []).filter((s) => s.folder !== "" && !s.here);
-    if (real.length <= 1) return false;
-    const files = (sections || []).reduce((n, s) => n + (s.files ? s.files.length : 0), 0);
-    return real.length >= CROWD_FOLDERS || files > CROWD_FILES;
+  // Every folder-node path in a tree, depth-first — the set Expand-all / Collapse-all pins.
+  function allFolderPaths(t) {
+    const out = [];
+    (function walk(nodes) {
+      for (const n of nodes || []) {
+        out.push(n.path);
+        walk(n.children);
+      }
+    })(t && t.folders);
+    return out;
+  }
+
+  // How many folder nodes can actually be steered open/closed — an empty declared leaf has
+  // a disabled caret and nothing beneath, so it doesn't count. Decides whether the
+  // Expand/Collapse-all toggles are worth showing (they'd be inert no-ops otherwise).
+  function expandableCount(t) {
+    let n = 0;
+    (function walk(nodes) {
+      for (const node of nodes || []) {
+        if (!node.empty) n += 1;
+        walk(node.children);
+      }
+    })(t && t.folders);
+    return n;
+  }
+
+  // Whether folders should open COLLAPSED by default — true only for a "crowded" level.
+  // A lone folder never auto-collapses (opening a repo to a single mysterious collapsed
+  // row reads as "where did my files go?"). The caller layers remembered choices on top.
+  function crowdedCount(folderCount, fileCount) {
+    if (folderCount <= 1) return false;
+    return folderCount >= CROWD_FOLDERS || fileCount > CROWD_FILES;
   }
 
   // Whether a stored focus still points at something real — a file lives under it, or
@@ -188,7 +216,7 @@ const FilesTree = (function () {
     });
   }
 
-  return { group, folderOf, norm, matches, scope, crumbs, subsections, crowded, focusLive };
+  return { group, folderOf, norm, matches, scope, crumbs, tree, allFolderPaths, expandableCount, crowdedCount, focusLive };
 })();
 
 if (typeof window !== "undefined") window.FilesTree = FilesTree;
