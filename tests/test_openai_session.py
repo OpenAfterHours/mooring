@@ -158,6 +158,37 @@ def test_every_request_is_value_blind(ws):
         assert SECRET not in json.dumps(call, default=str)
 
 
+def test_propose_cell_tool_emits_an_apply_proposal(ws):
+    # The Apply card is driven by a "proposal" event, which fires ONLY when the model
+    # calls a propose tool. Prove the OpenAI loop wires that end-to-end (the flow the
+    # user reported missing): a mooring_propose_cell call -> a proposal event with code.
+    scripted = [
+        [
+            _chunk(
+                tool_calls=[
+                    _tc(
+                        0,
+                        tc_id="p1",
+                        name="mooring_propose_cell",
+                        args='{"code": "summary = df.describe()", "rationale": "summarise"}',
+                    )
+                ]
+            ),
+            _chunk(finish="tool_calls"),
+        ],
+        [_chunk(content="Proposed a cell."), _chunk(finish="stop")],
+    ]
+    session, _ = _session(ws, scripted)
+    q = session.subscribe()
+    session.send("summarise the data")
+    events = _drain(q, until="idle")
+    session.close()
+    proposals = [e for e in events if e.kind == "proposal"]
+    assert proposals, "a propose-tool call must emit a proposal event (the Apply card)"
+    assert proposals[0].data["code"] == "summary = df.describe()"
+    assert proposals[0].data.get("rationale") == "summarise"
+
+
 def test_store_omitted_for_a_custom_endpoint(ws):
     # The provider passes store=None for a custom base_url (an OpenAI-compatible server
     # may reject the unknown field); the request then omits it entirely.
