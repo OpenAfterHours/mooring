@@ -487,3 +487,209 @@ test("reviewLabel: the compact visible transcript row, also a constant", () => {
   assert.equal(C.reviewLabel(), "/review — check this notebook's logic for risks");
   assert.equal(C.reviewLabel(), C.reviewLabel());
 });
+
+// -- renderMarkdown: GFM output rendering + the escape-first XSS contract -----
+// The copilot's replies are streamed model text. renderMarkdown makes them
+// read-friendly (tables, headings, lists, links, quotes) while guaranteeing NO
+// raw model output ever reaches innerHTML: it escapes < > & first, then only
+// splices in mooring's own tags. These pin BOTH the rendering and that contract.
+
+test("renderMarkdown: a pipe table becomes a <table> with headers, cells, alignment", () => {
+  const md = "| Region | Sales |\n|:---|---:|\n| North | 1240 |\n| South | 980 |";
+  const html = C.renderMarkdown(md);
+  assert.match(html, /<table/);
+  assert.match(html, /<th[^>]*>Region<\/th>/);
+  assert.match(html, /<th[^>]*>Sales<\/th>/);
+  assert.match(html, /<td[^>]*>North<\/td>/);
+  assert.match(html, /<td[^>]*>1240<\/td>/);
+  assert.match(html, /class="md-al-left"/); // Region left-aligned
+  assert.match(html, /class="md-al-right"/); // Sales right-aligned
+  assert.match(html, /md-table-wrap/); // wrapped so it scrolls, not the pane
+});
+
+test("renderMarkdown: a lone '|' in prose is NOT a table (needs a delimiter row)", () => {
+  const html = C.renderMarkdown("a | b is fine in a sentence");
+  assert.ok(!/<table/.test(html));
+  assert.match(html, /a \| b is fine/);
+});
+
+test("renderMarkdown: a table cell escapes HTML (no injection through a cell)", () => {
+  const md = "| a | b |\n|---|---|\n| <img src=x onerror=alert(1)> | y |";
+  const html = C.renderMarkdown(md);
+  assert.ok(!/<img/.test(html), "a raw <img> must never appear");
+  assert.match(html, /&lt;img/);
+});
+
+test("renderMarkdown: headings h1..h6 and an ordered list", () => {
+  assert.match(C.renderMarkdown("# Title"), /<h1>Title<\/h1>/);
+  assert.match(C.renderMarkdown("### Sub"), /<h3>Sub<\/h3>/);
+  assert.match(C.renderMarkdown("###### Deep"), /<h6>Deep<\/h6>/);
+  const ol = C.renderMarkdown("1. one\n2. two");
+  assert.match(ol, /<ol><li>one<\/li><li>two<\/li><\/ol>/);
+});
+
+test("renderMarkdown: '#Nospace' is not a heading (ATX needs a space)", () => {
+  const html = C.renderMarkdown("#tag not a heading");
+  assert.ok(!/<h1>/.test(html));
+  assert.match(html, /#tag not a heading/);
+});
+
+test("renderMarkdown: nested list folds by indent", () => {
+  const html = C.renderMarkdown("- a\n  - b\n- c");
+  assert.match(html, /<ul><li>a<ul><li>b<\/li><\/ul><\/li><li>c<\/li><\/ul>/);
+});
+
+test("renderMarkdown: a task list renders inert check markers, never <input>", () => {
+  const html = C.renderMarkdown("- [ ] todo\n- [x] done");
+  assert.ok(!/<input/.test(html), "no form controls");
+  assert.match(html, /☐/);
+  assert.match(html, /☑/);
+  assert.match(html, /class="md-task"/);
+});
+
+test("renderMarkdown: blockquote — the '>' marker survives escaping and is consumed", () => {
+  const html = C.renderMarkdown("> quoted line");
+  assert.match(html, /<blockquote>[\s\S]*quoted line[\s\S]*<\/blockquote>/);
+  assert.ok(!/&gt;/.test(html), "the > marker is consumed, not shown as text");
+});
+
+test("renderMarkdown: a safe link is linked; javascript: is neutralised to text", () => {
+  const ok = C.renderMarkdown("[docs](https://example.com)");
+  assert.match(ok, /<a href="https:\/\/example\.com" target="_blank" rel="noopener noreferrer">docs<\/a>/);
+  const bad = C.renderMarkdown("[x](javascript:alert(1))");
+  assert.ok(!/href="javascript/i.test(bad), "a javascript: URL must be rejected");
+  assert.match(bad, /x/, "the label is preserved as plain text");
+});
+
+test("renderMarkdown: a link href cannot break out of the attribute", () => {
+  const html = C.renderMarkdown('[x](https://a" onmouseover=alert(1))');
+  // Either dropped, or the quote is entity-encoded — never a bare quote in href.
+  assert.ok(!/href="https:\/\/a" onmouseover/.test(html));
+});
+
+test("renderMarkdown: data: and vbscript: URLs are rejected too", () => {
+  assert.ok(!/href="data:/i.test(C.renderMarkdown("[a](data:text/html,<script>0</script>)")));
+  assert.ok(!/href="vbscript:/i.test(C.renderMarkdown("[a](vbscript:msgbox(1))")));
+});
+
+test("renderMarkdown: inline bold / italic / code / strikethrough", () => {
+  const html = C.renderMarkdown("**b** *i* `c` ~~s~~");
+  assert.match(html, /<strong>b<\/strong>/);
+  assert.match(html, /<em>i<\/em>/);
+  assert.match(html, /<code>c<\/code>/);
+  assert.match(html, /<del>s<\/del>/);
+});
+
+test("renderMarkdown: raw HTML in prose is escaped (the core XSS contract)", () => {
+  const html = C.renderMarkdown("hello <script>alert(1)</script> <b>x</b>");
+  assert.ok(!/<script>/.test(html), "no raw <script>");
+  assert.ok(!/<b>x<\/b>/.test(html), "no raw <b> from the model");
+  assert.match(html, /&lt;script&gt;/);
+});
+
+test("renderMarkdown: a fenced code block is kept verbatim and escaped", () => {
+  const html = C.renderMarkdown("```python\nx = '<b>'\n```");
+  assert.match(html, /<pre class="cell-code"><code>/);
+  assert.match(html, /&lt;b&gt;/);
+  assert.ok(!/<b>/.test(html));
+});
+
+test("renderMarkdown: plain paragraphs and soft line breaks are preserved", () => {
+  const html = C.renderMarkdown("line one\nline two\n\nnew para");
+  assert.match(html, /<p>line one<br>line two<\/p>/);
+  assert.match(html, /<p>new para<\/p>/);
+});
+
+// -- renderMarkdown: hardening fixes from the adversarial review --------------
+
+test("renderMarkdown: a leading control byte cannot smuggle a javascript: scheme", () => {
+  // A browser's URL parser ignores a leading C0 control, re-exposing the scheme;
+  // mdSafeHref must strip controls BEFORE the allow-list so the check isn't fooled.
+  for (const code of [0x00, 0x01, 0x08, 0x1f, 0x7f]) {
+    const byte = String.fromCharCode(code);
+    const html = C.renderMarkdown("[click](" + byte + "javascript:alert(1))");
+    assert.ok(!/href="[^"]*javascript:/i.test(html), "no javascript: href for byte 0x" + code.toString(16));
+    assert.ok(!new RegExp("[" + String.fromCharCode(0, 1, 8, 0x1f, 0x7f) + "]").test(html), "no control byte in the output");
+  }
+  // The safe control case: a normal https link still works.
+  assert.match(C.renderMarkdown("[ok](https://e.com)"), /<a href="https:\/\/e\.com"/);
+});
+
+test("renderMarkdown: a '*' inside inline code stays verbatim (no straddling <em>)", () => {
+  const html = C.renderMarkdown("Match `*.py` or `*.txt` files.");
+  assert.match(html, /<code>\*\.py<\/code>/);
+  assert.match(html, /<code>\*\.txt<\/code>/);
+  assert.ok(!/<em>/.test(html), "emphasis must not straddle the two code spans");
+});
+
+test("renderMarkdown: markdown typed inside inline code is literal, not re-parsed", () => {
+  const html = C.renderMarkdown("see `[x](y)` and `**b**` literally");
+  assert.match(html, /<code>\[x\]\(y\)<\/code>/);
+  assert.ok(!/<a /.test(html), "a link inside code stays literal");
+  assert.match(html, /<code>\*\*b\*\*<\/code>/);
+  assert.ok(!/<strong>/.test(html), "bold inside code stays literal");
+});
+
+test("renderMarkdown: emphasis markers in a URL don't inject tags into the href", () => {
+  const html = C.renderMarkdown("[a](http://x*y*z)");
+  assert.match(html, /<a href="http:\/\/x\*y\*z"/);
+  assert.ok(!/<em>/.test(html), "the URL is captured raw, never emphasis-processed");
+});
+
+// -- renderMarkdown: fixes from the SECOND adversarial pass -------------------
+
+test("renderMarkdown: bold/italic that WRAPS an inline code span renders (no leaked **)", () => {
+  const b = C.renderMarkdown("call the **`df.merge()`** method");
+  assert.match(b, /<strong><code>df\.merge\(\)<\/code><\/strong>/);
+  assert.ok(!/\*\*/.test(b), "no literal ** left over");
+  const it = C.renderMarkdown("use *`x`* here");
+  assert.match(it, /<em><code>x<\/code><\/em>/);
+  // ...while a '*' INSIDE code still stays literal (the earlier fix holds).
+  const inside = C.renderMarkdown("Match `*.py` or `*.txt`.");
+  assert.match(inside, /<code>\*\.py<\/code>/);
+  assert.ok(!/<em>/.test(inside));
+});
+
+test("renderMarkdown: a long run of unmatched '[' renders fast (no O(n^2) freeze)", () => {
+  const s = "[".repeat(200000);
+  const t0 = process.hrtime.bigint();
+  const html = C.renderMarkdown(s);
+  const ms = Number(process.hrtime.bigint() - t0) / 1e6;
+  assert.equal(typeof html, "string");
+  assert.ok(ms < 2000, "rendered 200k '[' in " + ms.toFixed(0) + "ms — should be well under 2s");
+});
+
+test("renderMarkdown: absurdly deep blockquote nesting still renders (never falls back to null)", () => {
+  const html = C.renderMarkdown(">".repeat(5000) + " deep");
+  assert.equal(typeof html, "string", "must not overflow the stack and return null");
+  assert.match(html, /<blockquote>/);
+});
+
+test("renderMarkdown: an inline ```code``` span keeps its text (not eaten by the fence split)", () => {
+  const html = C.renderMarkdown("run ```pip install foo``` now");
+  assert.match(html, /<code>pip install foo<\/code>/);
+  assert.match(html, /run <code>pip install foo<\/code> now/);
+  assert.ok(!/<pre/.test(html), "same-line triple backticks are inline, not a block");
+});
+
+test("renderMarkdown: a real fenced code block (``` on its own line) still renders as a block", () => {
+  const html = C.renderMarkdown("```python\nx = 1\n```");
+  assert.match(html, /<pre class="cell-code"><code>x = 1<\/code><\/pre>/);
+});
+
+test("renderMarkdown: whitespace-flanked '*' is not emphasis (arithmetic / glob stay literal)", () => {
+  const a = C.renderMarkdown("2 * 3 * 4 = 24");
+  assert.ok(!/<em>/.test(a), "multiplication must not italicise");
+  assert.match(a, /2 \* 3 \* 4 = 24/);
+  assert.ok(!/<em>/.test(C.renderMarkdown("SELECT * FROM t")));
+  // ...but real *italic* and **bold** still render.
+  assert.match(C.renderMarkdown("this is *italic* and **bold**"), /<em>italic<\/em> and <strong>bold<\/strong>/);
+});
+
+test("renderMarkdown: a U+0000 in model text can't forge a placeholder", () => {
+  // The inline sentinel is U+0000; renderMarkdown strips it from the input, so a
+  // model-supplied U+0000 bytes cannot smuggle in a placeholder or blank content.
+  const html = C.renderMarkdown("before " + String.fromCharCode(0) + "0" + String.fromCharCode(0) + " after");
+  assert.equal(html.indexOf(String.fromCharCode(0)), -1, "no raw U+0000 survives to the output");
+  assert.match(html, /before 0 after/);
+});

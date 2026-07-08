@@ -930,6 +930,55 @@ footer {
 }
 .chat-body .row-assistant .cell-code code { background: none; border: none; padding: 0; }
 
+/* GFM in an assistant row: headings, ordered/nested/task lists, links, quotes,
+   strikethrough and tables (rendered by ChatCore.renderMarkdown). */
+.chat-body .row-assistant h1,
+.chat-body .row-assistant h2,
+.chat-body .row-assistant h3,
+.chat-body .row-assistant h4,
+.chat-body .row-assistant h5,
+.chat-body .row-assistant h6 {
+  margin: 0.5rem 0 0.3rem;
+  line-height: 1.25;
+  color: var(--term-ink);
+  font-weight: 700;
+}
+.chat-body .row-assistant h1 { font-size: 1.25em; }
+.chat-body .row-assistant h2 { font-size: 1.15em; }
+.chat-body .row-assistant h3 { font-size: 1.05em; }
+.chat-body .row-assistant h4,
+.chat-body .row-assistant h5,
+.chat-body .row-assistant h6 { font-size: 1em; }
+.chat-body .row-assistant ol { margin: 0.2rem 0 0.4rem; padding-left: 1.4rem; }
+.chat-body .row-assistant li { margin: 0.1rem 0; }
+.chat-body .row-assistant li > ul,
+.chat-body .row-assistant li > ol { margin: 0.1rem 0 0.1rem; }
+.chat-body .row-assistant li.md-task { list-style: none; margin-left: -1rem; }
+.chat-body .row-assistant .md-check { color: var(--term-accent); user-select: none; }
+.chat-body .row-assistant a { color: var(--term-accent); text-decoration: underline; }
+.chat-body .row-assistant del { color: var(--term-dim); }
+.chat-body .row-assistant blockquote {
+  margin: 0.3rem 0;
+  padding: 0.1rem 0 0.1rem 0.7rem;
+  border-left: 3px solid var(--term-rule);
+  color: var(--term-dim);
+}
+.chat-body .row-assistant blockquote p { margin: 0.2rem 0; }
+/* a table scrolls INSIDE its own box, so a wide table never scrolls the pane */
+.chat-body .md-table-wrap { overflow-x: auto; margin: 0.4rem 0; }
+.chat-body .md-table { border-collapse: collapse; font-size: 0.95em; min-width: 100%; }
+.chat-body .md-table th,
+.chat-body .md-table td {
+  border: 1px solid var(--term-rule);
+  padding: 0.25rem 0.5rem;
+  text-align: left;
+  vertical-align: top;
+}
+.chat-body .md-table th { background: var(--term-surface); color: var(--term-ink); font-weight: 700; }
+.chat-body .md-table .md-al-center { text-align: center; }
+.chat-body .md-table .md-al-right { text-align: right; }
+.chat-body .md-table .md-al-left { text-align: left; }
+
 /* a proposed cell, rendered as an additive (+) block — NOT a diff: append_cell
    only ever appends a cell, so the honest framing is "appends a cell". */
 .chat-body .proposal-card {
