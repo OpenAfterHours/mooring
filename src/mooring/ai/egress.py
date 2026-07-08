@@ -24,6 +24,7 @@ this is the deterministic floor beneath it.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 
 from mooring.ai import pii
@@ -35,13 +36,16 @@ from mooring.ai.pii import Finding, guard_prompt
 
 __all__ = [
     "Finding",
+    "ToolOutput",
     "guard_prompt",
     "scrub_columns",
     "scrub_text",
+    "scrub_error_text",
     "sanitize_traceback",
     "build_system_context",
     "to_tool_result",
     "to_error_result",
+    "to_openai_tool_message",
 ]
 
 
@@ -105,6 +109,43 @@ def sanitize_traceback(
     )
 
 
+@dataclass(frozen=True)
+class ToolOutput:
+    """A provider-neutral tool result: the value-free ``text`` a tool hands back,
+    plus whether it is an error.
+
+    Tool handlers (:func:`mooring.ai.tools.build_tool_specs`) return this instead of
+    a provider-specific result object, so ONE set of handlers serves every backend.
+    Each provider adapter mints the concrete wire form from it through THIS module —
+    the copilot ``ToolResult`` (:func:`to_tool_result` / :func:`to_error_result`) or
+    the OpenAI tool message (:func:`to_openai_tool_message`) — so every tool output
+    still passes the egress floor by construction. For an error, ``text`` carries the
+    RAW message; the scrub (:func:`scrub_error_text`) is applied at the mint, so no
+    egress channel ever sees it unscrubbed.
+    """
+
+    text: str
+    is_error: bool = False
+
+
+def scrub_error_text(message: str) -> str:
+    """Scrub an error/exception message to the checksum-PII floor, value-free.
+
+    Exception text can quote user input (a path, a cell fragment, a rendered
+    value), and the error field crosses to the model, so it gets the same
+    checksum-PII floor as every other egress fragment. Extracted so BOTH the
+    copilot error minter (:func:`to_error_result`) and the provider-neutral OpenAI
+    minter (:func:`to_openai_tool_message`) apply the SAME floor from one place.
+    ``scrub_text`` drops whole lines and a typical exception message is ONE line —
+    so when the scrub empties it, a value-free explanation is substituted rather
+    than handing the model an empty, unexplained failure it would just retry.
+    """
+    scrubbed, findings = scrub_text(message)
+    if findings and not scrubbed.strip():
+        scrubbed = "error message withheld: it contained a checksum-validated identifier"
+    return scrubbed
+
+
 def to_tool_result(text: str):
     """Mint the SDK ``ToolResult`` that carries ``text`` to the model.
 
@@ -126,25 +167,35 @@ def to_tool_result(text: str):
 
 
 def to_error_result(message: str):
-    """Mint a failed ``ToolResult``. Errors cross to the model too: exception
-    text can quote user input (a path, a cell fragment, a rendered value), so the
-    message is scrubbed here — the error channel gets the same checksum-PII floor
-    as every other egress fragment. ``scrub_text`` drops whole lines, and the
-    typical exception message IS one line — so when the scrub empties it, a
-    value-free explanation is substituted rather than handing the model an
-    empty, unexplained failure it would just retry."""
+    """Mint a failed copilot ``ToolResult``. The error field crosses to the model,
+    so ``message`` gets the same checksum-PII floor as every other egress fragment
+    via :func:`scrub_error_text`."""
     from copilot.tools import ToolResult
 
-    scrubbed, findings = scrub_text(message)
-    if findings and not scrubbed.strip():
-        scrubbed = "error message withheld: it contained a checksum-validated identifier"
     return ToolResult(
         text_result_for_llm="",
         # "error" is mooring's own result_type; the SDK's ToolResultType Literal
         # omits it, but the dataclass stores the string as-is at runtime.
         result_type="error",  # ty: ignore[invalid-argument-type]
-        error=scrubbed,
+        error=scrub_error_text(message),
     )
+
+
+def to_openai_tool_message(tool_call_id: str, output: ToolOutput) -> dict:
+    """Mint the provider-neutral (OpenAI-shaped) tool-result message for ``output``.
+
+    The SDK-free sibling of :func:`to_tool_result` / :func:`to_error_result`, for a
+    provider that runs its OWN tool-calling loop: OpenAI has no agent runtime, so
+    mooring builds the ``{"role": "tool", ...}`` turn itself. This is the ONE place
+    that message is constructed (enforced by ``tests/test_egress.py``), so a
+    self-driven loop still routes every tool output through egress by construction —
+    the structural analogue of the copilot ``ToolResult`` mint gateway. An error
+    output gets the same floor as the copilot error channel
+    (:func:`scrub_error_text`); a success output is minted as-is, because each
+    handler already owns its own scrub (mirroring :func:`to_tool_result`).
+    """
+    content = scrub_error_text(output.text) if output.is_error else output.text
+    return {"role": "tool", "tool_call_id": tool_call_id, "content": content}
 
 
 def build_system_context(

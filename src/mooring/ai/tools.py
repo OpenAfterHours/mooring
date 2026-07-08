@@ -1,4 +1,11 @@
-"""The mooring-mediated safe toolset given to the Copilot agent.
+"""The mooring-mediated safe toolset for the AI copilot.
+
+:func:`build_tool_specs` builds the tools as provider-neutral :class:`ToolSpec`
+objects whose handlers return a value-free :class:`mooring.ai.egress.ToolOutput`;
+:func:`build_tools` is the GitHub Copilot adapter that wraps them in the SDK's
+``Tool`` type. Sharing one set of handlers lets a second backend (which runs its
+own tool-calling loop) reuse the exact value-free logic instead of re-implementing
+tool serialisation.
 
 Every tool here is **value-free by construction** — it returns only a dataset's
 SCHEMA (names + dtypes, via the trusted ``schema`` module), the notebook's
@@ -13,8 +20,12 @@ agent has no path to data.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
+
+if TYPE_CHECKING:
+    from mooring.ai.egress import ToolOutput
 
 # The always-on tools. The session's ``available_tools`` allowlist is derived
 # from the tools actually built (these plus the dictionary tools when a data
@@ -121,7 +132,26 @@ def _args(invocation) -> dict:
     return raw if isinstance(raw, dict) else {}
 
 
-def build_tools(
+@dataclass(frozen=True)
+class ToolSpec:
+    """A provider-neutral tool descriptor produced by :func:`build_tool_specs`.
+
+    Adapted per backend: :func:`build_tools` wraps each in a ``copilot.tools.Tool``;
+    an OpenAI backend emits ``{"type": "function", "function": {...}}`` from
+    ``name`` / ``description`` / ``parameters`` (already plain JSON-Schema, reusable
+    verbatim) and dispatches ``handler`` by name. ``handler`` takes the SDK
+    invocation (anything exposing ``.arguments``) and returns a value-free
+    :class:`mooring.ai.egress.ToolOutput` — never a provider-specific result type.
+    """
+
+    name: str
+    description: str
+    parameters: dict
+    handler: Callable[[object], "ToolOutput"]
+    skip_permission: bool = True
+
+
+def build_tool_specs(
     *,
     workspace: Path,
     folders: tuple[str, ...],
@@ -131,40 +161,47 @@ def build_tools(
     dictionary=None,
     semantic_models=None,
     pii_enabled: bool = False,
-) -> list:
-    """Build the safe tools, bound to one workspace + target notebook.
+) -> list["ToolSpec"]:
+    """Build the safe tools as provider-neutral :class:`ToolSpec`s, bound to one
+    workspace + target notebook.
 
-    Handlers follow the SDK's ``ToolHandler`` contract: a single ``ToolInvocation``
-    argument (``invocation.arguments`` is the parsed args), returning a ToolResult.
-    When ``dictionary`` (a :class:`mooring.ai.datadictionary.DictionaryIndex`) is
-    non-empty, the three value-free dictionary tools are added. When
-    ``semantic_models`` (pre-parsed :class:`mooring.pbip_model.SemanticModel`
-    objects — the caller has already applied the config gate and the synced
-    per-model opt-out) is non-empty, the three model tools are added. When
-    ``pii_enabled``, ``get_schema`` withholds any column whose NAME is itself a PII
-    value (a pivot/transpose on a PII key) — the second, dynamic schema egress
-    (besides the system context) that the agent can reach at any time.
+    Handlers take a single invocation argument (anything exposing ``.arguments`` —
+    the parsed args; a JSON string is tolerated) and return a value-free
+    :class:`mooring.ai.egress.ToolOutput`. When ``dictionary`` (a
+    :class:`mooring.ai.datadictionary.DictionaryIndex`) is non-empty, the three
+    value-free dictionary tools are added. When ``semantic_models`` (pre-parsed
+    :class:`mooring.pbip_model.SemanticModel` objects — the caller has already
+    applied the config gate and the synced per-model opt-out) is non-empty, the
+    three model tools are added. When ``pii_enabled``, ``get_schema`` withholds any
+    column whose NAME is itself a PII value (a pivot/transpose on a PII key) — the
+    second, dynamic schema egress (besides the system context) that the agent can
+    reach at any time.
 
     ``emit_proposal_patch`` (supplied by the real chat session) enables the
     edit/rewrite tools: each captures the target cell's current source as an
     ``anchor`` and emits a structured proposal ``{kind, ops, diffs}`` to the local
     UI for the analyst to review and Apply (never an autonomous write).
+
+    :func:`build_tools` adapts these to the copilot SDK; a second backend reuses the
+    same handlers and only re-expresses the spec and result shapes.
     """
     from dataclasses import replace
-
-    from copilot.tools import Tool
 
     from mooring import marimo_rt, pbip_model, schema
     from mooring.ai import egress
 
-    def _err(msg: str):
-        # egress mints (and scrubs) the error channel — exception text can quote
-        # user input, so it gets the same checksum-PII floor as the text channel.
-        return egress.to_error_result(msg)
+    def _ok(text: str) -> "ToolOutput":
+        return egress.ToolOutput(text=text)
+
+    def _err(msg: str) -> "ToolOutput":
+        # A value-free error output. The message carries the RAW text and is scrubbed
+        # at the mint (egress.to_error_result / egress.to_openai_tool_message both
+        # apply egress.scrub_error_text), so no egress channel sees it unscrubbed.
+        return egress.ToolOutput(text=msg, is_error=True)
 
     def list_datasets(_invocation):
         found = schema.list_datasets(workspace, folders)
-        return egress.to_tool_result("\n".join(found) or "(no datasets found)")
+        return _ok("\n".join(found) or "(no datasets found)")
 
     def get_schema(invocation):
         rel = str(_args(invocation).get("dataset", "")).strip()
@@ -180,7 +217,7 @@ def build_tools(
             text = schema.format_for_ai(ds, source=rel)
         except (ValueError, OSError) as exc:
             return _err(f"cannot read schema: {exc}")
-        return egress.to_tool_result(text)
+        return _ok(text)
 
     _NB_READ_ERRORS = (
         ValueError,
@@ -218,7 +255,7 @@ def build_tools(
         else:  # not a parseable marimo notebook — show the raw source instead
             rendered = raw
         scrubbed, _ = egress.scrub_text(rendered)
-        return egress.to_tool_result(scrubbed)
+        return _ok(scrubbed)
 
     def propose_cell(invocation):
         args = _args(invocation)
@@ -227,7 +264,7 @@ def build_tools(
         if not code.strip():
             return _err("code required")
         emit_proposal(code, rationale)
-        return egress.to_tool_result(
+        return _ok(
             "Proposed the cell to the analyst, who will review and apply it."
         )
 
@@ -262,7 +299,7 @@ def build_tools(
                 "diffs": [{"label": f"cell {idx}", "before": anchor, "after": code}],
             }
         )
-        return egress.to_tool_result(
+        return _ok(
             f"Proposed an edit to cell {idx} for the analyst to review and apply."
         )
 
@@ -318,7 +355,7 @@ def build_tools(
             return _err("provide at least one of edits, appends, or deletes")
         assert emit_proposal_patch is not None  # tool only registered when the callback exists
         emit_proposal_patch({"kind": "patch", "rationale": rationale, "ops": ops, "diffs": diffs})
-        return egress.to_tool_result(
+        return _ok(
             f"Proposed {len(ops)} change(s) to the notebook for the analyst to review and apply."
         )
 
@@ -347,7 +384,7 @@ def build_tools(
                 ],
             }
         )
-        return egress.to_tool_result(
+        return _ok(
             f"Proposed a full rewrite ({len(new_cells)} cells) for the analyst to review and apply."
         )
 
@@ -362,7 +399,7 @@ def build_tools(
 
         assert dictionary is not None  # dictionary tools only registered when it is present
         listing, _ = egress.scrub_text(render_listing(dictionary))
-        return egress.to_tool_result(listing or "(the data dictionary is empty)")
+        return _ok(listing or "(the data dictionary is empty)")
 
     def describe_table(invocation):
         from mooring.ai.datadictionary import render_table
@@ -373,9 +410,9 @@ def build_tools(
         assert dictionary is not None  # dictionary tools only registered when it is present
         table = dictionary.get(name)
         if table is None:
-            return egress.to_tool_result(f"No table named {name!r} in the data dictionary.")
+            return _ok(f"No table named {name!r} in the data dictionary.")
         rendered, _ = egress.scrub_text(render_table(table))
-        return egress.to_tool_result(rendered)
+        return _ok(rendered)
 
     def search_dictionary(invocation):
         from mooring.ai.datadictionary import render_table
@@ -386,9 +423,9 @@ def build_tools(
         assert dictionary is not None  # dictionary tools only registered when it is present
         hits = dictionary.search(query, limit=8)
         if not hits:
-            return egress.to_tool_result(f"No dictionary tables match {query!r}.")
+            return _ok(f"No dictionary tables match {query!r}.")
         rendered, _ = egress.scrub_text("\n\n".join(render_table(t, max_cols=12) for t in hits))
-        return egress.to_tool_result(rendered)
+        return _ok(rendered)
 
     # The semantic-model tools serve the PRE-PARSED allowlist skeleton (tables,
     # columns+dataTypes, relationships, measure DAX — mooring.pbip_model; partition
@@ -412,7 +449,7 @@ def build_tools(
         if name:
             model = _find_model(name)
             if model is None:
-                return egress.to_tool_result(
+                return _ok(
                     f"No semantic model named {name!r} in this workspace."
                 )
             picked = [model]
@@ -421,7 +458,7 @@ def build_tools(
         rendered, _ = egress.scrub_text(
             "\n\n".join(pbip_model.render_summary(m) for m in picked)
         )
-        return egress.to_tool_result(rendered)
+        return _ok(rendered)
 
     def describe_model_table(invocation):
         args = _args(invocation)
@@ -432,7 +469,7 @@ def build_tools(
         if model_name:
             model = _find_model(model_name)
             if model is None:
-                return egress.to_tool_result(
+                return _ok(
                     f"No semantic model named {model_name!r} in this workspace."
                 )
             search = [model]
@@ -442,8 +479,8 @@ def build_tools(
             table = m.get_table(table_name)
             if table is not None:
                 rendered, _ = egress.scrub_text(pbip_model.render_table(m, table))
-                return egress.to_tool_result(rendered)
-        return egress.to_tool_result(f"No table named {table_name!r} in the semantic model.")
+                return _ok(rendered)
+        return _ok(f"No table named {table_name!r} in the semantic model.")
 
     def get_measure(invocation):
         args = _args(invocation)
@@ -454,7 +491,7 @@ def build_tools(
         if model_name:
             model = _find_model(model_name)
             if model is None:
-                return egress.to_tool_result(
+                return _ok(
                     f"No semantic model named {model_name!r} in this workspace."
                 )
             search = [model]
@@ -465,18 +502,18 @@ def build_tools(
             if hit is not None:
                 table, measure = hit
                 rendered, _ = egress.scrub_text(pbip_model.render_measure(m, table, measure))
-                return egress.to_tool_result(rendered)
-        return egress.to_tool_result(f"No measure named {measure_name!r} in the semantic model.")
+                return _ok(rendered)
+        return _ok(f"No measure named {measure_name!r} in the semantic model.")
 
-    tools = [
-        Tool(
+    specs = [
+        ToolSpec(
             "mooring_list_datasets",
             "List the dataset files (parquet/csv/xlsx) available in this workspace.",
             handler=list_datasets,
             parameters={"type": "object", "properties": {}},
             skip_permission=True,  # value-free by construction; no prompt needed
         ),
-        Tool(
+        ToolSpec(
             "mooring_get_schema",
             "Get a dataset's schema: column names, dtypes, and row count. "
             "Returns ONLY the schema — never any data value.",
@@ -493,14 +530,14 @@ def build_tools(
             },
             skip_permission=True,  # returns schema only — value-free
         ),
-        Tool(
+        ToolSpec(
             "mooring_read_notebook_source",
             "Read the current marimo notebook's Python source code (no data values).",
             handler=read_notebook_source,
             parameters={"type": "object", "properties": {}},
             skip_permission=True,  # source only — value-free
         ),
-        Tool(
+        ToolSpec(
             "mooring_propose_cell",
             "Propose a Python cell for the analyst to apply into the notebook. "
             "Use this to suggest code; the analyst reviews and applies it." + _CELL_FORMAT,
@@ -521,8 +558,8 @@ def build_tools(
     ]
 
     if emit_proposal_patch is not None:
-        tools += [
-            Tool(
+        specs += [
+            ToolSpec(
                 "mooring_propose_cell_edit",
                 "Propose REPLACING an existing cell's code. Read the notebook first "
                 "(mooring_read_notebook_source) to get cell indices. The analyst sees a "
@@ -545,7 +582,7 @@ def build_tools(
                 },
                 skip_permission=True,  # surfaces a proposal only; the analyst applies it
             ),
-            Tool(
+            ToolSpec(
                 "mooring_propose_notebook_edit",
                 "Propose SEVERAL cell changes at once — edits, appends, and deletes — "
                 "as one reviewable patch (prefer this for a multi-cell change). Indices "
@@ -582,7 +619,7 @@ def build_tools(
                 },
                 skip_permission=True,  # surfaces a proposal only; the analyst applies it
             ),
-            Tool(
+            ToolSpec(
                 "mooring_propose_notebook_rewrite",
                 "Propose REPLACING THE WHOLE notebook with a new ordered list of cells. "
                 "Heavier than an edit (every changed cell re-runs and loses its identity) — "
@@ -606,8 +643,8 @@ def build_tools(
         ]
 
     if dictionary is not None and not dictionary.is_empty():
-        tools += [
-            Tool(
+        specs += [
+            ToolSpec(
                 "mooring_list_tables",
                 "List the tables in the team data dictionary (grouped by domain). "
                 "Returns table names, column counts, and descriptions — never any data value.",
@@ -615,7 +652,7 @@ def build_tools(
                 parameters={"type": "object", "properties": {}},
                 skip_permission=True,  # serves the value-minimised in-memory index
             ),
-            Tool(
+            ToolSpec(
                 "mooring_describe_table",
                 "Describe one data-dictionary table: its columns' names, types, "
                 "nullability, foreign keys, and descriptions. Never any data value.",
@@ -632,7 +669,7 @@ def build_tools(
                 },
                 skip_permission=True,  # name lookup in-memory; never a path, never a value
             ),
-            Tool(
+            ToolSpec(
                 "mooring_search_dictionary",
                 "Search the data dictionary for tables/columns matching a query "
                 "(use before writing a JOIN). Returns matching schemas — never any value.",
@@ -656,8 +693,8 @@ def build_tools(
             "type": "string",
             "description": "the semantic model's name (only needed when several exist)",
         }
-        tools += [
-            Tool(
+        specs += [
+            ToolSpec(
                 "mooring_get_semantic_model",
                 "Summarise the workspace's Power BI semantic model(s): table names, "
                 "column counts, measure NAMES, and relationships — no DAX (cheap to "
@@ -666,7 +703,7 @@ def build_tools(
                 parameters={"type": "object", "properties": {"model": _MODEL_ARG}},
                 skip_permission=True,  # names only, from the pre-parsed in-memory model
             ),
-            Tool(
+            ToolSpec(
                 "mooring_describe_model_table",
                 "Describe one semantic-model table: columns with dataTypes, "
                 "calculated-column DAX, that table's measures with DAX, and its "
@@ -682,7 +719,7 @@ def build_tools(
                 },
                 skip_permission=True,  # name lookup in-memory; never a path, never a value
             ),
-            Tool(
+            ToolSpec(
                 "mooring_get_measure",
                 "Fetch one measure's full DAX expression (plus format string and "
                 "display folder) from the semantic model, by measure name.",
@@ -698,4 +735,61 @@ def build_tools(
                 skip_permission=True,  # name lookup in-memory; never a path, never a value
             ),
         ]
-    return tools
+    return specs
+
+
+def build_tools(
+    *,
+    workspace: Path,
+    folders: tuple[str, ...],
+    notebook_rel: str,
+    emit_proposal: Callable[[str, str], None],
+    emit_proposal_patch: Callable[[dict], None] | None = None,
+    dictionary=None,
+    semantic_models=None,
+    pii_enabled: bool = False,
+) -> list:
+    """The GitHub Copilot adapter over :func:`build_tool_specs`.
+
+    Wraps each provider-neutral :class:`ToolSpec` in a ``copilot.tools.Tool`` whose
+    handler maps the spec's value-free :class:`~mooring.ai.egress.ToolOutput` onto a
+    copilot ``ToolResult`` via the egress minters — so a ``ToolResult`` is still
+    constructed ONLY inside egress (pinned by ``tests/test_egress.py``), and the
+    copilot session (``available_tools=[t.name for t in tools]``) is unchanged.
+
+    Kept as the SAME public entry point the copilot session and the tool tests use:
+    it still returns ``copilot.tools.Tool`` objects with the same ``name`` /
+    ``parameters`` / ``skip_permission`` and handlers that return a ``ToolResult``.
+    The SDK import stays function-local (``copilot`` is the optional extra).
+    """
+    from copilot.tools import Tool
+
+    from mooring.ai import egress
+
+    specs = build_tool_specs(
+        workspace=workspace,
+        folders=folders,
+        notebook_rel=notebook_rel,
+        emit_proposal=emit_proposal,
+        emit_proposal_patch=emit_proposal_patch,
+        dictionary=dictionary,
+        semantic_models=semantic_models,
+        pii_enabled=pii_enabled,
+    )
+
+    def _to_tool(spec: ToolSpec):
+        def handler(invocation):
+            out = spec.handler(invocation)
+            if out.is_error:
+                return egress.to_error_result(out.text)
+            return egress.to_tool_result(out.text)
+
+        return Tool(
+            spec.name,
+            spec.description,
+            handler=handler,
+            parameters=spec.parameters,
+            skip_permission=spec.skip_permission,
+        )
+
+    return [_to_tool(spec) for spec in specs]
