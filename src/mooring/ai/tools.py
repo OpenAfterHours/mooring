@@ -793,3 +793,55 @@ def build_tools(
         )
 
     return [_to_tool(spec) for spec in specs]
+
+
+def build_openai_tools(
+    *,
+    workspace: Path,
+    folders: tuple[str, ...],
+    notebook_rel: str,
+    emit_proposal: Callable[[str, str], None],
+    emit_proposal_patch: Callable[[dict], None] | None = None,
+    dictionary=None,
+    semantic_models=None,
+    pii_enabled: bool = False,
+) -> tuple[list[dict], dict[str, Callable[[object], "ToolOutput"]]]:
+    """The OpenAI adapter over :func:`build_tool_specs`.
+
+    Returns ``(tool_specs, dispatch)``: ``tool_specs`` is the OpenAI function-tool
+    schema list — ``[{"type": "function", "function": {name, description,
+    parameters}}]`` — passed verbatim as the ``tools=`` argument (the ``parameters``
+    dicts are already plain JSON-Schema, reusable as-is); ``dispatch`` maps each tool
+    name to its value-free handler, which the session's own tool-calling loop invokes
+    and whose :class:`~mooring.ai.egress.ToolOutput` it mints through
+    :func:`mooring.ai.egress.to_openai_tool_message`.
+
+    This adapter is SDK-free by design (it only builds dicts) — the same value-free
+    handlers as the copilot path, re-expressed as function specs. Only mooring's own
+    tools are ever produced; a backend that runs this NEVER registers a hosted tool
+    (web_search / file_search / code_interpreter), which is how value-blindness stays
+    structural for a self-driven loop.
+    """
+    specs = build_tool_specs(
+        workspace=workspace,
+        folders=folders,
+        notebook_rel=notebook_rel,
+        emit_proposal=emit_proposal,
+        emit_proposal_patch=emit_proposal_patch,
+        dictionary=dictionary,
+        semantic_models=semantic_models,
+        pii_enabled=pii_enabled,
+    )
+    tool_specs = [
+        {
+            "type": "function",
+            "function": {
+                "name": spec.name,
+                "description": spec.description,
+                "parameters": spec.parameters,
+            },
+        }
+        for spec in specs
+    ]
+    dispatch = {spec.name: spec.handler for spec in specs}
+    return tool_specs, dispatch

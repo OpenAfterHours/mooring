@@ -31,6 +31,13 @@ dependencies = [
 copilot = [
     "github-copilot-sdk>=1.0.1",
 ]
+# The OpenAI provider (an alternative to Copilot). The `openai` SDK is lean
+# (httpx + pydantic, a few MB) vs the Copilot CLI's ~150 MB, but it still ships
+# as an extra so a base install stays minimal: `pip install "mooring[openai]"`.
+# The API key is resolved locally (MOORING_OPENAI_API_KEY / keyring), never synced.
+openai = [
+    "openai>=1.40",
+]
 # Optional NER name detection for the outbound-PII guard (Phase 2). GLiNER pulls
 # torch + transformers (hundreds of MB), so it ships as an extra — without it the
 # guard still does its stdlib structured-PII scan. Install with

@@ -95,6 +95,14 @@ class AiConfig:
     # Default ON: it only ever REMOVES information, and the raw paste is never
     # stored, so there is no send-raw path. Turning it off is a weakening flip.
     traceback_guard: bool = True
+    # OpenAI-provider endpoint overrides — VALUE-FREE (a URL and an API version,
+    # never the API key, which is resolved locally from env/keyring; see
+    # mooring.ai.openai_provider). ``openai_base_url`` points the client at an
+    # OpenAI-compatible gateway or an Azure resource; ``openai_api_version`` (when
+    # set) selects the AzureOpenAI client for a classic Azure deployment. Both are
+    # safe in synced/templated config because neither is a secret.
+    openai_base_url: str = ""
+    openai_api_version: str = ""
     pii: PiiConfig = field(default_factory=PiiConfig)
     batch: BatchConfig = field(default_factory=BatchConfig)
 
@@ -190,6 +198,12 @@ def load_ai_config(ai: Mapping, env: Mapping[str, str]) -> AiConfig:
         ),
         traceback_guard=_as_bool(
             env.get("MOORING_AI_TRACEBACK_GUARD"), _as_bool(ai.get("traceback_guard"), True)
+        ),
+        openai_base_url=env.get(
+            "MOORING_AI_OPENAI_BASE_URL", str(ai.get("openai_base_url", ""))
+        ),
+        openai_api_version=env.get(
+            "MOORING_AI_OPENAI_API_VERSION", str(ai.get("openai_api_version", ""))
         ),
         pii=pii,
         batch=batch,
