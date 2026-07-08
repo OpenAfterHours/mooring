@@ -34,6 +34,16 @@ let lastReview = null;
 // The catalog search box's current text — filters the file listing client-side. Kept
 // across /api/state re-renders so a poll doesn't clear an in-progress filter.
 let fileQuery = "";
+// The "focus one folder" view + the default-collapse memory. `focusPrefix` narrows the
+// whole listing to one folder subtree ("" = All folders); `folderExpand` maps a folder
+// to an explicit open/closed choice that overrides the crowded() default. Both are
+// display-only and persist PER WORKSPACE in localStorage on the stable hub origin (see
+// loadFolderView). `currentSections` is the last-rendered set — the Expand/Collapse-all
+// escape hatch pins exactly those.
+let focusPrefix = "";
+let folderExpand = {};
+let folderViewKey = null;
+let currentSections = [];
 let aiChatEnabled = false;
 // When the last /api/state landed (client clock) and whether it was logged in —
 // the freshness banner's inputs. There is no server-side "last refreshed" time:
@@ -1216,13 +1226,105 @@ function newNotebookIn(folder) {
   if (name) action("/api/new", { name: `${folder}/${name}` });
 }
 
+// -- folder view: focus + per-folder collapse (persisted per workspace) ------
+// Display-only, client-side. Keyed by the repo slug when connected, else the
+// workspace path (local mode), so two workspaces sharing the stable hub origin's
+// localStorage don't collide on one key. Best-effort like the theme/watch mirrors:
+// private mode just forgets the view between launches.
+
+function folderViewId(state) {
+  // A non-lossy encoding, so two distinct workspaces never slug to the same key (a
+  // character-class replacement collapses "my proj" and "my_proj" to one string).
+  const raw = (state && (state.repo || state.workspace)) || "default";
+  return encodeURIComponent(raw);
+}
+
+function loadFolderView(id) {
+  folderViewKey = id ? `mooring.folderview.${id}` : null;
+  let raw;
+  try {
+    raw = folderViewKey ? localStorage.getItem(folderViewKey) : null;
+  } catch {
+    // Storage is blocked (not just empty): keep the in-memory view rather than wiping a
+    // focus/collapse the user set this session — private mode only forgets BETWEEN launches.
+    return;
+  }
+  focusPrefix = "";
+  folderExpand = {};
+  try {
+    if (raw) {
+      const data = JSON.parse(raw) || {};
+      focusPrefix = FilesTree.norm(data.focus || "");
+      folderExpand = data.exp && typeof data.exp === "object" ? data.exp : {};
+    }
+  } catch {
+    // corrupt JSON — start at All folders with every folder at its default.
+  }
+}
+
+function saveFolderView() {
+  try {
+    if (folderViewKey) {
+      localStorage.setItem(folderViewKey, JSON.stringify({ focus: focusPrefix, exp: folderExpand }));
+    }
+  } catch {
+    // best-effort; the in-memory view still drives this session.
+  }
+}
+
+// Narrow the whole listing to one folder subtree (or "" to reset to All folders).
+function setFocus(prefix) {
+  focusPrefix = FilesTree.norm(prefix || "");
+  saveFolderView();
+  renderFiles(lastFiles, lastArtifacts, lastFolders);
+}
+
+function setFolderExpanded(folder, expanded) {
+  folderExpand[folder] = expanded;
+  saveFolderView();
+}
+
+// A section's persisted-collapse key. The focus's own "here" section shares `folder`
+// with the aggregate section for that path, so it carries an `expandKey` to keep the two
+// states distinct (see FilesTree.subsections).
+function sectionKey(section) {
+  return section.expandKey || section.folder;
+}
+
+// The Expand/Collapse-all escape hatch: pin every CURRENTLY-rendered section (incl. the
+// loose "repo root" one) open or closed. Deeper folders keep their remembered/default
+// state until you drill to them.
+function setAllExpanded(expanded) {
+  for (const s of currentSections) {
+    if (!s.empty) folderExpand[sectionKey(s)] = expanded;
+  }
+  saveFolderView();
+  renderFiles(lastFiles, lastArtifacts, lastFolders);
+}
+
+// Whether a section renders expanded: an explicit remembered choice wins; otherwise a
+// container's OWN loose files (the repo root and the focus's "here" section) stay visible,
+// and everything else follows the view's default (collapsed only when the repo is crowded).
+function folderIsExpanded(section, collapseDefault) {
+  const key = sectionKey(section);
+  if (Object.prototype.hasOwnProperty.call(folderExpand, key)) return !!folderExpand[key];
+  if (section.folder === "" || section.here) return true;
+  return !collapseDefault;
+}
+
 // A collapsible folder section: a header row (caret + name + count) and the file rows
 // under it. Reuses the PBIP caret/collapse pattern. An empty DECLARED folder still
 // renders — "here's where notebooks go" — with a disabled caret and a New-here button.
-function buildFolderSection(section) {
+// The header NAME doubles as a drill control: clicking it focuses that sub-folder (the
+// breadcrumb climbs back out). `ctx` carries the view's collapse default and whether a
+// search is forcing everything expanded.
+function buildFolderSection(section, ctx) {
+  ctx = ctx || {};
+  const expanded = ctx.forceExpand || folderIsExpanded(section, ctx.collapseDefault);
   const memberRows = section.files.map((file) => {
     const row = buildFileRow(file, { rel: true });
     row.classList.add("member");
+    if (!expanded) row.classList.add("hidden");
     return row;
   });
 
@@ -1232,16 +1334,40 @@ function buildFolderSection(section) {
     caret.textContent = "·";
     caret.disabled = true;
   } else {
-    caret.textContent = "▾";
+    caret.textContent = expanded ? "▾" : "▸";
+    caret.title = expanded ? "Collapse" : "Expand";
     caret.addEventListener("click", () => {
       const open = caret.textContent === "▾";
       caret.textContent = open ? "▸" : "▾";
       memberRows.forEach((row) => row.classList.toggle("hidden", open));
+      setFolderExpanded(sectionKey(section), !open);
     });
   }
 
-  const name = document.createElement("b");
-  name.textContent = section.folder === "" ? " repo root " : ` ${section.folder}/ `;
+  // Label: the folder name relative to the current focus (`label` in focus mode),
+  // "repo root" for loose files, or a "files in X/" caption for the focus's own files.
+  const labelText = section.here
+    ? `· files in ${section.label || section.folder}/ `
+    : section.folder === ""
+      ? " repo root "
+      : ` ${section.label != null ? section.label : section.folder}/ `;
+  // The name drills IN (focuses this sub-folder) — except the root and the "here"
+  // section, which have nowhere deeper of their own to go. Disabled while searching:
+  // the focus is ignored mid-search, so a drill click would be a dead no-op that
+  // silently rewrites the remembered focus (surfacing only once search is cleared).
+  const drillable = !!section.folder && !section.here && !ctx.searching;
+  let name;
+  if (drillable) {
+    name = document.createElement("button");
+    name.className = "folder-drill";
+    name.textContent = labelText;
+    name.title = `Focus ${section.folder}/`;
+    name.addEventListener("click", () => setFocus(section.folder));
+  } else {
+    name = document.createElement("b");
+    name.textContent = labelText;
+  }
+
   const detail = document.createElement("span");
   detail.className = "muted";
   detail.textContent = section.empty ? "— empty" : `— ${section.files.length} file(s)`;
@@ -1265,16 +1391,84 @@ function buildFolderSection(section) {
   return [tr, ...memberRows];
 }
 
+// The folder-browser toolbar above the table: a breadcrumb when a folder is focused
+// (climb back out or reset to All folders) plus a live "N of M files" count, and
+// Expand-all / Collapse-all whenever there's more than one collapsible section.
+function renderFolderControls(o) {
+  const bar = $("folder-controls");
+  bar.innerHTML = "";
+  const hasCatalog = !$("files-table").classList.contains("hidden");
+  const showCrumbs = !!o.focus && !o.searching;
+  // Every non-empty section has a live caret (incl. the loose "repo root" one), so all
+  // of them count toward whether Expand/Collapse-all is worth showing.
+  const collapsible = o.sections.filter((s) => !s.empty).length;
+  const showToggles = !o.searching && collapsible > 1;
+  bar.classList.toggle("hidden", !hasCatalog || (!showCrumbs && !showToggles));
+  if (bar.classList.contains("hidden")) return;
+
+  if (showCrumbs) {
+    const nav = document.createElement("nav");
+    nav.className = "folder-scope";
+    nav.setAttribute("aria-label", "Folder path");
+    const root = document.createElement("button");
+    root.className = "folder-crumb";
+    root.textContent = "All folders";
+    root.title = "Show every folder";
+    root.addEventListener("click", () => setFocus(""));
+    nav.appendChild(root);
+    for (const c of FilesTree.crumbs(o.focus)) {
+      const sep = document.createElement("span");
+      sep.className = "folder-crumb-sep";
+      sep.textContent = "›";
+      nav.appendChild(sep);
+      if (c.prefix === o.focus) {
+        const cur = document.createElement("span");
+        cur.className = "folder-crumb current";
+        cur.textContent = c.label;
+        nav.appendChild(cur);
+      } else {
+        const crumb = document.createElement("button");
+        crumb.className = "folder-crumb";
+        crumb.textContent = c.label;
+        crumb.title = `Focus ${c.prefix}/`;
+        crumb.addEventListener("click", () => setFocus(c.prefix));
+        nav.appendChild(crumb);
+      }
+    }
+    const count = document.createElement("span");
+    count.className = "folder-count muted";
+    count.textContent = `${o.shownFiles} of ${o.totalFiles} file${o.totalFiles === 1 ? "" : "s"}`;
+    nav.appendChild(count);
+    bar.appendChild(nav);
+  }
+
+  if (showToggles) {
+    const toggles = document.createElement("div");
+    toggles.className = "folder-toggles";
+    const ex = document.createElement("button");
+    ex.className = "small";
+    ex.textContent = "Expand all";
+    ex.addEventListener("click", () => setAllExpanded(true));
+    const co = document.createElement("button");
+    co.className = "small";
+    co.textContent = "Collapse all";
+    co.addEventListener("click", () => setAllExpanded(false));
+    toggles.append(ex, co);
+    bar.appendChild(toggles);
+  }
+}
+
 function renderFiles(files, artifacts, declaredFolders) {
   const tbody = $("files-table").querySelector("tbody");
   tbody.innerHTML = "";
   const q = fileQuery.trim();
+  const declared = declaredFolders || [];
   // PBIP artifacts keep their own collapsible grouping; the rest group by folder so the
   // structure (incl. an adopted/declared folder that is still empty) is visible.
   const nonArtifact = files.filter((f) => !f.artifact);
   // Catalog presence (UNFILTERED): declared-but-empty folders still count, so the
   // table/empty-hint/search toggles keep the original "structure is visible" behaviour.
-  const baseSections = FilesTree.group(nonArtifact, declaredFolders || []);
+  const baseSections = FilesTree.group(nonArtifact, declared);
   const hasCatalog = baseSections.length > 0 || artifacts.length > 0;
   $("files-table").classList.toggle("hidden", !hasCatalog);
   // The empty-hint and the table are mutually exclusive: declared folders seed empty
@@ -1284,22 +1478,50 @@ function renderFiles(files, artifacts, declaredFolders) {
   // The search box appears once there's a catalog to filter (find a notebook by name/title).
   $("file-search").classList.toggle("hidden", !hasCatalog);
 
-  // Filtered view for rendering: match path/title/tags; while filtering, drop empty
-  // declared-folder sections (they're noise) and any artifact that doesn't match.
-  const shownArtifacts = artifacts.filter((a) =>
-    FilesTree.matches({ path: a.pointer || a.name || a.key }, q),
-  );
-  const sections = q
-    ? FilesTree.group(nonArtifact.filter((f) => FilesTree.matches(f, q)), declaredFolders || []).filter(
-        (s) => s.files.length,
-      )
-    : baseSections;
+  // While searching, ignore the folder focus and hunt the WHOLE repo, with matching
+  // sections FORCE-expanded so a hit under a collapsed/out-of-focus folder is never
+  // hidden. Otherwise honour the focused folder (Stage 2), re-rooted so deep sub-folders
+  // stop flattening. The root view is the ordinary grouping (zero regression).
+  const searching = !!q;
+  const focus = searching ? "" : focusPrefix;
+
+  let sections;
+  let shownArtifacts;
+  if (searching) {
+    sections = FilesTree.group(nonArtifact.filter((f) => FilesTree.matches(f, q)), declared).filter(
+      (s) => s.files.length,
+    );
+    shownArtifacts = artifacts.filter((a) =>
+      FilesTree.matches({ path: a.pointer || a.name || a.key }, q),
+    );
+  } else if (focus) {
+    sections = FilesTree.subsections(nonArtifact, declared, focus);
+    // Focus also scopes Power BI projects: hide a project whose pointer lives outside
+    // the focused folder, so "focus reports/" doesn't still list every semantic model.
+    shownArtifacts = artifacts.filter(
+      (a) => FilesTree.scope([{ path: a.pointer || a.name || a.key }], focus).length > 0,
+    );
+  } else {
+    sections = baseSections;
+    shownArtifacts = artifacts.slice();
+  }
+  currentSections = sections;
+
+  const collapseDefault = !searching && FilesTree.crowded(sections);
+  const ctx = { collapseDefault, forceExpand: searching, searching };
+  renderFolderControls({
+    focus,
+    searching,
+    sections,
+    totalFiles: nonArtifact.length,
+    shownFiles: FilesTree.scope(nonArtifact, focus).length,
+  });
 
   for (const artifact of shownArtifacts) {
     for (const row of buildArtifactRows(artifact, files)) tbody.appendChild(row);
   }
   for (const section of sections) {
-    for (const row of buildFolderSection(section)) tbody.appendChild(row);
+    for (const row of buildFolderSection(section, ctx)) tbody.appendChild(row);
   }
   const shown = shownArtifacts.length + sections.reduce((n, s) => n + s.files.length, 0);
   if (q && shown === 0) {
@@ -1678,6 +1900,16 @@ async function refresh() {
     lastFiles = state.files || [];
     lastArtifacts = state.artifacts || [];
     lastFolders = state.folders || [];
+    // Folder view (focus + collapse memory) persists per workspace on the stable hub
+    // origin. Re-read each poll — localStorage is the source of truth — then self-heal
+    // a focus whose folder a teammate has since renamed or deleted (a blank card
+    // otherwise), resetting it to All folders.
+    loadFolderView(folderViewId(state));
+    if (focusPrefix &&
+        !FilesTree.focusLive(lastFiles.filter((f) => !f.artifact), lastFolders, focusPrefix)) {
+      focusPrefix = "";
+      saveFolderView();
+    }
     renderFiles(lastFiles, lastArtifacts, lastFolders);
   } else {
     lastFiles = [];  // no file surface (login wall) — don't leave stale push/propose targets

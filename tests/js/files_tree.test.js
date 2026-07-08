@@ -98,3 +98,116 @@ test("matches: missing title/tags don't throw", () => {
   assert.equal(FT.matches({ path: "a.py" }, "a"), true);
   assert.equal(FT.matches({ path: "a.py", tags: null }, "a"), true);
 });
+
+// -- scope(): the "focus one folder" filter ---------------------------------
+
+test("scope: empty focus returns every file (a copy, not the input)", () => {
+  const input = [f("a.py"), f("b/c.py")];
+  const out = FT.scope(input, "");
+  assert.deepEqual(out.map((x) => x.path), ["a.py", "b/c.py"]);
+  assert.notEqual(out, input); // a fresh array
+});
+
+test("scope: keeps only files at or under the focus", () => {
+  const files = [f("reports/2026/q3/x.py"), f("reports/y.py"), f("analysis/z.py")];
+  assert.deepEqual(FT.scope(files, "reports").map((x) => x.path),
+    ["reports/2026/q3/x.py", "reports/y.py"]);
+});
+
+test("scope: is slash-bounded — 'report' never captures 'reports/…'", () => {
+  const files = [f("reports/a.py"), f("report/b.py"), f("report")];
+  assert.deepEqual(FT.scope(files, "report").map((x) => x.path), ["report/b.py", "report"]);
+});
+
+// -- crumbs(): the breadcrumb trail -----------------------------------------
+
+test("crumbs: builds a cumulative-prefix trail, empty for the root", () => {
+  assert.deepEqual(FT.crumbs(""), []);
+  assert.deepEqual(FT.crumbs("reports/2026"), [
+    { label: "reports", prefix: "reports" },
+    { label: "2026", prefix: "reports/2026" },
+  ]);
+});
+
+// -- subsections(): the re-rooted, one-level-below-focus view ----------------
+
+test("subsections: focus '' delegates to group() unchanged", () => {
+  const files = [f("notebooks/a.py")];
+  assert.deepEqual(FT.subsections(files, ["notebooks"], ""), FT.group(files, ["notebooks"]));
+});
+
+test("subsections: deep paths group by the segment BELOW the focus, not flattened", () => {
+  const files = [f("reports/2026/q3/x.py"), f("reports/2026/q1/y.py"), f("reports/2025/z.py")];
+  const secs = FT.subsections(files, [], "reports");
+  const byFolder = Object.fromEntries(secs.map((s) => [s.folder, s]));
+  assert.deepEqual(Object.keys(byFolder).sort(), ["reports/2025", "reports/2026"]);
+  assert.equal(byFolder["reports/2026"].label, "2026");
+  assert.equal(byFolder["reports/2026"].files.length, 2);
+  // rel is relative to the sub-section, so the row stays compact.
+  assert.deepEqual(byFolder["reports/2026"].files.map((x) => x.rel).sort(), ["q1/y.py", "q3/x.py"]);
+});
+
+test("subsections: files DIRECTLY in the focus lead in a `here` section", () => {
+  const files = [f("reports/summary.py"), f("reports/2026/x.py")];
+  const secs = FT.subsections(files, [], "reports");
+  assert.equal(secs[0].here, true);
+  assert.equal(secs[0].folder, "reports");
+  assert.deepEqual(secs[0].files.map((x) => x.rel), ["summary.py"]);
+  // A distinct, collision-proof expand key: it shares `folder` with the aggregate
+  // "reports" section, so its remembered open/closed bit must not be the same key.
+  assert.equal(secs[0].expandKey, "reports/");
+});
+
+test("subsections: a declared child folder under the focus seeds an empty section", () => {
+  const secs = FT.subsections([], ["reports/2026"], "reports");
+  const empty = secs.find((s) => s.folder === "reports/2026");
+  assert.ok(empty);
+  assert.equal(empty.empty, true);
+});
+
+test("subsections: does not mutate the input files", () => {
+  const input = [f("reports/2026/x.py")];
+  FT.subsections(input, [], "reports");
+  assert.equal("rel" in input[0], false);
+});
+
+// -- crowded(): the default-collapse heuristic ------------------------------
+
+test("crowded: a small/flat repo is not crowded (stays expanded)", () => {
+  const secs = FT.group([f("a/x.py"), f("b/y.py")], []);
+  assert.equal(FT.crowded(secs), false);
+});
+
+test("crowded: a lone folder never auto-collapses, even with many files", () => {
+  const many = Array.from({ length: 40 }, (_, i) => f(`only/n${i}.py`));
+  assert.equal(FT.crowded(FT.group(many, [])), false);
+});
+
+test("crowded: many folders or a long listing collapse by default", () => {
+  const manyFolders = FT.group(
+    [f("a/x.py"), f("b/x.py"), f("c/x.py"), f("d/x.py")], [],
+  );
+  assert.equal(FT.crowded(manyFolders), true); // >= 4 folders
+  const manyFiles = FT.group(
+    Array.from({ length: 25 }, (_, i) => f(`a/x${i}.py`)).concat(f("b/y.py")), [],
+  );
+  assert.equal(FT.crowded(manyFiles), true); // > 20 files
+});
+
+// -- focusLive(): self-heal a stale focus -----------------------------------
+
+test("focusLive: root focus is always live", () => {
+  assert.equal(FT.focusLive([], [], ""), true);
+});
+
+test("focusLive: live when a file lives under the focus", () => {
+  assert.equal(FT.focusLive([f("reports/a.py")], [], "reports"), true);
+});
+
+test("focusLive: live when a declared folder is at/under the focus", () => {
+  assert.equal(FT.focusLive([], ["reports/2026"], "reports"), true);
+});
+
+test("focusLive: dead when the folder is gone (no files, no declaration)", () => {
+  assert.equal(FT.focusLive([f("analysis/a.py")], ["analysis"], "reports"), false);
+});

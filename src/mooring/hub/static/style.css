@@ -537,6 +537,45 @@ button.caret:disabled { opacity: 0.4; cursor: default; }
 tr.folder-header td { border-top: 1px solid var(--border); padding-top: 0.5rem; }
 tr.folder-header td.path { font-family: inherit; }
 tr.folder-header b { font-weight: 600; }
+/* the folder name doubles as a drill control (focus this sub-folder). Styled to read as
+   the bold label it replaces — no button chrome — with a hover underline to signal it's
+   clickable. Keeps small/flat repos looking exactly as before. */
+button.folder-drill {
+  border: none;
+  background: none;
+  padding: 0;
+  font: inherit;
+  font-weight: 600;
+  color: inherit;
+  cursor: pointer;
+}
+button.folder-drill:hover { color: var(--accent); text-decoration: underline; }
+
+/* folder browser bar (above the table): the focus breadcrumb + count on the left,
+   Expand/Collapse-all on the right. Wraps on a narrow window rather than overflowing. */
+.folder-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin: 0 0 0.5rem;
+}
+.folder-scope { display: flex; flex-wrap: wrap; align-items: center; gap: 0.15rem; font-size: 0.9rem; }
+.folder-crumb {
+  border: none;
+  background: none;
+  padding: 0.1rem 0.25rem;
+  font: inherit;
+  color: var(--accent);
+  cursor: pointer;
+  border-radius: 4px;
+}
+.folder-crumb:hover { text-decoration: underline; }
+.folder-crumb.current { color: inherit; font-weight: 600; cursor: default; padding: 0.1rem 0.25rem; }
+.folder-crumb-sep { color: var(--muted); }
+.folder-count { margin-left: 0.4rem; font-size: 0.82rem; }
+.folder-toggles { display: flex; gap: 0.4rem; }
 
 /* first-run checklist: the self-ticking ramp (pull → open → duplicate → push).
    Done items dim + strike through; the tick keeps the ok color (it's an
