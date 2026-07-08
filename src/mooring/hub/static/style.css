@@ -577,6 +577,20 @@ button.folder-drill:hover { color: var(--accent); text-decoration: underline; }
 .folder-count { margin-left: 0.4rem; font-size: 0.82rem; }
 .folder-toggles { display: flex; gap: 0.4rem; }
 
+/* repo-curated "featured folders": the ☆/★ star that pins a top-level folder to the top
+   for the team, and the "More folders" disclosure that folds the rest. */
+button.feature-star {
+  border: 1px solid transparent;
+  background: none;
+  color: var(--muted);
+  padding: 0.1rem 0.3rem;
+  cursor: pointer;
+  line-height: 1;
+}
+button.feature-star:hover { color: var(--accent); }
+button.feature-star.on { color: var(--accent); }
+tr.folder-header.more-folders b { color: var(--muted); font-weight: 600; }
+
 /* first-run checklist: the self-ticking ramp (pull → open → duplicate → push).
    Done items dim + strike through; the tick keeps the ok color (it's an
    inline-block, so the parent's line-through never crosses it). */

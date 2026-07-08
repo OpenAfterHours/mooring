@@ -195,6 +195,26 @@ const FilesTree = (function () {
     return n;
   }
 
+  // Split top-level folder nodes into the curator's FEATURED ones (in their declared
+  // order, pinned to the top) and the REST (folded under a "More folders" disclosure).
+  // Unknown/duplicate featured paths are skipped; an empty featured list leaves everything
+  // in `rest`. Pure — the nodes are the same objects, just partitioned and reordered.
+  function partitionFeatured(folders, featured) {
+    const byPath = new Map((folders || []).map((n) => [n.path, n]));
+    const feat = [];
+    const seen = new Set();
+    for (const raw of featured || []) {
+      const p = norm(raw);
+      const node = byPath.get(p);
+      if (node && !seen.has(p)) {
+        feat.push(node);
+        seen.add(p);
+      }
+    }
+    const rest = (folders || []).filter((n) => !seen.has(n.path));
+    return { featured: feat, rest };
+  }
+
   // Whether folders should open COLLAPSED by default — true only for a "crowded" level.
   // A lone folder never auto-collapses (opening a repo to a single mysterious collapsed
   // row reads as "where did my files go?"). The caller layers remembered choices on top.
@@ -216,7 +236,7 @@ const FilesTree = (function () {
     });
   }
 
-  return { group, folderOf, norm, matches, scope, crumbs, tree, allFolderPaths, expandableCount, crowdedCount, focusLive };
+  return { group, folderOf, norm, matches, scope, crumbs, tree, allFolderPaths, expandableCount, partitionFeatured, crowdedCount, focusLive };
 })();
 
 if (typeof window !== "undefined") window.FilesTree = FilesTree;

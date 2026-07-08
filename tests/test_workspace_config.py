@@ -252,3 +252,82 @@ def test_guard_mode_fails_open_on_malformed_toml(tmp_path):
 
     (tmp_path / "mooring.toml").write_text("[guard\npush =", "utf-8")
     assert workspace_config.guard_mode(tmp_path) == "warn"
+
+
+# -- featured folders ([hub] featured_folders — repo-curated hub display order) ---
+
+
+def test_featured_missing_is_empty(tmp_path):
+    assert wc.featured_folders(tmp_path) == ()
+
+
+def test_featured_set_and_clear_round_trip(tmp_path):
+    assert wc.set_featured_folder(tmp_path, "reports", True) is True
+    assert wc.featured_folders(tmp_path) == ("reports",)
+    data = tomllib.loads((tmp_path / "mooring.toml").read_text("utf-8"))
+    assert data["hub"]["featured_folders"] == ["reports"]
+
+    assert wc.set_featured_folder(tmp_path, "reports", False) is False
+    assert wc.featured_folders(tmp_path) == ()
+    # A file left wholly empty is removed, not written empty.
+    assert not (tmp_path / "mooring.toml").exists()
+
+
+def test_featured_order_is_preserved_not_sorted(tmp_path):
+    # Order is display priority here (unlike [sync] folders, which sorts).
+    wc.set_featured_folder(tmp_path, "zeta", True)
+    wc.set_featured_folder(tmp_path, "alpha", True)
+    assert wc.featured_folders(tmp_path) == ("zeta", "alpha")
+
+
+def test_featured_normalizes_and_dedupes(tmp_path):
+    wc.set_featured_folder(tmp_path, "reports\\", True)  # backslash + trailing slash
+    wc.set_featured_folder(tmp_path, "/reports/", True)  # surrounding slashes — same key
+    assert wc.featured_folders(tmp_path) == ("reports",)  # one entry
+
+
+def test_featured_unchanged_is_noop(tmp_path):
+    assert wc.set_featured_folder(tmp_path, "reports", True) is True
+    before = (tmp_path / "mooring.toml").read_text("utf-8")
+    # Re-featuring an already-featured folder must not rewrite the shared file.
+    assert wc.set_featured_folder(tmp_path, "reports", True) is True
+    assert (tmp_path / "mooring.toml").read_text("utf-8") == before
+
+
+def test_featured_never_touches_sync_folders(tmp_path):
+    # Featuring is display-only — it must NEVER change what actually syncs.
+    wc.add_extra_folder(tmp_path, "packages/finance/notebooks")
+    wc.set_featured_folder(tmp_path, "reports", True)
+    data = tomllib.loads((tmp_path / "mooring.toml").read_text("utf-8"))
+    assert data["sync"]["folders"] == ["packages/finance/notebooks"]  # unchanged
+    assert data["hub"]["featured_folders"] == ["reports"]
+    assert wc.extra_folders(tmp_path) == ("packages/finance/notebooks",)
+
+
+def test_featured_preserves_unrelated_keys(tmp_path):
+    wc.set_ai_disabled(tmp_path, "notebooks/a.py", True)
+    wc.set_featured_folder(tmp_path, "reports", True)
+    wc.set_featured_folder(tmp_path, "reports", False)  # remove — prunes [hub] only
+    data = tomllib.loads((tmp_path / "mooring.toml").read_text("utf-8"))
+    assert "hub" not in data
+    assert data["ai"]["disabled_notebooks"] == ["notebooks/a.py"]  # untouched
+
+
+def test_featured_read_fails_open_on_malformed_toml(tmp_path):
+    (tmp_path / "mooring.toml").write_text("[hub\nfeatured =", "utf-8")
+    assert wc.featured_folders(tmp_path) == ()
+
+
+def test_featured_write_does_not_clobber_corrupt_file(tmp_path):
+    original = "this is = not valid = toml"
+    (tmp_path / "mooring.toml").write_text(original, "utf-8")
+    with pytest.raises(tomllib.TOMLDecodeError):
+        wc.set_featured_folder(tmp_path, "reports", True)
+    assert (tmp_path / "mooring.toml").read_text("utf-8") == original
+
+
+def test_featured_read_fails_open_on_non_utf8(tmp_path):
+    # A UTF-16 mooring.toml (a Windows hazard) must fail OPEN, not raise into api_state.
+    (tmp_path / "mooring.toml").write_bytes("[hub]\n".encode("utf-16"))
+    assert wc.featured_folders(tmp_path) == ()
+    assert wc.disabled_notebooks(tmp_path) == set()  # every read-side caller is protected

@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import time
+import tomllib
 
+from starlette.concurrency import run_in_threadpool
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from mooring import __version__, auth, config, config_store, sync, telemetry
+from mooring import __version__, auth, config, config_store, sync, telemetry, workspace_config
 from mooring.github import AuthFailed, GitHubError, TlsFailure, Unreachable, compare_url
 from mooring.runtime import workspace_hint
 
@@ -27,6 +29,10 @@ def api_state(request: Request) -> JSONResponse:
         # the structure (incl. an adopted/declared folder that is still empty) —
         # "here's where notebooks go" even before the first file lands.
         "folders": list(cfg.folders),
+        # Repo-curated hub display order: the folders a teammate STARRED (synced
+        # mooring.toml [hub] featured_folders) get pinned to the top; the rest fold
+        # under a "More folders" disclosure. Additive — absent/empty = ordinary render.
+        "featured_folders": list(workspace_config.featured_folders(cfg.workspace())),
         "repos": [
             {
                 "alias": s.alias,
@@ -255,6 +261,42 @@ async def api_set_theme(request: Request) -> JSONResponse:
         editor.apply_theme(theme)
     telemetry.log_event("ui_theme", theme=theme)
     return JSONResponse({"ok": True, "theme": theme})
+
+
+async def api_set_featured(request: Request) -> JSONResponse:
+    """Star (or un-star) one folder in the synced ``mooring.toml`` ``[hub]
+    featured_folders`` so the hub shows it pinned at the top for the whole team, with
+    the rest folded under "More folders". Display-only and additive — it NEVER touches
+    ``[sync] folders``, so what actually syncs is unchanged. The path is validated to
+    resolve under the workspace (no traversal), but need not exist (star before the
+    first pull; un-star after a rename to clear a stale entry). Order is preserved
+    (display priority). The write runs off the event loop like the model toggle."""
+    hub = request.app.state.hub
+    data = await request.json()
+    folder = str(data.get("folder", "")).strip()
+    featured = bool(data.get("featured", True))
+    if not folder:
+        return JSONResponse({"error": "A folder is required."}, status_code=400)
+    workspace = hub.cfg.workspace()
+    key = workspace_config.normalize_notebook(folder)
+    if not key:  # e.g. "/" or "///" — normalizes to "", which can never be stored
+        return JSONResponse({"error": "A folder is required."}, status_code=400)
+    try:
+        target = (workspace / key).resolve()
+        target.relative_to(workspace.resolve())
+    except (ValueError, OSError):
+        return JSONResponse({"error": "Path escapes the workspace."}, status_code=400)
+    try:
+        await run_in_threadpool(workspace_config.set_featured_folder, workspace, key, featured)
+    except (tomllib.TOMLDecodeError, UnicodeDecodeError):
+        # A non-UTF-8 mooring.toml (UTF-16/BOM — a Windows hazard) decodes to a
+        # UnicodeDecodeError, not a TOMLDecodeError; both mean "fix the file first".
+        return JSONResponse(
+            {"error": "mooring.toml is malformed — fix it before changing featured folders."},
+            status_code=409,
+        )
+    telemetry.log_event("hub_feature", featured=int(featured))
+    return JSONResponse({"ok": True, "folder": key, "featured": featured})
 
 
 def api_login_start(request: Request) -> JSONResponse:

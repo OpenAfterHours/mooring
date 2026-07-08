@@ -72,7 +72,9 @@ def _read_data(workspace: Path) -> dict:
         return {}
     try:
         return tomllib.loads(path.read_text("utf-8"))
-    except (OSError, tomllib.TOMLDecodeError):
+    except (OSError, tomllib.TOMLDecodeError, UnicodeDecodeError):
+        # UnicodeDecodeError: a non-UTF-8 file (UTF-16/BOM — a Windows hazard). Fail
+        # open like a parse error so a bad encoding can't wedge the whole hub.
         return {}
 
 
@@ -368,6 +370,79 @@ def add_extra_folders(workspace: Path, folders: Iterable[str]) -> None:
         sync["folders"] = sorted(merged)  # stable diffs and sync merges
         data["sync"] = sync
         _write_data(workspace, data)
+
+
+# -- featured folders (repo-curated hub display order) --------------------------
+# A curator STARS the few top-level folders that matter into the SYNCED mooring.toml
+# [hub] featured_folders; the hub then shows those first and folds the rest under a
+# "More folders" disclosure for everyone. Display-only and strictly ADDITIVE (an
+# absent/empty list = the ordinary render) — it NEVER touches [sync] folders, so what
+# actually syncs is unchanged. ORDER is meaningful (display priority), so the list is
+# preserved as written, NOT sorted. Only PATHS, never a value.
+
+
+def _featured_list(data: dict) -> list[str]:
+    """The normalized, de-duplicated ``[hub] featured_folders`` list from already-parsed
+    data (tolerant of a bare string or a malformed value), ORDER preserved — unlike the
+    sync folders, order here is display priority."""
+    hub = data.get("hub")
+    if not isinstance(hub, dict):
+        return []
+    raw = hub.get("featured_folders", [])
+    if isinstance(raw, str):  # tolerate a single bare string
+        raw = [raw]
+    if not isinstance(raw, list):
+        return []
+    out: list[str] = []
+    for p in raw:
+        norm = normalize_notebook(p)
+        if norm and norm not in out:
+            out.append(norm)
+    return out
+
+
+def featured_folders(workspace: Path) -> tuple[str, ...]:
+    """The repo's curated, pinned-first hub folders (``()`` when none). Fails open like
+    the rest of the read side (a malformed file → no featured folders)."""
+    return tuple(_featured_list(_read_data(workspace)))
+
+
+def set_featured_folder(workspace: Path, folder: str, featured: bool) -> bool:
+    """Add/remove ``folder`` in ``[hub] featured_folders``, preserving every other key
+    and section in ``mooring.toml`` (the :func:`set_ai_disabled` idiom: strict read,
+    prune-empty, atomic replace, serialized by ``_WRITE_LOCK``) — but ORDER-PRESERVING:
+    a newly featured folder is APPENDED (display priority), never sorted. A no-op when
+    the list wouldn't change. Returns the folder's new featured state. Raises
+    ``tomllib.TOMLDecodeError`` on a corrupt file rather than overwriting it."""
+    key = normalize_notebook(folder)
+    with _WRITE_LOCK:
+        data = _read_data_strict(workspace)
+        names = _featured_list(data)
+        before = list(names)
+        if featured:
+            if key and key not in names:
+                names.append(key)
+        else:
+            names = [n for n in names if n != key]
+        if names == before:
+            return featured  # nothing changed — don't rewrite the shared file
+        hub = data.get("hub")
+        if not isinstance(hub, dict):
+            hub = {}
+        if names:
+            hub["featured_folders"] = names
+            data["hub"] = hub
+        else:
+            hub.pop("featured_folders", None)
+            if hub:
+                data["hub"] = hub
+            else:
+                data.pop("hub", None)
+        if data:
+            _write_data(workspace, data)
+        else:
+            config_path(workspace).unlink(missing_ok=True)
+    return featured
 
 
 # -- connection definitions (value-free shape; the secret stays local) ----------

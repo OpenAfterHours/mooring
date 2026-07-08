@@ -44,6 +44,13 @@ let focusPrefix = "";
 let folderExpand = {};
 let folderViewKey = null;
 let currentNodePaths = [];
+// Repo-curated "featured folders" (synced mooring.toml [hub]): the starred folders show
+// first and the rest fold under a "More folders" disclosure. `lastFeatured` mirrors
+// /api/state; `canFeature` gates the star control to repo mode (it curates for the team);
+// `moreOpen` is the personal open/closed state of that disclosure (persisted like focus).
+let lastFeatured = [];
+let canFeature = false;
+let moreOpen = false;
 let aiChatEnabled = false;
 // When the last /api/state landed (client clock) and whether it was logged in —
 // the freshness banner's inputs. There is no server-side "last refreshed" time:
@@ -1251,11 +1258,13 @@ function loadFolderView(id) {
   }
   focusPrefix = "";
   folderExpand = {};
+  moreOpen = false;
   try {
     if (raw) {
       const data = JSON.parse(raw) || {};
       focusPrefix = FilesTree.norm(data.focus || "");
       folderExpand = data.exp && typeof data.exp === "object" ? data.exp : {};
+      moreOpen = !!data.more;
     }
   } catch {
     // corrupt JSON — start at All folders with every folder at its default.
@@ -1265,7 +1274,10 @@ function loadFolderView(id) {
 function saveFolderView() {
   try {
     if (folderViewKey) {
-      localStorage.setItem(folderViewKey, JSON.stringify({ focus: focusPrefix, exp: folderExpand }));
+      localStorage.setItem(
+        folderViewKey,
+        JSON.stringify({ focus: focusPrefix, exp: folderExpand, more: moreOpen }),
+      );
     }
   } catch {
     // best-effort; the in-memory view still drives this session.
@@ -1292,9 +1304,10 @@ function nodeExpanded(key, collapseDefault) {
 }
 
 // The Expand/Collapse-all escape hatch: pin every folder node in the current tree open or
-// closed, then re-render (which rebuilds only the now-visible rows).
+// closed (and the "More folders" fold with them), then re-render.
 function setAllExpanded(expanded) {
   for (const key of currentNodePaths) folderExpand[key] = expanded;
+  moreOpen = expanded;
   saveFolderView();
   renderFiles(lastFiles, lastArtifacts, lastFolders);
 }
@@ -1326,9 +1339,10 @@ function buildTreeFileRow(file, depth) {
 }
 
 // One folder header row in the tree: caret (collapse in place) + name (drills IN to focus
-// this sub-folder; the breadcrumb climbs back out) + subtree count + "New here". An empty
-// declared leaf gets a disabled caret and the "here's where notebooks go" nub.
-function buildFolderHeader(node, depth, expanded) {
+// this sub-folder; the breadcrumb climbs back out) + subtree count + "New here" (and a
+// ☆/★ Feature star on top-level folders in repo mode). An empty declared leaf gets a
+// disabled caret and the "here's where notebooks go" nub.
+function buildFolderHeader(node, depth, expanded, ctx) {
   const caret = document.createElement("button");
   caret.className = "small caret";
   caret.dataset.folder = node.path; // so focus can return here after the re-render
@@ -1365,6 +1379,21 @@ function buildFolderHeader(node, depth, expanded) {
   headTd.style.paddingLeft = treeIndent(depth);
   headTd.append(caret, name, detail);
   const actionsTd = document.createElement("td");
+  // Feature star: only on TOP-LEVEL folders in the browse (unfocused) view, repo mode —
+  // starring curates the team's synced display order. ★ = featured (click to un-star).
+  if (ctx && ctx.featureable && depth === 0) {
+    const featured = ctx.featuredSet.has(node.path);
+    const star = document.createElement("button");
+    star.className = "small feature-star" + (featured ? " on" : "");
+    star.textContent = featured ? "★" : "☆";
+    star.title = featured
+      ? "Featured for the team — click to un-star"
+      : "Feature this folder for the team (pins it to the top)";
+    star.setAttribute("aria-pressed", featured ? "true" : "false");
+    star.addEventListener("click", () =>
+      action("/api/hub/feature", { folder: node.path, featured: !featured }));
+    actionsTd.append(star);
+  }
   const btn = document.createElement("button");
   btn.className = "small";
   btn.textContent = "New here";
@@ -1375,11 +1404,71 @@ function buildFolderHeader(node, depth, expanded) {
   return tr;
 }
 
+// The "More folders (N)" disclosure header — folds the non-featured top-level folders
+// beneath the curator's featured ones. Its own open/closed state (moreOpen) persists per
+// workspace like a focus. Depth 0; no drill/New-here of its own.
+function buildMoreHeader(count) {
+  const caret = document.createElement("button");
+  caret.className = "small caret";
+  caret.dataset.moreToggle = "more"; // so focus can return here after the re-render
+  caret.textContent = moreOpen ? "▾" : "▸";
+  caret.title = moreOpen ? "Hide the other folders" : "Show the other folders";
+  caret.addEventListener("click", () => {
+    moreOpen = !moreOpen;
+    saveFolderView();
+    renderFiles(lastFiles, lastArtifacts, lastFolders);
+    refocus('[data-more-toggle="more"]');
+  });
+  const name = document.createElement("b");
+  name.textContent = " More folders ";
+  const detail = document.createElement("span");
+  detail.className = "muted";
+  detail.textContent = `— ${count} folder${count === 1 ? "" : "s"}`;
+  const tr = document.createElement("tr");
+  tr.className = "folder-header more-folders";
+  const headTd = document.createElement("td");
+  headTd.className = "path";
+  headTd.colSpan = 2;
+  headTd.style.paddingLeft = treeIndent(0);
+  headTd.append(caret, name, detail);
+  tr.append(headTd, document.createElement("td"));
+  return tr;
+}
+
+// A featured folder that no longer exists in the repo (renamed/deleted): it has no tree
+// node, so without this row there'd be no ★ to un-star it and the dead entry would linger
+// in the synced mooring.toml forever. Shown (repo mode only) with a live un-star button.
+function buildStaleFeatured(path) {
+  const name = document.createElement("span");
+  name.className = "muted";
+  name.textContent = ` ${path}/ `;
+  const note = document.createElement("span");
+  note.className = "muted";
+  note.textContent = "— featured, but no longer in the repo";
+  const star = document.createElement("button");
+  star.className = "small feature-star on";
+  star.textContent = "★";
+  star.title = "This folder no longer exists — click to un-star it for the team";
+  star.addEventListener("click", () =>
+    action("/api/hub/feature", { folder: path, featured: false }));
+  const tr = document.createElement("tr");
+  tr.className = "folder-header more-folders";
+  const headTd = document.createElement("td");
+  headTd.className = "path";
+  headTd.colSpan = 2;
+  headTd.style.paddingLeft = treeIndent(0);
+  headTd.append(name, note);
+  const actionsTd = document.createElement("td");
+  actionsTd.append(star);
+  tr.append(headTd, actionsTd);
+  return tr;
+}
+
 // A folder node and, when expanded, its contents — child folders first, then its own
 // files — each recursively.
 function buildFolderNode(node, depth, ctx) {
   const expanded = nodeExpanded(node.path, ctx.collapseDefault);
-  const rows = [buildFolderHeader(node, depth, expanded)];
+  const rows = [buildFolderHeader(node, depth, expanded, ctx)];
   if (expanded && !node.empty) rows.push(...buildTreeRows(node.children, node.files, depth + 1, ctx));
   return rows;
 }
@@ -1565,7 +1654,13 @@ function renderFiles(files, artifacts, declaredFolders) {
   const t = FilesTree.tree(nonArtifact, declared, focus);
   currentNodePaths = FilesTree.allFolderPaths(t);
   const shownFiles = FilesTree.scope(nonArtifact, focus).length;
-  const ctx = { collapseDefault: FilesTree.crowdedCount(t.folders.length, shownFiles) };
+  const ctx = {
+    collapseDefault: FilesTree.crowdedCount(t.folders.length, shownFiles),
+    // The ☆/★ star curates the team's order — only on top-level folders in the browse
+    // (unfocused) view, repo mode. `featuredSet` tells a header filled vs hollow.
+    featureable: !focus && canFeature,
+    featuredSet: new Set(lastFeatured),
+  };
   const shownArtifacts = focus
     ? artifacts.filter((a) => FilesTree.scope([{ path: a.pointer || a.name || a.key }], focus).length > 0)
     : artifacts.slice();
@@ -1574,7 +1669,39 @@ function renderFiles(files, artifacts, declaredFolders) {
   for (const artifact of shownArtifacts) {
     for (const row of buildArtifactRows(artifact, files)) tbody.appendChild(row);
   }
-  for (const row of buildTreeRows(t.folders, t.files, 0, ctx)) tbody.appendChild(row);
+
+  // At the root, the curator's featured folders pin to the top and the rest fold under a
+  // "More folders" disclosure (additive — no featured folders → the ordinary tree). A
+  // focus zooms past all of this.
+  const rows = [];
+  const part = !focus && lastFeatured.length
+    ? FilesTree.partitionFeatured(t.folders, lastFeatured)
+    : { featured: [], rest: t.folders };
+  for (const node of part.featured) rows.push(...buildFolderNode(node, 0, ctx));
+  // Stale featured entries (folder renamed/deleted) — keep them un-starrable so a dead
+  // entry never gets stuck in the synced list. Repo mode only; truly-gone paths only.
+  if (ctx.featureable) {
+    const live = new Set(part.featured.map((n) => n.path));
+    const seen = new Set();
+    for (const raw of lastFeatured) {
+      const p = FilesTree.norm(raw);
+      if (p && !live.has(p) && !seen.has(p) && !FilesTree.focusLive(nonArtifact, declared, p)) {
+        seen.add(p);
+        rows.push(buildStaleFeatured(p));
+      }
+    }
+  }
+  if (part.featured.length) {
+    // Featured are pinned; fold everything else under "More folders".
+    if (part.rest.length) {
+      rows.push(buildMoreHeader(part.rest.length));
+      if (moreOpen) for (const node of part.rest) rows.push(...buildFolderNode(node, 0, ctx));
+    }
+  } else {
+    for (const node of part.rest) rows.push(...buildFolderNode(node, 0, ctx));
+  }
+  for (const file of t.files) rows.push(buildTreeFileRow(file, 0));
+  for (const row of rows) tbody.appendChild(row);
 }
 
 // "Last checked 3 hours ago — 2 teammate update(s) waiting. Refresh". Quiet by
@@ -1942,6 +2069,10 @@ async function refresh() {
     lastFiles = state.files || [];
     lastArtifacts = state.artifacts || [];
     lastFolders = state.folders || [];
+    // Repo-curated featured folders (synced): honoured everywhere; only repo mode gets
+    // the star control (curating is a team act — local-only users have nobody to share with).
+    lastFeatured = state.featured_folders || [];
+    canFeature = state.mode === "repo";
     // Folder view (focus + collapse memory) persists per workspace on the stable hub
     // origin. Re-read each poll — localStorage is the source of truth — then self-heal
     // a focus whose folder a teammate has since renamed or deleted (a blank card
@@ -1957,6 +2088,8 @@ async function refresh() {
     lastFiles = [];  // no file surface (login wall) — don't leave stale push/propose targets
     lastArtifacts = [];
     lastFolders = [];
+    lastFeatured = [];
+    canFeature = false;
   }
   renderChecklist();  // after lastFiles lands: two of the items derive from the rows
   renderFreshnessBanner();
