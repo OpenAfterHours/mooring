@@ -38,12 +38,12 @@ let fileQuery = "";
 // whole listing to one folder subtree ("" = All folders); `folderExpand` maps a folder
 // to an explicit open/closed choice that overrides the crowded() default. Both are
 // display-only and persist PER WORKSPACE in localStorage on the stable hub origin (see
-// loadFolderView). `currentSections` is the last-rendered set — the Expand/Collapse-all
-// escape hatch pins exactly those.
+// loadFolderView). `currentNodePaths` is every folder node in the last-rendered tree —
+// the Expand/Collapse-all escape hatch pins exactly those.
 let focusPrefix = "";
 let folderExpand = {};
 let folderViewKey = null;
-let currentSections = [];
+let currentNodePaths = [];
 let aiChatEnabled = false;
 // When the last /api/state landed (client clock) and whether it was logged in —
 // the freshness banner's inputs. There is no server-side "last refreshed" time:
@@ -1284,94 +1284,136 @@ function setFolderExpanded(folder, expanded) {
   saveFolderView();
 }
 
-// A section's persisted-collapse key. The focus's own "here" section shares `folder`
-// with the aggregate section for that path, so it carries an `expandKey` to keep the two
-// states distinct (see FilesTree.subsections).
-function sectionKey(section) {
-  return section.expandKey || section.folder;
+// Whether a folder renders expanded: an explicit remembered choice (keyed by its path)
+// wins; otherwise it follows the view's default (collapsed only when the level is crowded).
+function nodeExpanded(key, collapseDefault) {
+  if (Object.prototype.hasOwnProperty.call(folderExpand, key)) return !!folderExpand[key];
+  return !collapseDefault;
 }
 
-// The Expand/Collapse-all escape hatch: pin every CURRENTLY-rendered section (incl. the
-// loose "repo root" one) open or closed. Deeper folders keep their remembered/default
-// state until you drill to them.
+// The Expand/Collapse-all escape hatch: pin every folder node in the current tree open or
+// closed, then re-render (which rebuilds only the now-visible rows).
 function setAllExpanded(expanded) {
-  for (const s of currentSections) {
-    if (!s.empty) folderExpand[sectionKey(s)] = expanded;
-  }
+  for (const key of currentNodePaths) folderExpand[key] = expanded;
   saveFolderView();
   renderFiles(lastFiles, lastArtifacts, lastFolders);
 }
 
-// Whether a section renders expanded: an explicit remembered choice wins; otherwise a
-// container's OWN loose files (the repo root and the focus's "here" section) stay visible,
-// and everything else follows the view's default (collapsed only when the repo is crowded).
-function folderIsExpanded(section, collapseDefault) {
-  const key = sectionKey(section);
-  if (Object.prototype.hasOwnProperty.call(folderExpand, key)) return !!folderExpand[key];
-  if (section.folder === "" || section.here) return true;
-  return !collapseDefault;
+// Indent a tree row by its depth (a folder and its files step in together). Capped so a
+// very deep path can't push the row off-screen — the path cell ellipsis-truncates anyway.
+function treeIndent(depth) {
+  return `${0.5 + Math.min(depth, 6) * 1.3}rem`;
 }
 
-// A collapsible folder section: a header row (caret + name + count) and the file rows
-// under it. Reuses the PBIP caret/collapse pattern. An empty DECLARED folder still
-// renders — "here's where notebooks go" — with a disabled caret and a New-here button.
-// The header NAME doubles as a drill control: clicking it focuses that sub-folder (the
-// breadcrumb climbs back out). `ctx` carries the view's collapse default and whether a
-// search is forcing everything expanded.
-function buildFolderSection(section, ctx) {
-  ctx = ctx || {};
-  const expanded = ctx.forceExpand || folderIsExpanded(section, ctx.collapseDefault);
-  const memberRows = section.files.map((file) => {
-    const row = buildFileRow(file, { rel: true });
-    row.classList.add("member");
-    if (!expanded) row.classList.add("hidden");
-    return row;
-  });
+// Toggling a tree caret (or Expand/Collapse-all) re-renders the whole table, which drops
+// keyboard focus to <body>. After the re-render, put focus back on the control's freshly
+// rebuilt twin (matched by its data-attribute) so a keyboard/AT user keeps their place.
+function refocus(selector) {
+  const el = document.querySelector(selector);
+  if (el && typeof el.focus === "function") el.focus();
+}
+function cssAttr(value) {
+  return window.CSS && CSS.escape ? CSS.escape(String(value)) : String(value).replace(/["\\]/g, "\\$&");
+}
 
+// One file row inside the recursive tree, indented to its depth.
+function buildTreeFileRow(file, depth) {
+  const row = buildFileRow(file, { rel: true });
+  row.classList.add("member");
+  const cell = row.querySelector("td.path");
+  if (cell) cell.style.paddingLeft = treeIndent(depth);
+  return row;
+}
+
+// One folder header row in the tree: caret (collapse in place) + name (drills IN to focus
+// this sub-folder; the breadcrumb climbs back out) + subtree count + "New here". An empty
+// declared leaf gets a disabled caret and the "here's where notebooks go" nub.
+function buildFolderHeader(node, depth, expanded) {
   const caret = document.createElement("button");
   caret.className = "small caret";
-  if (section.empty) {
+  caret.dataset.folder = node.path; // so focus can return here after the re-render
+  if (node.empty) {
     caret.textContent = "·";
     caret.disabled = true;
   } else {
     caret.textContent = expanded ? "▾" : "▸";
     caret.title = expanded ? "Collapse" : "Expand";
+    // A node's descendants are built on demand, so a toggle persists the new state and
+    // re-renders rather than flipping the visibility of already-built rows.
     caret.addEventListener("click", () => {
-      const open = caret.textContent === "▾";
-      caret.textContent = open ? "▸" : "▾";
-      memberRows.forEach((row) => row.classList.toggle("hidden", open));
-      setFolderExpanded(sectionKey(section), !open);
+      setFolderExpanded(node.path, !expanded);
+      renderFiles(lastFiles, lastArtifacts, lastFolders);
+      refocus(`.caret[data-folder="${cssAttr(node.path)}"]`);
     });
   }
 
-  // Label: the folder name relative to the current focus (`label` in focus mode),
-  // "repo root" for loose files, or a "files in X/" caption for the focus's own files.
-  const labelText = section.here
-    ? `· files in ${section.label || section.folder}/ `
-    : section.folder === ""
-      ? " repo root "
-      : ` ${section.label != null ? section.label : section.folder}/ `;
-  // The name drills IN (focuses this sub-folder) — except the root and the "here"
-  // section, which have nowhere deeper of their own to go. Disabled while searching:
-  // the focus is ignored mid-search, so a drill click would be a dead no-op that
-  // silently rewrites the remembered focus (surfacing only once search is cleared).
-  const drillable = !!section.folder && !section.here && !ctx.searching;
-  let name;
-  if (drillable) {
-    name = document.createElement("button");
-    name.className = "folder-drill";
-    name.textContent = labelText;
-    name.title = `Focus ${section.folder}/`;
-    name.addEventListener("click", () => setFocus(section.folder));
-  } else {
-    name = document.createElement("b");
-    name.textContent = labelText;
-  }
+  const name = document.createElement("button");
+  name.className = "folder-drill";
+  name.textContent = ` ${node.name}/ `;
+  name.title = `Focus ${node.path}/`;
+  name.addEventListener("click", () => setFocus(node.path));
 
   const detail = document.createElement("span");
   detail.className = "muted";
-  detail.textContent = section.empty ? "— empty" : `— ${section.files.length} file(s)`;
+  detail.textContent = node.empty ? "— empty" : `— ${node.count} file(s)`;
 
+  const tr = document.createElement("tr");
+  tr.className = "folder-header";
+  const headTd = document.createElement("td");
+  headTd.className = "path";
+  headTd.colSpan = 2;
+  headTd.style.paddingLeft = treeIndent(depth);
+  headTd.append(caret, name, detail);
+  const actionsTd = document.createElement("td");
+  const btn = document.createElement("button");
+  btn.className = "small";
+  btn.textContent = "New here";
+  btn.title = `Create a notebook in ${node.path}/`;
+  btn.addEventListener("click", () => newNotebookIn(node.path));
+  actionsTd.append(btn);
+  tr.append(headTd, actionsTd);
+  return tr;
+}
+
+// A folder node and, when expanded, its contents — child folders first, then its own
+// files — each recursively.
+function buildFolderNode(node, depth, ctx) {
+  const expanded = nodeExpanded(node.path, ctx.collapseDefault);
+  const rows = [buildFolderHeader(node, depth, expanded)];
+  if (expanded && !node.empty) rows.push(...buildTreeRows(node.children, node.files, depth + 1, ctx));
+  return rows;
+}
+
+// Render one tree level: its sub-folders (recursively) then its own files.
+function buildTreeRows(folders, files, depth, ctx) {
+  const rows = [];
+  for (const node of folders) rows.push(...buildFolderNode(node, depth, ctx));
+  for (const file of files) rows.push(buildTreeFileRow(file, depth));
+  return rows;
+}
+
+// A flat, force-expanded folder section — used ONLY for search results (matches grouped
+// under their top-level folder). The recursive tree above handles the browse view.
+function buildFolderSection(section) {
+  const memberRows = section.files.map((file) => {
+    const row = buildFileRow(file, { rel: true });
+    row.classList.add("member");
+    return row;
+  });
+  const caret = document.createElement("button");
+  caret.className = "small caret";
+  caret.textContent = "▾";
+  caret.title = "Collapse";
+  caret.addEventListener("click", () => {
+    const open = caret.textContent === "▾";
+    caret.textContent = open ? "▸" : "▾";
+    memberRows.forEach((row) => row.classList.toggle("hidden", open));
+  });
+  const name = document.createElement("b");
+  name.textContent = section.folder === "" ? " repo root " : ` ${section.folder}/ `;
+  const detail = document.createElement("span");
+  detail.className = "muted";
+  detail.textContent = `— ${section.files.length} file(s)`;
   const tr = document.createElement("tr");
   tr.className = "folder-header";
   const headTd = document.createElement("td");
@@ -1399,10 +1441,8 @@ function renderFolderControls(o) {
   bar.innerHTML = "";
   const hasCatalog = !$("files-table").classList.contains("hidden");
   const showCrumbs = !!o.focus && !o.searching;
-  // Every non-empty section has a live caret (incl. the loose "repo root" one), so all
-  // of them count toward whether Expand/Collapse-all is worth showing.
-  const collapsible = o.sections.filter((s) => !s.empty).length;
-  const showToggles = !o.searching && collapsible > 1;
+  // Expand/Collapse-all is worth showing once there's more than one folder node to steer.
+  const showToggles = !o.searching && o.collapsibleCount > 1;
   bar.classList.toggle("hidden", !hasCatalog || (!showCrumbs && !showToggles));
   if (bar.classList.contains("hidden")) return;
 
@@ -1448,11 +1488,20 @@ function renderFolderControls(o) {
     const ex = document.createElement("button");
     ex.className = "small";
     ex.textContent = "Expand all";
-    ex.addEventListener("click", () => setAllExpanded(true));
+    ex.dataset.folderToggle = "expand";
+    // setAllExpanded re-renders (rebuilding this bar), so put focus back on the twin.
+    ex.addEventListener("click", () => {
+      setAllExpanded(true);
+      refocus('[data-folder-toggle="expand"]');
+    });
     const co = document.createElement("button");
     co.className = "small";
     co.textContent = "Collapse all";
-    co.addEventListener("click", () => setAllExpanded(false));
+    co.dataset.folderToggle = "collapse";
+    co.addEventListener("click", () => {
+      setAllExpanded(false);
+      refocus('[data-folder-toggle="collapse"]');
+    });
     toggles.append(ex, co);
     bar.appendChild(toggles);
   }
@@ -1478,61 +1527,54 @@ function renderFiles(files, artifacts, declaredFolders) {
   // The search box appears once there's a catalog to filter (find a notebook by name/title).
   $("file-search").classList.toggle("hidden", !hasCatalog);
 
-  // While searching, ignore the folder focus and hunt the WHOLE repo, with matching
-  // sections FORCE-expanded so a hit under a collapsed/out-of-focus folder is never
-  // hidden. Otherwise honour the focused folder (Stage 2), re-rooted so deep sub-folders
-  // stop flattening. The root view is the ordinary grouping (zero regression).
   const searching = !!q;
   const focus = searching ? "" : focusPrefix;
 
-  let sections;
-  let shownArtifacts;
   if (searching) {
-    sections = FilesTree.group(nonArtifact.filter((f) => FilesTree.matches(f, q)), declared).filter(
-      (s) => s.files.length,
-    );
-    shownArtifacts = artifacts.filter((a) =>
-      FilesTree.matches({ path: a.pointer || a.name || a.key }, q),
-    );
-  } else if (focus) {
-    sections = FilesTree.subsections(nonArtifact, declared, focus);
-    // Focus also scopes Power BI projects: hide a project whose pointer lives outside
-    // the focused folder, so "focus reports/" doesn't still list every semantic model.
-    shownArtifacts = artifacts.filter(
-      (a) => FilesTree.scope([{ path: a.pointer || a.name || a.key }], focus).length > 0,
-    );
-  } else {
-    sections = baseSections;
-    shownArtifacts = artifacts.slice();
+    // Flat, force-expanded matches across the WHOLE repo (the focus is ignored while
+    // searching), so a hit under a collapsed/out-of-focus folder is never hidden.
+    currentNodePaths = [];
+    const sections = FilesTree.group(nonArtifact.filter((f) => FilesTree.matches(f, q)), declared)
+      .filter((s) => s.files.length);
+    const shownArtifacts = artifacts.filter((a) =>
+      FilesTree.matches({ path: a.pointer || a.name || a.key }, q));
+    renderFolderControls({ focus: "", searching: true, collapsibleCount: 0,
+      totalFiles: nonArtifact.length, shownFiles: nonArtifact.length });
+    for (const artifact of shownArtifacts) {
+      for (const row of buildArtifactRows(artifact, files)) tbody.appendChild(row);
+    }
+    for (const section of sections) {
+      for (const row of buildFolderSection(section)) tbody.appendChild(row);
+    }
+    const shown = shownArtifacts.length + sections.reduce((n, s) => n + s.files.length, 0);
+    if (shown === 0) {
+      const tr = document.createElement("tr");
+      const td = document.createElement("td");
+      td.colSpan = 3;
+      td.className = "muted";
+      td.textContent = `No notebooks match “${q}”.`;
+      tr.appendChild(td);
+      tbody.appendChild(tr);
+    }
+    return;
   }
-  currentSections = sections;
 
-  const collapseDefault = !searching && FilesTree.crowded(sections);
-  const ctx = { collapseDefault, forceExpand: searching, searching };
-  renderFolderControls({
-    focus,
-    searching,
-    sections,
-    totalFiles: nonArtifact.length,
-    shownFiles: FilesTree.scope(nonArtifact, focus).length,
-  });
-
+  // Browse view: a recursive folder tree rooted at the focus, so deep sub-folders nest as
+  // their own collapsible nodes instead of flattening. Crowded levels open collapsed; a
+  // focus narrows to one subtree (Power BI projects scoped to it by pointer path).
+  const t = FilesTree.tree(nonArtifact, declared, focus);
+  currentNodePaths = FilesTree.allFolderPaths(t);
+  const shownFiles = FilesTree.scope(nonArtifact, focus).length;
+  const ctx = { collapseDefault: FilesTree.crowdedCount(t.folders.length, shownFiles) };
+  const shownArtifacts = focus
+    ? artifacts.filter((a) => FilesTree.scope([{ path: a.pointer || a.name || a.key }], focus).length > 0)
+    : artifacts.slice();
+  renderFolderControls({ focus, searching: false, collapsibleCount: FilesTree.expandableCount(t),
+    totalFiles: nonArtifact.length, shownFiles });
   for (const artifact of shownArtifacts) {
     for (const row of buildArtifactRows(artifact, files)) tbody.appendChild(row);
   }
-  for (const section of sections) {
-    for (const row of buildFolderSection(section, ctx)) tbody.appendChild(row);
-  }
-  const shown = shownArtifacts.length + sections.reduce((n, s) => n + s.files.length, 0);
-  if (q && shown === 0) {
-    const tr = document.createElement("tr");
-    const td = document.createElement("td");
-    td.colSpan = 3;
-    td.className = "muted";
-    td.textContent = `No notebooks match “${q}”.`;
-    tr.appendChild(td);
-    tbody.appendChild(tr);
-  }
+  for (const row of buildTreeRows(t.folders, t.files, 0, ctx)) tbody.appendChild(row);
 }
 
 // "Last checked 3 hours ago — 2 teammate update(s) waiting. Refresh". Quiet by
