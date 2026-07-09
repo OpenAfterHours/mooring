@@ -313,6 +313,26 @@ class AppConfig:
     def ai_batch_pii_policy(self) -> str:
         return self.ai.batch.pii_policy
 
+    @property
+    def ai_investigate_enabled(self) -> bool:
+        return self.ai.investigate.enabled
+
+    @property
+    def ai_investigate_max_branches(self) -> int:
+        return self.ai.investigate.max_branches
+
+    @property
+    def ai_investigate_max_concurrency(self) -> int:
+        return self.ai.investigate.max_concurrency
+
+    @property
+    def ai_investigate_branch_timeout(self) -> int:
+        return self.ai.investigate.branch_timeout
+
+    @property
+    def ai_investigate_pii_policy(self) -> str:
+        return self.ai.investigate.pii_policy
+
 
 def _str_list(raw: object, key: str) -> tuple[str, ...]:
     """Coerce a ``[sync]`` array value to a tuple of strings.

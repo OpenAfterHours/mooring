@@ -7,7 +7,7 @@ import types
 import polars as pl
 import pytest
 
-from mooring.ai.tools import EDIT_TOOL_NAMES, TOOL_NAMES, build_tools
+from mooring.ai.tools import EDIT_TOOL_NAMES, TOOL_NAMES, build_tool_specs, build_tools
 
 SECRET = "SECRET_VALUE_DO_NOT_LEAK"
 
@@ -73,9 +73,73 @@ def _edit_tools(ws, patches, proposals=None):
     }
 
 
+def _spec_names(ws, **kw):
+    return [
+        s.name
+        for s in build_tool_specs(workspace=ws, folders=("data",), notebook_rel="nb.py", **kw)
+    ]
+
+
 def test_tool_names_match_built_tools(ws):
     tools = _tools(ws, [])
     assert sorted(tools) == sorted(TOOL_NAMES)
+
+
+def test_readonly_build_registers_no_write_tool(ws):
+    # No emit_proposal / emit_proposal_patch => a READ-ONLY session (an investigate
+    # sub-agent): only the value-free read tools, NEVER a propose/edit tool. This gate is
+    # the load-bearing privacy invariant — a sub-agent's finding is trusted BECAUSE it is
+    # structurally value-blind, which holds only if it can never write or return a value.
+    names = _spec_names(ws)
+    assert names == ["mooring_list_datasets", "mooring_get_schema", "mooring_read_notebook_source"]
+    assert not any("propose" in n for n in names)
+    assert "mooring_investigate" not in names
+
+
+def test_investigate_tool_only_registered_with_run_investigation(ws):
+    assert "mooring_investigate" not in _spec_names(ws, emit_proposal=lambda *a, **k: None)
+    with_inv = _spec_names(
+        ws, emit_proposal=lambda *a, **k: None, run_investigation=lambda b: "findings"
+    )
+    assert "mooring_investigate" in with_inv
+
+
+def test_investigate_tool_calls_the_coordinator_and_returns_its_findings(ws):
+    seen = {}
+
+    def run_investigation(branches):
+        seen["branches"] = branches
+        return "## what columns?\norders has id, ts, amount"
+
+    spec = {
+        s.name: s
+        for s in build_tool_specs(
+            workspace=ws,
+            folders=("data",),
+            notebook_rel="nb.py",
+            emit_proposal=lambda *a, **k: None,
+            run_investigation=run_investigation,
+        )
+    }["mooring_investigate"]
+    out = spec.handler(_invocation(branches=[{"question": "what columns?"}]))
+    assert not out.is_error
+    assert "orders has id, ts, amount" in out.text
+    assert seen["branches"] == [{"question": "what columns?"}]
+
+
+def test_investigate_tool_rejects_empty_branches(ws):
+    spec = {
+        s.name: s
+        for s in build_tool_specs(
+            workspace=ws,
+            folders=("data",),
+            notebook_rel="nb.py",
+            emit_proposal=lambda *a, **k: None,
+            run_investigation=lambda b: "x",
+        )
+    }["mooring_investigate"]
+    assert spec.handler(_invocation(branches=[])).is_error
+    assert spec.handler(_invocation()).is_error
 
 
 def test_all_tools_skip_permission(ws):

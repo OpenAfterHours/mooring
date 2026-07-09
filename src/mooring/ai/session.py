@@ -53,6 +53,27 @@ _TOOL_GUIDE = (
     "cannot read the data itself."
 )
 
+_INVESTIGATOR_GUIDE = (
+    "\n\nYou are INVESTIGATING on another assistant's behalf. Use the read tools to inspect "
+    "this workspace WITHOUT ever seeing data values:\n"
+    "- mooring_list_datasets — list available datasets\n"
+    "- mooring_get_schema(dataset) — a dataset's column names + dtypes\n"
+    "- mooring_read_notebook_source — the notebook's current code, with each cell's index\n"
+    "Then ANSWER the question in prose, citing the schema / column / table / measure NAMES "
+    "and code facts you found. You have NO way to write, propose, or apply anything — do not "
+    "try, and never ask for a data value. Keep your answer focused and self-contained; it is "
+    "handed straight back as findings for the main assistant to act on."
+)
+
+_INVESTIGATE_GUIDE = (
+    "\n\nWhen a task splits into INDEPENDENT parts (understand several notebooks, map several "
+    "tables / semantic models, or plan a join across datasets), call mooring_investigate with "
+    "a list of value-free sub-questions: separate read-only assistants research them IN "
+    "PARALLEL and their findings come back merged, so you can then propose ONE change. Prefer "
+    "it over asking many read questions yourself one at a time. Never put a data value in a "
+    "sub-question — only names / paths and plain-English asks."
+)
+
 _DICT_TOOL_GUIDE = (
     "\n\nA team DATA DICTIONARY is available (metadata only — names/types/keys/"
     "descriptions, never values):\n"
@@ -98,6 +119,8 @@ class CopilotChatSession(ChatBroadcaster):
         dictionary=None,
         semantic_models=None,
         helpers=None,
+        read_only: bool = False,
+        run_investigation=None,
         pii_enabled: bool = False,
         pii_block: bool = True,
         pii_names: bool = False,
@@ -125,13 +148,20 @@ class CopilotChatSession(ChatBroadcaster):
         )
         self._model = (model or "").strip()
         self._reasoning_effort = (reasoning_effort or "").strip() or None
-        guide = _TOOL_GUIDE
+        self._read_only = read_only
+        # A read-only investigate sub-agent: no propose/edit tool and no
+        # mooring_investigate (so it cannot write or recurse). Forced off under read_only
+        # even if a run_investigation were mis-wired — belt-and-suspenders for depth-1.
+        self._run_investigation = None if read_only else run_investigation
+        guide = _INVESTIGATOR_GUIDE if read_only else _TOOL_GUIDE
         if dictionary is not None and not dictionary.is_empty():
             guide += _DICT_TOOL_GUIDE
         if helpers is not None and not helpers.is_empty():
             guide += _HELPER_TOOL_GUIDE
         if semantic_models:
             guide += _MODEL_TOOL_GUIDE
+        if self._run_investigation is not None:
+            guide += _INVESTIGATE_GUIDE
         self._system_context = system_context + guide
         self._workspace = Path(workspace)
         self._folders = tuple(folders)
@@ -256,11 +286,14 @@ class CopilotChatSession(ChatBroadcaster):
             workspace=self._workspace,
             folders=self._folders,
             notebook_rel=self._notebook_rel,
-            emit_proposal=self._emit_proposal,
-            emit_proposal_patch=self._emit_proposal_patch,
+            # A read-only session registers NO write surface (the load-bearing privacy
+            # gate): no propose/edit tool, only the value-free read tools.
+            emit_proposal=None if self._read_only else self._emit_proposal,
+            emit_proposal_patch=None if self._read_only else self._emit_proposal_patch,
             dictionary=self._dictionary,
             semantic_models=self._semantic_models,
             code_index=self._helpers,
+            run_investigation=self._run_investigation,
             pii_enabled=self._pii_enabled,
         )
         extra: dict[str, Any] = {}

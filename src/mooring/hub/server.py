@@ -800,6 +800,22 @@ class Hub:
         in the background — ``background=True`` — so the open response is immediate).
         """
         provider = self._provider_for()
+        # Wire the fan-out "investigate" tool: a value-free coordinator closure that opens
+        # READ-ONLY sub-agents per branch and returns their merged findings. None when the
+        # feature is off, so open_chat doesn't build mooring_investigate. The sub-agents
+        # never get this tool (open_readonly forces read_only=True), so depth is bounded to 1.
+        from mooring.app.investigate_service import make_run_investigation
+
+        run_investigation = make_run_investigation(
+            app_cfg=self.app_cfg,
+            notebook_rel=notebook_rel,
+            build_context=lambda nb, ds: self.chat.build_context(
+                self.app_cfg, workspace, nb, ds, folders=self.cfg.folders
+            ),
+            open_readonly_session=lambda ctx, nb, m, e: self._make_investigator_session(
+                ctx, workspace, nb, model=m, reasoning_effort=(e or None)
+            ),
+        )
         return provider.open_chat(
             system_context=system_context,
             workspace=workspace,
@@ -810,6 +826,7 @@ class Hub:
             dictionary=dictionary,
             semantic_models=semantic_models,
             helpers=helpers,
+            run_investigation=run_investigation,
             # The whole guard config travels as ONE object, so a field can't be
             # silently dropped on the way to the session (the session downloads any
             # NER model in the background and the prompt path skips it until ready).
@@ -820,6 +837,35 @@ class Hub:
             traceback_guard=self.app_cfg.ai.traceback_guard,
             # Don't block the open request on the (CLI-spawning, networked) Copilot
             # handshake — stream readiness/failure over the SSE channel instead.
+            background=True,
+        )
+
+    def _make_investigator_session(
+        self, ctx, workspace: Path, notebook_rel: str, model: str = "", reasoning_effort=None
+    ):
+        """A READ-ONLY value-blind sub-agent for ONE investigate branch: the same session
+        as the interactive chat, but built with NO propose/edit tool and NO
+        ``mooring_investigate`` (so it can neither write nor recurse), and the PII guard
+        forced to BLOCK mode because there is no human at a sub-agent to confirm. ``ctx`` is
+        the 6-tuple ``build_context`` returns; a branch's finding is trusted because this
+        session is structurally value-blind, which the read_only tool subset guarantees."""
+        from dataclasses import replace
+
+        system_context, index, _pii_banner, _live_text, models, code_index = ctx
+        provider = self._provider_for()
+        return provider.open_chat(
+            system_context=system_context,
+            workspace=workspace,
+            folders=self.cfg.folders,
+            notebook_rel=notebook_rel,
+            model=model,
+            reasoning_effort=reasoning_effort,
+            dictionary=index,
+            semantic_models=models,
+            helpers=code_index,
+            read_only=True,
+            pii=replace(self.app_cfg.ai.pii, block_prompt=True),
+            traceback_guard=self.app_cfg.ai.traceback_guard,
             background=True,
         )
 

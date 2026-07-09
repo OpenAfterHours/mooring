@@ -299,6 +299,8 @@ class CopilotProvider:
         dictionary=None,
         semantic_models=None,
         helpers=None,
+        read_only: bool = False,
+        run_investigation=None,
         pii: PiiConfig | None = None,
         traceback_guard: bool = True,
         background: bool = False,
@@ -349,6 +351,8 @@ class CopilotProvider:
             dictionary=dictionary,
             semantic_models=semantic_models,
             helpers=helpers,
+            read_only=read_only,
+            run_investigation=run_investigation,
             pii_enabled=pii.enabled,
             pii_block=pii.block_prompt,
             # NER name detection only acts when the whole guard is on.
