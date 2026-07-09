@@ -102,9 +102,13 @@ discovery, skills, file hooks, and host-git access are all switched off.
 
 ## Parallel "investigate": read-only sub-agents (opt-in) { #investigate }
 
-Off by default (`[ai.investigate] enabled = false`). When on, the copilot gains one
-extra tool, `mooring_investigate`, that lets it research several **independent**
-sub-questions **in parallel** before it proposes — e.g. "understand these three
+On by default (opt out with `[ai.investigate] enabled = false`, or
+`MOORING_AI_INVESTIGATE=false`). It defaults on because it adds **no** data surface — it
+is structurally value-blind, like the semantic-model reader — but each branch is a full
+model session, so turn it off (or lower `max_concurrency`) if you want to avoid the extra
+spend, which is heaviest on the Copilot provider (a subprocess + premium request per
+branch). When on, the copilot gains one extra tool, `mooring_investigate`, that lets it
+research several **independent** sub-questions **in parallel** before it proposes — e.g. "understand these three
 notebooks" or "map these two semantic models". It runs automatically as part of
 answering; there is **no separate approval step**, because the only thing a human ever
 approves stays the same: **the code you Apply**. Each branch spawns a **read-only**

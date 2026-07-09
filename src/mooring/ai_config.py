@@ -76,7 +76,13 @@ class BatchConfig:
 
 @dataclass(frozen=True)
 class InvestigateConfig:
-    """Parallel "investigate" fan-out. Default OFF.
+    """Parallel "investigate" fan-out. Default ON (opt-out).
+
+    Defaults ON — unlike ``context`` / ``code_index`` / ``pii``, which opt IN because they
+    add a data surface, investigate adds NONE: it is structurally value-blind (read-only
+    sub-agents with no write tool), so it belongs to the same "value-free, on by default"
+    category as ``semantic_model`` and ``traceback_guard``. Set ``enabled = false`` to turn
+    it off (e.g. to avoid any extra model spend).
 
     The copilot may call ``mooring_investigate`` to spawn N READ-ONLY value-blind
     sub-agents that research independent sub-questions CONCURRENTLY, then merge their
@@ -84,16 +90,18 @@ class InvestigateConfig:
     only human gate stays the existing Apply. Each branch is a full model session
     against one account's quota with no throttle, so ``max_concurrency`` mirrors
     :class:`BatchConfig`'s cap philosophy: small on the Copilot provider (a ~150 MB
-    CLI subprocess per branch), higher on the OpenAI/LiteLLM (HTTP) path.
-    ``max_branches`` hard-caps one investigation; ``branch_timeout`` bounds a branch's
-    wall-clock. ``pii_policy`` is the NON-interactive decision (there is no human at a
-    sub-agent): a checksum-PII hit in a sub-question skips that branch
-    (``"block_branch"``) or the whole investigation (``"block_investigation"``) — it is
-    never auto-confirmed. The sub-agents are read-only (no propose/edit tool) and
-    ``mooring_investigate`` is never in THEIR toolset, so an investigation cannot recurse.
+    CLI subprocess + a premium request per branch), lighter on the OpenAI/LiteLLM (HTTP)
+    path. It is model-gated (only fires when a task genuinely splits into independent
+    parts), so the spend is occasional, not per-turn. ``max_branches`` hard-caps one
+    investigation; ``branch_timeout`` bounds a branch's wall-clock. ``pii_policy`` is the
+    NON-interactive decision (there is no human at a sub-agent): a checksum-PII hit in a
+    sub-question skips that branch (``"block_branch"``) or the whole investigation
+    (``"block_investigation"``) — never auto-confirmed. The sub-agents are read-only (no
+    propose/edit tool) and ``mooring_investigate`` is never in THEIR toolset, so an
+    investigation cannot recurse.
     """
 
-    enabled: bool = False
+    enabled: bool = True
     max_branches: int = 8
     max_concurrency: int = 3
     branch_timeout: int = 180  # wall-clock seconds per branch
@@ -214,7 +222,7 @@ def load_ai_config(ai: Mapping, env: Mapping[str, str]) -> AiConfig:
     if not isinstance(inv, Mapping):
         inv = {}
     investigate = InvestigateConfig(
-        enabled=_as_bool(env.get("MOORING_AI_INVESTIGATE"), _as_bool(inv.get("enabled"), False)),
+        enabled=_as_bool(env.get("MOORING_AI_INVESTIGATE"), _as_bool(inv.get("enabled"), True)),
         max_branches=int(env.get("MOORING_AI_INVESTIGATE_MAX_BRANCHES", inv.get("max_branches", 8))),
         max_concurrency=int(
             env.get("MOORING_AI_INVESTIGATE_MAX_CONCURRENCY", inv.get("max_concurrency", 3))
