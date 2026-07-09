@@ -210,6 +210,27 @@ EDITABLE: tuple[SettingSpec, ...] = (
         "choice; a per-model opt-out also lives in the synced mooring.toml.",
     ),
     SettingSpec(
+        key="ai.code_index",
+        accessor="ai_code_index",
+        label="Read the team code library (reusable helpers)",
+        group="ai",
+        type="bool",
+        control="toggle",
+        default=False,
+        sensitivity="weakens",
+        env_var="MOORING_AI_CODE_INDEX",
+        weaken_value=True,
+        confirm="Turning the code library ON reads your team's importable .py helper "
+        "modules and sends the copilot their API SKELETON — function/class names, "
+        "signatures, type hints, and DOCSTRINGS (never a function body or any data "
+        "value). The skeleton is value-free by construction, but docstrings are prose "
+        "your team wrote, so this is a weaker tier than the value-blind schema. Modules "
+        "are parsed, never imported or run. Continue?",
+        help="Let the copilot discover and REUSE your team's helper functions/classes "
+        "(from importable .py under the synced folders) instead of re-implementing them. "
+        "Off by default; a per-module opt-out lives in the synced mooring.toml.",
+    ),
+    SettingSpec(
         key="ai.traceback_guard",
         accessor="ai_traceback_guard",
         label="Sanitise pasted tracebacks",
