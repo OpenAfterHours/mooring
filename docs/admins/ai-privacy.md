@@ -354,6 +354,40 @@ Run `mooring ai dictionary check` to see exactly how your files parse — which 
 was detected, how many tables/columns were kept, which keys were dropped, and any
 secret-scan findings — *before* enabling the feature or sharing the files.
 
+### Multiple context folders: team offer + per-user subscription
+
+A repo can offer **more than one** context folder, and the choice is **per-repo**.
+Two planes, deliberately separated:
+
+- **The team OFFER (synced, team-wide).** A curator lists the offered folders in the
+  synced `mooring.toml` `[ai] context_folders` — via the hub's per-folder **"AI
+  context"** toggle or `mooring ai context add/remove`. This is *AI governance*, the
+  same trust model as `disabled_notebooks`/`featured_folders`: **anyone in repo mode
+  can widen the team's model-readable ceiling by pushing `mooring.toml`**, so review
+  it like code.
+- **The per-user SUBSCRIPTION (per-machine).** Each teammate can narrow which offered
+  folders *their* copilot reads — the hub checklist or `mooring ai context use/unuse`,
+  stored in their own `config.toml` `[repos.<alias>].ai_context_folders`. Unset = read
+  the whole offer; an explicit empty selection reads nothing.
+
+The load-bearing invariant: **a subscription can only ever narrow, never widen.** The
+read set is always `subscription ∩ offer`, and the **whole offer** rides sync for any
+consented teammate — so every folder the model can read is a folder that went through
+the **pre-push secret/PII scan**. A user's personal pick is provably a subset of that
+scanned, synced set.
+
+Each folder is read independently: the per-file **secret withhold** and the per-file
+size cap run **per folder**, so a poisoned folder can neither blank a clean sibling nor
+escape its own withhold; the combined instructions are also aggregate-size-capped. When
+two folders define the same dictionary table (the domain is the file stem, not
+folder-unique), the first (sorted-folder) wins and the shadowed copy is **surfaced as a
+`mooring ai dictionary check` finding** — never silently dropped.
+
+One honest deviation to note: because the whole offer syncs for any consented teammate,
+an offered folder rides `pull` to a teammate who has **not** subscribed to it — harmless
+value-free files on disk that never enter the model's context. (`context` off is still
+"neither read nor synced".)
+
 ## Structured-PII pre-flight scan (opt-in, best-effort)
 
 The guarantees above stop the *data* from reaching the model. They cannot stop a

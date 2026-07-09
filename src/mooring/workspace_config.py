@@ -224,6 +224,77 @@ def set_semantic_model_disabled(workspace: Path, model_key: str, disabled: bool)
     return disabled
 
 
+# -- team AI context folders (the synced OFFER) --------------------------------
+# The value-free MENU of context folders a curator publishes for the repo — the
+# multi-folder generalisation of the per-machine [ai] context_dir. Stored SORTED
+# (an allowlist has no display order, unlike featured_folders) under [ai]
+# context_folders in the SYNCED mooring.toml, so the whole team sees the same offer
+# and every offered folder rides pull/push (and thus the pre-push secret scan). Only
+# PATHS, never a value. READING them still needs each machine's own [ai] context
+# consent bool; a Phase-2 per-user subscription can narrow the read set to a subset
+# of this offer (see mooring.app.context_folders). Same trust model as
+# featured_folders/disabled_notebooks: anyone in repo mode can push a change.
+
+
+def _context_folders_list(data: dict) -> list[str]:
+    """The normalized, de-duplicated ``[ai] context_folders`` offer from already-parsed
+    data (tolerant of a bare string or a malformed value)."""
+    ai = data.get("ai")
+    if not isinstance(ai, dict):
+        return []
+    raw = ai.get("context_folders", [])
+    if isinstance(raw, str):  # tolerate a single bare string
+        raw = [raw]
+    if not isinstance(raw, list):
+        return []
+    out: list[str] = []
+    for p in raw:
+        norm = normalize_notebook(p)
+        if norm and norm not in out:
+            out.append(norm)
+    return out
+
+
+def context_folders(workspace: Path) -> tuple[str, ...]:
+    """The repo's team-published AI context folders (the OFFER), sorted + de-duplicated
+    (``()`` when none). Fails open like the rest of the read side (a malformed file → no
+    offer)."""
+    return tuple(sorted(_context_folders_list(_read_data(workspace))))
+
+
+def set_context_folder(workspace: Path, folder: str, offered: bool) -> bool:
+    """Add/remove ``folder`` in the synced ``[ai] context_folders`` offer, preserving
+    every other key and section in ``mooring.toml`` (the :func:`set_ai_disabled` idiom:
+    strict read, sorted+deduped write, prune-empty, atomic replace, serialized by
+    ``_WRITE_LOCK``). Returns the folder's new offered state. Raises
+    ``tomllib.TOMLDecodeError`` on a corrupt file rather than overwriting it."""
+    key = normalize_notebook(folder)
+    with _WRITE_LOCK:
+        data = _read_data_strict(workspace)
+        names = set(_context_folders_list(data))
+        if offered and key:
+            names.add(key)
+        else:
+            names.discard(key)
+        ai = data.get("ai")
+        if not isinstance(ai, dict):
+            ai = {}
+        if names:
+            ai["context_folders"] = sorted(names)
+            data["ai"] = ai
+        else:
+            ai.pop("context_folders", None)
+            if ai:
+                data["ai"] = ai
+            else:
+                data.pop("ai", None)
+        if data:
+            _write_data(workspace, data)
+        else:
+            config_path(workspace).unlink(missing_ok=True)
+    return offered
+
+
 # -- shadow-guard ignore list -------------------------------------------------
 # Notebooks whose filename shadows an importable module (e.g. polars.py) that the
 # team has acknowledged and wants the guard to stop warning about — the targeted

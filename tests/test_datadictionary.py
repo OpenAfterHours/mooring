@@ -289,3 +289,61 @@ def test_single_file_form_and_search_get_list(tmp_path):
     assert index.get("orders") is not None
     assert [t.name for t in index.search("orders")] == ["orders"]
     assert "orders" in dd.render_listing(index)
+
+
+# -- cross-folder merge (several context folders read at once) ---------------
+
+
+def _write_folder(tmp_path, folder, rel, text):
+    p = tmp_path / folder / rel
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(text, "utf-8")
+
+
+def test_load_index_stamps_the_source_folder(tmp_path):
+    _write_folder(
+        tmp_path, "finance", "dictionaries/credit.yaml",
+        "models:\n  - name: t\n    columns:\n      - name: id\n        data_type: int\n",
+    )
+    (table,) = dd.load_index(tmp_path, "finance").tables
+    assert table.source == "finance"  # value-free folder attribution
+    assert table.qualified == "credit.t"  # qualified is NOT namespaced by folder
+
+
+def test_merge_indexes_single_is_passthrough(tmp_path):
+    _write(
+        tmp_path, "dictionaries/credit.yaml",
+        "models:\n  - name: t\n    columns:\n      - name: id\n        data_type: int\n",
+    )
+    idx = dd.load_index(tmp_path, "context")
+    assert dd.merge_indexes([idx]) is idx  # byte-identical single-folder path
+
+
+def test_merge_indexes_first_folder_wins_and_reports_the_shadow(tmp_path):
+    _write_folder(
+        tmp_path, "ctx_a", "dictionaries/credit.yaml",
+        "models:\n  - name: t\n    description: from A\n"
+        "    columns:\n      - name: id\n        data_type: int\n",
+    )
+    _write_folder(
+        tmp_path, "ctx_b", "dictionaries/credit.yaml",
+        f"models:\n  - name: t\n    description: from B has {SECRET}\n"
+        "    columns:\n      - name: id2\n        data_type: bigint\n"
+        "  - name: u\n    columns:\n      - name: x\n        data_type: int\n",
+    )
+    a = dd.load_index(tmp_path, "ctx_a")
+    b = dd.load_index(tmp_path, "ctx_b")
+    merged = dd.merge_indexes([a, b])  # ctx_a precedes ctx_b (sorted-folder order)
+
+    by_name = {t.qualified: t for t in merged.tables}
+    # first-folder-wins on the clash: ctx_a's credit.t survives, ctx_b's is dropped
+    assert by_name["credit.t"].source == "ctx_a"
+    assert by_name["credit.t"].description == "from A"
+    # a non-colliding table from the shadowed folder still merges through
+    assert by_name["credit.u"].source == "ctx_b"
+    # the collision is SURFACED, never silently resolved by concat order
+    collisions = [r for r in merged.reports if r.shape == "error" and "duplicate" in r.error]
+    assert len(collisions) == 1
+    assert "credit.t" in collisions[0].error and "ctx_a" in collisions[0].error
+    # the shadowed copy's contents (incl. the secret in its description) never survive
+    assert SECRET not in dd.render_tables(merged.tables)

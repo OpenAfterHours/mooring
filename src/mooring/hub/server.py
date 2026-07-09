@@ -124,11 +124,14 @@ class Hub:
         from dataclasses import replace
 
         cfg = self.app_cfg.config_for(None)
-        # Fold the repo's synced sub-folders (mooring.toml [sync] folders) into the
-        # scope so a notebook created in a uv-workspace package folder lists, opens,
-        # and syncs like any other. Re-read here (not cached) so a folder registered
-        # by a New on this run shows up on the very next /api/state.
-        folders = workspace_config.merge_extra_folders(cfg.folders, cfg.workspace())
+        # Fold the repo's synced sub-folders (mooring.toml [sync] folders) AND the team
+        # AI context OFFER ([ai] context_folders) into the scope so a notebook created in
+        # a uv-workspace package folder — and every offered context folder — lists, opens,
+        # and syncs like any other. Re-read here (not cached) so a folder registered by a
+        # New (or a Use-as-context toggle) on this run shows up on the very next /api/state.
+        from mooring.app import context_folders as ctxdirs
+
+        folders = ctxdirs.sync_dirs(self.app_cfg, cfg.folders, cfg.workspace())
         return cfg if folders == cfg.folders else replace(cfg, folders=folders)
 
     def reload(self) -> None:
@@ -976,6 +979,8 @@ def create_app(hub: Hub) -> Starlette:
             Route("/api/repo/remove", setup.api_repo_remove, methods=["POST"]),
             Route("/api/ui/theme", setup.api_set_theme, methods=["POST"]),
             Route("/api/hub/feature", setup.api_set_featured, methods=["POST"]),
+            Route("/api/hub/context-folder", setup.api_set_context_folder, methods=["POST"]),
+            Route("/api/ai/context/subscribe", setup.api_context_subscribe, methods=["POST"]),
             Route("/api/doctor", setup.api_doctor, methods=["POST"]),
             Route("/settings", pages.settings_page),
             Route("/api/settings", settings.api_get_settings),

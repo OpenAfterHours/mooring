@@ -51,6 +51,16 @@ let currentNodePaths = [];
 let lastFeatured = [];
 let canFeature = false;
 let moreOpen = false;
+// Team-offered AI context folders (synced mooring.toml [ai] context_folders): the
+// value-free menu whose folders the copilot may read. `lastContextFolders` mirrors
+// /api/state; `canCurateContext` gates the per-folder "AI context" toggle to repo mode
+// with AI enabled (curating what the model reads is a team governance act).
+let lastContextFolders = [];
+let canCurateContext = false;
+// The per-user subscription checklist: `lastAiContext` is this machine's [ai] context
+// consent bool and `lastSelectedContext` the offered folders THIS copilot actually reads.
+let lastAiContext = false;
+let lastSelectedContext = [];
 let aiChatEnabled = false;
 // When the last /api/state landed (client clock) and whether it was logged in —
 // the freshness banner's inputs. There is no server-side "last refreshed" time:
@@ -1394,6 +1404,21 @@ function buildFolderHeader(node, depth, expanded, ctx) {
       action("/api/hub/feature", { folder: node.path, featured: !featured }));
     actionsTd.append(star);
   }
+  // "AI context" toggle: offer/withdraw a top-level folder as team copilot context.
+  // Repo mode + AI on only. Independent of the ☆ star — this governs what the model reads.
+  if (ctx && ctx.contextCurateable && depth === 0) {
+    const offered = ctx.contextSet.has(node.path);
+    const b = document.createElement("button");
+    b.className = "small ctx-folder" + (offered ? " on" : "");
+    b.textContent = offered ? "◆ AI context" : "◇ AI context";
+    b.title = offered
+      ? "Offered as team AI context — click to withdraw"
+      : "Offer this folder as team AI context (the copilot reads it; reading needs [ai] context on)";
+    b.setAttribute("aria-pressed", offered ? "true" : "false");
+    b.addEventListener("click", () =>
+      action("/api/hub/context-folder", { folder: node.path, offered: !offered }));
+    actionsTd.append(b);
+  }
   const btn = document.createElement("button");
   btn.className = "small";
   btn.textContent = "New here";
@@ -1462,6 +1487,72 @@ function buildStaleFeatured(path) {
   actionsTd.append(star);
   tr.append(headTd, actionsTd);
   return tr;
+}
+
+// An OFFERED AI-context folder that no longer exists in the repo (renamed/deleted): like
+// buildStaleFeatured, it has no tree node, so this row keeps a live withdraw button so the
+// dead entry never lingers in the synced [ai] context_folders. Repo mode + AI on only.
+function buildStaleContext(path) {
+  const name = document.createElement("span");
+  name.className = "muted";
+  name.textContent = ` ${path}/ `;
+  const note = document.createElement("span");
+  note.className = "muted";
+  note.textContent = "— offered as AI context, but no longer in the repo";
+  const b = document.createElement("button");
+  b.className = "small ctx-folder on";
+  b.textContent = "◆ AI context";
+  b.title = "This folder no longer exists — click to withdraw it from the team AI context";
+  b.addEventListener("click", () =>
+    action("/api/hub/context-folder", { folder: path, offered: false }));
+  const tr = document.createElement("tr");
+  tr.className = "folder-header more-folders";
+  const headTd = document.createElement("td");
+  headTd.className = "path";
+  headTd.colSpan = 2;
+  headTd.style.paddingLeft = treeIndent(0);
+  headTd.append(name, note);
+  const actionsTd = document.createElement("td");
+  actionsTd.append(b);
+  tr.append(headTd, actionsTd);
+  return tr;
+}
+
+// The per-user AI context subscription checklist: which of the repo's OFFERED context
+// folders THIS machine's copilot reads (the synced offer stays the ceiling). Shown only in
+// repo mode with AI + [ai] context on and a non-empty offer. Toggling a box POSTs a per-user
+// subscription change (a light refresh, not a hub reload — it changes READ scope only).
+function renderContextSubscription() {
+  const panel = $("context-sub");
+  if (!panel) return;
+  const offer = lastContextFolders;
+  const show = canCurateContext && lastAiContext && offer.length > 0;
+  panel.classList.toggle("hidden", !show);
+  panel.textContent = "";
+  if (!show) return;
+  const reading = new Set(lastSelectedContext);
+  const head = document.createElement("div");
+  head.className = "context-sub-head";
+  head.textContent =
+    `🧭 Copilot context for this repo — reading ${reading.size} of ` +
+    `${offer.length} offered folder${offer.length === 1 ? "" : "s"}`;
+  panel.appendChild(head);
+  const list = document.createElement("div");
+  list.className = "context-sub-list";
+  for (const folder of offer) {
+    const label = document.createElement("label");
+    label.className = "context-sub-item";
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.checked = reading.has(folder);
+    box.addEventListener("change", () =>
+      action("/api/ai/context/subscribe", { folder, on: box.checked }));
+    const span = document.createElement("span");
+    span.textContent = " " + folder;
+    label.append(box, span);
+    list.appendChild(label);
+  }
+  panel.appendChild(list);
 }
 
 // A folder node and, when expanded, its contents — child folders first, then its own
@@ -1660,6 +1751,10 @@ function renderFiles(files, artifacts, declaredFolders) {
     // (unfocused) view, repo mode. `featuredSet` tells a header filled vs hollow.
     featureable: !focus && canFeature,
     featuredSet: new Set(lastFeatured),
+    // The "AI context" toggle offers a top-level folder to the team copilot. Independent
+    // of the ☆ star (governance, not display order) — rendered on every top-level folder.
+    contextCurateable: !focus && canCurateContext,
+    contextSet: new Set(lastContextFolders),
   };
   const shownArtifacts = focus
     ? artifacts.filter((a) => FilesTree.scope([{ path: a.pointer || a.name || a.key }], focus).length > 0)
@@ -1688,6 +1783,21 @@ function renderFiles(files, artifacts, declaredFolders) {
       if (p && !live.has(p) && !seen.has(p) && !FilesTree.focusLive(nonArtifact, declared, p)) {
         seen.add(p);
         rows.push(buildStaleFeatured(p));
+      }
+    }
+  }
+  // Stale AI-context offers (folder renamed/deleted): keep them withdrawable. A folder that
+  // exists but is folded under "More folders" is still live — liveFolders spans all top-level
+  // nodes regardless of fold state — so only truly-gone offered paths surface here.
+  if (ctx.contextCurateable) {
+    const liveFolders = new Set(t.folders.map((n) => n.path));
+    const seenCtx = new Set();
+    for (const raw of lastContextFolders) {
+      const p = FilesTree.norm(raw);
+      if (p && !liveFolders.has(p) && !seenCtx.has(p) &&
+          !FilesTree.focusLive(nonArtifact, declared, p)) {
+        seenCtx.add(p);
+        rows.push(buildStaleContext(p));
       }
     }
   }
@@ -2073,6 +2183,12 @@ async function refresh() {
     // the star control (curating is a team act — local-only users have nobody to share with).
     lastFeatured = state.featured_folders || [];
     canFeature = state.mode === "repo";
+    // Team AI-context offer (synced): the toggle only shows in repo mode with AI on —
+    // curating what the copilot reads is a team act, and pointless with AI off.
+    lastContextFolders = state.context_folders || [];
+    canCurateContext = state.mode === "repo" && !!state.ai_chat;
+    lastAiContext = !!state.ai_context;
+    lastSelectedContext = state.selected_context_folders || [];
     // Folder view (focus + collapse memory) persists per workspace on the stable hub
     // origin. Re-read each poll — localStorage is the source of truth — then self-heal
     // a focus whose folder a teammate has since renamed or deleted (a blank card
@@ -2084,12 +2200,17 @@ async function refresh() {
       saveFolderView();
     }
     renderFiles(lastFiles, lastArtifacts, lastFolders);
+    renderContextSubscription();
   } else {
     lastFiles = [];  // no file surface (login wall) — don't leave stale push/propose targets
     lastArtifacts = [];
     lastFolders = [];
     lastFeatured = [];
     canFeature = false;
+    lastContextFolders = [];
+    canCurateContext = false;
+    lastAiContext = false;
+    lastSelectedContext = [];
   }
   renderChecklist();  // after lastFiles lands: two of the items derive from the rows
   renderFreshnessBanner();

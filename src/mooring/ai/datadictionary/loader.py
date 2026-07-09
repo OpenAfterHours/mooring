@@ -7,6 +7,7 @@ Never raises for a bad file — it records the error in that file's report.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 from mooring.ai.datadictionary.model import DictionaryIndex, ParseReport, Table
@@ -59,7 +60,9 @@ def load_index(
             reports.append(ParseReport(str(path), domain, "error", error="path escapes workspace"))
             continue
         tables, report = _parse_file(path, rel, domain, max_file_bytes, workspace_resolved)
-        all_tables.extend(tables)
+        # Stamp the source FOLDER (value-free) so a cross-folder collision can be
+        # attributed when several context folders are merged (see merge_indexes).
+        all_tables.extend(replace(t, source=context_dir) for t in tables)
         reports.append(report)
     return DictionaryIndex(tables=tuple(all_tables), reports=tuple(reports))
 

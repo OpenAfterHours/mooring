@@ -83,6 +83,30 @@ def add_repo(
     write_user_data(data)
 
 
+def set_repo_context_folders(alias: str, folders: "tuple[str, ...] | list[str] | None") -> None:
+    """Set (or clear) this machine's per-user AI context SUBSCRIPTION for ``alias`` in
+    the user config.toml ``[repos.<alias>].ai_context_folders``.
+
+    ``folders=None`` DELETES the key — revert to reading the WHOLE team offer (the
+    opt-out default). A list is written SORTED + de-duplicated; an empty list stays ``[]``
+    = subscribed to nothing. Materializes the ``[repos]`` registry on first write like
+    :func:`add_repo`, and preserves every other key in the repo's table. Raises
+    ``KeyError`` for an unknown alias."""
+    validate_alias(alias)
+    data = _materialized(read_user_data())
+    if alias not in data["repos"] or alias in RESERVED_ALIASES:
+        raise KeyError(alias)
+    entry = data["repos"][alias]
+    if folders is None:
+        entry.pop("ai_context_folders", None)
+    else:
+        norm = sorted(
+            {str(f).replace("\\", "/").strip().strip("/") for f in folders if str(f).strip()}
+        )
+        entry["ai_context_folders"] = norm
+    write_user_data(data)
+
+
 def set_host(host: str) -> str:
     """Persist the global GitHub host; returns the normalized value.
 
