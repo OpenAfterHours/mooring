@@ -155,12 +155,10 @@ def _entry(status: sync.FileStatus) -> DigestEntry:
 
 
 def _in_scope(path: str, cfg: Config) -> bool:
-    """The same visibility both sync sides use: the exclude filter plus the
-    folder scope (or a synced root file). A compare answer covers the whole
-    repo; anything sync would not see must not shape the digest."""
-    if not sync.is_synced_path(path, cfg.exclude):
-        return False
-    return sync.within_folders(path, cfg.folders) or path in sync.SYNCED_ROOT_FILES
+    """The same visibility both sync sides use (:func:`sync.in_sync_scope`): the
+    exclude filter plus the folder scope, or a loose top-level file. A compare answer
+    covers the whole repo; anything sync would not see must not shape the digest."""
+    return sync.in_sync_scope(path, cfg.folders, cfg.exclude)
 
 
 def _from_compare(digest: Digest, data: dict, candidates: dict, cfg: Config) -> bool:

@@ -412,8 +412,15 @@ def _folders_list(data: dict) -> list[str]:
         return []
     out: list[str] = []
     for p in raw:
-        norm = normalize_notebook(p)
-        if norm and norm not in out:
+        # Drop root-sentinel / escaping entries ("", ".", "./x", "..") for the SAME reason
+        # config._folder_list does: a folder that resolves to the workspace root or outside
+        # it makes the local (filesystem) and remote (path-prefix) scans diverge and pull
+        # delete files. Loose root files sync on their own rule (sync.in_sync_scope).
+        segs = [s for s in normalize_notebook(p).split("/") if s not in ("", ".")]
+        if not segs or ".." in segs:
+            continue
+        norm = "/".join(segs)
+        if norm not in out:
             out.append(norm)
     return out
 

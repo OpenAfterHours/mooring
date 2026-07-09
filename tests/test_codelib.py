@@ -237,6 +237,23 @@ def test_load_index_excludes_the_open_notebook(tmp_path):
     assert {m.import_path for m in idx.modules} == {"utils.a"}
 
 
+def test_load_index_includes_loose_root_helpers(tmp_path):
+    # A helper dropped at the repo ROOT syncs by default, so the copilot must index it too
+    # even though only "utils" is a configured folder. Root dotfiles stay excluded (they
+    # do not sync — is_synced_path drops them).
+    (tmp_path / "root_helpers.py").write_text(
+        'def load_it(path: str):\n    """Load."""\n    return path\n', "utf-8"
+    )
+    (tmp_path / ".hidden.py").write_text("def secret(): pass\n", "utf-8")
+    (tmp_path / "utils").mkdir()
+    (tmp_path / "utils" / "a.py").write_text("def a(): pass\n", "utf-8")
+    idx = loader.load_index(tmp_path, ["utils"])
+    fn_names = {f.name for m in idx.modules for f in m.functions}
+    assert "load_it" in fn_names  # root helper indexed
+    assert "a" in fn_names  # configured folder still indexed
+    assert "secret" not in fn_names  # root dotfile excluded, matching sync scope
+
+
 def test_importpath_variants(tmp_path):
     (tmp_path / "pkg" / "utils").mkdir(parents=True)
     helpers = tmp_path / "pkg" / "utils" / "helpers.py"

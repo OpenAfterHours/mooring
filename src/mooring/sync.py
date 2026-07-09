@@ -118,6 +118,21 @@ def within_folders(path: str, folders: tuple[str, ...]) -> bool:
     return False
 
 
+def in_sync_scope(rel_path: str, folders: tuple[str, ...], exclude: Iterable[str] = ()) -> bool:
+    """The single scope gate both sync sides share: a workspace-relative POSIX path
+    participates in sync iff it passes :func:`is_synced_path` AND is either inside a
+    synced ``folders`` entry or a loose top-level file (no ``/``). Root-level files
+    sync by default, so a helper module dropped at the repo root travels like any file
+    under a synced folder. :func:`synced_paths` (local scan) and
+    :meth:`GitHubClientProtocol.get_tree` (remote tree) implement the two halves of
+    this on their own sides for enumeration efficiency; keep all three in agreement, or
+    a path visible on one side but not the other makes pull record it in the manifest
+    and the next push delete it remotely (see :func:`is_synced_path`)."""
+    if not is_synced_path(rel_path, exclude):
+        return False
+    return within_folders(rel_path, folders) or "/" not in rel_path
+
+
 @dataclass
 class FolderCandidate:
     """A top-level repo folder that holds syncable files but is OUTSIDE the current
@@ -306,9 +321,10 @@ def synced_paths(
     workspace: Path, folders: tuple[str, ...], exclude: Iterable[str] = ()
 ) -> Iterator[str]:
     """Yield the workspace-relative POSIX path of every file that participates in
-    sync: the files under ``folders`` plus the synced root files (``SYNCED_ROOT_FILES``),
-    filtered by :func:`is_synced_path`. The shared enumeration behind
-    :func:`scan_local` (which hashes each) and :func:`local_report` (which doesn't)."""
+    sync: the files under ``folders`` plus every loose top-level file, filtered by
+    :func:`is_synced_path`. The local half of :func:`in_sync_scope`, and the shared
+    enumeration behind :func:`scan_local` (which hashes each) and :func:`local_report`
+    (which doesn't)."""
     for folder in folders:
         root = workspace / folder
         if not root.is_dir():
@@ -319,10 +335,17 @@ def synced_paths(
             rel = path.relative_to(workspace).as_posix()
             if is_synced_path(rel, exclude):
                 yield rel
-    for name in SYNCED_ROOT_FILES:
-        path = workspace / name
-        if path.is_file() and is_synced_path(name, exclude):
-            yield name
+    # Loose top-level files sync by default — a helper module dropped at the repo
+    # root rides sync like anything under a synced folder (SYNCED_ROOT_FILES —
+    # pyproject.toml, uv.lock, mooring.toml — are themselves root-level and covered
+    # here). A NON-recursive glob so only the repo root is swept, never machine dirs
+    # such as venv/ or node_modules/ that live below it; is_synced_path still drops
+    # dotfiles and [sync] exclude hits. Mirrors get_tree(..., include_root=True).
+    for path in sorted(workspace.glob("*")):
+        if path.is_file():
+            rel = path.name  # root-level: no "/" in the relative path
+            if is_synced_path(rel, exclude):
+                yield rel
 
 
 def scan_local(
@@ -363,8 +386,13 @@ def _scope_matches(cfg: Config, mft: manifest_mod.Manifest) -> bool:
     A pre-scope manifest (``scope_folders is None``) is treated as a mismatch, so
     widening ``[sync] folders`` (e.g. adding the context folder) forces a real
     tree fetch instead of silently reusing a narrower snapshot — which is what made
-    an already-pushed folder un-pullable once the head had caught up.
+    an already-pushed folder un-pullable once the head had caught up. A pre-v2
+    manifest is likewise a mismatch: its ``files`` predates loose-top-level-file
+    sync and omits any root-level file, so we refetch once (the completing pull
+    rewrites the version — see :func:`pull`) rather than hide an existing root file.
     """
+    if mft.version < manifest_mod.CURRENT_VERSION:
+        return False
     if mft.scope_folders is None and mft.scope_exclude is None:
         return False
     return tuple(mft.scope_folders or ()) == tuple(cfg.folders) and tuple(
@@ -382,7 +410,7 @@ def _remote_entries(
         return {p: s for p, s in mft.files.items() if is_synced_path(p, cfg.exclude)}
     return {
         e.path: e.sha
-        for e in client.get_tree(head, cfg.folders, SYNCED_ROOT_FILES)
+        for e in client.get_tree(head, cfg.folders, include_root=True)
         if is_synced_path(e.path, cfg.exclude)
     }
 
@@ -393,7 +421,7 @@ def _review_tree(client: GitHubClientProtocol, cfg: Config, branch: str) -> dict
     review_head = client.get_branch_head(branch)
     return {
         e.path: e.sha
-        for e in client.get_tree(review_head, cfg.folders, SYNCED_ROOT_FILES)
+        for e in client.get_tree(review_head, cfg.folders, include_root=True)
         if is_synced_path(e.path, cfg.exclude)
     }
 
@@ -788,9 +816,12 @@ def pull(
         mft.head_commit = prep.head
         # A completed pull has reconciled the manifest with the full remote tree under
         # the current scope, so record that scope: the next same-head pull/status can
-        # trust the fast path again, and a later scope widening will be detected.
+        # trust the fast path again, and a later scope widening will be detected. The
+        # version stamp travels with it — a pre-v2 manifest that just refetched now
+        # holds root files, so it may be trusted going forward.
         mft.scope_folders = tuple(cfg.folders)
         mft.scope_exclude = tuple(cfg.exclude)
+        mft.version = manifest_mod.CURRENT_VERSION
     manifest_mod.save(workspace, mft)
     return result
 

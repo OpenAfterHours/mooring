@@ -24,6 +24,11 @@ host = "github.com"  # GitHub Enterprise: your instance's host, e.g. ghe.example
 # workspace = ""   # optional override; empty = ~/PythonProjects/mooring/<owner>/<repo>
 
 [sync]
+# Folders whose files (at any depth) ride sync. Loose files at the repo ROOT sync
+# too, always — a helper module or note dropped at the top level travels like
+# anything in a folder (dotfiles, __pycache__ and __marimo__ are still skipped; use
+# `exclude` below to keep specific root files out). Sub-folders are NOT swept unless
+# listed here, so machine dirs like venv/ or node_modules/ never sync by accident.
 folders = ["notebooks", "data", "reports"]
 # Extra paths to keep out of GitHub, on top of the always-skipped ones
 # (dotfiles, __pycache__, marimo's __marimo__ session folder). Case-sensitive

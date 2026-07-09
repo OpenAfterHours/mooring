@@ -100,13 +100,15 @@ class FakeClient:
             raise NotFound(f"branch {branch}")
         return self.heads[branch]
 
-    def get_tree(self, commit_sha, folders, extra_paths=()):
+    def get_tree(self, commit_sha, folders, extra_paths=(), include_root=False):
         prefixes = tuple(f"{f}/" for f in folders)
         extra = frozenset(extra_paths)
         return [
             e
             for e in self.get_full_tree(commit_sha)
-            if e.path.startswith(prefixes) or e.path in extra
+            if e.path.startswith(prefixes)
+            or e.path in extra
+            or (include_root and "/" not in e.path)
         ]
 
     def get_full_tree(self, commit_sha):

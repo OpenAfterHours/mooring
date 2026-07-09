@@ -55,7 +55,7 @@ def test_check_notes_when_the_flag_is_off(workspace, capsys):
 def test_check_no_python_files(workspace, capsys):
     workspace.mkdir(parents=True, exist_ok=True)
     assert cli.main(["ai", "code", "check"]) == 0
-    assert "No .py files found" in capsys.readouterr().out
+    assert "No .py helper modules found" in capsys.readouterr().out
 
 
 def test_check_output_is_value_free(workspace, monkeypatch, capsys):

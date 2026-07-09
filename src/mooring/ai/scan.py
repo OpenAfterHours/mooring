@@ -45,6 +45,10 @@ def scan_pii_targets(
         root = workspace / folder
         if root.is_dir():
             targets += sorted(root.rglob("*.py"))
+    # Loose top-level .py files sync by default (sync.in_sync_scope), so the pre-flight
+    # scan must cover them too — otherwise a root helper with PII would ship to the team
+    # unscanned. Non-recursive; dot-prefixed names excluded to match is_synced_path.
+    targets += sorted(p for p in workspace.glob("*.py") if not p.name.startswith("."))
     if notebook_rel:
         targets.append(workspace / notebook_rel)
     findings: list[tuple[str, int, str]] = []

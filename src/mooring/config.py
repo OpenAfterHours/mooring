@@ -332,6 +332,30 @@ def _str_list(raw: object, key: str) -> tuple[str, ...]:
     return tuple(s for s in raw if isinstance(s, str))
 
 
+def _folder_list(raw: object, key: str) -> tuple[str, ...]:
+    """Like :func:`_str_list` but for ``[sync] folders``: also canonicalise each entry to
+    a clean workspace-relative POSIX sub-path so the two scan sides agree on it. Backslashes
+    become ``/``; ``""``, ``.``, ``./`` and any ``..`` segment are dropped; duplicates are
+    removed order-preserving.
+
+    This is load-bearing, not cosmetic: the LOCAL scan resolves a folder through the
+    filesystem (``workspace / folder`` + ``rglob``), while the REMOTE scan does a literal
+    ``path.startswith(folder + "/")`` on GitHub's forward-slash tree. A ``.`` (== the
+    workspace root), a ``"notebooks\\team"`` backslash, or a ``"./reports"`` prefix resolves
+    differently on the two sides, so the local side over-includes and pull then classifies
+    identical files DELETED_REMOTE and removes them from disk. Dropping ``.`` loses no
+    coverage — loose root files sync on their own rule (see :func:`mooring.sync.in_sync_scope`)."""
+    out: list[str] = []
+    for entry in _str_list(raw, key):
+        segs = [s for s in entry.replace("\\", "/").split("/") if s not in ("", ".")]
+        if not segs or ".." in segs:
+            continue  # resolves to the workspace root or escapes it — never a sync folder
+        norm = "/".join(segs)
+        if norm not in out:
+            out.append(norm)
+    return tuple(out)
+
+
 def _as_bool(value: object, default: bool) -> bool:
     """Coerce a TOML bool or a string env override to bool; None keeps default."""
     if value is None:
@@ -475,7 +499,7 @@ def load_app_config(
         repos=specs,
         active_alias=active,
         host=githost.normalize_host(env.get("MOORING_GITHUB_HOST") or str(gh.get("host", ""))),
-        folders=_str_list(sync.get("folders", ("notebooks", "data", "reports")), "folders"),
+        folders=_folder_list(sync.get("folders", ("notebooks", "data", "reports")), "folders"),
         exclude=_str_list(sync.get("exclude", ()), "exclude"),
         warn_file_mb=int(sync.get("warn_file_mb", 10)),
         max_file_mb=int(sync.get("max_file_mb", 45)),
