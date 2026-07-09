@@ -59,6 +59,19 @@ def load_index(
             seen.add(rp)
             files.append(path)
 
+    # Loose top-level .py helpers sync by default (sync.in_sync_scope), so a helper module
+    # dropped at the repo root is a first-class team helper the copilot should reuse. Sweep
+    # the root NON-recursively (folder trees are handled above); skip dot-prefixed names to
+    # match is_synced_path, which keeps root dotfiles out of sync.
+    for path in sorted(ws.glob("*.py")):
+        if path.name.startswith(".") or _ignored(path, ws_resolved):
+            continue
+        rp = path.resolve()
+        if rp in seen:
+            continue
+        seen.add(rp)
+        files.append(path)
+
     modules: list[Module] = []
     reports: list[ExtractReport] = []
     for path in files:

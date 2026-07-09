@@ -88,7 +88,8 @@ def _safe_count(fn) -> int | None:
 
 
 def list_datasets(workspace: Path, folders: tuple[str, ...]) -> list[str]:
-    """Workspace-relative paths of inspectable data files under ``folders``."""
+    """Workspace-relative paths of inspectable data files under ``folders``, plus any
+    loose top-level data file (which syncs by default — see sync.in_sync_scope)."""
     found: list[str] = []
     for folder in folders:
         root = workspace / folder
@@ -97,7 +98,16 @@ def list_datasets(workspace: Path, folders: tuple[str, ...]) -> list[str]:
         for path in root.rglob("*"):
             if path.is_file() and path.suffix.lower() in SUPPORTED_EXTENSIONS:
                 found.append(path.relative_to(workspace).as_posix())
-    return sorted(found)
+    # Loose root-level data files (non-recursive; dot-prefixed names excluded to match
+    # is_synced_path, which keeps them out of sync).
+    for path in workspace.glob("*"):
+        if (
+            path.is_file()
+            and not path.name.startswith(".")
+            and path.suffix.lower() in SUPPORTED_EXTENSIONS
+        ):
+            found.append(path.name)
+    return sorted(set(found))
 
 
 def format_for_ai(schema: DatasetSchema, source: str | None = None) -> str:

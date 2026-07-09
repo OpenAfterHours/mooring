@@ -155,11 +155,14 @@ def test_local_report_lists_disk_files_with_local_state(cfg):
     write_local(cfg, "notebooks/a.py", "x")
     write_local(cfg, "data/x.csv", "a,b\n1,2\n")
     write_local(cfg, "notebooks/.hidden.py", "x")  # dotfiles excluded, like sync
-    write_local(cfg, "README.md", "no")  # outside the synced folders
+    write_local(cfg, "README.md", "no")  # loose root file — syncs by default
+    write_local(cfg, "misc/note.py", "x")  # non-synced SUB-folder is not swept
     report = sync.local_report(cfg.workspace(), cfg.folders, cfg.exclude)
     assert report.head_commit == ""  # no remote: nothing to diff against
     rows = {f.path: f for f in report.files}
-    assert set(rows) == {"notebooks/a.py", "data/x.csv"}  # same visibility as scan_local
+    # Loose top-level files ride sync; a non-synced sub-folder does not (same
+    # visibility as scan_local).
+    assert set(rows) == {"notebooks/a.py", "data/x.csv", "README.md"}
     assert all(f.state is FileState.LOCAL for f in report.files)
     # Local rows are NOT hashed (presence is carried by the LOCAL state, never diffed).
     assert rows["notebooks/a.py"].local_sha is None
@@ -189,13 +192,19 @@ def test_local_report_empty_workspace(cfg):
 
 def test_pull_into_empty_workspace(cfg):
     client = FakeClient(
-        {"notebooks/a.py": b"print(1)\n", "data/x.csv": b"a,b\n1,2\n", "README.md": b"no"}
+        {
+            "notebooks/a.py": b"print(1)\n",
+            "data/x.csv": b"a,b\n1,2\n",
+            "README.md": b"no",  # loose root file — pulled by default
+            "misc/note.py": b"x",  # non-synced SUB-folder — stays out
+        }
     )
     result = sync.pull(client, cfg)
-    assert result.pulled == 2  # README.md is outside the synced folders
+    assert result.pulled == 3  # notebooks/a.py, data/x.csv, README.md (misc/ excluded)
     assert read_local(cfg, "notebooks/a.py") == "print(1)\n"
+    assert read_local(cfg, "README.md") == "no"
     mft = manifest.load(cfg.workspace())
-    assert set(mft.files) == {"notebooks/a.py", "data/x.csv"}
+    assert set(mft.files) == {"notebooks/a.py", "data/x.csv", "README.md"}
     assert mft.head_commit == client.head
 
 
@@ -292,6 +301,63 @@ def test_root_mooring_toml_syncs_like_any_file(cfg):
     cfg2 = replace(cfg, workspace_path=str(cfg.workspace().parent / "ws2"))
     sync.pull(client, cfg2)
     assert workspace_config.is_ai_disabled(cfg2.workspace(), "notebooks/a.py")
+
+
+def test_loose_root_file_round_trips_between_users(cfg):
+    # A helper module dropped at the repo ROOT (no configured folder) is enumerated
+    # by the local scan, pushed, and pulled by a teammate — the whole point of
+    # loose-top-level-file sync. Symmetric on both sides (in_sync_scope).
+    write_local(cfg, "helpers.py", "def clean(df): ...\n")
+    write_local(cfg, "notebooks/a.py", "import helpers\n")
+    assert "helpers.py" in sync.scan_local(cfg.workspace(), cfg.folders, cfg.exclude)
+
+    client = FakeClient()
+    assert sync.push(client, cfg).pushed == 2
+    assert "helpers.py" in client.tree
+
+    cfg2 = replace(cfg, workspace_path=str(cfg.workspace().parent / "ws2"))
+    assert sync.pull(client, cfg2).pulled == 2
+    assert read_local(cfg2, "helpers.py") == "def clean(df): ...\n"
+
+
+def test_root_dotfile_and_nested_subfolder_stay_out_of_scope(cfg):
+    # The root sweep is shallow and dot-aware: a root dotfile is excluded (like any
+    # dotfile) and a file in a NON-synced sub-folder is not swept — so venv/ or
+    # node_modules/ can never ride sync by accident.
+    write_local(cfg, ".env", "SECRET=1\n")  # root dotfile — excluded
+    write_local(cfg, "venv/lib.py", "x\n")  # non-synced sub-folder — not swept
+    write_local(cfg, "notes.md", "hi\n")  # loose root file — synced
+    scan = sync.scan_local(cfg.workspace(), cfg.folders, cfg.exclude)
+    assert ".env" not in scan
+    assert "venv/lib.py" not in scan
+    assert "notes.md" in scan
+
+
+def test_upgrade_surfaces_existing_remote_root_file(cfg):
+    # An existing remote root file (added out-of-band before this feature) must appear
+    # after upgrade even with the branch head unchanged: a pre-v2 manifest is treated
+    # as a scope mismatch so the head-unchanged fast path refetches the tree once, then
+    # the completing pull stamps the version so steady-state pulls short-circuit again.
+    client = FakeClient({"notebooks/a.py": b"v1\n", "helpers.py": b"def f(): ...\n"})
+    sync.pull(client, cfg)
+
+    # Rewind to exactly what a pre-root-files build left behind: version 1, the root
+    # file absent from BOTH the manifest base and the local disk (that build never
+    # enumerated or wrote it), while the branch head is untouched — so ONLY the version
+    # gate can force the refetch that re-detects it.
+    mft = manifest.load(cfg.workspace())
+    mft.version = 1
+    mft.files.pop("helpers.py", None)
+    manifest.save(cfg.workspace(), mft)
+    (cfg.workspace() / "helpers.py").unlink()
+    assert mft.head_commit == client.head  # head unchanged: fast path would fire
+
+    result = sync.pull(client, cfg)
+    assert result.pulled == 1  # helpers.py re-detected as NEW_REMOTE and written
+    assert read_local(cfg, "helpers.py") == "def f(): ...\n"
+    reloaded = manifest.load(cfg.workspace())
+    assert reloaded.version == manifest.CURRENT_VERSION  # stamped by the completed pull
+    assert sync.pull(client, cfg).pulled == 0  # steady state: fast path short-circuits
 
 
 def test_pull_never_overwrites_local_edits_by_default(cfg):

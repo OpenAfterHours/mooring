@@ -56,6 +56,15 @@ def test_scan_pii_targets_dedupes_notebook_already_in_a_folder(tmp_path):
     assert [(p, k) for p, _, k in findings] == [("notebooks/a.py", pii.CARD)]
 
 
+def test_scan_pii_targets_covers_loose_root_py(tmp_path):
+    # A loose root .py syncs by default, so the pre-flight scan must cover it — otherwise a
+    # root helper carrying PII would ship to the team unscanned.
+    (tmp_path / "context").mkdir()
+    (tmp_path / "constants.py").write_text(f"CARD = '{VALID_CARD}'\n", "utf-8")
+    findings = scan.scan_pii_targets(tmp_path, "context", ("notebooks",), _index(), None)
+    assert ("constants.py", pii.CARD) in [(p, k) for p, _, k in findings]
+
+
 def test_scan_context_secrets_finds_secrets_in_context_only(tmp_path):
     token = "ghp_" + "a" * 36
     (tmp_path / "context" / "dictionaries").mkdir(parents=True)

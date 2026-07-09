@@ -103,6 +103,7 @@ class GitHubClientProtocol(Protocol):
         commit_sha: str,
         folders: tuple[str, ...],
         extra_paths: tuple[str, ...] = (),
+        include_root: bool = False,
     ) -> list[TreeEntry]: ...
 
     def get_full_tree(self, commit_sha: str) -> list[TreeEntry]: ...
@@ -238,12 +239,18 @@ class GitHubClient:
         commit_sha: str,
         folders: tuple[str, ...],
         extra_paths: tuple[str, ...] = (),
+        include_root: bool = False,
     ) -> list[TreeEntry]:
         prefixes = tuple(f"{f.rstrip('/')}/" for f in folders)
         extra = frozenset(extra_paths)
         entries = []
         for e in self.get_full_tree(commit_sha):
-            if not (e.path.startswith(prefixes) or e.path in extra):
+            # include_root keeps every loose top-level blob (no "/" in its path) so
+            # a file added at the repo root rides sync; the caller re-applies
+            # is_synced_path, which drops root dotfiles / [sync] exclude hits. The
+            # remote half of sync.in_sync_scope.
+            root_level = include_root and "/" not in e.path
+            if not (e.path.startswith(prefixes) or e.path in extra or root_level):
                 continue
             # SHA-256 object-format repos can't be synced (their blob shas are 64 hex).
             # Checked HERE, on the in-scope entries only, so a repo whose synced folders

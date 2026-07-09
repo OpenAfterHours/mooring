@@ -16,7 +16,7 @@ from collections.abc import Callable, Iterable
 from pathlib import Path
 
 from mooring import pbip, trash
-from mooring.sync import is_synced_path
+from mooring.sync import is_synced_path, within_folders
 
 
 def _resolve_within(workspace: Path, rel_path: str) -> Path:
@@ -39,12 +39,17 @@ def _is_within(ws_real: Path, p: Path) -> bool:
 
 
 def _in_synced_folder(rel_path: str, folders: Iterable[str] | None) -> bool:
-    """Whether ``rel_path`` lives under one of the configured sync roots. ``None``
-    means 'unrestricted' (direct callers/tests); production passes cfg.folders so
-    the delete set matches the files the hub actually lists (scan_local scope)."""
+    """Whether ``rel_path`` is in sync scope: under one of the configured sync roots,
+    or a loose top-level file (which sync by default). ``None`` means 'unrestricted'
+    (direct callers/tests); production passes cfg.folders so the delete set matches the
+    files the hub actually lists (scan_local scope)."""
     if folders is None:
         return True
-    return rel_path.split("/", 1)[0] in tuple(folders)
+    # Mirror sync.in_sync_scope exactly (within a synced folder — supporting multi-segment
+    # folders like "notebooks/team-a" — OR a loose top-level file), so the delete set
+    # matches what the hub lists and sync tracks. A plain top-segment membership test would
+    # refuse a nested notebook under a multi-segment synced folder that the hub does list.
+    return within_folders(rel_path, tuple(folders)) or "/" not in rel_path
 
 
 def _expand(workspace: Path, rel_path: str) -> list[str]:

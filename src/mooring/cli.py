@@ -1851,16 +1851,18 @@ def cmd_ai_code_check(app_cfg: config.AppConfig, cfg: config.Config) -> int:
     if not app_cfg.ai_code_index:
         print("Note: [ai] code_index is OFF - set it true (hub Settings > AI copilot, or "
               "config.toml) to actually use this in the chat.\n")
-    print(f"Scanned folders (the repo's synced folders): {', '.join(folders) or '(none)'}")
+    print(
+        f"Scanned locations (the repo's synced folders + loose root files): "
+        f"{', '.join(folders) or '(root only)'}"
+    )
     disabled = workspace_config.disabled_code_modules(workspace)
     if disabled:
         print(f"Per-module opt-outs ([ai] disabled_code_modules): {', '.join(sorted(disabled))}")
     print("")
     if not index.reports:
         print(
-            "No .py files found under the synced folders. Helpers must live UNDER a synced "
-            "folder (run `mooring adopt <folder>` to sync a top-level utils/ folder) and be "
-            "importable."
+            "No .py helper modules found. Helpers must live under a synced folder or at the "
+            "repo root (both sync by default), be importable, and define functions/classes."
         )
         return 0
     kept = 0

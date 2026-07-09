@@ -123,11 +123,31 @@ def test_delete_trailing_slash_on_pbip_still_expands_artifact(tmp_path):
 
 
 def test_delete_restricted_to_synced_folders(tmp_path):
-    write(tmp_path, "secret.env", "x")
+    # A file in a non-synced SUB-folder is out of scope — refused.
+    write(tmp_path, "misc/secret.env", "x")
     folders = ("notebooks", "data", "reports")
     with pytest.raises(ValueError, match="not a notebook"):
-        deletion.delete(tmp_path, "secret.env", folders=folders)
-    assert (tmp_path / "secret.env").exists()
+        deletion.delete(tmp_path, "misc/secret.env", folders=folders)
+    assert (tmp_path / "misc/secret.env").exists()
+
+
+def test_delete_allows_loose_root_file(tmp_path):
+    # Loose top-level files sync by default, so the hub can delete them too.
+    write(tmp_path, "helpers.py", "def f(): ...\n")
+    folders = ("notebooks", "data", "reports")
+    removed = deletion.delete(tmp_path, "helpers.py", folders=folders)
+    assert removed == ["helpers.py"]
+    assert not (tmp_path / "helpers.py").exists()
+
+
+def test_delete_allows_nested_file_under_multisegment_folder(tmp_path):
+    # A multi-segment synced folder (e.g. an adopted notebooks/team-a) is in scope and the
+    # hub lists its files, so deletion must accept them — a top-segment membership test
+    # would wrongly refuse a file the workspace does sync.
+    write(tmp_path, "notebooks/team-a/x.py", "print(1)\n")
+    removed = deletion.delete(tmp_path, "notebooks/team-a/x.py", folders=("notebooks/team-a",))
+    assert removed == ["notebooks/team-a/x.py"]
+    assert not (tmp_path / "notebooks/team-a/x.py").exists()
 
 
 def test_delete_refuses_excluded_path(tmp_path):

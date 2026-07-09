@@ -186,6 +186,29 @@ def test_sync_exclude_rejects_non_string_array(tmp_path):
         load_config(user_config_path=nums, env={})
 
 
+def test_sync_folders_drop_root_sentinels_and_canonicalize(tmp_path):
+    # A folder that resolves to the workspace root (".", "") or escapes it ("x/../y")
+    # would make the local (filesystem rglob) and remote (path-prefix) scans diverge and
+    # delete files on pull, so those are dropped; "reports/" and "./data" canonicalize.
+    # Loose root files sync on their own rule, so dropping "." loses no coverage.
+    user = tmp_path / "config.toml"
+    user.write_text(
+        '[sync]\nfolders = [".", "", "notebooks", "reports/", "./data", "x/../y"]\n',
+        "utf-8",
+    )
+    cfg = load_config(user_config_path=user, env={})
+    assert cfg.folders == ("notebooks", "reports", "data")
+
+
+def test_sync_folders_backslash_is_canonicalized(tmp_path):
+    # A Windows-style hand edit with a literal backslash must canonicalize to a POSIX
+    # sub-path, or the two scan sides disagree about the same folder. A TOML literal
+    # string ('...') keeps the backslash verbatim.
+    user = tmp_path / "config.toml"
+    user.write_text("[sync]\nfolders = ['pkg\\utils']\n", "utf-8")
+    assert load_config(user_config_path=user, env={}).folders == ("pkg/utils",)
+
+
 def test_user_config_overrides_defaults(tmp_path):
     user = tmp_path / "config.toml"
     user.write_text(

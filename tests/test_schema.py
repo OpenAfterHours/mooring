@@ -31,6 +31,19 @@ def _write_xlsx(path):
     wb.save(path)
 
 
+def test_list_datasets_includes_loose_root_data_files(tmp_path):
+    # A data file dropped at the repo ROOT syncs by default, so the dataset pickers/tool
+    # must list it alongside folder datasets; root dotfiles stay out (they do not sync).
+    (tmp_path / "data").mkdir()
+    DF.write_csv(tmp_path / "data" / "in.csv")
+    DF.write_parquet(tmp_path / "sales.parquet")  # loose root data file
+    DF.write_csv(tmp_path / ".hidden.csv")  # root dotfile — excluded, matching sync scope
+    out = schema.list_datasets(tmp_path, ("data",))
+    assert "sales.parquet" in out
+    assert "data/in.csv" in out
+    assert ".hidden.csv" not in out
+
+
 @pytest.fixture
 def parquet(tmp_path):
     p = tmp_path / "sales.parquet"

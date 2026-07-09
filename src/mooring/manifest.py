@@ -15,10 +15,16 @@ MANIFEST_DIR = ".mooring"
 MANIFEST_NAME = "manifest.json"
 CACHE_NAME = "remote-cache.json"
 
+# Manifest format version. Bumped to 2 when loose top-level files became part of the
+# sync scope: a v1 manifest's `files` predates that and omits any root-level file, so
+# sync._scope_matches treats a pre-v2 manifest as a scope mismatch and refetches the
+# tree once (a completed pull then rewrites the version). See sync._scope_matches.
+CURRENT_VERSION = 2
+
 
 @dataclass
 class Manifest:
-    version: int = 1
+    version: int = CURRENT_VERSION
     branch: str = ""
     head_commit: str = ""
     files: dict[str, str] = field(default_factory=dict)  # repo path -> base blob sha
