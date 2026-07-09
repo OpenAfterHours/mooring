@@ -142,11 +142,12 @@ class ChatService:
         from mooring.ai import context as ctxmod
         from mooring.ai import egress, locality, ner, pii, tools
         from mooring.ai.datadictionary import DictionaryIndex
+        from mooring.app import context_folders as ctxdirs
 
         pii_banner: list[dict] = []
-        repo_ctx = ctxmod.discover_context(
+        repo_ctx = ctxmod.discover_contexts(
             workspace,
-            context_dir=app_cfg.ai_context_dir,
+            ctxdirs.read_dirs(app_cfg, workspace),
             enabled=app_cfg.ai_context,
             max_kb=app_cfg.ai_context_max_kb,
         )

@@ -42,6 +42,62 @@ def test_corrupt_file_is_not_clobbered_on_write(tmp_path):
     assert (tmp_path / "mooring.toml").read_text("utf-8") == original  # untouched
 
 
+# -- team AI context folders (the synced OFFER) --------------------------------
+
+
+def test_context_folders_missing_is_empty(tmp_path):
+    assert wc.context_folders(tmp_path) == ()
+
+
+def test_context_folder_set_and_clear_round_trip(tmp_path):
+    assert wc.set_context_folder(tmp_path, "finance/dict", True) is True
+    assert wc.context_folders(tmp_path) == ("finance/dict",)
+    data = tomllib.loads((tmp_path / "mooring.toml").read_text("utf-8"))
+    assert data["ai"]["context_folders"] == ["finance/dict"]
+
+    assert wc.set_context_folder(tmp_path, "finance/dict", False) is False
+    assert wc.context_folders(tmp_path) == ()
+    assert not (tmp_path / "mooring.toml").exists()  # pruned empty
+
+
+def test_context_folders_stored_sorted_and_deduped(tmp_path):
+    # An allowlist has no display order (unlike featured_folders) → always sorted.
+    wc.set_context_folder(tmp_path, "zeta", True)
+    wc.set_context_folder(tmp_path, "alpha", True)
+    wc.set_context_folder(tmp_path, "alpha", True)  # dupe is a no-op
+    assert wc.context_folders(tmp_path) == ("alpha", "zeta")
+
+
+def test_context_folders_normalizes_paths(tmp_path):
+    wc.set_context_folder(tmp_path, "\\finance\\dict\\", True)
+    assert wc.context_folders(tmp_path) == ("finance/dict",)
+
+
+def test_context_folder_preserves_sibling_ai_keys(tmp_path):
+    # Lives under [ai] beside disabled_notebooks — a write must keep the siblings.
+    wc.set_ai_disabled(tmp_path, "notebooks/secret.py", True)
+    wc.set_context_folder(tmp_path, "context", True)
+    assert wc.disabled_notebooks(tmp_path) == {"notebooks/secret.py"}
+    assert wc.context_folders(tmp_path) == ("context",)
+    # Removing the offer leaves the sibling [ai] key (file not pruned).
+    wc.set_context_folder(tmp_path, "context", False)
+    assert wc.disabled_notebooks(tmp_path) == {"notebooks/secret.py"}
+    assert wc.context_folders(tmp_path) == ()
+
+
+def test_context_folders_fails_open_on_corrupt_read(tmp_path):
+    (tmp_path / "mooring.toml").write_text("this is = not valid = toml", "utf-8")
+    assert wc.context_folders(tmp_path) == ()  # read side fails open
+
+
+def test_context_folder_corrupt_file_not_clobbered_on_write(tmp_path):
+    original = "this is = not valid = toml"
+    (tmp_path / "mooring.toml").write_text(original, "utf-8")
+    with pytest.raises(tomllib.TOMLDecodeError):
+        wc.set_context_folder(tmp_path, "context", True)
+    assert (tmp_path / "mooring.toml").read_text("utf-8") == original
+
+
 def test_normalization_and_dedupe(tmp_path):
     wc.set_ai_disabled(tmp_path, "notebooks\\a.py", True)  # backslash
     wc.set_ai_disabled(tmp_path, "/notebooks/a.py/", True)  # surrounding slashes

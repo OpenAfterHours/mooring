@@ -420,6 +420,32 @@ def _build_parser() -> argparse.ArgumentParser:
         "check", help="parse context/ dictionaries and report tables, columns, and dropped keys"
     )
     ai_dict_check.add_argument("--repo", default=None, metavar="ALIAS", help=_REPO_ARG_HELP)
+    ai_context = ai_sub.add_parser(
+        "context", help="manage the team's shared AI context folders (the offer in mooring.toml)"
+    )
+    ai_context_sub = ai_context.add_subparsers(dest="ai_context_command", required=True)
+    ai_context_list = ai_context_sub.add_parser("list", help="list the repo's offered AI context folders")
+    ai_context_list.add_argument("--repo", default=None, metavar="ALIAS", help=_REPO_ARG_HELP)
+    ai_context_add = ai_context_sub.add_parser(
+        "add", help="offer a folder as team AI context (writes the synced mooring.toml)"
+    )
+    ai_context_add.add_argument("folder", help="workspace-relative folder to offer")
+    ai_context_add.add_argument("--repo", default=None, metavar="ALIAS", help=_REPO_ARG_HELP)
+    ai_context_remove = ai_context_sub.add_parser(
+        "remove", help="stop offering a folder as team AI context"
+    )
+    ai_context_remove.add_argument("folder", help="workspace-relative folder to stop offering")
+    ai_context_remove.add_argument("--repo", default=None, metavar="ALIAS", help=_REPO_ARG_HELP)
+    ai_context_use = ai_context_sub.add_parser(
+        "use", help="subscribe THIS machine's copilot to an offered folder (per-user)"
+    )
+    ai_context_use.add_argument("folder", help="an offered folder to start reading")
+    ai_context_use.add_argument("--repo", default=None, metavar="ALIAS", help=_REPO_ARG_HELP)
+    ai_context_unuse = ai_context_sub.add_parser(
+        "unuse", help="stop THIS machine's copilot reading an offered folder (per-user)"
+    )
+    ai_context_unuse.add_argument("folder", help="an offered folder to stop reading")
+    ai_context_unuse.add_argument("--repo", default=None, metavar="ALIAS", help=_REPO_ARG_HELP)
     # `ai model check` (this Power BI semantic-model lint) is a DIFFERENT command
     # from `ai pii model` below (the NER model download) — one level up the tree.
     ai_model = ai_sub.add_parser(
@@ -1718,6 +1744,100 @@ def _unknown_alias(alias: str, app_cfg: config.AppConfig) -> str:
     return f"Unknown repo alias {alias!r}. Known: {known}"
 
 
+def cmd_ai_context(
+    app_cfg: config.AppConfig, cfg: config.Config, args: argparse.Namespace
+) -> int:
+    """List or curate the repo's AI context folders. TWO planes:
+
+    * the team OFFER — ``add``/``remove`` write the SYNCED ``mooring.toml``
+      ``[ai] context_folders`` (push to share). Only folder PATHS travel.
+    * this machine's per-user SUBSCRIPTION — ``use``/``unuse`` write the per-machine
+      user config ``[repos.<alias>].ai_context_folders``, narrowing which offered
+      folders THIS copilot reads (the offer stays the ceiling).
+
+    ``list`` shows the offer with a ``*`` beside the folders this machine reads. Reading
+    still needs each machine's own ``[ai] context`` consent bool."""
+    import tomllib
+
+    from mooring import config_store
+
+    workspace = cfg.workspace()
+    cmd = args.ai_context_command
+    alias = getattr(args, "repo", None) or app_cfg.active_alias
+
+    def _effective(offer: tuple[str, ...]) -> list[str]:
+        """The offered folders this machine's copilot reads (subscription ∩ offer)."""
+        try:
+            sub = app_cfg.spec(alias).context_folders if alias else None
+        except KeyError:
+            sub = None
+        return list(offer) if sub is None else [f for f in offer if f in sub]
+
+    if cmd == "list":
+        offer = workspace_config.context_folders(workspace)
+        if offer:
+            reading = set(_effective(offer))
+            print("Offered AI context folders (synced mooring.toml [ai] context_folders):")
+            for folder in offer:
+                print(f"  [{'*' if folder in reading else ' '}] {folder}")
+            print("\n  [*] = this machine's copilot reads it (`mooring ai context use/unuse` to change)")
+        else:
+            legacy = app_cfg.ai_context_dir.strip("/")
+            print(
+                "No team context folders offered yet — the copilot falls back to the "
+                f"per-machine [ai] context_dir: {legacy or '(none)'}"
+            )
+        if not app_cfg.ai_context:
+            print("\nNote: [ai] context is OFF on this machine — set it true to read them in chat.")
+        return 0
+
+    folder = workspace_config.normalize_notebook(args.folder)
+    if not folder:
+        sys.exit("Give a workspace-relative folder, e.g. `mooring ai context add finance/dictionary`.")
+
+    if cmd in ("use", "unuse"):
+        offer = workspace_config.context_folders(workspace)
+        if not offer:
+            sys.exit(
+                "This repo offers no team AI context folders yet. Offer one first: "
+                "`mooring ai context add <folder>`."
+            )
+        if folder not in offer:
+            sys.exit(f"'{folder}' isn't offered as team AI context. Offered: {', '.join(offer)}.")
+        if not alias:
+            sys.exit("No repo selected — configure one with `mooring repo add` first.")
+        selected = set(_effective(offer))
+        selected.add(folder) if cmd == "use" else selected.discard(folder)
+        new_sub = None if selected >= set(offer) else sorted(selected)
+        try:
+            config_store.set_repo_context_folders(alias, new_sub)
+        except KeyError:
+            sys.exit(_unknown_alias(alias, app_cfg))
+        except tomllib.TOMLDecodeError as exc:
+            sys.exit(f"config.toml is unparseable ({exc}); fix it before editing your subscription.")
+        now_reading = new_sub if new_sub is not None else list(offer)
+        verb = "reads" if cmd == "use" else "no longer reads"
+        print(f"This machine's copilot {verb} '{folder}'.")
+        print(f"Now reading: {', '.join(now_reading) or '(none)'}")
+        return 0
+
+    try:
+        if cmd == "add":
+            workspace_config.set_context_folder(workspace, folder, True)
+            print(f"Offered '{folder}' as team AI context. Run `mooring push` to share it.")
+        elif cmd == "remove":
+            workspace_config.set_context_folder(workspace, folder, False)
+            print(f"Stopped offering '{folder}'. Run `mooring push` to share the change.")
+        else:
+            return 2
+    except tomllib.TOMLDecodeError as exc:
+        sys.exit(
+            f"Can't update {workspace_config.WORKSPACE_CONFIG_NAME}: it is not valid TOML "
+            f"({exc}). Fix it (pull a teammate's version, or repair it) and retry."
+        )
+    return 0
+
+
 def cmd_ai_code_check(app_cfg: config.AppConfig, cfg: config.Config) -> int:
     """Show exactly what the copilot's reusable code library would see: which importable
     .py modules under the synced folders yield helpers, and WHY the rest were skipped
@@ -1781,16 +1901,21 @@ def cmd_ai_dictionary_check(app_cfg: config.AppConfig, cfg: config.Config) -> in
     secret scan — before enabling the feature or pushing context to the team.
     """
     from mooring.ai import datadictionary, scan
+    from mooring.app import context_folders as ctxdirs
 
     workspace = cfg.workspace()
-    ctx_dir = app_cfg.ai_context_dir
-    index = datadictionary.load_index(workspace, ctx_dir)
+    # Lint the WHOLE offer (every folder that can ride push), not a per-user subset.
+    ctx_dirs = ctxdirs.shareable_dirs(app_cfg, workspace)
+    index = datadictionary.merge_indexes(
+        [datadictionary.load_index(workspace, d) for d in ctx_dirs]
+    )
+    if len(ctx_dirs) > 1:
+        print(f"Context folders: {', '.join(ctx_dirs)}\n")
     if not app_cfg.ai_context:
         print("Note: [ai] context is OFF — set it true to actually use this in the chat.\n")
     if not index.reports:
-        print(
-            f"No dictionary files under {ctx_dir}/dictionaries/*.yaml or {ctx_dir}/datadictionary.yaml."
-        )
+        where = " or ".join(f"{d}/dictionaries/*.yaml" for d in ctx_dirs) or "the context folder"
+        print(f"No dictionary files under: {where}")
         return 0
     for r in index.reports:
         if r.error:
@@ -1803,7 +1928,7 @@ def cmd_ai_dictionary_check(app_cfg: config.AppConfig, cfg: config.Config) -> in
         print("\nSample parsed table:")
         for line in datadictionary.render_table(index.tables[0], max_cols=8).splitlines():
             print(f"  {line}")
-    findings = scan.scan_context_secrets(workspace, ctx_dir, index)
+    findings = scan.scan_context_secrets(workspace, ctx_dirs, index)
     print("")
     if findings:
         print(f"secret scan: {len(findings)} high-confidence finding(s) - fix before sharing:")
@@ -1898,10 +2023,14 @@ def cmd_ai_pii_check(
     NER name pass runs too; otherwise it scans structured PII only.
     """
     from mooring.ai import datadictionary, ner, scan
+    from mooring.app import context_folders as ctxdirs
 
     workspace = cfg.workspace()
-    ctx_dir = app_cfg.ai_context_dir
-    index = datadictionary.load_index(workspace, ctx_dir)
+    # Lint the WHOLE offer (every folder that can ride push), not a per-user subset.
+    ctx_dirs = ctxdirs.shareable_dirs(app_cfg, workspace)
+    index = datadictionary.merge_indexes(
+        [datadictionary.load_index(workspace, d) for d in ctx_dirs]
+    )
     backend = ner.resolve_backend(app_cfg.ai_pii_name_backend)
     model = ner.model_for(
         backend,
@@ -1927,7 +2056,7 @@ def cmd_ai_pii_check(
         print(f"Note: detect_names is ON but {hint} - scanning structured PII only.\n")
     findings = scan.scan_pii_targets(
         workspace,
-        ctx_dir,
+        ctx_dirs,
         cfg.folders,
         index,
         getattr(args, "notebook", None),
@@ -2243,6 +2372,9 @@ def cmd_ai(app_cfg: config.AppConfig, cfg: config.Config, args: argparse.Namespa
             return cmd_ai_dictionary_check(app_cfg, cfg)
         return 2
 
+    if args.ai_command == "context":
+        return cmd_ai_context(app_cfg, cfg, args)
+
     if args.ai_command == "model":
         if args.ai_model_command == "check":
             return cmd_ai_model_check(app_cfg, cfg)
@@ -2476,11 +2608,15 @@ def main(argv: list[str] | None = None) -> int:
         cfg = app_cfg.config_for(getattr(args, "repo", None))
     except KeyError:
         sys.exit(_unknown_alias(args.repo, app_cfg))
-    # Fold the repo's synced sub-folders (mooring.toml [sync] folders) into the scope,
-    # so notebooks under a uv-workspace package folder list and sync like the hub's do.
+    # Fold the repo's synced sub-folders (mooring.toml [sync] folders) AND the team AI
+    # context OFFER ([ai] context_folders) into the scope, so notebooks under a
+    # uv-workspace package folder — and every offered context folder — list and sync
+    # like the hub's do.
     from dataclasses import replace
 
-    folders = workspace_config.merge_extra_folders(cfg.folders, cfg.workspace())
+    from mooring.app import context_folders as ctxdirs
+
+    folders = ctxdirs.sync_dirs(app_cfg, cfg.folders, cfg.workspace())
     if folders != cfg.folders:
         cfg = replace(cfg, folders=folders)
 

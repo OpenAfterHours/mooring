@@ -130,26 +130,32 @@ traceback_guard = true      # when a chat message contains a pasted Python trace
 # SYNCED <workspace>/mooring.toml ([ai] disabled_notebooks = [...]) so the decision
 # travels to teammates, NOT in this per-machine config. Enforced at open/send/apply.
 
-# Team context for the copilot — OPT-IN, off by default. When `context = true`,
-# mooring reads `<workspace>/context/` and feeds the assistant:
+# Team context for the copilot — OPT-IN, off by default. `context` is THIS machine's
+# consent bool; when true, mooring reads the repo's context folder(s) and feeds the
+# assistant, from each:
 #   - instructions.md            free-text guidance (the copilot-instructions.md
 #                                equivalent), sent VERBATIM — never put real values
-#                                or secrets in it; it is secret-scanned and withheld
-#                                on a hit, but that is best-effort, not a guarantee.
+#                                or secrets in it; it is secret-scanned per-folder and
+#                                withheld on a hit, but that is best-effort, not a guarantee.
 #   - dictionaries/*.yaml        per-domain data dictionaries (dbt schema.yml and
 #                                other shapes auto-detected); reduced to column
 #                                names/types/keys/descriptions only and pulled in
 #                                relevant slices. Run `mooring ai dictionary check`
-#                                to see how your files parse.
+#                                to see how your files parse (and any cross-folder clashes).
 # Unlike the dataset schema (which structurally cannot carry a value), this team
 # context carries whatever the author wrote — see docs/admins/ai-privacy.md.
-# Turning this on also makes `context_dir` a SYNCED folder, so the context you
-# author rides `mooring push`/`pull` to teammates like notebooks and data do — no
-# need to add it to [sync] folders by hand. (Off = the folder is neither read nor
-# synced.)
-context = false             # set true to enable + sync team instructions + data dictionary
-context_dir = "context"     # workspace-relative folder mooring reads context from
-context_max_kb = 256        # cap on the instructions text injected per chat
+#
+# WHICH folders: a curator OFFERS folders to the team in the SYNCED mooring.toml
+# ([ai] context_folders — edit via the hub's per-folder "AI context" toggle or
+# `mooring ai context add/remove`). With no offer, mooring falls back to the single
+# `context_dir` below. The whole offer rides `mooring push`/`pull` for any teammate
+# whose `context` bool is on (so every offered folder is covered by the pre-push secret
+# scan) — no need to add it to [sync] folders by hand. Each teammate can then narrow
+# which offered folders THEIR copilot reads with `mooring ai context use/unuse` (or the
+# hub checklist); unset = read the whole offer. (context off = neither read nor synced.)
+context = false             # this machine's consent: set true to read + sync team context
+context_dir = "context"     # fallback single folder when the repo publishes no offer
+context_max_kb = 256        # cap on the instructions text injected per chat, PER FOLDER
 
 # Best-effort structured-PII pre-flight scan — OPT-IN, off by default. When
 # `enabled = true`, mooring scans text on its way to the AI server (your chat

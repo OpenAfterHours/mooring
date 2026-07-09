@@ -219,6 +219,10 @@
       <div id="adopt-banner" class="notice notice-adopt hidden"></div>
       <div id="freshness-banner" class="notice notice-fresh hidden" role="status"></div>
       <div id="summary" class="muted files-summary"></div>
+      <!-- Per-user AI context subscription: when the repo offers context folders and this
+           machine has AI + [ai] context on, pick which offered folders THIS copilot reads
+           (the synced offer stays the ceiling). Rendered by renderContextSubscription. -->
+      <div id="context-sub" class="context-sub hidden"></div>
       <!-- Folder browser bar: the "focus one folder" breadcrumb (climb back out /
            reset to All folders) with a live "N of M files" count, plus Expand-all /
            Collapse-all. Rendered by renderFolderControls; hidden at the repo root

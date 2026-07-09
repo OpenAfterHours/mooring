@@ -80,6 +80,12 @@ class RepoSpec:
     repo: str
     branch: str = "main"
     workspace_path: str = ""
+    # This machine's per-user AI context SUBSCRIPTION for the repo: which of the team's
+    # offered context folders (synced mooring.toml [ai] context_folders) this user's copilot
+    # actually reads. ``None`` = no choice recorded → read the WHOLE offer (the opt-out
+    # default); ``()`` = subscribed to nothing; a non-empty tuple = read that subset
+    # (intersected with the offer, which stays authoritative). See mooring.app.context_folders.
+    context_folders: tuple[str, ...] | None = None
 
     @property
     def slug(self) -> str:
@@ -355,6 +361,25 @@ def merged_data(user_config_path: Path | None = None) -> dict:
     return data
 
 
+def _opt_subscription(raw: object) -> tuple[str, ...] | None:
+    """Parse a repo's ``ai_context_folders`` subscription. ``None`` when the key is
+    absent (no choice → read the whole offer); a normalized tuple otherwise (an empty
+    list stays ``()`` = subscribed to nothing). Tolerant of a bare string or garbage."""
+    if raw is None:
+        return None
+    if isinstance(raw, str):
+        norm = raw.replace("\\", "/").strip().strip("/")
+        return (norm,) if norm else ()
+    if isinstance(raw, (list, tuple)):
+        out: list[str] = []
+        for p in raw:
+            norm = str(p).replace("\\", "/").strip().strip("/")
+            if norm and norm not in out:
+                out.append(norm)
+        return tuple(out)
+    return None  # a malformed value (e.g. a table) → treated as "no choice"
+
+
 def repo_specs_from_data(data: dict) -> tuple[tuple[RepoSpec, ...], str]:
     """Extract (repos, active_alias) from raw config data.
 
@@ -371,6 +396,7 @@ def repo_specs_from_data(data: dict) -> tuple[tuple[RepoSpec, ...], str]:
                 repo=str(tbl.get("repo", "")),
                 branch=str(tbl.get("branch", "main") or "main"),
                 workspace_path=str(tbl.get("workspace", "")),
+                context_folders=_opt_subscription(tbl.get("ai_context_folders")),
             )
             for alias, tbl in sorted(repos_data.items())
             if isinstance(tbl, dict)

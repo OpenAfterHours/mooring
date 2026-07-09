@@ -591,6 +591,32 @@ button.feature-star:hover { color: var(--accent); }
 button.feature-star.on { color: var(--accent); }
 tr.folder-header.more-folders b { color: var(--muted); font-weight: 600; }
 
+/* "AI context" toggle: offer/withdraw a top-level folder as team copilot context
+   (governance, not display order — distinct from the ☆ star). */
+button.ctx-folder {
+  border: 1px solid transparent;
+  background: none;
+  color: var(--muted);
+  padding: 0.1rem 0.35rem;
+  cursor: pointer;
+  line-height: 1;
+  font-size: 0.85em;
+}
+button.ctx-folder:hover { color: var(--accent); }
+button.ctx-folder.on { color: var(--accent); }
+
+/* per-user AI context subscription checklist (which offered folders this copilot reads) */
+.context-sub {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.5rem 0.7rem;
+  margin: 0.5rem 0;
+  background: var(--panel, transparent);
+}
+.context-sub-head { font-size: 0.85em; color: var(--muted); margin-bottom: 0.35rem; }
+.context-sub-list { display: flex; flex-wrap: wrap; gap: 0.35rem 1rem; }
+.context-sub-item { display: inline-flex; align-items: center; gap: 0.3rem; cursor: pointer; }
+
 /* first-run checklist: the self-ticking ramp (pull → open → duplicate → push).
    Done items dim + strike through; the tick keeps the ok color (it's an
    inline-block, so the parent's line-through never crosses it). */

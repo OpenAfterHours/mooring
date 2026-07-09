@@ -23,10 +23,14 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from mooring.ai import pii, secrets
-from mooring.ai.datadictionary import DictionaryIndex, Table, load_index
+from mooring.ai.datadictionary import DictionaryIndex, Table, load_index, merge_indexes
 
 _INSTRUCTIONS = "instructions.md"
 _DEFAULT_MAX_KB = 256
+# Aggregate cap on the COMBINED instructions across all folders (a prompt-size guard on
+# top of the per-file cap). Each folder's text is already secret-scanned+withheld before
+# the join, so trimming here only ever drops clean, already-vetted text.
+_MAX_TOTAL_INSTR_KB = 512
 
 
 @dataclass(frozen=True)
@@ -103,6 +107,69 @@ def discover_context(
         index=index,
         loaded_files=tuple(loaded),
         findings=tuple(findings),
+    )
+
+
+def discover_contexts(
+    workspace: Path,
+    dirs,
+    *,
+    enabled: bool = False,
+    max_kb: int = _DEFAULT_MAX_KB,
+) -> RepoContext:
+    """Read SEVERAL context folders into one merged :class:`RepoContext`.
+
+    Each folder is read by the single-dir :func:`discover_context` primitive, so
+    every privacy-critical guard — the per-file whole-file hard-withhold, the soft
+    per-line PII drop, the per-file ``max_kb`` cap, and the path-escape confinement
+    — runs INDEPENDENTLY per folder (one poisoned folder can neither blank a clean
+    sibling nor escape its own withhold). The surviving parts are then merged:
+    instructions concatenated in a stable sorted-folder order (each behind a
+    value-free ``<!-- context: <dir>/instructions.md -->`` banner for attribution),
+    dictionary indexes merged first-folder-wins with collision reports
+    (:func:`mooring.ai.datadictionary.merge_indexes`), and loaded_files/findings
+    tuple-concatenated. The result keeps the single ``instructions``/``index`` shape
+    so the egress choke point needs no change. A single folder is byte-identical to
+    calling :func:`discover_context` directly. Returns empty when ``enabled`` is
+    False — the opt-in gate.
+    """
+    if not enabled:
+        return RepoContext.empty()
+    # Sort+dedupe so the assembled system prompt is deterministic regardless of the
+    # order the caller resolved the folders in (keeps the "matches today" snapshots
+    # stable and gives first-folder-wins a well-defined winner).
+    ordered = sorted({str(d).strip().strip("/") for d in dirs if str(d).strip().strip("/")})
+    if not ordered:
+        return RepoContext.empty()
+    parts = [discover_context(workspace, context_dir=d, enabled=True, max_kb=max_kb) for d in ordered]
+    return _merge_repo_contexts(list(zip(ordered, parts)))
+
+
+def _merge_repo_contexts(labelled: "list[tuple[str, RepoContext]]") -> RepoContext:
+    """Fold ``(dir, RepoContext)`` pairs (already sorted) into one RepoContext."""
+    instr_parts = [(d, p.instructions) for d, p in labelled if p.instructions]
+    if len(instr_parts) == 1:
+        instructions = instr_parts[0][1]  # single folder: byte-identical, no banner
+    elif instr_parts:
+        instructions = "\n\n".join(
+            f"<!-- context: {d}/{_INSTRUCTIONS} -->\n{txt}" for d, txt in instr_parts
+        )
+        cap = _MAX_TOTAL_INSTR_KB * 1024
+        if len(instructions.encode("utf-8")) > cap:
+            # Safe to trim: every folder's text was already secret-scanned (and withheld
+            # whole if it tripped) BEFORE the join, so only clean text can be cut here.
+            instructions = instructions.encode("utf-8")[:cap].decode("utf-8", errors="ignore")
+            instructions += "\n\n[trimmed: combined team instructions exceeded the size cap]"
+    else:
+        instructions = ""
+    index = merge_indexes([p.index for _, p in labelled])
+    loaded = tuple(f for _, p in labelled for f in p.loaded_files)
+    findings = tuple(f for _, p in labelled for f in p.findings)
+    return RepoContext(
+        instructions=instructions,
+        index=index,
+        loaded_files=loaded,
+        findings=findings,
     )
 
 

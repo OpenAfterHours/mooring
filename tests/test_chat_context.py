@@ -146,3 +146,27 @@ def test_build_context_drops_models_the_team_opted_out(tmp_path):
     )
     assert models == []
     assert "POWER BI SEMANTIC MODELS" not in context
+
+
+def test_build_context_merges_multiple_offered_context_folders(tmp_path):
+    # End-to-end: two OFFERED folders' instructions.md merge into one TEAM INSTRUCTIONS
+    # block, in stable sorted-folder order, still below the immutable privacy rules.
+    from mooring import workspace_config
+
+    service, app_cfg, ws = _service_setup(tmp_path, env={"MOORING_AI_CONTEXT": "1"})
+    workspace_config.set_context_folder(ws, "ctx_b", True)
+    workspace_config.set_context_folder(ws, "ctx_a", True)
+    (ws / "ctx_a").mkdir()
+    (ws / "ctx_a" / "instructions.md").write_text("Report amounts in GBP.", "utf-8")
+    (ws / "ctx_b").mkdir()
+    (ws / "ctx_b" / "instructions.md").write_text("Fiscal year starts in April.", "utf-8")
+
+    context, _index, _banner, _live, _models, _code = service.build_context(app_cfg, ws, "nb.py", "")
+
+    assert _INSTR_HEADER in context
+    assert "Report amounts in GBP." in context and "Fiscal year starts in April." in context
+    # sorted-folder order (ctx_a before ctx_b), each behind its value-free banner
+    assert context.index("ctx_a/instructions.md") < context.index("ctx_b/instructions.md")
+    assert context.index("Report amounts in GBP.") < context.index("Fiscal year starts in April.")
+    # the immutable rules still precede the merged user-authored block
+    assert context.index("STRICT PRIVACY RULES") < context.index(_INSTR_HEADER)

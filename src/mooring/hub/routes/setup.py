@@ -14,6 +14,13 @@ from mooring.github import AuthFailed, GitHubError, TlsFailure, Unreachable, com
 from mooring.runtime import workspace_hint
 
 
+def _read_context_dirs(hub, cfg) -> tuple[str, ...]:
+    """The context folders this machine's copilot would read (subscription ∩ offer)."""
+    from mooring.app import context_folders as ctxdirs
+
+    return ctxdirs.read_dirs(hub.app_cfg, cfg.workspace())
+
+
 def api_state(request: Request) -> JSONResponse:
     hub = request.app.state.hub
     cfg = hub.cfg
@@ -33,6 +40,15 @@ def api_state(request: Request) -> JSONResponse:
         # mooring.toml [hub] featured_folders) get pinned to the top; the rest fold
         # under a "More folders" disclosure. Additive — absent/empty = ordinary render.
         "featured_folders": list(workspace_config.featured_folders(cfg.workspace())),
+        # The team's OFFERED AI context folders (synced mooring.toml [ai] context_folders):
+        # the value-free menu a curator publishes so the copilot can read them. Reading
+        # still needs each machine's own [ai] context consent — this list is only the
+        # offer. Drives the per-folder "AI context" toggle (repo mode + AI on).
+        "context_folders": list(workspace_config.context_folders(cfg.workspace())),
+        # Which offered folders THIS machine's copilot actually reads (subscription ∩
+        # offer, or the whole offer when unsubscribed). Drives the per-user subscription
+        # checklist; the offer stays the ceiling.
+        "selected_context_folders": list(_read_context_dirs(hub, cfg)),
         "repos": [
             {
                 "alias": s.alias,
@@ -49,6 +65,9 @@ def api_state(request: Request) -> JSONResponse:
         # project vs mooring's bundled env vs a frozen build). See _notebook_env.
         "env": hub._notebook_env(cfg.workspace()),
         "ai_chat": hub.app_cfg.ai_enabled,
+        # This machine's [ai] context consent bool — gates whether the copilot reads ANY
+        # team context. Drives showing the per-user subscription checklist.
+        "ai_context": hub.app_cfg.ai_context,
         # Whether the workspace-level "Batch build" entry should show (AI on AND
         # the opt-in batch orchestrator enabled). The page itself re-gates.
         "ai_batch": hub.app_cfg.ai_enabled and hub.app_cfg.ai_batch_enabled,
@@ -297,6 +316,98 @@ async def api_set_featured(request: Request) -> JSONResponse:
         )
     telemetry.log_event("hub_feature", featured=int(featured))
     return JSONResponse({"ok": True, "folder": key, "featured": featured})
+
+
+async def api_set_context_folder(request: Request) -> JSONResponse:
+    """Offer (or withdraw) one folder as team AI context in the synced ``mooring.toml``
+    ``[ai] context_folders`` — the value-free menu a curator publishes so the whole team's
+    copilot can read it (reading still needs each machine's own ``[ai] context`` consent).
+    Unlike featured folders this is AI GOVERNANCE, not display order, so the offer is stored
+    SORTED. The path is validated to resolve under the workspace (no traversal) but need not
+    exist yet (offer before the first pull; withdraw after a rename to clear a stale entry).
+    The write runs off the event loop like the featured/model toggles."""
+    hub = request.app.state.hub
+    data = await request.json()
+    folder = str(data.get("folder", "")).strip()
+    offered = bool(data.get("offered", True))
+    if not folder:
+        return JSONResponse({"error": "A folder is required."}, status_code=400)
+    workspace = hub.cfg.workspace()
+    key = workspace_config.normalize_notebook(folder)
+    if not key:  # e.g. "/" or "///" — normalizes to "", which can never be stored
+        return JSONResponse({"error": "A folder is required."}, status_code=400)
+    try:
+        target = (workspace / key).resolve()
+        target.relative_to(workspace.resolve())
+    except (ValueError, OSError):
+        return JSONResponse({"error": "Path escapes the workspace."}, status_code=400)
+    try:
+        await run_in_threadpool(workspace_config.set_context_folder, workspace, key, offered)
+    except (tomllib.TOMLDecodeError, UnicodeDecodeError):
+        # A non-UTF-8 mooring.toml (UTF-16/BOM — a Windows hazard) decodes to a
+        # UnicodeDecodeError, not a TOMLDecodeError; both mean "fix the file first".
+        return JSONResponse(
+            {"error": "mooring.toml is malformed — fix it before changing context folders."},
+            status_code=409,
+        )
+    telemetry.log_event("hub_context_folder", offered=int(offered))
+    return JSONResponse({"ok": True, "folder": key, "offered": offered})
+
+
+async def api_context_subscribe(request: Request) -> JSONResponse:
+    """Subscribe/unsubscribe THIS machine's copilot to one of the repo's offered AI
+    context folders — a per-user, per-repo choice (the synced offer stays the ceiling).
+
+    Writes the user config.toml ``[repos.<alias>].ai_context_folders`` and updates the
+    live config WITHOUT a full ``hub.reload()``: a subscription changes only what the
+    copilot READS, so open chat sessions and in-flight batches must not be torn down
+    (the theme endpoint's light-refresh idiom). Selecting every offered folder clears the
+    subscription (follow the whole offer, including later additions); an explicit empty
+    selection reads nothing. Rejects a folder the repo doesn't offer."""
+    from dataclasses import replace
+
+    from mooring.app import context_folders as ctxdirs
+
+    hub = request.app.state.hub
+    if not hub.app_cfg.ai_enabled:
+        return JSONResponse({"error": "AI is disabled."}, status_code=400)
+    alias = hub.app_cfg.active_alias
+    if not alias:
+        return JSONResponse({"error": "No active repo to subscribe for."}, status_code=400)
+    data = await request.json()
+    folder = workspace_config.normalize_notebook(str(data.get("folder", "")))
+    on = bool(data.get("on", True))
+    workspace = hub.cfg.workspace()
+    offer = workspace_config.context_folders(workspace)
+    if folder not in offer:
+        return JSONResponse(
+            {"error": "That folder isn't offered as team AI context."}, status_code=400
+        )
+    # Derive the new explicit subscription from the current effective read set.
+    selected = set(ctxdirs.read_dirs(hub.app_cfg, workspace))
+    selected.add(folder) if on else selected.discard(folder)
+    new_sub = None if selected >= set(offer) else sorted(selected)
+    try:
+        await run_in_threadpool(config_store.set_repo_context_folders, alias, new_sub)
+    except (KeyError, tomllib.TOMLDecodeError, UnicodeDecodeError):
+        return JSONResponse(
+            {"error": "config.toml is malformed — fix it before changing your subscription."},
+            status_code=409,
+        )
+    # Light refresh: rebuild only the active repo's subscription in the live config.
+    with hub._lock:
+        specs = tuple(
+            replace(s, context_folders=(None if new_sub is None else tuple(new_sub)))
+            if s.alias == alias
+            else s
+            for s in hub.app_cfg.repos
+        )
+        hub.app_cfg = replace(hub.app_cfg, repos=specs)
+    telemetry.log_event("ai_context_subscribe", on=int(on))
+    return JSONResponse(
+        {"ok": True, "folder": folder, "on": on,
+         "selected_context_folders": list(ctxdirs.read_dirs(hub.app_cfg, workspace))}
+    )
 
 
 def api_login_start(request: Request) -> JSONResponse:

@@ -14,7 +14,7 @@ import pytest
 from starlette.routing import Mount, Route
 from starlette.testclient import TestClient
 
-from mooring import config, paths
+from mooring import config, config_store, paths
 from mooring.hub.server import Hub, create_app
 
 # (path, non-HEAD methods sorted, endpoint function name) for every Route.
@@ -26,6 +26,8 @@ EXPECTED_ROUTES = {
     ("/api/repo/remove", ("POST",), "api_repo_remove"),
     ("/api/ui/theme", ("POST",), "api_set_theme"),
     ("/api/hub/feature", ("POST",), "api_set_featured"),  # repo-curated featured folders
+    ("/api/hub/context-folder", ("POST",), "api_set_context_folder"),  # team AI context offer
+    ("/api/ai/context/subscribe", ("POST",), "api_context_subscribe"),  # per-user context sub
     ("/api/doctor", ("POST",), "api_doctor"),  # the on-demand health check
     ("/settings", ("GET",), "settings_page"),
     ("/api/settings", ("GET",), "api_get_settings"),
@@ -294,6 +296,123 @@ def test_feature_409_on_non_utf8_mooring_toml(local_client):
     (ws / "mooring.toml").write_bytes("[hub]\n".encode("utf-16"))
     resp = client.post("/api/hub/feature", json={"folder": "reports", "featured": True})
     assert resp.status_code == 409
+
+
+# -- team AI context folders: /api/state field + /api/hub/context-folder ----------
+
+
+def test_state_context_folders_default_empty(local_client):
+    client, _hub, _ws = local_client
+    assert client.get("/api/state").json()["context_folders"] == []
+
+
+def test_context_folder_round_trip_and_state_field(local_client):
+    client, _hub, ws = local_client
+    resp = client.post("/api/hub/context-folder", json={"folder": "finance/dict", "offered": True})
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True, "folder": "finance/dict", "offered": True}
+    data = tomllib.loads((ws / "mooring.toml").read_text("utf-8"))
+    assert data["ai"]["context_folders"] == ["finance/dict"]
+    assert client.get("/api/state").json()["context_folders"] == ["finance/dict"]
+
+    resp = client.post("/api/hub/context-folder", json={"folder": "finance/dict", "offered": False})
+    assert resp.status_code == 200
+    assert not (ws / "mooring.toml").exists()  # pruned empty, nothing spurious to sync
+    assert client.get("/api/state").json()["context_folders"] == []
+
+
+def test_context_folder_offer_is_stored_sorted(local_client):
+    # Unlike featured folders (display order), the offer is an allowlist → sorted.
+    client, _hub, _ws = local_client
+    client.post("/api/hub/context-folder", json={"folder": "zeta", "offered": True})
+    client.post("/api/hub/context-folder", json={"folder": "alpha", "offered": True})
+    assert client.get("/api/state").json()["context_folders"] == ["alpha", "zeta"]
+
+
+def test_context_folder_requires_a_folder(local_client):
+    client, _hub, _ws = local_client
+    assert client.post("/api/hub/context-folder", json={}).status_code == 400
+    assert client.post("/api/hub/context-folder", json={"folder": "/"}).status_code == 400
+
+
+def test_context_folder_rejects_escaping_paths(local_client):
+    client, _hub, _ws = local_client
+    resp = client.post("/api/hub/context-folder", json={"folder": "../outside", "offered": True})
+    assert resp.status_code == 400
+
+
+def test_context_folder_409_on_corrupt_mooring_toml(local_client):
+    client, _hub, ws = local_client
+    _write(ws, "mooring.toml", "this is = not valid = toml")
+    resp = client.post("/api/hub/context-folder", json={"folder": "reports", "offered": True})
+    assert resp.status_code == 409
+    assert (ws / "mooring.toml").read_text("utf-8") == "this is = not valid = toml"
+
+
+def test_context_folder_preserves_other_ai_keys(local_client):
+    # The offer lives under [ai] beside disabled_notebooks — writing it must not drop them.
+    client, _hub, ws = local_client
+    _write(ws, "mooring.toml", '[ai]\ndisabled_notebooks = ["notebooks/secret.py"]\n')
+    resp = client.post("/api/hub/context-folder", json={"folder": "reports", "offered": True})
+    assert resp.status_code == 200
+    data = tomllib.loads((ws / "mooring.toml").read_text("utf-8"))
+    assert data["ai"]["disabled_notebooks"] == ["notebooks/secret.py"]
+    assert data["ai"]["context_folders"] == ["reports"]
+
+
+# -- per-user subscription: /api/ai/context/subscribe + selected_context_folders --
+
+
+@pytest.fixture
+def repo_client(tmp_path, monkeypatch):
+    """A configured-repo hub whose repo is PERSISTED in the user config (unlike
+    local_client's in-memory spec), so the per-machine subscription round-trips."""
+    monkeypatch.setattr(paths, "user_config_dir", lambda: tmp_path / "appdata")
+    monkeypatch.delenv("MOORING_TOKEN", raising=False)
+    config_store.add_repo("ws", owner="acme", repo="analytics", workspace=str(tmp_path / "ws"))
+    (tmp_path / "ws").mkdir(parents=True, exist_ok=True)
+    hub = Hub(config.load_app_config(env={}))
+    with TestClient(create_app(hub)) as client:
+        yield client, hub, tmp_path / "ws"
+
+
+def test_subscribe_narrows_and_clears_and_persists(repo_client):
+    client, _hub, ws = repo_client
+    client.post("/api/hub/context-folder", json={"folder": "a", "offered": True})
+    client.post("/api/hub/context-folder", json={"folder": "b", "offered": True})
+    # Unsubscribed → reads the whole offer.
+    assert set(client.get("/api/state").json()["selected_context_folders"]) == {"a", "b"}
+
+    # Unsubscribe from "a" → explicit subset persisted to the USER config (per-machine).
+    resp = client.post("/api/ai/context/subscribe", json={"folder": "a", "on": False})
+    assert resp.status_code == 200
+    assert resp.json()["selected_context_folders"] == ["b"]
+    assert client.get("/api/state").json()["selected_context_folders"] == ["b"]
+    udata = tomllib.loads(paths.user_config_file().read_text("utf-8"))
+    assert udata["repos"]["ws"]["ai_context_folders"] == ["b"]
+    # The offer itself (synced) is untouched by a personal subscription.
+    assert client.get("/api/state").json()["context_folders"] == ["a", "b"]
+
+    # Re-subscribe to "a" → all offered selected → the subscription is CLEARED (None).
+    resp = client.post("/api/ai/context/subscribe", json={"folder": "a", "on": True})
+    assert set(resp.json()["selected_context_folders"]) == {"a", "b"}
+    udata = tomllib.loads(paths.user_config_file().read_text("utf-8"))
+    assert "ai_context_folders" not in udata["repos"]["ws"]  # cleared, follows the offer
+
+
+def test_subscribe_rejects_a_folder_not_offered(repo_client):
+    client, _hub, _ws = repo_client
+    client.post("/api/hub/context-folder", json={"folder": "a", "offered": True})
+    resp = client.post("/api/ai/context/subscribe", json={"folder": "not-offered", "on": True})
+    assert resp.status_code == 400
+
+
+def test_subscribe_to_nothing_reads_nothing(repo_client):
+    client, _hub, _ws = repo_client
+    client.post("/api/hub/context-folder", json={"folder": "a", "offered": True})
+    resp = client.post("/api/ai/context/subscribe", json={"folder": "a", "on": False})
+    assert resp.status_code == 200
+    assert resp.json()["selected_context_folders"] == []  # explicit empty subscription
 
 
 def test_state_survives_non_utf8_mooring_toml(local_client):

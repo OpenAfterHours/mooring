@@ -32,6 +32,11 @@ class Table:
     domain: str = ""
     description: str = ""
     columns: tuple[Column, ...] = ()
+    # The context FOLDER this table was loaded from (a value-free path). NON-KEY:
+    # ``qualified`` and :meth:`DictionaryIndex.get` ignore it — it exists only to
+    # attribute a cross-folder collision in a :class:`ParseReport` (see
+    # :func:`merge_indexes`) when several context folders are read at once.
+    source: str = ""
 
     @property
     def qualified(self) -> str:
@@ -100,6 +105,53 @@ class DictionaryIndex:
                 scored.append((score, table))
         scored.sort(key=lambda s: (-s[0], s[1].qualified))
         return [t for _, t in scored[:limit]]
+
+
+# -- cross-folder merge (several context folders read at once) ---------------
+
+
+def merge_indexes(indexes_in_order: "list[DictionaryIndex]") -> "DictionaryIndex":
+    """Merge the per-folder indexes into one, FIRST-FOLDER-WINS on a name clash.
+
+    ``indexes_in_order`` is the list of :class:`DictionaryIndex` from each context
+    folder in precedence (stable sorted-folder) order. Tables are concatenated in
+    that order; on a duplicate ``qualified`` name (the domain is the FILE STEM, so
+    two ``credit.yaml`` in different folders both become domain ``credit``) the
+    earlier folder's table is kept and a :class:`ParseReport` is EMITTED for each
+    shadowed copy — a collision is surfaced, never silently resolved by concat
+    order (the "parsing is never silently wrong" contract). Every folder's own
+    reports are preserved. A single index passes through unchanged (byte-identical
+    single-folder behaviour), so ``get``/FK/annotation first-match stays
+    deterministic. ``Table.source`` disambiguates otherwise-identical findings.
+    """
+    if len(indexes_in_order) == 1:
+        return indexes_in_order[0]
+    merged: list[Table] = []
+    reports: list[ParseReport] = []
+    collisions: list[ParseReport] = []
+    winners: dict[str, Table] = {}
+    for index in indexes_in_order:
+        reports.extend(index.reports)
+        for table in index.tables:
+            key = table.qualified.lower()
+            winner = winners.get(key)
+            if winner is None:
+                winners[key] = table
+                merged.append(table)
+            else:
+                collisions.append(
+                    ParseReport(
+                        path=table.source or table.domain,
+                        domain=table.domain,
+                        shape="error",
+                        error=(
+                            f"duplicate table '{table.qualified}' - already defined by "
+                            f"context folder '{winner.source or '?'}'; this copy from "
+                            f"'{table.source or '?'}' is ignored"
+                        ),
+                    )
+                )
+    return DictionaryIndex(tables=tuple(merged), reports=tuple(reports + collisions))
 
 
 # -- rendering (what the tools / seeding serialise) -------------------------
