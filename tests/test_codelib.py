@@ -280,6 +280,23 @@ def test_adversarial_constructs_never_leak_values(source):
     assert SECRET not in blob
 
 
+def test_reports_explain_why_a_file_yielded_no_helpers(tmp_path):
+    # The `mooring ai code check` diagnostic keys off these reports: a notebook, a script,
+    # and a real helper are distinguishable so a user learns WHY the AI sees nothing.
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "nb.py").write_text(
+        "import marimo\napp = marimo.App()\n@app.cell\ndef _():\n    return 1\n", "utf-8"
+    )
+    (tmp_path / "src" / "script.py").write_text('print("hi")\nTOTAL = 3\n', "utf-8")
+    (tmp_path / "src" / "helpers.py").write_text("def clean(df): pass\n", "utf-8")
+    idx = loader.load_index(tmp_path, ["src"])
+    reports = {r.path: r for r in idx.reports}
+    assert reports["src/nb.py"].is_marimo and reports["src/nb.py"].n_functions == 0
+    assert not reports["src/script.py"].is_marimo and reports["src/script.py"].n_functions == 0
+    assert reports["src/helpers.py"].n_functions == 1
+    assert {m.import_path for m in idx.modules} == {"src.helpers"}  # only the real helper
+
+
 def test_helper_seed_is_empty_on_no_match(tmp_path):
     # Byte-identity guard: a non-empty index whose modules don't match the notebook seeds
     # nothing (no dangling head), so the system context is unchanged when nothing is relevant.

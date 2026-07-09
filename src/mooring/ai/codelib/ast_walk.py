@@ -131,6 +131,7 @@ def extract_module(
         path=rel,
         n_functions=len(functions),
         n_classes=len(classes),
+        is_marimo=marimo,
         dropped_nodes=tuple(sorted(dropped.items())),
     )
     return module, report
@@ -315,7 +316,7 @@ def _clean_doc(node) -> tuple[str, bool]:
     if not d:
         return "", False
     if len(d) > DOCSTRING_CAP:
-        d = d[:DOCSTRING_CAP].rstrip() + " …[trimmed]"
+        d = d[:DOCSTRING_CAP].rstrip() + " ...[trimmed]"
     if docscan.scan_docstring(d):
         return "", True
     return d, False

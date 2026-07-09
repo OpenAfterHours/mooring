@@ -92,6 +92,7 @@ class ExtractReport:
     error: str = ""
     n_functions: int = 0
     n_classes: int = 0
+    is_marimo: bool = False  # a marimo notebook (its cells are skipped) — for the check output
     dropped_nodes: tuple[tuple[str, int], ...] = ()  # (kind, count) — value-free drift report
 
 
