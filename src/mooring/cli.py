@@ -457,6 +457,15 @@ def _build_parser() -> argparse.ArgumentParser:
         help="parse synced .SemanticModel folders and report what's kept, excluded, and flagged",
     )
     ai_model_check.add_argument("--repo", default=None, metavar="ALIAS", help=_REPO_ARG_HELP)
+    ai_code = ai_sub.add_parser(
+        "code", help="inspect the copilot's reusable code library (importable .py helper modules)"
+    )
+    ai_code_sub = ai_code.add_subparsers(dest="ai_code_command", required=True)
+    ai_code_check = ai_code_sub.add_parser(
+        "check",
+        help="show which .py modules the copilot can reuse, and why the rest are skipped",
+    )
+    ai_code_check.add_argument("--repo", default=None, metavar="ALIAS", help=_REPO_ARG_HELP)
     ai_pii = ai_sub.add_parser(
         "pii", help="scan context/ and notebook source for structured-PII risks (offline)"
     )
@@ -1829,6 +1838,62 @@ def cmd_ai_context(
     return 0
 
 
+def cmd_ai_code_check(app_cfg: config.AppConfig, cfg: config.Config) -> int:
+    """Show exactly what the copilot's reusable code library would see: which importable
+    .py modules under the synced folders yield helpers, and WHY the rest were skipped
+    (a marimo notebook, a script with no top-level defs, an ignored/vendored tree, or a
+    parse error). Offline — the diagnostic for "the AI can't see my helpers"."""
+    from mooring.ai import codelib
+
+    workspace = cfg.workspace()
+    folders = cfg.folders
+    index = codelib.load_index(workspace, tuple(folders))
+    if not app_cfg.ai_code_index:
+        print("Note: [ai] code_index is OFF - set it true (hub Settings > AI copilot, or "
+              "config.toml) to actually use this in the chat.\n")
+    print(f"Scanned folders (the repo's synced folders): {', '.join(folders) or '(none)'}")
+    disabled = workspace_config.disabled_code_modules(workspace)
+    if disabled:
+        print(f"Per-module opt-outs ([ai] disabled_code_modules): {', '.join(sorted(disabled))}")
+    print("")
+    if not index.reports:
+        print(
+            "No .py files found under the synced folders. Helpers must live UNDER a synced "
+            "folder (run `mooring adopt <folder>` to sync a top-level utils/ folder) and be "
+            "importable."
+        )
+        return 0
+    kept = 0
+    for r in sorted(index.reports, key=lambda rep: rep.path):
+        if r.error:
+            reason = f"skipped - {r.error}"
+        elif r.n_functions == 0 and r.n_classes == 0:
+            reason = (
+                "marimo notebook - no reusable top-level helpers (its cells are skipped)"
+                if r.is_marimo
+                else "no reusable helpers (a script, or only private/underscore defs)"
+            )
+        else:
+            kept += 1
+            reason = f"{r.n_functions} function(s), {r.n_classes} class(es)"
+        print(f"  {r.path}: {reason}")
+    print(f"\n{kept} module(s) the copilot can reuse; {len(index.reports) - kept} yielded none.")
+    notes = [
+        (m.import_path or m.path, m.import_note)
+        for m in index.modules
+        if not m.importable and m.import_note
+    ]
+    if notes:
+        print("\nFound but not importable as-is (the copilot flags the import):")
+        for path, note in notes:
+            print(f"  {path}: {note}")
+    if index.modules:
+        print("\nSample of what the copilot sees (mooring_list_helpers):")
+        for line in codelib.render_listing(index).splitlines()[:20]:
+            print(f"  {line}")
+    return 0
+
+
 def cmd_ai_dictionary_check(app_cfg: config.AppConfig, cfg: config.Config) -> int:
     """Parse the workspace's data dictionary and report what mooring understood.
 
@@ -2313,6 +2378,11 @@ def cmd_ai(app_cfg: config.AppConfig, cfg: config.Config, args: argparse.Namespa
     if args.ai_command == "model":
         if args.ai_model_command == "check":
             return cmd_ai_model_check(app_cfg, cfg)
+        return 2
+
+    if args.ai_command == "code":
+        if args.ai_code_command == "check":
+            return cmd_ai_code_check(app_cfg, cfg)
         return 2
 
     if args.ai_command == "pii":

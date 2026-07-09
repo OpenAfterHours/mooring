@@ -211,6 +211,7 @@ source_modules =
     mooring.ai.batch
     mooring.ai.cellwrite
     mooring.ai.chat
+    mooring.ai.codelib
     mooring.ai.context
     mooring.ai.copilot
     mooring.ai.datadictionary

@@ -38,6 +38,47 @@ def test_privacy_rules_precede_instructions():
     assert "override" in out.lower()
 
 
+def test_helpers_text_is_byte_identical_when_empty():
+    base = build_system_context(**BASE)
+    assert build_system_context(**BASE, helpers_text="") == base
+    assert "RELEVANT HELPER MODULES" not in base
+    with_helpers = build_system_context(**BASE, helpers_text="Module `utils.helpers`\n  def clean()")
+    assert "RELEVANT HELPER MODULES" in with_helpers and "utils.helpers" in with_helpers
+
+
+def test_build_context_seeds_and_returns_the_code_library(tmp_path):
+    service, app_cfg, ws = _service_setup(tmp_path, env={"MOORING_AI_CODE_INDEX": "1"})
+    (ws / "utils").mkdir()
+    (ws / "utils" / "helpers.py").write_text(
+        "def clean_dates(df, cols: list):\n"
+        '    """Normalize dates."""\n'
+        '    key = "SECRET_VALUE_DO_NOT_LEAK"\n'
+        "    return key\n",
+        "utf-8",
+    )
+    (ws / "nb.py").write_text("import utils.helpers\n", "utf-8")  # references the helper
+    context, _i, _b, _l, _m, code_index = service.build_context(
+        app_cfg, ws, "nb.py", "", folders=("utils",)
+    )
+    assert code_index is not None and not code_index.is_empty()
+    assert "RELEVANT HELPER MODULES" in context
+    assert "clean_dates(df, cols: list)" in context
+    assert "from utils.helpers import" in context
+    assert "SECRET_VALUE_DO_NOT_LEAK" not in context  # the body literal is dropped
+
+
+def test_build_context_no_code_library_when_flag_off(tmp_path):
+    service, app_cfg, ws = _service_setup(tmp_path)  # [ai] code_index defaults OFF
+    (ws / "utils").mkdir()
+    (ws / "utils" / "helpers.py").write_text("def h(): pass\n", "utf-8")
+    (ws / "nb.py").write_text("import utils.helpers\n", "utf-8")
+    context, _i, _b, _l, _m, code_index = service.build_context(
+        app_cfg, ws, "nb.py", "", folders=("utils",)
+    )
+    assert code_index is None
+    assert "RELEVANT HELPER MODULES" not in context
+
+
 # -- ChatService.build_context: the semantic-model gates + the 5-tuple -----------
 
 
@@ -67,7 +108,7 @@ def _write_model(ws):
 def test_build_context_returns_models_and_a_names_only_hint(tmp_path):
     service, app_cfg, ws = _service_setup(tmp_path)
     _write_model(ws)
-    context, index, banner, live, models = service.build_context(
+    context, index, banner, live, models, _code = service.build_context(
         app_cfg, ws, "nb.py", "", folders=("reports",)
     )
     assert [m.key for m in models] == ["reports/Sales"]
@@ -77,7 +118,7 @@ def test_build_context_returns_models_and_a_names_only_hint(tmp_path):
 
 def test_build_context_no_models_when_none_exist(tmp_path):
     service, app_cfg, ws = _service_setup(tmp_path)
-    context, _index, _banner, _live, models = service.build_context(
+    context, _index, _banner, _live, models, _code = service.build_context(
         app_cfg, ws, "nb.py", "", folders=("reports",)
     )
     assert models == []
@@ -87,7 +128,7 @@ def test_build_context_no_models_when_none_exist(tmp_path):
 def test_build_context_gates_on_the_semantic_model_switch(tmp_path):
     service, app_cfg, ws = _service_setup(tmp_path, env={"MOORING_AI_SEMANTIC_MODEL": "0"})
     _write_model(ws)
-    context, _index, _banner, _live, models = service.build_context(
+    context, _index, _banner, _live, models, _code = service.build_context(
         app_cfg, ws, "nb.py", "", folders=("reports",)
     )
     assert models == []
@@ -100,7 +141,7 @@ def test_build_context_drops_models_the_team_opted_out(tmp_path):
     service, app_cfg, ws = _service_setup(tmp_path)
     _write_model(ws)
     workspace_config.set_semantic_model_disabled(ws, "reports/Sales", True)
-    context, _index, _banner, _live, models = service.build_context(
+    context, _index, _banner, _live, models, _code = service.build_context(
         app_cfg, ws, "nb.py", "", folders=("reports",)
     )
     assert models == []
@@ -120,7 +161,7 @@ def test_build_context_merges_multiple_offered_context_folders(tmp_path):
     (ws / "ctx_b").mkdir()
     (ws / "ctx_b" / "instructions.md").write_text("Fiscal year starts in April.", "utf-8")
 
-    context, _index, _banner, _live, _models = service.build_context(app_cfg, ws, "nb.py", "")
+    context, _index, _banner, _live, _models, _code = service.build_context(app_cfg, ws, "nb.py", "")
 
     assert _INSTR_HEADER in context
     assert "Report amounts in GBP." in context and "Fiscal year starts in April." in context

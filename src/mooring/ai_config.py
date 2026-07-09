@@ -91,6 +91,12 @@ class AiConfig:
     # extractor is allowlist-based (M partitions/roles/annotations never read) and
     # a synced per-model opt-out lives in the workspace mooring.toml.
     semantic_model: bool = True
+    # Read the team's importable .py helper modules under the synced folders and offer
+    # the copilot their value-free API SKELETON (signatures + scanned docstrings, NEVER a
+    # body) so it can reuse them. Extracted via ast (never imported/executed). OPT-IN, off
+    # by default: it is a new egress surface (docstrings are best-effort, like a dictionary
+    # description). A synced per-module opt-out lives in the workspace mooring.toml.
+    code_index: bool = False
     # Sanitise-and-hold for pasted Python tracebacks (which can embed data values).
     # Default ON: it only ever REMOVES information, and the raw paste is never
     # stored, so there is no send-raw path. Turning it off is a weakening flip.
@@ -196,6 +202,7 @@ def load_ai_config(ai: Mapping, env: Mapping[str, str]) -> AiConfig:
         semantic_model=_as_bool(
             env.get("MOORING_AI_SEMANTIC_MODEL"), _as_bool(ai.get("semantic_model"), True)
         ),
+        code_index=_as_bool(env.get("MOORING_AI_CODE_INDEX"), _as_bool(ai.get("code_index"), False)),
         traceback_guard=_as_bool(
             env.get("MOORING_AI_TRACEBACK_GUARD"), _as_bool(ai.get("traceback_guard"), True)
         ),

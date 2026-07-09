@@ -388,6 +388,34 @@ an offered folder rides `pull` to a teammate who has **not** subscribed to it �
 value-free files on disk that never enter the model's context. (`context` off is still
 "neither read nor synced".)
 
+### Code library: reusing your team's helper functions (opt-in)
+
+With `[ai] code_index = true` (**off by default**), the copilot can **discover and
+reuse** your team's own helper functions/classes — the importable `.py` modules under
+your synced folders — instead of re-implementing them. mooring extracts each module's
+**API skeleton** with Python's `ast` and feeds the model only that.
+
+- **It is parsed, never imported or executed.** `ast.parse` reads the text; nothing in
+  the extractor imports the module, runs it, or evaluates a literal — so a module with an
+  import-time side effect is analysed without triggering it (pinned by a canary test).
+- **What the model sees is a value-free skeleton, by construction:** function/class/method
+  **names**, **signatures** (a present default renders as `...`, never its value), **type
+  hints** (string/number constants inside them are blanked), decorator/base **name-heads**
+  (call arguments dropped), and each symbol's **docstring** — plus the exact
+  `from pkg.mod import name` line to reuse it. A function **body**, any **literal**, a
+  **default value**, and a **constant value** have *no slot* in the model — they are
+  structurally impossible to send, not merely filtered. This does not rely on the
+  PII scanner below (which catches only well-formed identifiers).
+- **The one weaker slot is the docstring** — prose your team wrote, the same best-effort
+  tier as a data-dictionary description. It is scanned and withheld on a high-confidence
+  hit, but a plain-text value a regex can't match can survive. Docstrings live in your
+  own reviewed source, so treat them like the code they document.
+- **There is deliberately no "read the source body" tool.** Real function bodies are a
+  general value channel no scanner can make value-blind, so v1 exposes only the skeleton
+  (three value-free tools: `list_helpers`, `describe_helper`, `search_helpers`).
+
+A per-module opt-out lives in the synced `mooring.toml` (`[ai] disabled_code_modules`).
+
 ## Structured-PII pre-flight scan (opt-in, best-effort)
 
 The guarantees above stop the *data* from reaching the model. They cannot stop a

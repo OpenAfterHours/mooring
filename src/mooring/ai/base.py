@@ -77,6 +77,7 @@ class AIProvider(Protocol):
         reasoning_effort: str | None = None,
         dictionary=None,
         semantic_models=None,
+        helpers=None,
         pii: "PiiConfig | None" = None,
     ):
         """Open a long-lived, streaming chat session (a ``ChatBroadcaster``).

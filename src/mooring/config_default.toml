@@ -106,6 +106,16 @@ semantic_model = true       # let the copilot read a synced Power BI semantic mo
                             # even opened. A per-model opt-out lives in the
                             # SYNCED mooring.toml ([ai] disabled_semantic_models); run
                             # `mooring ai model check` to preview exactly what it would see.
+code_index = false          # OPT-IN, off by default: read the team's importable .py helper
+                            # modules under the synced folders and offer the copilot their
+                            # value-free API SKELETON (function/class NAMES + signatures +
+                            # type hints + scanned docstrings — NEVER a function body, a
+                            # literal, or any data value) so it can DISCOVER and REUSE them
+                            # instead of re-implementing. Extracted with `ast` — the modules
+                            # are never imported or executed. The skeleton is structurally
+                            # value-free; docstrings are the one best-effort slot (scanned,
+                            # like a dictionary description). A per-module opt-out lives in
+                            # the SYNCED mooring.toml ([ai] disabled_code_modules).
 traceback_guard = true      # when a chat message contains a pasted Python traceback,
                             # rewrite it value-safe before it leaves (exception types and
                             # workspace frames kept — their source re-read from disk —

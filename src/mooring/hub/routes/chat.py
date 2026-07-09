@@ -44,7 +44,7 @@ async def api_chat_open(request: Request) -> JSONResponse:
         # File IO (notebook source, dataset schema, team context, semantic-model
         # extraction) — off the event loop so a slow read can't stall the hub's
         # other requests.
-        context, index, pii_banner, live_text, models = await run_in_threadpool(
+        context, index, pii_banner, live_text, models, code_index = await run_in_threadpool(
             hub._build_chat_context, workspace, notebook, dataset
         )
     except ValueError as exc:
@@ -61,6 +61,7 @@ async def api_chat_open(request: Request) -> JSONResponse:
             reasoning_effort=reasoning_effort,
             dictionary=index,
             semantic_models=models,
+            helpers=code_index,
         )
     except Exception as exc:  # noqa: BLE001  # AIError surfaces to the UI in Phase 1
         return JSONResponse({"error": str(exc)}, status_code=502)

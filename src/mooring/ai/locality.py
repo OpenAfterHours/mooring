@@ -15,6 +15,7 @@ already passed the five-slot allowlist in :mod:`mooring.ai.datadictionary`.
 
 from __future__ import annotations
 
+import ast
 import re
 
 from mooring.ai.datadictionary import DictionaryIndex, Table, render_tables
@@ -23,6 +24,7 @@ _IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 SEED_MAX_TABLES = 8
 SEED_MAX_COLUMNS_TOTAL = 200
+HELPER_SEED_MAX_MODULES = 8
 
 
 def _identifiers(notebook_source: str) -> set[str]:
@@ -137,6 +139,120 @@ def seed_text(tables: list[Table], reasons: dict[str, str], n_more: int) -> str:
     body = render_tables(tables)
     if n_more:
         body += f"\n\n(+{n_more} more relevant tables not shown - ask and I'll look them up.)"
+    return f"{head}\n\n{body}"
+
+
+# -- code library (reusable helper modules) locality ---------------------------
+# The same token-optimisation idea as the dictionary above, applied to the value-free
+# code skeleton: seed the skeletons of modules the notebook already imports / references,
+# and leave the rest to the pull tools. Every signal is value-free (module + symbol NAMES,
+# the notebook's own import statements), so seeding reveals nothing new.
+
+
+def _notebook_imports(notebook_source: str) -> set[str]:
+    """Lower-cased module names the notebook imports (ast-parsed) — the highest-precision
+    reuse signal. Empty on a syntax error."""
+    names: set[str] = set()
+    try:
+        tree = ast.parse(notebook_source or "")
+    except (SyntaxError, ValueError):
+        return names
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for n in node.names:
+                names.add(n.name.lower())
+                names.add(n.name.split(".")[0].lower())
+                if n.asname:
+                    names.add(n.asname.lower())
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            names.add(node.module.lower())
+            names.add(node.module.split(".")[0].lower())
+    return names
+
+
+def helper_working_set(
+    code_index,
+    *,
+    notebook_source: str = "",
+    notebook_rel: str = "",
+    max_modules: int = HELPER_SEED_MAX_MODULES,
+    expand_imports: bool = True,
+) -> tuple[list, dict[str, str], int]:
+    """Return ``(modules, reasons, n_more)`` — the helper modules to seed, why each was
+    chosen (keyed by import_path/path), and how many relevant modules didn't fit."""
+    if code_index.is_empty():
+        return [], {}, 0
+    imported = _notebook_imports(notebook_source)
+    idents = _identifiers(notebook_source)
+    folder = _folder_domain(notebook_rel)
+
+    scored: list[tuple[int, object, str]] = []
+    for module in code_index.modules:
+        score = 0
+        reasons: list[str] = []
+        ip = module.import_path.lower()
+        stem = ip.split(".")[-1] if ip else ""
+        aliases = {a.lower() for _, a in module.import_aliases}
+        if ip and (ip in imported or stem in imported or (aliases & imported)):
+            score += 5
+            reasons.append("imported by your notebook")
+        symbols = {f.name.lower() for f in module.functions} | {c.name.lower() for c in module.classes}
+        if (stem and stem in idents) or (symbols & idents):
+            score += 4
+            reasons.append("referenced in your notebook")
+        top = ip.split(".")[0] if ip else ""
+        if folder and top and folder == top:
+            score += 1
+            reasons.append("in your working area")
+        if score > 0:
+            scored.append((score, module, "; ".join(reasons)))
+
+    scored.sort(key=lambda s: (-s[0], (s[1].import_path or s[1].path)))
+    selected: list = []
+    reasons_out: dict[str, str] = {}
+    overflow = 0
+    for _score, module, reason in scored:
+        if len(selected) >= max_modules:
+            overflow += 1
+            continue
+        selected.append(module)
+        reasons_out[module.import_path or module.path] = reason
+
+    if expand_imports:
+        by_path = {m.import_path: m for m in code_index.modules if m.import_path}
+        chosen = {m.import_path or m.path for m in selected}
+        for module in list(selected):
+            for imp in module.imports:
+                parts = imp.lstrip(".").split(".")
+                for i in range(len(parts), 0, -1):
+                    hit = by_path.get(".".join(parts[:i]))
+                    if hit and hit.import_path not in chosen and len(selected) < max_modules:
+                        selected.append(hit)
+                        chosen.add(hit.import_path)
+                        reasons_out[hit.import_path] = f"used by {module.import_path or module.path}"
+                        break
+    return selected, reasons_out, overflow
+
+
+def helper_seed_text(modules: list, reasons: dict[str, str], n_more: int) -> str:
+    """The 'RELEVANT HELPER MODULES' block. Returns '' when nothing matched — so a repo
+    with .py present but no relevant module adds NO dangling head (byte-identity)."""
+    if not modules:
+        return ""
+    from mooring.ai import codelib
+
+    def _key(m):
+        return m.import_path or m.path
+
+    why = "; ".join(f"{_key(m)} ({reasons.get(_key(m), 'relevant')})" for m in modules)
+    head = (
+        "Auto-selected reusable helpers for your current work (more exist - use "
+        "mooring_search_helpers / mooring_describe_helper to fetch them).\n"
+        f"Loaded: {why}."
+    )
+    body = codelib.render_modules(modules, max_methods=12)
+    if n_more:
+        body += f"\n\n(+{n_more} more relevant modules not shown - ask and I'll look them up.)"
     return f"{head}\n\n{body}"
 
 

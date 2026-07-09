@@ -240,6 +240,37 @@ class ChatService:
             ]
             semantic_models_text = pbip_model.render_models_hint(models)
 
+        # Team code library: the value-free API skeleton of the team's importable .py
+        # helper modules under the synced folders (mooring.ai.codelib — ast only, NEVER
+        # imported/executed), gated on the opt-in [ai] code_index. Only a locality-selected
+        # NAMES + SIGNATURES seed enters the context; the rest stays behind the helper tools,
+        # and the parsed index rides as the 6th tuple element so the session offers them.
+        code_index = None
+        helpers_text = ""
+        if app_cfg.ai_code_index and folders:
+            from mooring.ai import codelib
+
+            off = workspace_config.disabled_code_modules(workspace)
+            full = codelib.load_index(
+                workspace, tuple(folders), exclude=(notebook_rel, dataset_rel)
+            )
+            code_index = (
+                replace(
+                    full,
+                    modules=tuple(
+                        m
+                        for m in full.modules
+                        if workspace_config.normalize_notebook(m.import_path or m.path) not in off
+                    ),
+                )
+                if off
+                else full
+            )
+            hmods, hreasons, hmore = locality.helper_working_set(
+                code_index, notebook_source=source, notebook_rel=notebook_rel
+            )
+            helpers_text = locality.helper_seed_text(hmods, hreasons, hmore)
+
         context = egress.build_system_context(
             schema_text=schema_text,
             notebook_source=source,
@@ -248,6 +279,7 @@ class ChatService:
             instructions_text=repo_ctx.instructions,
             dictionary_text=dictionary_text,
             semantic_models_text=semantic_models_text,
+            helpers_text=helpers_text,
             # Let the copilot AUTHOR value-free tie-out checks on request. This is a
             # static capability note (the mooring_checks API), never a receipt or a
             # value — so it opens no new egress channel.
@@ -262,7 +294,7 @@ class ChatService:
             # so the copilot can write connection code that references them.
             connections_help=workspace_config.connections_hint(workspace),
         )
-        return context, (index if has_dict else DictionaryIndex()), pii_banner, live_text, models
+        return context, (index if has_dict else DictionaryIndex()), pii_banner, live_text, models, code_index
 
     # -- live-kernel schema pipeline ---------------------------------------------
 

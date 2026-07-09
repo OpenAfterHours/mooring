@@ -242,6 +242,10 @@ class AppConfig:
         return self.ai.semantic_model
 
     @property
+    def ai_code_index(self) -> bool:
+        return self.ai.code_index
+
+    @property
     def ai_traceback_guard(self) -> bool:
         return self.ai.traceback_guard
 

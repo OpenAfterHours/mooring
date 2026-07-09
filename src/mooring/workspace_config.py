@@ -191,6 +191,26 @@ def is_semantic_model_disabled(workspace: Path, model_key: str) -> bool:
     return normalize_notebook(model_key) in disabled_semantic_models(workspace)
 
 
+def _disabled_code_modules_list(data: dict) -> set[str]:
+    """The normalized code-module opt-out set (``[ai] disabled_code_modules``) — dotted
+    import paths or workspace-relative .py paths the copilot's code library skips."""
+    ai = data.get("ai")
+    if not isinstance(ai, dict):
+        return set()
+    raw = ai.get("disabled_code_modules", [])
+    if isinstance(raw, str):
+        raw = [raw]
+    if not isinstance(raw, list):
+        return set()
+    return {normalize_notebook(p) for p in raw if str(p).strip()}
+
+
+def disabled_code_modules(workspace: Path) -> set[str]:
+    """The set of helper modules (dotted import path or .py path) the code library is OFF
+    for. Fails open like the rest of the read side (a malformed file → no opt-outs)."""
+    return _disabled_code_modules_list(_read_data(workspace))
+
+
 def set_semantic_model_disabled(workspace: Path, model_key: str, disabled: bool) -> bool:
     """Add/remove a semantic model from the opt-out list, preserving every other
     key and section in ``mooring.toml`` (the :func:`set_ai_disabled` idiom: strict

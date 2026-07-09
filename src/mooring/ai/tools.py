@@ -112,6 +112,19 @@ MODEL_TOOL_NAMES = [
     "mooring_get_measure",
 ]
 
+# Added only when the workspace's offered folders hold importable .py modules (and the
+# feature is on — the caller applies the gate). Same shape as the dictionary/model trios:
+# name lookups in the pre-parsed in-memory CodeIndex (never a caller path), serving the
+# value-free API skeleton from mooring.ai.codelib — module import paths, structurally
+# value-free signatures, sanitised type hints, and best-effort-scanned docstrings. Function
+# bodies, literals, and constant values were never parsed, so no tool can reach them. There
+# is deliberately NO get_source tool: real bodies are a value channel no floor makes safe.
+HELPER_TOOL_NAMES = [
+    "mooring_list_helpers",
+    "mooring_describe_helper",
+    "mooring_search_helpers",
+]
+
 
 def _safe(workspace: Path, rel: str) -> Path:
     target = (workspace / rel).resolve()
@@ -160,6 +173,7 @@ def build_tool_specs(
     emit_proposal_patch: Callable[[dict], None] | None = None,
     dictionary=None,
     semantic_models=None,
+    code_index=None,
     pii_enabled: bool = False,
 ) -> list["ToolSpec"]:
     """Build the safe tools as provider-neutral :class:`ToolSpec`s, bound to one
@@ -427,6 +441,46 @@ def build_tool_specs(
         rendered, _ = egress.scrub_text("\n\n".join(render_table(t, max_cols=12) for t in hits))
         return _ok(rendered)
 
+    # The code-library tools serve the PRE-PARSED API skeleton (mooring.ai.codelib):
+    # module import paths, value-free signatures, sanitised type hints, best-effort-scanned
+    # docstrings. Lookups are by NAME in the in-memory CodeIndex — never a caller path — and
+    # every rendered string still passes egress.scrub_text (defence in depth; the real
+    # value-blindness is the structural allowlist, since egress is only a checksum floor).
+    # There is no source-body tool by design.
+
+    def list_helpers(_invocation):
+        from mooring.ai import codelib
+
+        assert code_index is not None  # helper tools only registered when it is present
+        listing, _ = egress.scrub_text(codelib.render_listing(code_index))
+        return _ok(listing or "(the team code library is empty)")
+
+    def describe_helper(invocation):
+        from mooring.ai import codelib
+
+        name = str(_args(invocation).get("name", "")).strip()
+        if not name:
+            return _err("name required")
+        assert code_index is not None
+        rendered = codelib.render_lookup(code_index, name)
+        if not rendered:
+            return _ok(f"No helper named {name!r} in the team code library.")
+        out, _ = egress.scrub_text(rendered)
+        return _ok(out)
+
+    def search_helpers(invocation):
+        from mooring.ai import codelib
+
+        query = str(_args(invocation).get("query", "")).strip()
+        if not query:
+            return _err("query required")
+        assert code_index is not None
+        hits = code_index.search(query, limit=8)
+        if not hits:
+            return _ok(f"No helpers match {query!r}.")
+        out, _ = egress.scrub_text(codelib.render_modules(hits, max_methods=12))
+        return _ok(out)
+
     # The semantic-model tools serve the PRE-PARSED allowlist skeleton (tables,
     # columns+dataTypes, relationships, measure DAX — mooring.pbip_model; partition
     # M, roles, annotations, and translations were never parsed, so no tool can
@@ -688,6 +742,51 @@ def build_tool_specs(
             ),
         ]
 
+    if code_index is not None and not code_index.is_empty():
+        specs += [
+            ToolSpec(
+                "mooring_list_helpers",
+                "List the team's reusable helper modules with each function/class NAME and "
+                "signature (so you can reuse them instead of re-implementing) — never a body "
+                "or any data value.",
+                handler=list_helpers,
+                parameters={"type": "object", "properties": {}},
+                skip_permission=True,  # serves the value-free in-memory code index
+            ),
+            ToolSpec(
+                "mooring_describe_helper",
+                "Describe one helper (a module, function, class, or Class.method): its "
+                "signature, type hints, docstring, and the exact `from ... import ...` line "
+                "to reuse it. Never a function body or any data value.",
+                handler=describe_helper,
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "name": {
+                            "type": "string",
+                            "description": "a module import path, or a function/class/Class.method name",
+                        }
+                    },
+                    "required": ["name"],
+                },
+                skip_permission=True,  # name lookup in-memory; never a path, never a value
+            ),
+            ToolSpec(
+                "mooring_search_helpers",
+                "Search the team's helper library for functions/classes matching a query "
+                "(use before writing a helper yourself). Returns signatures — never a body.",
+                handler=search_helpers,
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "a helper name/term to search for"}
+                    },
+                    "required": ["query"],
+                },
+                skip_permission=True,  # searches the value-free in-memory code index
+            ),
+        ]
+
     if models:
         _MODEL_ARG = {
             "type": "string",
@@ -747,6 +846,7 @@ def build_tools(
     emit_proposal_patch: Callable[[dict], None] | None = None,
     dictionary=None,
     semantic_models=None,
+    code_index=None,
     pii_enabled: bool = False,
 ) -> list:
     """The GitHub Copilot adapter over :func:`build_tool_specs`.
@@ -774,6 +874,7 @@ def build_tools(
         emit_proposal_patch=emit_proposal_patch,
         dictionary=dictionary,
         semantic_models=semantic_models,
+        code_index=code_index,
         pii_enabled=pii_enabled,
     )
 
@@ -804,6 +905,7 @@ def build_openai_tools(
     emit_proposal_patch: Callable[[dict], None] | None = None,
     dictionary=None,
     semantic_models=None,
+    code_index=None,
     pii_enabled: bool = False,
 ) -> tuple[list[dict], dict[str, Callable[[object], "ToolOutput"]]]:
     """The OpenAI adapter over :func:`build_tool_specs`.
@@ -830,6 +932,7 @@ def build_openai_tools(
         emit_proposal_patch=emit_proposal_patch,
         dictionary=dictionary,
         semantic_models=semantic_models,
+        code_index=code_index,
         pii_enabled=pii_enabled,
     )
     tool_specs = [
