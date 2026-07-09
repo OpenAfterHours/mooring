@@ -207,6 +207,7 @@ def build_system_context(
     instructions_text: str = "",
     dictionary_text: str = "",
     semantic_models_text: str = "",
+    helpers_text: str = "",
     checks_help: str = "",
     sql_help: str = "",
     inputs_help: str = "",
@@ -241,6 +242,9 @@ def build_system_context(
     instructions_text, _ = scrub_text(instructions_text)
     dictionary_text, _ = scrub_text(dictionary_text)
     semantic_models_text, _ = scrub_text(semantic_models_text)
+    # helpers_text is the value-free code skeleton (mooring.ai.codelib); scrubbed here as
+    # defence in depth, though its value-blindness is the structural ast allowlist, not this.
+    helpers_text, _ = scrub_text(helpers_text)
     # connections_help carries USER-authored connection shape values (unlike the static
     # checks_help/sql_help capability notes), so it gets the same scrub backstop.
     connections_help, _ = scrub_text(connections_help)
@@ -280,6 +284,11 @@ def build_system_context(
         parts.append(
             "POWER BI SEMANTIC MODELS (names only — use the model tools for detail):\n"
             + semantic_models_text.strip()
+        )
+    if helpers_text.strip():
+        parts.append(
+            "RELEVANT HELPER MODULES (reuse these via their import line — signatures/"
+            "docstrings only, never a body):\n" + helpers_text.strip()
         )
     if instructions_text.strip():
         parts.append(

@@ -298,6 +298,7 @@ class CopilotProvider:
         reasoning_effort: str | None = None,
         dictionary=None,
         semantic_models=None,
+        helpers=None,
         pii: PiiConfig | None = None,
         traceback_guard: bool = True,
         background: bool = False,
@@ -347,6 +348,7 @@ class CopilotProvider:
             notebook_rel=notebook_rel,
             dictionary=dictionary,
             semantic_models=semantic_models,
+            helpers=helpers,
             pii_enabled=pii.enabled,
             pii_block=pii.block_prompt,
             # NER name detection only acts when the whole guard is on.

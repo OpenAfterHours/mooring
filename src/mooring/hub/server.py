@@ -784,6 +784,7 @@ class Hub:
         reasoning_effort: str | None = None,
         dictionary=None,
         semantic_models=None,
+        helpers=None,
     ):
         """Open a streaming Copilot chat session bound to this notebook.
 
@@ -805,6 +806,7 @@ class Hub:
             reasoning_effort=reasoning_effort,
             dictionary=dictionary,
             semantic_models=semantic_models,
+            helpers=helpers,
             # The whole guard config travels as ONE object, so a field can't be
             # silently dropped on the way to the session (the session downloads any
             # NER model in the background and the prompt path skips it until ready).

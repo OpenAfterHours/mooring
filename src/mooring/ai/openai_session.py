@@ -37,7 +37,12 @@ from typing import TYPE_CHECKING, Any
 from mooring.ai import egress
 from mooring.ai.base import AIError, AINotConnectedError
 from mooring.ai.chat import ChatBroadcaster, ChatEvent
-from mooring.ai.session import _DICT_TOOL_GUIDE, _MODEL_TOOL_GUIDE, _TOOL_GUIDE
+from mooring.ai.session import (
+    _DICT_TOOL_GUIDE,
+    _HELPER_TOOL_GUIDE,
+    _MODEL_TOOL_GUIDE,
+    _TOOL_GUIDE,
+)
 from mooring.ai.tools import build_openai_tools
 
 if TYPE_CHECKING:
@@ -66,6 +71,7 @@ class OpenAIChatSession(ChatBroadcaster):
         reasoning_effort: str | None = None,
         dictionary=None,
         semantic_models=None,
+        helpers=None,
         pii_enabled: bool = False,
         pii_block: bool = True,
         pii_names: bool = False,
@@ -93,6 +99,8 @@ class OpenAIChatSession(ChatBroadcaster):
         guide = _TOOL_GUIDE
         if dictionary is not None and not dictionary.is_empty():
             guide += _DICT_TOOL_GUIDE
+        if helpers is not None and not helpers.is_empty():
+            guide += _HELPER_TOOL_GUIDE
         if semantic_models:
             guide += _MODEL_TOOL_GUIDE
         self._system_context = system_context + guide
@@ -100,6 +108,7 @@ class OpenAIChatSession(ChatBroadcaster):
         self._folders = tuple(folders)
         self._notebook_rel = notebook_rel
         self._dictionary = dictionary
+        self._helpers = helpers
         self._semantic_models = list(semantic_models or [])
         self._pii_enabled = pii_enabled
         self._client_factory = client_factory
@@ -157,6 +166,7 @@ class OpenAIChatSession(ChatBroadcaster):
                 emit_proposal_patch=self._emit_proposal_patch,
                 dictionary=self._dictionary,
                 semantic_models=self._semantic_models,
+                code_index=self._helpers,
                 pii_enabled=self._pii_enabled,
             )
         except AINotConnectedError as exc:
