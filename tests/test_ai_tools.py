@@ -180,6 +180,31 @@ def test_investigate_progress_is_a_noop_without_a_sink(ws):
     assert not spec.handler(_invocation(branches=[{"question": "q"}])).is_error
 
 
+def test_investigate_copilot_handler_is_async_so_it_cannot_wedge_the_event_loop(ws):
+    # The Copilot SDK calls tool handlers ON the session's asyncio loop thread and awaits an
+    # awaitable result. The fan-out blocks for as long as its slowest branch, so its handler
+    # MUST be a coroutine that offloads to a worker thread — otherwise close()/teardown
+    # (scheduled with run_coroutine_threadsafe) can never run until the fan-out finishes.
+    import asyncio
+    import inspect
+
+    tools = {
+        t.name: t
+        for t in build_tools(
+            workspace=ws,
+            folders=("data",),
+            notebook_rel="nb.py",
+            emit_proposal=lambda *a, **k: None,
+            run_investigation=lambda b, on_progress=None: "merged findings",
+        )
+    }
+    assert inspect.iscoroutinefunction(tools["mooring_investigate"].handler)
+    res = asyncio.run(tools["mooring_investigate"].handler(_invocation(branches=[{"question": "q"}])))
+    assert "merged findings" in res.text_result_for_llm
+    # Every other (fast) tool stays a plain sync callable — no needless thread hop.
+    assert not inspect.iscoroutinefunction(tools["mooring_get_schema"].handler)
+
+
 def test_investigate_tool_rejects_empty_branches(ws):
     spec = {
         s.name: s

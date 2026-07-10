@@ -804,8 +804,16 @@ class Hub:
         # READ-ONLY sub-agents per branch and returns their merged findings. None when the
         # feature is off, so open_chat doesn't build mooring_investigate. The sub-agents
         # never get this tool (open_readonly forces read_only=True), so depth is bounded to 1.
+        import threading
+
         from mooring.app.investigate_service import make_run_investigation
 
+        # The parent session's cancel signal for work that OUTLIVES a turn. A fan-out runs
+        # read-only sub-agents on its own pool while the parent's tool call blocks, so
+        # closing / idle-reaping / repo-switching the chat must stop them — otherwise each
+        # branch runs to its full branch_timeout, burning spend the analyst cancelled. It
+        # is armed by a close hook once the session exists (below).
+        investigate_abort = threading.Event()
         run_investigation = make_run_investigation(
             app_cfg=self.app_cfg,
             notebook_rel=notebook_rel,
@@ -815,8 +823,9 @@ class Hub:
             open_readonly_session=lambda ctx, nb, m, e: self._make_investigator_session(
                 ctx, workspace, nb, model=m, reasoning_effort=(e or None)
             ),
+            abort=investigate_abort,
         )
-        return provider.open_chat(
+        session = provider.open_chat(
             system_context=system_context,
             workspace=workspace,
             folders=self.cfg.folders,
@@ -839,6 +848,10 @@ class Hub:
             # handshake — stream readiness/failure over the SSE channel instead.
             background=True,
         )
+        # Arm the cancel signal: closing the session (explicit close, idle-reap, repo
+        # switch, shutdown) now aborts any in-flight investigation within one poll.
+        session.add_close_hook(investigate_abort.set)
+        return session
 
     def _make_investigator_session(
         self, ctx, workspace: Path, notebook_rel: str, model: str = "", reasoning_effort=None

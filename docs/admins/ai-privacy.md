@@ -100,7 +100,7 @@ DAX), but never the data itself.
 Nothing about a conversation is persisted: the session store, telemetry, config
 discovery, skills, file hooks, and host-git access are all switched off.
 
-## Parallel "investigate": read-only sub-agents (opt-in) { #investigate }
+## Parallel "investigate": read-only sub-agents (on by default) { #investigate }
 
 On by default (opt out with `[ai.investigate] enabled = false`, or
 `MOORING_AI_INVESTIGATE=false`). It defaults on because it adds **no** data surface — it

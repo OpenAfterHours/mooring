@@ -132,7 +132,7 @@ def test_default_notebook_is_used_when_a_branch_names_none():
 
 
 def test_a_silent_branch_times_out_as_failed():
-    planner = _planner([SilentSession()], config=InvestigateConfig(enabled=True, branch_timeout=1))
+    planner = _planner([SilentSession()], config=InvestigateConfig(enabled=True, branch_timeout=1, max_concurrency=2))
     [r] = planner.run([BranchJob(question="q")])
     assert r.status == "failed"
 
@@ -156,7 +156,9 @@ def test_preflight_blocks_a_checksum_pii_subquestion_before_opening_a_session():
 
 
 def test_block_investigation_policy_aborts_all_branches():
-    cfg = InvestigateConfig(enabled=True, pii_policy="block_investigation", branch_timeout=2)
+    cfg = InvestigateConfig(
+        enabled=True, pii_policy="block_investigation", branch_timeout=2, max_concurrency=2
+    )
     opened = []
     planner = _planner(
         [ScriptedSession(_msg("x"))], pii=PiiConfig(enabled=True), config=cfg, opened=opened
@@ -170,7 +172,7 @@ def test_block_investigation_policy_aborts_all_branches():
 
 
 def test_max_branches_caps_the_fan_out():
-    cfg = InvestigateConfig(enabled=True, max_branches=2, branch_timeout=2)
+    cfg = InvestigateConfig(enabled=True, max_branches=2, branch_timeout=2, max_concurrency=2)
     sessions = [ScriptedSession(_msg(f"f{i}")) for i in range(2)]
     results = _planner(sessions, config=cfg).run([BranchJob(question=f"q{i}") for i in range(5)])
     assert len(results) == 2
@@ -199,8 +201,117 @@ def test_merge_drops_a_checksum_pii_line_from_a_finding():
     assert "a safe line" in merged
 
 
-def test_empty_findings_merge_to_empty_string():
-    assert merge_findings([BranchResult("q", "failed", error="boom")]) == ""
+def test_only_a_truly_empty_result_set_merges_to_the_empty_string():
+    # No branches at all -> nothing to say. But a branch that FAILED must still be
+    # reported (see test_merge_reports_the_notes_even_when_nothing_usable_came_back),
+    # otherwise the model cannot tell "nothing ran" from "everything failed".
+    assert merge_findings([]) == ""
+    failed = merge_findings([BranchResult("q", "failed", error="boom")])
+    assert "no usable findings" in failed and "returned nothing" in failed
+
+
+def test_planner_refuses_an_unresolved_auto_concurrency_instead_of_going_serial():
+    # 0 = AUTO is a CONFIG sentinel only the app factory can resolve (it knows the
+    # provider). Collapsing it to 1 would silently make the fan-out serial.
+    import pytest
+
+    with pytest.raises(ValueError, match="resolved max_concurrency"):
+        InvestigatePlanner(
+            config=InvestigateConfig(enabled=True),  # max_concurrency defaults to 0
+            pii=PiiConfig(),
+            build_context=lambda nb, ds: "CTX",
+            open_session=lambda *a: None,
+        )
+
+
+def test_abort_stops_in_flight_branches_and_skips_the_rest():
+    import threading
+
+    abort = threading.Event()
+    abort.set()  # the parent session closed before the fan-out started
+    it = iter([ScriptedSession(_msg("never")), ScriptedSession(_msg("never"))])
+    opened = []
+    planner = InvestigatePlanner(
+        config=InvestigateConfig(enabled=True, branch_timeout=2, max_concurrency=2),
+        pii=PiiConfig(),
+        build_context=lambda nb, ds: "CTX",
+        open_session=lambda *a: (opened.append(1), next(it))[1],
+        abort=abort,
+    )
+    results = planner.run([BranchJob(question="q0"), BranchJob(question="q1")])
+    assert [r.status for r in results] == ["not_run", "not_run"]
+    assert opened == []  # nothing spawned once the parent is gone
+
+
+def test_close_hook_fires_once_and_a_broken_hook_does_not_stop_teardown():
+    calls = []
+    s = ScriptedSession([])
+    s.add_close_hook(lambda: (_ for _ in ()).throw(RuntimeError("boom")))  # broken hook
+    s.add_close_hook(lambda: calls.append("aborted"))
+    s.close()
+    s.close()  # idempotent
+    assert calls == ["aborted"]
+
+
+def test_a_cut_short_branch_is_marked_truncated_and_labelled_in_the_merge():
+    # Deltas arrive but the session never goes idle -> the deadline cuts it off. The partial
+    # text must NOT read to the parent model as a complete finding.
+    events = [("delta", {"text": "revenue joins to orders on"})]
+    planner = _planner(
+        [ScriptedSession(events)],
+        config=InvestigateConfig(enabled=True, branch_timeout=1, max_concurrency=2),
+    )
+    [r] = planner.run([BranchJob(question="how does revenue join?")])
+    assert r.status == "finding" and r.truncated is True
+    merged = merge_findings([r])
+    assert "revenue joins to orders on" in merged
+    assert "INCOMPLETE" in merged
+
+
+def test_a_clean_idle_branch_is_not_marked_truncated():
+    [r] = _planner([ScriptedSession(_msg("complete answer"))]).run([BranchJob(question="q")])
+    assert r.status == "finding" and r.truncated is False
+    assert "INCOMPLETE" not in merge_findings([r])
+
+
+def test_a_finding_the_scrub_empties_is_counted_as_withheld_not_dropped():
+    # The whole answer is a checksum-PII line, so scrub_text removes it. The model must be
+    # told the branch contributed nothing, not silently believe coverage was complete.
+    r = BranchResult("q", "finding", finding=CARD)
+    merged = merge_findings([r, BranchResult("q2", "finding", finding="real answer")])
+    assert CARD not in merged
+    assert "withheld by the privacy scrub" in merged
+
+
+def test_merge_reports_the_notes_even_when_nothing_usable_came_back():
+    # Every branch PII-blocked: returning "" would tell the model nothing, so it might
+    # silently retry. It must learn WHY and rephrase.
+    results = [
+        BranchResult("q1", "pii_blocked", pii=[{"line": 1, "kind": "card number"}]),
+        BranchResult("q2", "pii_blocked", pii=[{"line": 1, "kind": "card number"}]),
+    ]
+    merged = merge_findings(results)
+    assert merged  # not the empty string
+    assert "no usable findings" in merged and "sensitive data" in merged
+
+
+def test_context_is_built_once_per_target_across_branches():
+    # 4 angles on the SAME notebook must not re-parse the semantic model 4 times.
+    builds = []
+
+    def build_context(nb, ds):
+        builds.append((nb, ds))
+        return f"CTX {nb}"
+
+    planner = InvestigatePlanner(
+        config=InvestigateConfig(enabled=True, branch_timeout=2, max_concurrency=4),
+        pii=PiiConfig(),
+        build_context=build_context,
+        open_session=lambda *a: ScriptedSession(_msg("ok")),
+        default_notebook_rel="nb.py",
+    )
+    planner.run([BranchJob(question=f"q{i}") for i in range(4)])
+    assert builds == [("nb.py", "")]  # built once, reused by the other three
 
 
 def test_resolve_concurrency_is_provider_aware_and_explicit_wins():

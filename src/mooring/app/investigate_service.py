@@ -25,6 +25,7 @@ def make_run_investigation(
     notebook_rel: str,
     build_context: Callable,
     open_readonly_session: Callable,
+    abort=None,
 ) -> Callable[[list], str] | None:
     """Build the ``run_investigation(branches) -> merged_findings`` closure, or ``None``
     when ``[ai.investigate] enabled`` is off.
@@ -34,6 +35,10 @@ def make_run_investigation(
     hub's wiring (the read-only opener builds a session with NO propose/edit tool and NO
     ``mooring_investigate``, forcing depth-1 and read-only-only). ``notebook_rel`` is the
     analyst's current notebook, used as the default focus for a branch that names none.
+
+    ``abort`` (a ``threading.Event``) is the parent session's cancel signal — the hub sets
+    it from a close hook, so closing / idle-reaping / repo-switching the chat stops every
+    in-flight branch instead of letting each run to its ``branch_timeout``.
     """
     cfg = app_cfg.ai.investigate
     if not cfg.enabled:
@@ -73,6 +78,7 @@ def make_run_investigation(
             open_session=open_readonly_session,
             default_notebook_rel=notebook_rel,
             on_progress=on_progress,
+            abort=abort,
         )
         return merge_findings(planner.run(jobs))
 

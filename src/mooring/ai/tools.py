@@ -162,6 +162,13 @@ class ToolSpec:
     parameters: dict
     handler: Callable[[object], "ToolOutput"]
     skip_permission: bool = True
+    # ``blocking`` marks a handler that can run for many seconds (the investigate fan-out
+    # drives N sub-sessions to completion). The Copilot SDK calls tool handlers ON its
+    # session's asyncio loop thread and awaits an awaitable result, so a blocking handler
+    # there would wedge the loop — stalling close()/teardown for the whole fan-out. The
+    # copilot adapter therefore offloads a blocking handler to a worker thread. The OpenAI
+    # session runs its loop on its own worker thread, so blocking is harmless there.
+    blocking: bool = False
 
 
 def build_tool_specs(
@@ -933,6 +940,7 @@ def build_tool_specs(
                     "required": ["branches"],
                 },
                 skip_permission=True,  # spawns only read-only value-free sub-agents; returns merged value-free findings
+                blocking=True,  # drives N sub-sessions; must not run on an event loop
             )
         )
     return specs
@@ -984,11 +992,25 @@ def build_tools(
     )
 
     def _to_tool(spec: ToolSpec):
-        def handler(invocation):
+        def run(invocation):
             out = spec.handler(invocation)
             if out.is_error:
                 return egress.to_error_result(out.text)
             return egress.to_tool_result(out.text)
+
+        # The SDK invokes handlers ON the session's asyncio loop thread and awaits an
+        # awaitable result. A long, blocking handler (the investigate fan-out) would wedge
+        # that loop — close() schedules its disconnect with run_coroutine_threadsafe and
+        # would never get to run. Hand such a handler to a worker thread and await it, so
+        # the loop stays free to service teardown and events while the fan-out runs.
+        if spec.blocking:
+
+            async def handler(invocation):
+                import asyncio
+
+                return await asyncio.to_thread(run, invocation)
+        else:
+            handler = run
 
         return Tool(
             spec.name,

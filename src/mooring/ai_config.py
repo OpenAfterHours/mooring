@@ -93,8 +93,11 @@ class InvestigateConfig:
     CLI subprocess + a premium request per branch), lighter on the OpenAI/LiteLLM (HTTP)
     path. It is model-gated (only fires when a task genuinely splits into independent
     parts), so the spend is occasional, not per-turn. ``max_branches`` hard-caps one
-    investigation; ``branch_timeout`` bounds a branch's wall-clock. ``pii_policy`` is the
-    NON-interactive decision (there is no human at a sub-agent): a checksum-PII hit in a
+    investigation; ``branch_timeout`` bounds a branch's wall-clock. KEEP ``branch_timeout``
+    BELOW ``[ai] chat_idle_timeout_sec`` (900 s): the parent's activity clock is only
+    touched as branches FINISH, so a single branch running longer than the idle window can
+    let the parent chat be idle-reaped mid-flight and its findings dropped. ``pii_policy``
+    is the NON-interactive decision (there is no human at a sub-agent): a checksum-PII hit in a
     sub-question skips that branch (``"block_branch"``) or the whole investigation
     (``"block_investigation"``) — never auto-confirmed. The sub-agents are read-only (no
     propose/edit tool) and ``mooring_investigate`` is never in THEIR toolset, so an
@@ -159,6 +162,21 @@ def _as_bool(value: object, default: bool) -> bool:
     if isinstance(value, bool):
         return value
     return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _as_int(value: object, default: int) -> int:
+    """Coerce a TOML int or a string env override to int; a non-numeric value keeps the
+    default rather than raising.
+
+    An env var is operator input typed by hand: a typo — or the literal ``auto``, which the
+    ``0 = AUTO`` default positively invites — must not raise inside :func:`load_ai_config`
+    and stop the hub from booting. Fall back to the packaged default instead."""
+    if value is None:
+        return default
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return default
 
 
 def _str_list(raw: object, default: tuple[str, ...]) -> tuple[str, ...]:
@@ -227,12 +245,14 @@ def load_ai_config(ai: Mapping, env: Mapping[str, str]) -> AiConfig:
         inv = {}
     investigate = InvestigateConfig(
         enabled=_as_bool(env.get("MOORING_AI_INVESTIGATE"), _as_bool(inv.get("enabled"), True)),
-        max_branches=int(env.get("MOORING_AI_INVESTIGATE_MAX_BRANCHES", inv.get("max_branches", 8))),
-        max_concurrency=int(
-            env.get("MOORING_AI_INVESTIGATE_MAX_CONCURRENCY", inv.get("max_concurrency", 0))
+        max_branches=_as_int(
+            env.get("MOORING_AI_INVESTIGATE_MAX_BRANCHES", inv.get("max_branches")), 8
         ),
-        branch_timeout=int(
-            env.get("MOORING_AI_INVESTIGATE_BRANCH_TIMEOUT_SEC", inv.get("branch_timeout_sec", 180))
+        max_concurrency=_as_int(
+            env.get("MOORING_AI_INVESTIGATE_MAX_CONCURRENCY", inv.get("max_concurrency")), 0
+        ),
+        branch_timeout=_as_int(
+            env.get("MOORING_AI_INVESTIGATE_BRANCH_TIMEOUT_SEC", inv.get("branch_timeout_sec")), 180
         ),
         pii_policy=env.get(
             "MOORING_AI_INVESTIGATE_PII_POLICY", str(inv.get("pii_policy", "block_branch"))

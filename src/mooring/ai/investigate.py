@@ -74,6 +74,7 @@ class BranchResult:
     finding: str = ""
     error: str = ""
     pii: list[dict] = field(default_factory=list)
+    truncated: bool = False  # the answer was cut short (deadline / error / close)
 
 
 class InvestigatePlanner:
@@ -103,6 +104,15 @@ class InvestigatePlanner:
         on_progress: Callable[[dict], None] | None = None,
         abort: threading.Event | None = None,
     ) -> None:
+        # 0 = AUTO is a CONFIG-level sentinel that only the app factory can resolve (it
+        # alone knows the provider). Collapsing it to 1 here would silently turn the whole
+        # point of the feature — parallelism — into a serial loop, so refuse it loudly.
+        if int(getattr(config, "max_concurrency", 0)) <= 0:
+            raise ValueError(
+                "InvestigatePlanner needs a resolved max_concurrency (> 0); 0 means AUTO. "
+                "Call mooring.ai.investigate.resolve_concurrency(cfg.max_concurrency, provider) "
+                "first — mooring.app.investigate_service.make_run_investigation does this."
+            )
         self._cfg = config
         self._pii = pii
         self._build_context = build_context
@@ -110,6 +120,19 @@ class InvestigatePlanner:
         self._default_notebook = default_notebook_rel
         self._on_progress = on_progress
         self._abort = abort or threading.Event()
+        # Branches that share a (notebook, dataset) target rebuild a byte-identical context
+        # (semantic-model TMDL parse, dictionary, code index). Memoize per RUN so N angles
+        # on one notebook parse it once. The lock also serializes the first build, which is
+        # the expensive part; later branches hit the cache.
+        self._ctx_cache: dict = {}
+        self._ctx_lock = threading.Lock()
+
+    def _context_for(self, notebook_rel: str, dataset_rel: str):
+        key = (notebook_rel, dataset_rel)
+        with self._ctx_lock:
+            if key not in self._ctx_cache:
+                self._ctx_cache[key] = self._build_context(notebook_rel, dataset_rel)
+            return self._ctx_cache[key]
 
     def _emit(self, **data) -> None:
         """Publish one value-free progress event; a broken sink never sinks a branch."""
@@ -173,7 +196,7 @@ class InvestigatePlanner:
             return BranchResult(job.question, "not_run", error="Investigation cancelled.")
         notebook_rel = job.notebook_rel or self._default_notebook
         try:
-            ctx = self._build_context(notebook_rel, job.dataset_rel)
+            ctx = self._context_for(notebook_rel, job.dataset_rel)
         except Exception as exc:  # noqa: BLE001 - a branch's context failure isolates to it
             return BranchResult(job.question, "failed", error=f"Could not read context: {exc}")
         try:
@@ -194,6 +217,7 @@ class InvestigatePlanner:
             finding=outcome.finding,
             error=outcome.error,
             pii=outcome.pii,
+            truncated=outcome.truncated,
         )
 
 
@@ -201,40 +225,59 @@ def merge_findings(results) -> str:
     """Scrub each branch's finding and concatenate into ONE value-free block for the
     parent model to read as the tool result.
 
-    Only branches that actually answered contribute; blocked/failed branches are counted
-    so the model knows coverage was partial. Each finding passes
-    :func:`mooring.ai.egress.scrub_text` (the checksum-PII floor) as defence-in-depth — the
-    finding is already value-free by construction (a read-only sub-agent has no value
-    channel), so this is a floor, not the guarantee."""
+    Coverage is reported HONESTLY, because the parent model proposes a change from this
+    text: a truncated answer is labelled as incomplete, a finding the scrub emptied is
+    counted as withheld (not silently dropped), and blocked/failed branches are counted.
+    When nothing usable came back, the notes are still returned — a model that learns "all
+    branches were PII-blocked" can rephrase, whereas an empty string tells it nothing.
+
+    Each finding passes :func:`mooring.ai.egress.scrub_text` (the checksum-PII floor) as
+    defence-in-depth — a finding is already value-free by construction (a read-only
+    sub-agent has no value channel), so this is a floor, not the guarantee."""
     from mooring.ai import egress
 
     parts: list[str] = []
     blocked = 0
     failed = 0
+    withheld = 0
     for r in results:
         if r.status == "finding" and r.finding.strip():
             scrubbed, _ = egress.scrub_text(r.finding.strip())
-            if scrubbed.strip():
-                parts.append(f"## {r.question.strip()}\n{scrubbed.strip()}")
+            if not scrubbed.strip():
+                # The scrub removed the whole answer. Count it — never drop it silently,
+                # or the model believes this sub-question was answered.
+                withheld += 1
+                continue
+            body = scrubbed.strip()
+            if r.truncated:
+                body += "\n\n(This branch was cut short before it finished; the answer "
+                body += "above is INCOMPLETE — do not treat it as the whole picture.)"
+            parts.append(f"## {r.question.strip()}\n{body}")
         elif r.status == "pii_blocked":
             blocked += 1
-        elif r.status in ("failed", "empty", "cancelled", "not_run"):
+        else:  # failed | empty | cancelled | not_run — and any future status
             failed += 1
-    if not parts:
-        return ""
-    out = [
-        "Findings from investigating these questions in parallel (schema/code only — no "
-        "data values). Use them to propose ONE change now with the propose tools.",
-        "\n\n".join(parts),
-    ]
+
     notes = []
     if blocked:
         notes.append(
             f"{blocked} branch(es) were blocked because a sub-question looked like it "
             "contained sensitive data"
         )
+    if withheld:
+        notes.append(f"{withheld} branch(es) had their answer withheld by the privacy scrub")
     if failed:
         notes.append(f"{failed} branch(es) returned nothing")
+
+    if not parts:
+        if not notes:
+            return ""
+        return "The investigation produced no usable findings. (" + "; ".join(notes) + ".)"
+    out = [
+        "Findings from investigating these questions in parallel (schema/code only — no "
+        "data values). Use them to propose ONE change now with the propose tools.",
+        "\n\n".join(parts),
+    ]
     if notes:
         out.append("(" + "; ".join(notes) + ".)")
     return "\n\n".join(out)

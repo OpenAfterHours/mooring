@@ -30,12 +30,18 @@ class BranchOutcome:
     session went idle with nothing), ``failed`` (startup/send/timeout/error),
     ``pii_blocked`` (a block-mode hold — unattended, never auto-confirmed), or
     ``cancelled``. ``finding`` is the value-free answer text; ``pii`` are value-free
-    ``(line, kind)`` findings when blocked."""
+    ``(line, kind)`` findings when blocked.
+
+    ``truncated`` marks an answer collected from a terminal that was NOT a clean ``idle``
+    — a deadline, error, or close cut the branch off mid-stream. The text is still useful,
+    but the reader (and the parent model) must be told it is incomplete rather than treat a
+    half-finished analysis as authoritative."""
 
     status: str
     finding: str = ""
     error: str = ""
     pii: list[dict] = field(default_factory=list)
+    truncated: bool = False
 
 
 def await_ready(session, q, deadline: float, abort) -> bool:
@@ -109,17 +115,20 @@ def drive_to_finding(session, brief: str, *, deadline: float, abort) -> BranchOu
     def _text() -> str:
         return message or "".join(deltas)
 
+    def _cut_short(error: str) -> BranchOutcome:
+        """A terminal that is NOT a clean ``idle``: any text collected so far is a partial
+        answer, so flag it truncated rather than let it read as a complete finding."""
+        text = _text()
+        if text.strip():
+            return BranchOutcome("finding", finding=text, error=error, truncated=True)
+        return BranchOutcome("failed", error=error)
+
     while True:
         if abort.is_set():
-            return BranchOutcome("cancelled", finding=_text())
+            return BranchOutcome("cancelled", finding=_text(), truncated=bool(_text().strip()))
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            text = _text()
-            return BranchOutcome(
-                "finding" if text.strip() else "failed",
-                finding=text,
-                error="" if text.strip() else "Timed out before the assistant answered.",
-            )
+            return _cut_short("Timed out before the assistant finished answering.")
         try:
             event = q.get(timeout=min(remaining, _POLL))
         except queue.Empty:
@@ -148,19 +157,10 @@ def drive_to_finding(session, brief: str, *, deadline: float, abort) -> BranchOu
                 except Exception as exc:  # noqa: BLE001
                     return BranchOutcome("failed", error=str(exc))
         elif kind == "idle":
+            # The ONLY clean terminal: the assistant finished its turn.
             text = _text()
             return BranchOutcome("finding" if text.strip() else "empty", finding=text)
         elif kind == "fail":
-            text = _text()
-            return BranchOutcome(
-                "finding" if text.strip() else "failed",
-                finding=text,
-                error=str(data.get("text", "") or "The assistant reported an error."),
-            )
+            return _cut_short(str(data.get("text", "") or "The assistant reported an error."))
         elif kind == "closed":
-            text = _text()
-            return BranchOutcome(
-                "finding" if text.strip() else "failed",
-                finding=text,
-                error="" if text.strip() else "The session closed before answering.",
-            )
+            return _cut_short("The session closed before the assistant finished answering.")
