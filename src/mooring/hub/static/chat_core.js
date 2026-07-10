@@ -278,7 +278,11 @@ const ChatCore = (function () {
       "When the merged findings come back, summarise what you learned, then propose ONE " +
       "change with the propose tools for the analyst to review and apply. If the topic " +
       "does not actually split into independent parts, say so and answer it directly " +
-      "instead of fanning out."
+      "instead of fanning out.\n" +
+      "\n" +
+      "If the mooring_investigate tool is not available to you, do not mention it and do " +
+      "not apologise — the analyst has turned the fan-out off. Just research the topic " +
+      "yourself with the read tools and answer it."
     );
   }
 

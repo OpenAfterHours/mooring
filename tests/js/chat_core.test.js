@@ -445,6 +445,12 @@ test("investigatePrompt: a fixed wrapper around the analyst's own topic", () => 
   assert.match(p, /propose ONE\s+change/);
   // It must not fan out when the topic doesn't decompose (fan-out has real cost).
   assert.match(p, /does not actually split into independent parts/);
+  // Graceful degradation: with [ai.investigate] off the tool is never registered, so the
+  // prompt must tell the model to answer the question rather than apologise for a missing
+  // tool the analyst deliberately turned off.
+  assert.match(p, /not available to you/);
+  assert.match(p, /do not mention it and do not apologise/);
+  assert.match(p, /research the topic yourself with the read tools and answer/);
 });
 
 test("investigatePrompt: trims the topic and tolerates a missing one", () => {
