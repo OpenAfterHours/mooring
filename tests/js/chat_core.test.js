@@ -9,7 +9,25 @@
 
 const { test } = require("node:test");
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
 const C = require("../../src/mooring/hub/static/chat_core.js");
+
+// chat.js's printHelp keeps its OWN hand-written rows, so a command added to COMMANDS
+// (which drives the "/" autocomplete) can silently go undocumented — /review, /checks and
+// /sql all did. Pin the two lists together.
+test("every slash command in COMMANDS is documented in chat.js's /help", () => {
+  const chatJs = fs.readFileSync(
+    path.join(__dirname, "..", "..", "src", "mooring", "hub", "static", "chat.js"),
+    "utf8",
+  );
+  // printHelp rows look like  ["/name", "…"]  or  ["/name <topic>", "…"].
+  const documented = new Set(
+    [...chatJs.matchAll(/\["\/([a-z]+)[^"]*",/g)].map((m) => m[1]),
+  );
+  const missing = C.COMMANDS.map((c) => c.name).filter((n) => !documented.has(n));
+  assert.deepEqual(missing, [], `commands missing from /help: ${missing.join(", ")}`);
+});
 
 // A copy of chat.js's escapeHtml so we can prove highlightCode is safe on
 // already-escaped model output (the renderer in chat.js stays byte-for-byte).

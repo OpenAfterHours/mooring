@@ -51,6 +51,27 @@ from mooring.github import GitHubClient, GitHubError, Unreachable, blob_url
 from mooring.hub import settings_schema
 
 
+class _RevalidatingStatic(StaticFiles):
+    """Serve the hub's own JS/CSS with ``Cache-Control: no-cache``.
+
+    Starlette's ``StaticFiles`` sets no ``Cache-Control``, so a browser applies HEURISTIC
+    freshness and may reuse a script for a long time WITHOUT revalidating. Because the
+    hub's frontend is several cooperating files, that goes wrong in a way no reload fixes:
+    a fresh ``chat.js`` can offer a command whose handler lives in a stale, cached
+    ``chat_core.js`` (the ``/investigate`` menu entry did exactly this).
+
+    ``no-cache`` means "you may store it, but revalidate before reuse" — NOT "don't
+    store". The hub is a LOCAL app on 127.0.0.1, so revalidation costs a round trip to
+    ourselves and normally answers ``304 Not Modified`` from the existing ETag. Correctness
+    over a saving that is worth nothing on loopback.
+    """
+
+    async def get_response(self, path: str, scope):
+        response = await super().get_response(path, scope)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
+
+
 def _static_dir() -> Path:
     return Path(str(resources.files("mooring.hub").joinpath("static")))
 
@@ -1106,7 +1127,9 @@ def create_app(hub: Hub) -> Starlette:
             Route("/api/ai/batch/refine", batch.api_batch_refine, methods=["POST"]),
             Route("/api/ai/batch/force", batch.api_batch_force, methods=["POST"]),
             Route("/api/ai/batch/cancel", batch.api_batch_cancel, methods=["POST"]),
-            Mount("/static", StaticFiles(directory=static)),
+            # Always revalidate: a stale cached chat_core.js beside a fresh chat.js is a
+            # silent, reload-proof frontend break. See _RevalidatingStatic.
+            Mount("/static", _RevalidatingStatic(directory=static)),
         ],
         lifespan=lifespan,
     )
