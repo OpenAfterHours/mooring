@@ -23,7 +23,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from mooring import workspace_config
+from mooring import sync, workspace_config
 
 
 def shareable_dirs(app_cfg, workspace: Path) -> tuple[str, ...]:
@@ -80,6 +80,33 @@ def read_dirs(app_cfg, workspace: Path) -> tuple[str, ...]:
     return tuple(f for f in offer if f in sub)
 
 
+def _prune_contained(folders: tuple[str, ...]) -> tuple[str, ...]:
+    """``folders`` with every entry that another entry already COVERS removed, keeping the
+    broadest of each overlapping chain.
+
+    Containment is decided by :func:`mooring.sync.within_folders`, the same predicate the
+    scan itself uses, so the pruned tuple selects exactly the same files as the input. It is
+    the ``cfg.folders`` TUPLE that shrinks, not the sync scope.
+
+    This matters once a context folder may be NESTED: offering ``notebooks/context`` while
+    ``notebooks`` is already synced leaves both in scope, and
+    :func:`mooring.sync.synced_paths` walks each with ``rglob`` — so every file underneath is
+    yielded twice and :func:`mooring.sync.scan_local` hashes it twice (its dict hides the
+    duplicate; :func:`mooring.sync.local_report` does not, and lists the file twice). A
+    top-level ``context/`` sibling never overlapped, which is why this only surfaces now.
+
+    Containment is slash-bounded, so ``notebooks`` never swallows a sibling ``notebooks2``.
+    """
+    out: list[str] = []
+    for folder in folders:
+        if sync.within_folders(folder, tuple(out)):
+            continue  # already covered by a broader (or identical) entry
+        # `folder` is broader than anything it covers — drop those, then keep it.
+        out = [kept for kept in out if not sync.within_folders(kept, (folder,))]
+        out.append(folder)
+    return tuple(out)
+
+
 def sync_dirs(app_cfg, base_folders: tuple[str, ...], workspace: Path) -> tuple[str, ...]:
     """``base_folders`` (the repo's ``cfg.folders``) unioned with the repo's synced
     ``[sync] folders`` AND the whole team context OFFER.
@@ -89,6 +116,11 @@ def sync_dirs(app_cfg, base_folders: tuple[str, ...], workspace: Path) -> tuple[
     a Phase-2 subscription narrows what that user reads, keeping sync decoupled from
     read. Byte-identical to :func:`mooring.workspace_config.merge_extra_folders` when
     consent is off or the repo publishes no offer.
+
+    The union is then :func:`_prune_contained`, because an offered folder may be NESTED
+    inside one that already syncs — an overlap that would otherwise make the scan walk and
+    hash the same files twice. Pruning cannot change which files sync, only how many
+    entries name them.
     """
     merged = workspace_config.merge_extra_folders(base_folders, workspace)
     if not app_cfg.ai_context:
@@ -96,4 +128,4 @@ def sync_dirs(app_cfg, base_folders: tuple[str, ...], workspace: Path) -> tuple[
     offer = workspace_config.context_folders(workspace)
     if not offer:
         return merged
-    return tuple(dict.fromkeys((*merged, *offer)))
+    return _prune_contained((*merged, *offer))

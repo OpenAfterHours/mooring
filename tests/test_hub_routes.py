@@ -339,6 +339,27 @@ def test_context_folder_rejects_escaping_paths(local_client):
     client, _hub, _ws = local_client
     resp = client.post("/api/hub/context-folder", json={"folder": "../outside", "offered": True})
     assert resp.status_code == 400
+    # An absolute path escapes without ever forming a ".." segment: Path(ws) / "C:/x" is "C:/x".
+    resp = client.post("/api/hub/context-folder", json={"folder": "C:/secrets", "offered": True})
+    assert resp.status_code == 400
+
+
+def test_context_folder_accepts_a_deeply_nested_folder(local_client):
+    # The ◆ toggle now renders at every tree depth and POSTs the full repo-root-relative
+    # path; the route stores it verbatim (depth was never the danger — escaping is).
+    client, _hub, ws = local_client
+    resp = client.post(
+        "/api/hub/context-folder", json={"folder": "reports/2026/finance", "offered": True}
+    )
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True, "folder": "reports/2026/finance", "offered": True}
+    assert client.get("/api/state").json()["context_folders"] == ["reports/2026/finance"]
+
+    resp = client.post(
+        "/api/hub/context-folder", json={"folder": "reports\\2026\\finance", "offered": False}
+    )
+    assert resp.status_code == 200  # a stray backslash normalizes to the same key
+    assert not (ws / "mooring.toml").exists()
 
 
 def test_context_folder_409_on_corrupt_mooring_toml(local_client):

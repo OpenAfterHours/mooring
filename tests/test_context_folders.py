@@ -65,6 +65,63 @@ def test_sync_dirs_no_offer_is_just_merge_extra_folders(tmp_path):
     )
 
 
+# -- nested offers: containment pruning ----------------------------------------
+# A top-level context/ sibling never overlapped the synced folders. A NESTED offer does,
+# and an overlapping cfg.folders makes sync.synced_paths rglob the same files twice.
+
+
+def test_sync_dirs_prunes_an_offer_nested_inside_a_synced_folder(tmp_path):
+    wc.set_context_folder(tmp_path, "notebooks/context", True)
+    got = ctxdirs.sync_dirs(_cfg(context=True), ("notebooks",), tmp_path)
+    # Already covered by "notebooks" — naming it again would double-walk the subtree.
+    assert got == ("notebooks",)
+
+
+def test_sync_dirs_prunes_a_base_folder_nested_inside_a_broader_offer(tmp_path):
+    # The other direction: the offer is the PARENT of an already-synced folder.
+    wc.set_context_folder(tmp_path, "notebooks", True)
+    got = ctxdirs.sync_dirs(_cfg(context=True), ("notebooks/team-a", "data"), tmp_path)
+    assert got == ("data", "notebooks")
+
+
+def test_sync_dirs_keeps_a_sibling_offer_that_overlaps_nothing(tmp_path):
+    wc.set_context_folder(tmp_path, "reports/finance", True)
+    got = ctxdirs.sync_dirs(_cfg(context=True), ("notebooks",), tmp_path)
+    assert got == ("notebooks", "reports/finance")
+
+
+def test_sync_dirs_containment_is_slash_bounded(tmp_path):
+    # "notebooks" must not swallow the sibling "notebooks2" — the classic prefix bug.
+    wc.set_context_folder(tmp_path, "notebooks2", True)
+    got = ctxdirs.sync_dirs(_cfg(context=True), ("notebooks",), tmp_path)
+    assert got == ("notebooks", "notebooks2")
+
+
+def test_pruned_scope_selects_exactly_the_same_files(tmp_path):
+    """The prune shrinks the cfg.folders TUPLE, never the set of synced files — and it is
+    the duplicate walk (and the duplicate blob hash behind it) that disappears."""
+    from mooring import sync
+
+    (tmp_path / "notebooks" / "context").mkdir(parents=True)
+    (tmp_path / "notebooks" / "top.py").write_text("x = 1", encoding="utf-8")
+    (tmp_path / "notebooks" / "context" / "instructions.md").write_text("hi", encoding="utf-8")
+    wc.set_context_folder(tmp_path, "notebooks/context", True)
+
+    overlapping = ("notebooks", "notebooks/context")
+    pruned = ctxdirs.sync_dirs(_cfg(context=True), ("notebooks",), tmp_path)
+    assert pruned == ("notebooks",)
+
+    dup = list(sync.synced_paths(tmp_path, overlapping))
+    clean = list(sync.synced_paths(tmp_path, pruned))
+    assert len(dup) != len(set(dup))  # the bug the prune removes
+    assert len(clean) == len(set(clean))  # no file walked twice
+    assert set(clean) == set(dup)  # ...and none lost
+    # local_report has no dict to hide the duplicate, so it listed the file twice.
+    assert len(sync.local_report(tmp_path, overlapping).files) > len(
+        sync.local_report(tmp_path, pruned).files
+    )
+
+
 # -- read_dirs: the per-user subscription ∩ offer (Phase 2) ---------------------
 
 

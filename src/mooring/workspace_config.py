@@ -34,7 +34,7 @@ import os
 import threading
 import tomllib
 from collections.abc import Iterable
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 import tomli_w
 
@@ -56,6 +56,35 @@ def normalize_notebook(rel: str) -> str:
     the hub's ``_chat_targets`` notebook_rel, so a path from any caller compares
     equal regardless of a stray backslash."""
     return str(rel).replace("\\", "/").strip().strip("/")
+
+
+def safe_folder(rel: str) -> str:
+    """``rel`` canonicalised as a workspace-relative folder key, or ``""`` when it is
+    one we must never hand to the filesystem. Nested folders (``a/b``) are fine — depth
+    was never the danger; leaving the workspace is.
+
+    Rejected: the root sentinel (``""``, ``"."``), a ``..`` escape, and an ABSOLUTE path.
+    The last one matters because ``Path(workspace) / "C:/x"`` is just ``C:/x`` on Windows,
+    so such an entry would make :func:`mooring.sync.synced_paths` walk outside the
+    workspace and then raise ``ValueError`` from ``relative_to`` mid-scan — a synced
+    ``mooring.toml`` could wedge every teammate's status/pull. ``..`` is caught today only
+    by accident (``sync.is_synced_path`` drops any segment starting with ``.``); this is
+    the guard that means it.
+
+    ``PureWindowsPath`` is used on EVERY platform on purpose: ``mooring.toml`` is a synced
+    file, so an entry authored on Windows must be rejected identically on macOS/Linux,
+    where ``"C:/x"`` would otherwise look like an innocent relative folder named ``C:``.
+    """
+    norm = normalize_notebook(rel)
+    if not norm:
+        return ""
+    win = PureWindowsPath(norm)
+    if win.drive or win.root or win.is_absolute():
+        return ""
+    segs = [s for s in norm.split("/") if s not in ("", ".")]
+    if not segs or ".." in segs:
+        return ""
+    return "/".join(segs)
 
 
 def _read_data(workspace: Path) -> dict:
@@ -258,7 +287,14 @@ def set_semantic_model_disabled(workspace: Path, model_key: str, disabled: bool)
 
 def _context_folders_list(data: dict) -> list[str]:
     """The normalized, de-duplicated ``[ai] context_folders`` offer from already-parsed
-    data (tolerant of a bare string or a malformed value)."""
+    data (tolerant of a bare string or a malformed value).
+
+    Sanitised with :func:`safe_folder`, exactly like ``[sync] folders`` — the offer is
+    folded straight into ``cfg.folders`` (see :func:`mooring.app.context_folders.sync_dirs`),
+    so an escaping entry here reaches the sync scan just as one there would. An entry at any
+    DEPTH is fine (``reports/finance``); only escapes are dropped. Silently dropping a bad
+    entry is the fail-open read side: the next write purges it from the file.
+    """
     ai = data.get("ai")
     if not isinstance(ai, dict):
         return []
@@ -269,7 +305,7 @@ def _context_folders_list(data: dict) -> list[str]:
         return []
     out: list[str] = []
     for p in raw:
-        norm = normalize_notebook(p)
+        norm = safe_folder(p)
         if norm and norm not in out:
             out.append(norm)
     return out
@@ -287,12 +323,20 @@ def set_context_folder(workspace: Path, folder: str, offered: bool) -> bool:
     every other key and section in ``mooring.toml`` (the :func:`set_ai_disabled` idiom:
     strict read, sorted+deduped write, prune-empty, atomic replace, serialized by
     ``_WRITE_LOCK``). Returns the folder's new offered state. Raises
-    ``tomllib.TOMLDecodeError`` on a corrupt file rather than overwriting it."""
-    key = normalize_notebook(folder)
+    ``tomllib.TOMLDecodeError`` on a corrupt file rather than overwriting it.
+
+    ``folder`` may name a folder at any depth (``reports/finance``). Offering one that
+    escapes the workspace raises ``ValueError`` — the write-side backstop behind the hub
+    route's and the CLI's own checks. WITHDRAWING is never refused, so a bad entry written
+    by an older version can always be cleared (and any write purges it regardless, since
+    :func:`_context_folders_list` no longer reads it back)."""
+    key = safe_folder(folder)
+    if offered and not key:
+        raise ValueError(f"{folder!r} is not a workspace-relative folder")
     with _WRITE_LOCK:
         data = _read_data_strict(workspace)
         names = set(_context_folders_list(data))
-        if offered and key:
+        if offered:
             names.add(key)
         else:
             names.discard(key)
@@ -412,15 +456,12 @@ def _folders_list(data: dict) -> list[str]:
         return []
     out: list[str] = []
     for p in raw:
-        # Drop root-sentinel / escaping entries ("", ".", "./x", "..") for the SAME reason
-        # config._folder_list does: a folder that resolves to the workspace root or outside
-        # it makes the local (filesystem) and remote (path-prefix) scans diverge and pull
-        # delete files. Loose root files sync on their own rule (sync.in_sync_scope).
-        segs = [s for s in normalize_notebook(p).split("/") if s not in ("", ".")]
-        if not segs or ".." in segs:
-            continue
-        norm = "/".join(segs)
-        if norm not in out:
+        # Drop root-sentinel / escaping entries ("", ".", "./x", "..", "C:/x") for the SAME
+        # reason config._folder_list does: a folder that resolves to the workspace root or
+        # outside it makes the local (filesystem) and remote (path-prefix) scans diverge and
+        # pull delete files. Loose root files sync on their own rule (sync.in_sync_scope).
+        norm = safe_folder(p)
+        if norm and norm not in out:
             out.append(norm)
     return out
 

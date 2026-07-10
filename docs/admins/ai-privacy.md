@@ -429,6 +429,15 @@ two folders define the same dictionary table (the domain is the file stem, not
 folder-unique), the first (sorted-folder) wins and the shadowed copy is **surfaced as a
 `mooring ai dictionary check` finding** — never silently dropped.
 
+An offered folder may sit at **any depth** — `reports/finance/context` is as valid as a
+top-level `context/`. Curate a nested one by expanding (or drilling into) it in the hub's
+file tree and clicking its **"AI context"** toggle, or by naming the full workspace-relative
+path: `mooring ai context add reports/finance/context`. Depth was never the risk; leaving
+the workspace is, so an entry that escapes it — `..`, or an absolute path like `C:/secrets` —
+is **refused on write and ignored on read**, in `mooring.toml` exactly as in `[sync] folders`.
+An offer nested inside a folder that already syncs does not widen the sync scope; it is
+already covered.
+
 One honest deviation to note: because the whole offer syncs for any consented teammate,
 an offered folder rides `pull` to a teammate who has **not** subscribed to it — harmless
 value-free files on disk that never enter the model's context. (`context` off is still
