@@ -1161,6 +1161,22 @@ function runCommand(cmd) {
           "(it can't confirm a number is correct). Check each point against the notebook."
       );
       break;
+    case "investigate":
+      // Fan out read-only sub-agents over independent sub-questions, then propose ONE
+      // change. Unlike the canned commands this prompt carries the analyst's own topic —
+      // ordinary user prose on the ordinary send path, so the PII valve applies to it.
+      if (!cmd.arg) {
+        addSysRow(
+          "Give it a topic: /investigate <what to look into> — e.g. " +
+            "/investigate how revenue is computed across the monthly notebooks."
+        );
+      } else {
+        submitFixedCommand(
+          ChatCore.investigatePrompt(cmd.arg),
+          ChatCore.investigateLabel(cmd.arg)
+        );
+      }
+      break;
     case "clear":
       $("messages").innerHTML = "";
       latestProposal = null;
@@ -1244,6 +1260,10 @@ function printHelp() {
   const rows = [
     ["/help", "show this help"],
     ["/explain", "walk through what this notebook does"],
+    ["/review", "review the notebook's logic for correctness risks"],
+    ["/checks", "propose tie-out / data-quality checks"],
+    ["/sql", "propose a marimo SQL (DuckDB) cell"],
+    ["/investigate <topic>", "research independent sub-questions in parallel"],
     ["/clear", "clear the transcript (keeps the session)"],
     ["/model [name]", "list or switch the model"],
     ["/apply", "apply the latest proposal"],

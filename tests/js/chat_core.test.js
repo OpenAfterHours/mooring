@@ -428,6 +428,50 @@ test("COMMANDS includes /sql", () => {
   assert.ok(C.COMMANDS.some((c) => c.name === "sql"));
 });
 
+test("investigatePrompt: a fixed wrapper around the analyst's own topic", () => {
+  const p = C.investigatePrompt("how revenue is computed");
+  assert.equal(typeof p, "string");
+  // The topic is interpolated (this prompt is NOT a pure constant, unlike /sql).
+  assert.match(p, /how revenue is computed/);
+  assert.notEqual(p, C.investigatePrompt("something else"));
+  // The wrapper's load-bearing demands: fan out ONCE over INDEPENDENT sub-questions,
+  // the branches are read-only, no data value ever goes into a sub-question, and the
+  // turn ends in ONE human-applied proposal.
+  assert.match(p, /mooring_investigate ONCE/);
+  assert.match(p, /INDEPENDENT sub-questions/);
+  assert.match(p, /read-only assistant/);
+  assert.match(p, /cannot write/);
+  assert.match(p, /Never put a data value in a sub-question/);
+  assert.match(p, /propose ONE\s+change/);
+  // It must not fan out when the topic doesn't decompose (fan-out has real cost).
+  assert.match(p, /does not actually split into independent parts/);
+});
+
+test("investigatePrompt: trims the topic and tolerates a missing one", () => {
+  assert.equal(C.investigatePrompt("  spaced  "), C.investigatePrompt("spaced"));
+  // A blank/absent topic must not throw — chat.js refuses it before sending, but the
+  // pure helper stays total.
+  for (const t of [undefined, null, "", "   "]) {
+    assert.equal(typeof C.investigatePrompt(t), "string");
+  }
+});
+
+test("investigateLabel: the transcript row carries the analyst's topic", () => {
+  assert.equal(C.investigateLabel("join keys"), "/investigate — join keys");
+  assert.equal(C.investigateLabel("  join keys "), "/investigate — join keys");
+  assert.equal(C.investigateLabel(undefined), "/investigate — ");
+});
+
+test("investigate is a command: parseSlash and filterCommands pick it up", () => {
+  assert.ok(C.COMMANDS.some((c) => c.name === "investigate"));
+  assert.deepEqual(C.parseSlash("/investigate join keys"), {
+    cmd: "investigate",
+    arg: "join keys",
+  });
+  assert.deepEqual(C.parseSlash("/investigate"), { cmd: "investigate", arg: "" });
+  assert.deepEqual(C.filterCommands("i").map((c) => c.name), ["investigate"]);
+});
+
 test("notesCellPrompt: mooring_propose_cell ONLY — edit/rewrite tools forbidden", () => {
   const p = C.notesCellPrompt();
   assert.equal(p, C.notesCellPrompt()); // constant
