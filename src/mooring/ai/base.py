@@ -78,6 +78,8 @@ class AIProvider(Protocol):
         dictionary=None,
         semantic_models=None,
         helpers=None,
+        read_only: bool = False,
+        run_investigation=None,
         pii: "PiiConfig | None" = None,
     ):
         """Open a long-lived, streaming chat session (a ``ChatBroadcaster``).
@@ -90,6 +92,10 @@ class AIProvider(Protocol):
         the Power BI model tools. ``pii`` is the whole
         :class:`~mooring.ai_config.PiiConfig`, passed as one object so a guard
         field can't be silently dropped in transit; None disables the guard.
+        ``read_only`` builds the session with NO propose/edit tool (an investigate
+        sub-agent); ``run_investigation`` (a value-free coordinator closure) adds the
+        ``mooring_investigate`` fan-out tool — never both at once (a read-only session
+        is forced to drop ``run_investigation`` so an investigation cannot recurse).
         Raises :class:`AIError` if unavailable/not signed in.
         """
         ...

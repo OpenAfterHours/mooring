@@ -19,6 +19,10 @@ const ChatCore = (function () {
     { name: "review", help: "review the notebook's logic for correctness risks" },
     { name: "checks", help: "propose tie-out / data-quality checks" },
     { name: "sql", help: "propose a marimo SQL (DuckDB) cell for this notebook" },
+    {
+      name: "investigate",
+      help: "research independent sub-questions in parallel — /investigate <topic>",
+    },
     { name: "clear", help: "clear the transcript (keeps the session)" },
     { name: "model", help: "switch model — /model [name]" },
     { name: "apply", help: "apply the latest proposal" },
@@ -247,6 +251,45 @@ const ChatCore = (function () {
 
   function sqlLabel() {
     return "/sql — propose a SQL cell for this notebook";
+  }
+
+  // -- /investigate: fan out read-only sub-agents over independent sub-questions ----
+  // UNLIKE the canned prompts above, this one INTERPOLATES the analyst's own topic. That
+  // is not a new egress channel: the topic is ordinary user prose sent over the ordinary
+  // send path, so the outbound PII valve and the per-notebook off-switch apply to it
+  // exactly as they would to a typed message. The prompt only asks the model to call
+  // mooring_investigate, whose branches are read-only, structurally value-blind sub-agents
+  // (see docs/admins/ai-privacy.md#investigate). The fixed WRAPPER around the topic is
+  // pinned by tests/js/chat_core.test.js.
+  function investigatePrompt(topic) {
+    return (
+      "Investigate this before you propose anything:\n" +
+      "\n" +
+      String(topic == null ? "" : topic).trim() +
+      "\n" +
+      "\n" +
+      "Break it into INDEPENDENT sub-questions that can each be researched on their own, " +
+      "then call mooring_investigate ONCE with all of them so they run in parallel. Each " +
+      "branch is answered by a separate read-only assistant that can read schemas, the " +
+      "notebook source, the data dictionary and any semantic model — it cannot write. " +
+      "Never put a data value in a sub-question: use names, paths and plain-English asks " +
+      "only.\n" +
+      "\n" +
+      "When the merged findings come back, summarise what you learned, then propose ONE " +
+      "change with the propose tools for the analyst to review and apply. If the topic " +
+      "does not actually split into independent parts, say so and answer it directly " +
+      "instead of fanning out.\n" +
+      "\n" +
+      "If the mooring_investigate tool is not available to you, do not mention it and do " +
+      "not apologise — the analyst has turned the fan-out off. Just research the topic " +
+      "yourself with the read tools and answer it."
+    );
+  }
+
+  // The compact row shown in the transcript in place of the full prompt. It carries the
+  // analyst's OWN topic, so the transcript reads back as what they actually asked for.
+  function investigateLabel(topic) {
+    return "/investigate — " + String(topic == null ? "" : topic).trim();
   }
 
   // -- input history (in-memory ONLY) --------------------------------------
@@ -910,6 +953,8 @@ const ChatCore = (function () {
     checksLabel,
     sqlPrompt,
     sqlLabel,
+    investigatePrompt,
+    investigateLabel,
     notesCellPrompt,
     HistoryRing,
     mentionMatch,

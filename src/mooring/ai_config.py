@@ -75,6 +75,47 @@ class BatchConfig:
 
 
 @dataclass(frozen=True)
+class InvestigateConfig:
+    """Parallel "investigate" fan-out. Default ON (opt-out).
+
+    Defaults ON — unlike ``context`` / ``code_index`` / ``pii``, which opt IN because they
+    add a data surface, investigate adds NONE: it is structurally value-blind (read-only
+    sub-agents with no write tool), so it belongs to the same "value-free, on by default"
+    category as ``semantic_model`` and ``traceback_guard``. Set ``enabled = false`` to turn
+    it off (e.g. to avoid any extra model spend).
+
+    The copilot may call ``mooring_investigate`` to spawn N READ-ONLY value-blind
+    sub-agents that research independent sub-questions CONCURRENTLY, then merge their
+    value-free findings back as one tool result so it can propose ONE change — the
+    only human gate stays the existing Apply. Each branch is a full model session
+    against one account's quota with no throttle, so ``max_concurrency`` mirrors
+    :class:`BatchConfig`'s cap philosophy: small on the Copilot provider (a ~150 MB
+    CLI subprocess + a premium request per branch), lighter on the OpenAI/LiteLLM (HTTP)
+    path. It is model-gated (only fires when a task genuinely splits into independent
+    parts), so the spend is occasional, not per-turn. ``max_branches`` hard-caps one
+    investigation; ``branch_timeout`` bounds a branch's wall-clock. KEEP ``branch_timeout``
+    BELOW ``[ai] chat_idle_timeout_sec`` (900 s): the parent's activity clock is only
+    touched as branches FINISH, so a single branch running longer than the idle window can
+    let the parent chat be idle-reaped mid-flight and its findings dropped. ``pii_policy``
+    is the NON-interactive decision (there is no human at a sub-agent): a checksum-PII hit in a
+    sub-question skips that branch (``"block_branch"``) or the whole investigation
+    (``"block_investigation"``) — never auto-confirmed. The sub-agents are read-only (no
+    propose/edit tool) and ``mooring_investigate`` is never in THEIR toolset, so an
+    investigation cannot recurse.
+    """
+
+    enabled: bool = True
+    max_branches: int = 8
+    # 0 = AUTO: resolved per provider, because a branch's cost is provider-shaped — a
+    # Copilot branch is a ~150 MB CLI subprocess AND a premium request, an OpenAI/LiteLLM
+    # branch is just HTTP + tokens. See mooring.ai.investigate.resolve_concurrency. Any
+    # value > 0 is an explicit override and always wins.
+    max_concurrency: int = 0
+    branch_timeout: int = 180  # wall-clock seconds per branch
+    pii_policy: str = "block_branch"  # "block_branch" | "block_investigation"
+
+
+@dataclass(frozen=True)
 class AiConfig:
     enabled: bool = True
     provider: str = "copilot"
@@ -111,6 +152,7 @@ class AiConfig:
     openai_api_version: str = ""
     pii: PiiConfig = field(default_factory=PiiConfig)
     batch: BatchConfig = field(default_factory=BatchConfig)
+    investigate: InvestigateConfig = field(default_factory=InvestigateConfig)
 
 
 def _as_bool(value: object, default: bool) -> bool:
@@ -120,6 +162,21 @@ def _as_bool(value: object, default: bool) -> bool:
     if isinstance(value, bool):
         return value
     return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _as_int(value: object, default: int) -> int:
+    """Coerce a TOML int or a string env override to int; a non-numeric value keeps the
+    default rather than raising.
+
+    An env var is operator input typed by hand: a typo — or the literal ``auto``, which the
+    ``0 = AUTO`` default positively invites — must not raise inside :func:`load_ai_config`
+    and stop the hub from booting. Fall back to the packaged default instead."""
+    if value is None:
+        return default
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return default
 
 
 def _str_list(raw: object, default: tuple[str, ...]) -> tuple[str, ...]:
@@ -183,6 +240,24 @@ def load_ai_config(ai: Mapping, env: Mapping[str, str]) -> AiConfig:
         ),
         pii_policy=env.get("MOORING_AI_BATCH_PII_POLICY", str(b.get("pii_policy", "block_job"))),
     )
+    inv = ai.get("investigate", {})
+    if not isinstance(inv, Mapping):
+        inv = {}
+    investigate = InvestigateConfig(
+        enabled=_as_bool(env.get("MOORING_AI_INVESTIGATE"), _as_bool(inv.get("enabled"), True)),
+        max_branches=_as_int(
+            env.get("MOORING_AI_INVESTIGATE_MAX_BRANCHES", inv.get("max_branches")), 8
+        ),
+        max_concurrency=_as_int(
+            env.get("MOORING_AI_INVESTIGATE_MAX_CONCURRENCY", inv.get("max_concurrency")), 0
+        ),
+        branch_timeout=_as_int(
+            env.get("MOORING_AI_INVESTIGATE_BRANCH_TIMEOUT_SEC", inv.get("branch_timeout_sec")), 180
+        ),
+        pii_policy=env.get(
+            "MOORING_AI_INVESTIGATE_PII_POLICY", str(inv.get("pii_policy", "block_branch"))
+        ),
+    )
     return AiConfig(
         enabled=_as_bool(env.get("MOORING_AI_ENABLED"), _as_bool(ai.get("enabled"), True)),
         provider=env.get("MOORING_AI_PROVIDER", str(ai.get("provider", "copilot"))),
@@ -214,4 +289,5 @@ def load_ai_config(ai: Mapping, env: Mapping[str, str]) -> AiConfig:
         ),
         pii=pii,
         batch=batch,
+        investigate=investigate,
     )

@@ -22,6 +22,19 @@ def unconfigured_client(tmp_path, monkeypatch):
         yield client, hub
 
 
+def test_static_assets_must_revalidate(unconfigured_client):
+    # Starlette's StaticFiles sets no Cache-Control, so a browser heuristically caches a
+    # script and may reuse it WITHOUT revalidating. The hub's frontend is several
+    # cooperating files, so that breaks in a way no reload fixes: a fresh chat.js offering
+    # a command whose handler lives in a stale, cached chat_core.js. On loopback the
+    # revalidation is free (an ETag 304), so correctness wins.
+    client, _ = unconfigured_client
+    for asset in ("chat_core.js", "chat.js"):
+        resp = client.get(f"/static/{asset}")
+        assert resp.status_code == 200
+        assert resp.headers["cache-control"] == "no-cache"
+
+
 def test_index_serves_html(unconfigured_client):
     client, _ = unconfigured_client
     resp = client.get("/")

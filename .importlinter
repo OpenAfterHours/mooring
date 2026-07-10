@@ -216,7 +216,9 @@ source_modules =
     mooring.ai.copilot
     mooring.ai.datadictionary
     mooring.ai.egress
+    mooring.ai.fanout
     mooring.ai.introspect
+    mooring.ai.investigate
     mooring.ai.locality
     mooring.ai.ner
     mooring.ai.openai_provider

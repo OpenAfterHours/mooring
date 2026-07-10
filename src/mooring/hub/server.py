@@ -51,6 +51,27 @@ from mooring.github import GitHubClient, GitHubError, Unreachable, blob_url
 from mooring.hub import settings_schema
 
 
+class _RevalidatingStatic(StaticFiles):
+    """Serve the hub's own JS/CSS with ``Cache-Control: no-cache``.
+
+    Starlette's ``StaticFiles`` sets no ``Cache-Control``, so a browser applies HEURISTIC
+    freshness and may reuse a script for a long time WITHOUT revalidating. Because the
+    hub's frontend is several cooperating files, that goes wrong in a way no reload fixes:
+    a fresh ``chat.js`` can offer a command whose handler lives in a stale, cached
+    ``chat_core.js`` (the ``/investigate`` menu entry did exactly this).
+
+    ``no-cache`` means "you may store it, but revalidate before reuse" — NOT "don't
+    store". The hub is a LOCAL app on 127.0.0.1, so revalidation costs a round trip to
+    ourselves and normally answers ``304 Not Modified`` from the existing ETag. Correctness
+    over a saving that is worth nothing on loopback.
+    """
+
+    async def get_response(self, path: str, scope):
+        response = await super().get_response(path, scope)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
+
+
 def _static_dir() -> Path:
     return Path(str(resources.files("mooring.hub").joinpath("static")))
 
@@ -800,7 +821,32 @@ class Hub:
         in the background — ``background=True`` — so the open response is immediate).
         """
         provider = self._provider_for()
-        return provider.open_chat(
+        # Wire the fan-out "investigate" tool: a value-free coordinator closure that opens
+        # READ-ONLY sub-agents per branch and returns their merged findings. None when the
+        # feature is off, so open_chat doesn't build mooring_investigate. The sub-agents
+        # never get this tool (open_readonly forces read_only=True), so depth is bounded to 1.
+        import threading
+
+        from mooring.app.investigate_service import make_run_investigation
+
+        # The parent session's cancel signal for work that OUTLIVES a turn. A fan-out runs
+        # read-only sub-agents on its own pool while the parent's tool call blocks, so
+        # closing / idle-reaping / repo-switching the chat must stop them — otherwise each
+        # branch runs to its full branch_timeout, burning spend the analyst cancelled. It
+        # is armed by a close hook once the session exists (below).
+        investigate_abort = threading.Event()
+        run_investigation = make_run_investigation(
+            app_cfg=self.app_cfg,
+            notebook_rel=notebook_rel,
+            build_context=lambda nb, ds: self.chat.build_context(
+                self.app_cfg, workspace, nb, ds, folders=self.cfg.folders
+            ),
+            open_readonly_session=lambda ctx, nb, m, e: self._make_investigator_session(
+                ctx, workspace, nb, model=m, reasoning_effort=(e or None)
+            ),
+            abort=investigate_abort,
+        )
+        session = provider.open_chat(
             system_context=system_context,
             workspace=workspace,
             folders=self.cfg.folders,
@@ -810,6 +856,7 @@ class Hub:
             dictionary=dictionary,
             semantic_models=semantic_models,
             helpers=helpers,
+            run_investigation=run_investigation,
             # The whole guard config travels as ONE object, so a field can't be
             # silently dropped on the way to the session (the session downloads any
             # NER model in the background and the prompt path skips it until ready).
@@ -820,6 +867,39 @@ class Hub:
             traceback_guard=self.app_cfg.ai.traceback_guard,
             # Don't block the open request on the (CLI-spawning, networked) Copilot
             # handshake — stream readiness/failure over the SSE channel instead.
+            background=True,
+        )
+        # Arm the cancel signal: closing the session (explicit close, idle-reap, repo
+        # switch, shutdown) now aborts any in-flight investigation within one poll.
+        session.add_close_hook(investigate_abort.set)
+        return session
+
+    def _make_investigator_session(
+        self, ctx, workspace: Path, notebook_rel: str, model: str = "", reasoning_effort=None
+    ):
+        """A READ-ONLY value-blind sub-agent for ONE investigate branch: the same session
+        as the interactive chat, but built with NO propose/edit tool and NO
+        ``mooring_investigate`` (so it can neither write nor recurse), and the PII guard
+        forced to BLOCK mode because there is no human at a sub-agent to confirm. ``ctx`` is
+        the 6-tuple ``build_context`` returns; a branch's finding is trusted because this
+        session is structurally value-blind, which the read_only tool subset guarantees."""
+        from dataclasses import replace
+
+        system_context, index, _pii_banner, _live_text, models, code_index = ctx
+        provider = self._provider_for()
+        return provider.open_chat(
+            system_context=system_context,
+            workspace=workspace,
+            folders=self.cfg.folders,
+            notebook_rel=notebook_rel,
+            model=model,
+            reasoning_effort=reasoning_effort,
+            dictionary=index,
+            semantic_models=models,
+            helpers=code_index,
+            read_only=True,
+            pii=replace(self.app_cfg.ai.pii, block_prompt=True),
+            traceback_guard=self.app_cfg.ai.traceback_guard,
             background=True,
         )
 
@@ -1047,7 +1127,9 @@ def create_app(hub: Hub) -> Starlette:
             Route("/api/ai/batch/refine", batch.api_batch_refine, methods=["POST"]),
             Route("/api/ai/batch/force", batch.api_batch_force, methods=["POST"]),
             Route("/api/ai/batch/cancel", batch.api_batch_cancel, methods=["POST"]),
-            Mount("/static", StaticFiles(directory=static)),
+            # Always revalidate: a stale cached chat_core.js beside a fresh chat.js is a
+            # silent, reload-proof frontend break. See _RevalidatingStatic.
+            Mount("/static", _RevalidatingStatic(directory=static)),
         ],
         lifespan=lifespan,
     )

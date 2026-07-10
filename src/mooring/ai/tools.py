@@ -162,6 +162,13 @@ class ToolSpec:
     parameters: dict
     handler: Callable[[object], "ToolOutput"]
     skip_permission: bool = True
+    # ``blocking`` marks a handler that can run for many seconds (the investigate fan-out
+    # drives N sub-sessions to completion). The Copilot SDK calls tool handlers ON its
+    # session's asyncio loop thread and awaits an awaitable result, so a blocking handler
+    # there would wedge the loop — stalling close()/teardown for the whole fan-out. The
+    # copilot adapter therefore offloads a blocking handler to a worker thread. The OpenAI
+    # session runs its loop on its own worker thread, so blocking is harmless there.
+    blocking: bool = False
 
 
 def build_tool_specs(
@@ -169,11 +176,13 @@ def build_tool_specs(
     workspace: Path,
     folders: tuple[str, ...],
     notebook_rel: str,
-    emit_proposal: Callable[[str, str], None],
+    emit_proposal: Callable[[str, str], None] | None = None,
     emit_proposal_patch: Callable[[dict], None] | None = None,
     dictionary=None,
     semantic_models=None,
     code_index=None,
+    run_investigation: Callable[..., str] | None = None,
+    emit_tool_progress: Callable[[str], None] | None = None,
     pii_enabled: bool = False,
 ) -> list["ToolSpec"]:
     """Build the safe tools as provider-neutral :class:`ToolSpec`s, bound to one
@@ -591,25 +600,36 @@ def build_tool_specs(
             parameters={"type": "object", "properties": {}},
             skip_permission=True,  # source only — value-free
         ),
-        ToolSpec(
-            "mooring_propose_cell",
-            "Propose a Python cell for the analyst to apply into the notebook. "
-            "Use this to suggest code; the analyst reviews and applies it." + _CELL_FORMAT,
-            handler=propose_cell,
-            parameters={
-                "type": "object",
-                "properties": {
-                    "code": {
-                        "type": "string",
-                        "description": "the cell BODY (no @app.cell/def/return)",
-                    },
-                    "rationale": {"type": "string", "description": _RATIONALE_DESC},
-                },
-                "required": ["code"],
-            },
-            skip_permission=True,  # only surfaces a proposal to the analyst; never injects
-        ),
     ]
+
+    # The propose tool is the WRITE surface. It is gated on ``emit_proposal`` (mirroring
+    # the edit tools' gate on ``emit_proposal_patch`` below), so a READ-ONLY session — an
+    # investigate sub-agent, built with emit_proposal=None — registers NO way to write:
+    # only the value-free read tools above (plus dictionary/model/helper reads). This gate
+    # is a LOAD-BEARING privacy invariant: a sub-agent's finding is trusted because the
+    # sub-agent is structurally value-blind (docs/admins/ai-privacy.md), which holds only
+    # if no write/value-returning tool is ever added to a read-only session.
+    if emit_proposal is not None:
+        specs.append(
+            ToolSpec(
+                "mooring_propose_cell",
+                "Propose a Python cell for the analyst to apply into the notebook. "
+                "Use this to suggest code; the analyst reviews and applies it." + _CELL_FORMAT,
+                handler=propose_cell,
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "code": {
+                            "type": "string",
+                            "description": "the cell BODY (no @app.cell/def/return)",
+                        },
+                        "rationale": {"type": "string", "description": _RATIONALE_DESC},
+                    },
+                    "required": ["code"],
+                },
+                skip_permission=True,  # only surfaces a proposal to the analyst; never injects
+            )
+        )
 
     if emit_proposal_patch is not None:
         specs += [
@@ -834,6 +854,95 @@ def build_tool_specs(
                 skip_permission=True,  # name lookup in-memory; never a path, never a value
             ),
         ]
+
+    # The fan-out tool. Registered ONLY when the caller injects ``run_investigation``
+    # (the interactive parent session, never a read-only sub-agent — so an investigation
+    # cannot recurse). Its handler runs the injected coordinator, which spawns read-only
+    # value-blind sub-agents and returns their scrubbed, merged findings — value-free text
+    # the model reads back as this tool's result (through the one egress mint), then turns
+    # into ONE proposal the analyst Applies.
+    if run_investigation is not None:
+
+        def _progress(event: dict) -> None:
+            """Render a value-free in-flight cue for the analyst. Carries COUNTS and
+            statuses only — never a sub-question or a finding — so the progress channel
+            opens no egress path (it goes to the local UI, not the model)."""
+            if emit_tool_progress is None:
+                return
+            phase = event.get("phase")
+            total = int(event.get("total", 0) or 0)
+            done = int(event.get("done", 0) or 0)
+            if not total:
+                return
+            if phase == "start":
+                emit_tool_progress(f"researching {total} questions in parallel…")
+            elif phase == "branch":
+                emit_tool_progress(f"researched {done} of {total}…")
+            elif phase == "done":
+                found = int(event.get("found", 0) or 0)
+                emit_tool_progress(f"merging findings from {found} of {total} branches…")
+
+        def investigate(invocation):
+            raw = _args(invocation).get("branches") or []
+            branches = [
+                b
+                for b in raw
+                if isinstance(b, dict) and str(b.get("question", "")).strip()
+            ]
+            if not branches:
+                return _err(
+                    "provide a non-empty 'branches' list of {question, notebook?, dataset?} objects"
+                )
+            try:
+                merged = run_investigation(branches, on_progress=_progress)
+            except Exception as exc:  # noqa: BLE001 - a coordinator error still yields a clean turn
+                return _err(f"the investigation could not run: {exc}")
+            return _ok(merged or "(the investigation produced no findings)")
+
+        specs.append(
+            ToolSpec(
+                "mooring_investigate",
+                "Research SEVERAL INDEPENDENT sub-questions IN PARALLEL before you propose. "
+                "Each branch is answered by a separate read-only assistant that can inspect "
+                "schemas, notebook source, the data dictionary, and semantic models — but "
+                "CANNOT write. Use this when a task splits into independent parts (understand "
+                "several notebooks, map several tables/models, or plan a join across datasets); "
+                "the findings come back merged so you can then propose ONE change. Prefer it "
+                "over asking many read questions yourself in series. Do NOT put any data value "
+                "in a question — only names/paths and plain-English asks.",
+                handler=investigate,
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "branches": {
+                            "type": "array",
+                            "description": "the independent sub-questions to research in parallel",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "question": {
+                                        "type": "string",
+                                        "description": "a value-free, plain-English sub-question",
+                                    },
+                                    "notebook": {
+                                        "type": "string",
+                                        "description": "optional workspace-relative notebook path to focus this branch on",
+                                    },
+                                    "dataset": {
+                                        "type": "string",
+                                        "description": "optional workspace-relative dataset path to give this branch its schema",
+                                    },
+                                },
+                                "required": ["question"],
+                            },
+                        }
+                    },
+                    "required": ["branches"],
+                },
+                skip_permission=True,  # spawns only read-only value-free sub-agents; returns merged value-free findings
+                blocking=True,  # drives N sub-sessions; must not run on an event loop
+            )
+        )
     return specs
 
 
@@ -842,11 +951,13 @@ def build_tools(
     workspace: Path,
     folders: tuple[str, ...],
     notebook_rel: str,
-    emit_proposal: Callable[[str, str], None],
+    emit_proposal: Callable[[str, str], None] | None = None,
     emit_proposal_patch: Callable[[dict], None] | None = None,
     dictionary=None,
     semantic_models=None,
     code_index=None,
+    run_investigation: Callable[..., str] | None = None,
+    emit_tool_progress: Callable[[str], None] | None = None,
     pii_enabled: bool = False,
 ) -> list:
     """The GitHub Copilot adapter over :func:`build_tool_specs`.
@@ -875,15 +986,31 @@ def build_tools(
         dictionary=dictionary,
         semantic_models=semantic_models,
         code_index=code_index,
+        run_investigation=run_investigation,
+        emit_tool_progress=emit_tool_progress,
         pii_enabled=pii_enabled,
     )
 
     def _to_tool(spec: ToolSpec):
-        def handler(invocation):
+        def run(invocation):
             out = spec.handler(invocation)
             if out.is_error:
                 return egress.to_error_result(out.text)
             return egress.to_tool_result(out.text)
+
+        # The SDK invokes handlers ON the session's asyncio loop thread and awaits an
+        # awaitable result. A long, blocking handler (the investigate fan-out) would wedge
+        # that loop — close() schedules its disconnect with run_coroutine_threadsafe and
+        # would never get to run. Hand such a handler to a worker thread and await it, so
+        # the loop stays free to service teardown and events while the fan-out runs.
+        if spec.blocking:
+
+            async def handler(invocation):
+                import asyncio
+
+                return await asyncio.to_thread(run, invocation)
+        else:
+            handler = run
 
         return Tool(
             spec.name,
@@ -901,11 +1028,13 @@ def build_openai_tools(
     workspace: Path,
     folders: tuple[str, ...],
     notebook_rel: str,
-    emit_proposal: Callable[[str, str], None],
+    emit_proposal: Callable[[str, str], None] | None = None,
     emit_proposal_patch: Callable[[dict], None] | None = None,
     dictionary=None,
     semantic_models=None,
     code_index=None,
+    run_investigation: Callable[..., str] | None = None,
+    emit_tool_progress: Callable[[str], None] | None = None,
     pii_enabled: bool = False,
 ) -> tuple[list[dict], dict[str, Callable[[object], "ToolOutput"]]]:
     """The OpenAI adapter over :func:`build_tool_specs`.
@@ -933,6 +1062,8 @@ def build_openai_tools(
         dictionary=dictionary,
         semantic_models=semantic_models,
         code_index=code_index,
+        run_investigation=run_investigation,
+        emit_tool_progress=emit_tool_progress,
         pii_enabled=pii_enabled,
     )
     tool_specs = [

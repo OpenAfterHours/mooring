@@ -11,6 +11,7 @@ called as ``egress.guard_prompt`` so every egress routes through one module.
 
 from __future__ import annotations
 
+import contextlib
 import queue
 import secrets as _secrets
 import threading
@@ -99,6 +100,11 @@ class ChatBroadcaster:
         # snapshot at open, then the most recent per-turn refresh). A turn re-injects
         # the live schema only when this changes — see _live_prefix.
         self._last_live_schema = ""
+        # Callables run once when the session closes. The one caller today is the
+        # investigate fan-out: work that OUTLIVES a turn (read-only sub-agent sessions on
+        # their own pool) must stop when the chat is closed / idle-reaped / repo-switched,
+        # or it runs to its branch timeout, burning spend the analyst tried to cancel.
+        self._close_hooks: list = []
 
     def subscribe(self) -> queue.Queue[ChatEvent]:
         q: queue.Queue[ChatEvent] = queue.Queue(maxsize=_QUEUE_MAX)
@@ -133,10 +139,24 @@ class ChatBroadcaster:
     def idle_seconds(self) -> float:
         return time.monotonic() - self._last_active
 
+    def add_close_hook(self, fn) -> None:
+        """Register a callable to run once when this session closes (best-effort).
+
+        The seam for cancelling work that outlives a turn: an in-flight investigate
+        fan-out registers its abort ``Event.set`` here, so closing / idle-reaping /
+        repo-switching the chat stops its read-only sub-agents instead of letting each
+        run to its full ``branch_timeout``."""
+        self._close_hooks.append(fn)
+
     def close(self) -> None:
         if self._closed:
             return
         self._closed = True
+        # Cancel outliving work FIRST, so a blocked tool sees the abort as early as
+        # possible; a broken hook must never stop the rest of the teardown.
+        for hook in self._close_hooks:
+            with contextlib.suppress(Exception):
+                hook()
         # Never retain a held (flagged) prompt's plaintext past the session's life.
         self._pending.clear()
         self._broadcast(ChatEvent("closed"))

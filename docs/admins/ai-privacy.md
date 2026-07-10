@@ -100,6 +100,52 @@ DAX), but never the data itself.
 Nothing about a conversation is persisted: the session store, telemetry, config
 discovery, skills, file hooks, and host-git access are all switched off.
 
+## Parallel "investigate": read-only sub-agents (on by default) { #investigate }
+
+On by default (opt out with `[ai.investigate] enabled = false`, or
+`MOORING_AI_INVESTIGATE=false`). It defaults on because it adds **no** data surface — it
+is structurally value-blind, like the semantic-model reader — but each branch is a full
+model session, so turn it off (or lower `max_concurrency`) if you want to avoid the extra
+spend, which is heaviest on the Copilot provider (a subprocess + premium request per
+branch). When on, the copilot gains one extra tool, `mooring_investigate`, that lets it
+research several **independent** sub-questions **in parallel** before it proposes — e.g. "understand these three
+notebooks" or "map these two semantic models". It runs automatically as part of
+answering; there is **no separate approval step**, because the only thing a human ever
+approves stays the same: **the code you Apply**. Each branch spawns a **read-only**
+sub-agent, their value-free findings are merged, and the copilot turns them into one
+proposal you review and Apply.
+
+It preserves every guarantee above, and its safety rests on one load-bearing invariant:
+
+- **The sub-agents are read-only — this is the guarantee, not a nicety.** A branch's
+  finding is the sub-agent's *own* answer, returned to the main copilot as a tool result.
+  That answer is trusted to be value-free because the sub-agent is **structurally
+  value-blind**: it is built with **no propose, edit, or any value-returning tool** — only
+  the value-free read tools (schema, notebook source, dictionary, semantic model). The
+  read-only tool subset is enforced in one place (`ai/tools.py`: the propose tool is gated
+  on the `emit_proposal` callback, which a sub-agent is never given) and pinned by a test.
+  The merge still applies the checksum-PII floor as defence-in-depth, but that floor is
+  *beneath* the structural guarantee, not the guarantee itself.
+- **Investigations cannot recurse.** `mooring_investigate` is never in a sub-agent's own
+  toolset (a read-only session drops it), so depth is bounded to 1.
+- **No new egress channel.** Findings ride the **existing** tool-result path
+  (`egress.to_openai_tool_message`) — the same channel every tool result uses — and every
+  sub-agent's context comes from the **same** single assembler (`build_system_context`).
+- **A checksum-PII sub-question is blocked, never sent.** Each branch's question passes the
+  value-free PII pre-flight before any session opens; there is no human at a sub-agent, so a
+  block-mode hold blocks that branch rather than being auto-confirmed.
+
+Because each branch is a full model session against your account's quota, it is capped by
+`[ai.investigate] max_branches` (default 8) and `max_concurrency`. `max_concurrency`
+defaults to `0` = **auto**, resolved per provider because the per-branch cost differs by an
+order of magnitude: **2 on Copilot** (each branch is a ~150 MB CLI subprocess *and* a
+premium request) and **6 on OpenAI/LiteLLM** (each branch is just an HTTP stream). Any value
+above `0` is an explicit override and wins for every provider.
+
+While a fan-out runs, the chat streams an inline progress cue on the tool line
+("investigating · researched 2 of 3…"). That cue carries **counts and statuses only** —
+never a sub-question or a finding — and it goes to your browser, not to the model.
+
 ## Choosing the AI backend: Copilot or an OpenAI-compatible endpoint { #ai-backend }
 
 The copilot ships two interchangeable backends. Pick one **per machine** in the hub

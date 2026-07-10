@@ -7,7 +7,7 @@ import types
 import polars as pl
 import pytest
 
-from mooring.ai.tools import EDIT_TOOL_NAMES, TOOL_NAMES, build_tools
+from mooring.ai.tools import EDIT_TOOL_NAMES, TOOL_NAMES, build_tool_specs, build_tools
 
 SECRET = "SECRET_VALUE_DO_NOT_LEAK"
 
@@ -73,9 +73,151 @@ def _edit_tools(ws, patches, proposals=None):
     }
 
 
+def _spec_names(ws, **kw):
+    return [
+        s.name
+        for s in build_tool_specs(workspace=ws, folders=("data",), notebook_rel="nb.py", **kw)
+    ]
+
+
 def test_tool_names_match_built_tools(ws):
     tools = _tools(ws, [])
     assert sorted(tools) == sorted(TOOL_NAMES)
+
+
+def test_readonly_build_registers_no_write_tool(ws):
+    # No emit_proposal / emit_proposal_patch => a READ-ONLY session (an investigate
+    # sub-agent): only the value-free read tools, NEVER a propose/edit tool. This gate is
+    # the load-bearing privacy invariant — a sub-agent's finding is trusted BECAUSE it is
+    # structurally value-blind, which holds only if it can never write or return a value.
+    names = _spec_names(ws)
+    assert names == ["mooring_list_datasets", "mooring_get_schema", "mooring_read_notebook_source"]
+    assert not any("propose" in n for n in names)
+    assert "mooring_investigate" not in names
+
+
+def test_investigate_tool_only_registered_with_run_investigation(ws):
+    assert "mooring_investigate" not in _spec_names(ws, emit_proposal=lambda *a, **k: None)
+    with_inv = _spec_names(
+        ws, emit_proposal=lambda *a, **k: None, run_investigation=lambda b: "findings"
+    )
+    assert "mooring_investigate" in with_inv
+
+
+def test_investigate_tool_calls_the_coordinator_and_returns_its_findings(ws):
+    seen = {}
+
+    def run_investigation(branches, on_progress=None):
+        seen["branches"] = branches
+        return "## what columns?\norders has id, ts, amount"
+
+    spec = {
+        s.name: s
+        for s in build_tool_specs(
+            workspace=ws,
+            folders=("data",),
+            notebook_rel="nb.py",
+            emit_proposal=lambda *a, **k: None,
+            run_investigation=run_investigation,
+        )
+    }["mooring_investigate"]
+    out = spec.handler(_invocation(branches=[{"question": "what columns?"}]))
+    assert not out.is_error
+    assert "orders has id, ts, amount" in out.text
+    assert seen["branches"] == [{"question": "what columns?"}]
+
+
+def test_investigate_tool_streams_value_free_progress_cues(ws):
+    cues: list[str] = []
+    question = "SENTINEL_QUESTION"
+    finding = "SENTINEL_FINDING"
+
+    def run_investigation(branches, on_progress=None):
+        # Replay the planner's value-free lifecycle events.
+        on_progress({"phase": "start", "done": 0, "total": 3})
+        on_progress({"phase": "branch", "done": 1, "total": 3, "status": "finding"})
+        on_progress({"phase": "done", "done": 3, "total": 3, "found": 2})
+        return finding
+
+    spec = {
+        s.name: s
+        for s in build_tool_specs(
+            workspace=ws,
+            folders=("data",),
+            notebook_rel="nb.py",
+            emit_proposal=lambda *a, **k: None,
+            run_investigation=run_investigation,
+            emit_tool_progress=cues.append,
+        )
+    }["mooring_investigate"]
+    out = spec.handler(_invocation(branches=[{"question": question}]))
+    assert cues == [
+        "researching 3 questions in parallel…",
+        "researched 1 of 3…",
+        "merging findings from 2 of 3 branches…",
+    ]
+    # The cue carries COUNTS only — never a sub-question's text nor a finding's text.
+    # (The findings themselves still reach the model, but as the tool RESULT.)
+    assert not any(question in c or finding in c for c in cues)
+    assert finding in out.text
+
+
+def test_investigate_progress_is_a_noop_without_a_sink(ws):
+    def run_investigation(branches, on_progress=None):
+        on_progress({"phase": "start", "done": 0, "total": 2})  # must not raise
+        return "findings"
+
+    spec = {
+        s.name: s
+        for s in build_tool_specs(
+            workspace=ws,
+            folders=("data",),
+            notebook_rel="nb.py",
+            emit_proposal=lambda *a, **k: None,
+            run_investigation=run_investigation,
+        )
+    }["mooring_investigate"]
+    assert not spec.handler(_invocation(branches=[{"question": "q"}])).is_error
+
+
+def test_investigate_copilot_handler_is_async_so_it_cannot_wedge_the_event_loop(ws):
+    # The Copilot SDK calls tool handlers ON the session's asyncio loop thread and awaits an
+    # awaitable result. The fan-out blocks for as long as its slowest branch, so its handler
+    # MUST be a coroutine that offloads to a worker thread — otherwise close()/teardown
+    # (scheduled with run_coroutine_threadsafe) can never run until the fan-out finishes.
+    import asyncio
+    import inspect
+
+    tools = {
+        t.name: t
+        for t in build_tools(
+            workspace=ws,
+            folders=("data",),
+            notebook_rel="nb.py",
+            emit_proposal=lambda *a, **k: None,
+            run_investigation=lambda b, on_progress=None: "merged findings",
+        )
+    }
+    assert inspect.iscoroutinefunction(tools["mooring_investigate"].handler)
+    res = asyncio.run(tools["mooring_investigate"].handler(_invocation(branches=[{"question": "q"}])))
+    assert "merged findings" in res.text_result_for_llm
+    # Every other (fast) tool stays a plain sync callable — no needless thread hop.
+    assert not inspect.iscoroutinefunction(tools["mooring_get_schema"].handler)
+
+
+def test_investigate_tool_rejects_empty_branches(ws):
+    spec = {
+        s.name: s
+        for s in build_tool_specs(
+            workspace=ws,
+            folders=("data",),
+            notebook_rel="nb.py",
+            emit_proposal=lambda *a, **k: None,
+            run_investigation=lambda b: "x",
+        )
+    }["mooring_investigate"]
+    assert spec.handler(_invocation(branches=[])).is_error
+    assert spec.handler(_invocation()).is_error
 
 
 def test_all_tools_skip_permission(ws):

@@ -32,6 +32,7 @@ const TOOL_LABELS = {
   mooring_list_tables: "listing dictionary tables",
   mooring_describe_table: "describing a table",
   mooring_search_dictionary: "searching the dictionary",
+  mooring_investigate: "investigating",
   mooring_get_semantic_model: "reading the semantic model",
   mooring_describe_model_table: "describing a model table",
   mooring_get_measure: "fetching a measure's DAX",
@@ -254,11 +255,17 @@ function onTool(d) {
       el.append(g, l);
     });
     row._detail = "";
+    row._baseLabel = label;
     toolStack.push(row);
   } else if (d.progress) {
     const row = toolStack.at(-1);
     if (row) {
       row._detail = d.progress;
+      // Surface progress INLINE, not only behind the click-to-expand detail: a fan-out
+      // ("investigating") blocks the turn for as long as its slowest branch, so a static
+      // line would read as a hang.
+      const label = row.querySelector(".tool-label");
+      if (label && row._baseLabel) label.textContent = `${row._baseLabel} · ${d.progress}`;
       makeExpandable(row);
     }
   }
@@ -1154,6 +1161,22 @@ function runCommand(cmd) {
           "(it can't confirm a number is correct). Check each point against the notebook."
       );
       break;
+    case "investigate":
+      // Fan out read-only sub-agents over independent sub-questions, then propose ONE
+      // change. Unlike the canned commands this prompt carries the analyst's own topic —
+      // ordinary user prose on the ordinary send path, so the PII valve applies to it.
+      if (!cmd.arg) {
+        addSysRow(
+          "Give it a topic: /investigate <what to look into> — e.g. " +
+            "/investigate how revenue is computed across the monthly notebooks."
+        );
+      } else {
+        submitFixedCommand(
+          ChatCore.investigatePrompt(cmd.arg),
+          ChatCore.investigateLabel(cmd.arg)
+        );
+      }
+      break;
     case "clear":
       $("messages").innerHTML = "";
       latestProposal = null;
@@ -1237,6 +1260,10 @@ function printHelp() {
   const rows = [
     ["/help", "show this help"],
     ["/explain", "walk through what this notebook does"],
+    ["/review", "review the notebook's logic for correctness risks"],
+    ["/checks", "propose tie-out / data-quality checks"],
+    ["/sql", "propose a marimo SQL (DuckDB) cell"],
+    ["/investigate <topic>", "research independent sub-questions in parallel"],
     ["/clear", "clear the transcript (keeps the session)"],
     ["/model [name]", "list or switch the model"],
     ["/apply", "apply the latest proposal"],

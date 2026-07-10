@@ -40,6 +40,8 @@ from mooring.ai.chat import ChatBroadcaster, ChatEvent
 from mooring.ai.session import (
     _DICT_TOOL_GUIDE,
     _HELPER_TOOL_GUIDE,
+    _INVESTIGATE_GUIDE,
+    _INVESTIGATOR_GUIDE,
     _MODEL_TOOL_GUIDE,
     _TOOL_GUIDE,
 )
@@ -72,6 +74,8 @@ class OpenAIChatSession(ChatBroadcaster):
         dictionary=None,
         semantic_models=None,
         helpers=None,
+        read_only: bool = False,
+        run_investigation=None,
         pii_enabled: bool = False,
         pii_block: bool = True,
         pii_names: bool = False,
@@ -96,13 +100,20 @@ class OpenAIChatSession(ChatBroadcaster):
         )
         self._model = (model or "").strip()
         self._reasoning_effort = (reasoning_effort or "").strip() or None
-        guide = _TOOL_GUIDE
+        self._read_only = read_only
+        # A read-only investigate sub-agent: no propose/edit tool and no
+        # mooring_investigate (so it cannot write or recurse). Force it off even if a
+        # run_investigation were mis-wired in — belt-and-suspenders for the depth-1 rule.
+        self._run_investigation = None if read_only else run_investigation
+        guide = _INVESTIGATOR_GUIDE if read_only else _TOOL_GUIDE
         if dictionary is not None and not dictionary.is_empty():
             guide += _DICT_TOOL_GUIDE
         if helpers is not None and not helpers.is_empty():
             guide += _HELPER_TOOL_GUIDE
         if semantic_models:
             guide += _MODEL_TOOL_GUIDE
+        if self._run_investigation is not None:
+            guide += _INVESTIGATE_GUIDE
         self._system_context = system_context + guide
         self._workspace = Path(workspace)
         self._folders = tuple(folders)
@@ -162,11 +173,16 @@ class OpenAIChatSession(ChatBroadcaster):
                 workspace=self._workspace,
                 folders=self._folders,
                 notebook_rel=self._notebook_rel,
-                emit_proposal=self._emit_proposal,
-                emit_proposal_patch=self._emit_proposal_patch,
+                # A read-only session registers NO write surface (the load-bearing
+                # privacy gate): no propose/edit tool, so only the value-free read tools
+                # (+ dictionary/model/helper reads) are built.
+                emit_proposal=None if self._read_only else self._emit_proposal,
+                emit_proposal_patch=None if self._read_only else self._emit_proposal_patch,
                 dictionary=self._dictionary,
                 semantic_models=self._semantic_models,
                 code_index=self._helpers,
+                run_investigation=self._run_investigation,
+                emit_tool_progress=self._emit_tool_progress,
                 pii_enabled=self._pii_enabled,
             )
         except AINotConnectedError as exc:
@@ -202,6 +218,15 @@ class OpenAIChatSession(ChatBroadcaster):
                 pass
 
     # -- events -------------------------------------------------------------
+
+    def _emit_tool_progress(self, text: str) -> None:
+        """A value-free in-flight cue for a long-running tool (the investigate fan-out),
+        on the chat's EXISTING ``tool`` progress channel. It carries counts/statuses only,
+        goes to the local UI (never the model), and touches the activity clock so a
+        multi-minute investigation is never idle-reaped mid-flight. Called from the
+        planner's worker threads — ``_broadcast`` fans out onto thread-safe queues."""
+        self.touch()
+        self._broadcast(ChatEvent("tool", {"progress": text}))
 
     def _emit_proposal(self, code: str, rationale: str = "") -> None:
         self._broadcast(ChatEvent("proposal", {"code": code, "rationale": rationale}))
