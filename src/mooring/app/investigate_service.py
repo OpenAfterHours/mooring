@@ -39,9 +39,22 @@ def make_run_investigation(
     if not cfg.enabled:
         return None
 
-    from mooring.ai.investigate import BranchJob, InvestigatePlanner, merge_findings
+    from dataclasses import replace
 
-    def run_investigation(branches: list) -> str:
+    from mooring.ai.investigate import (
+        BranchJob,
+        InvestigatePlanner,
+        merge_findings,
+        resolve_concurrency,
+    )
+
+    # Resolve AUTO (0) concurrency HERE, where the configured provider is known — the
+    # planner is provider-agnostic. An explicitly configured value always wins.
+    cfg = replace(
+        cfg, max_concurrency=resolve_concurrency(cfg.max_concurrency, app_cfg.ai_provider)
+    )
+
+    def run_investigation(branches: list, on_progress=None) -> str:
         jobs = [
             BranchJob(
                 question=str(b.get("question", "")).strip(),
@@ -59,6 +72,7 @@ def make_run_investigation(
             build_context=build_context,
             open_session=open_readonly_session,
             default_notebook_rel=notebook_rel,
+            on_progress=on_progress,
         )
         return merge_findings(planner.run(jobs))
 

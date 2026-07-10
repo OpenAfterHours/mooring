@@ -174,7 +174,8 @@ def build_tool_specs(
     dictionary=None,
     semantic_models=None,
     code_index=None,
-    run_investigation: Callable[[list], str] | None = None,
+    run_investigation: Callable[..., str] | None = None,
+    emit_tool_progress: Callable[[str], None] | None = None,
     pii_enabled: bool = False,
 ) -> list["ToolSpec"]:
     """Build the safe tools as provider-neutral :class:`ToolSpec`s, bound to one
@@ -855,6 +856,25 @@ def build_tool_specs(
     # into ONE proposal the analyst Applies.
     if run_investigation is not None:
 
+        def _progress(event: dict) -> None:
+            """Render a value-free in-flight cue for the analyst. Carries COUNTS and
+            statuses only — never a sub-question or a finding — so the progress channel
+            opens no egress path (it goes to the local UI, not the model)."""
+            if emit_tool_progress is None:
+                return
+            phase = event.get("phase")
+            total = int(event.get("total", 0) or 0)
+            done = int(event.get("done", 0) or 0)
+            if not total:
+                return
+            if phase == "start":
+                emit_tool_progress(f"researching {total} questions in parallel…")
+            elif phase == "branch":
+                emit_tool_progress(f"researched {done} of {total}…")
+            elif phase == "done":
+                found = int(event.get("found", 0) or 0)
+                emit_tool_progress(f"merging findings from {found} of {total} branches…")
+
         def investigate(invocation):
             raw = _args(invocation).get("branches") or []
             branches = [
@@ -867,7 +887,7 @@ def build_tool_specs(
                     "provide a non-empty 'branches' list of {question, notebook?, dataset?} objects"
                 )
             try:
-                merged = run_investigation(branches)
+                merged = run_investigation(branches, on_progress=_progress)
             except Exception as exc:  # noqa: BLE001 - a coordinator error still yields a clean turn
                 return _err(f"the investigation could not run: {exc}")
             return _ok(merged or "(the investigation produced no findings)")
@@ -928,7 +948,8 @@ def build_tools(
     dictionary=None,
     semantic_models=None,
     code_index=None,
-    run_investigation: Callable[[list], str] | None = None,
+    run_investigation: Callable[..., str] | None = None,
+    emit_tool_progress: Callable[[str], None] | None = None,
     pii_enabled: bool = False,
 ) -> list:
     """The GitHub Copilot adapter over :func:`build_tool_specs`.
@@ -958,6 +979,7 @@ def build_tools(
         semantic_models=semantic_models,
         code_index=code_index,
         run_investigation=run_investigation,
+        emit_tool_progress=emit_tool_progress,
         pii_enabled=pii_enabled,
     )
 
@@ -989,7 +1011,8 @@ def build_openai_tools(
     dictionary=None,
     semantic_models=None,
     code_index=None,
-    run_investigation: Callable[[list], str] | None = None,
+    run_investigation: Callable[..., str] | None = None,
+    emit_tool_progress: Callable[[str], None] | None = None,
     pii_enabled: bool = False,
 ) -> tuple[list[dict], dict[str, Callable[[object], "ToolOutput"]]]:
     """The OpenAI adapter over :func:`build_tool_specs`.
@@ -1018,6 +1041,7 @@ def build_openai_tools(
         semantic_models=semantic_models,
         code_index=code_index,
         run_investigation=run_investigation,
+        emit_tool_progress=emit_tool_progress,
         pii_enabled=pii_enabled,
     )
     tool_specs = [

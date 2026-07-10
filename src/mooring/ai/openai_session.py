@@ -182,6 +182,7 @@ class OpenAIChatSession(ChatBroadcaster):
                 semantic_models=self._semantic_models,
                 code_index=self._helpers,
                 run_investigation=self._run_investigation,
+                emit_tool_progress=self._emit_tool_progress,
                 pii_enabled=self._pii_enabled,
             )
         except AINotConnectedError as exc:
@@ -217,6 +218,15 @@ class OpenAIChatSession(ChatBroadcaster):
                 pass
 
     # -- events -------------------------------------------------------------
+
+    def _emit_tool_progress(self, text: str) -> None:
+        """A value-free in-flight cue for a long-running tool (the investigate fan-out),
+        on the chat's EXISTING ``tool`` progress channel. It carries counts/statuses only,
+        goes to the local UI (never the model), and touches the activity clock so a
+        multi-minute investigation is never idle-reaped mid-flight. Called from the
+        planner's worker threads — ``_broadcast`` fans out onto thread-safe queues."""
+        self.touch()
+        self._broadcast(ChatEvent("tool", {"progress": text}))
 
     def _emit_proposal(self, code: str, rationale: str = "") -> None:
         self._broadcast(ChatEvent("proposal", {"code": code, "rationale": rationale}))

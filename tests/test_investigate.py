@@ -14,6 +14,7 @@ from mooring.ai.investigate import (
     BranchResult,
     InvestigatePlanner,
     merge_findings,
+    resolve_concurrency,
 )
 from mooring.ai_config import InvestigateConfig, PiiConfig
 
@@ -84,7 +85,7 @@ def _msg(text):
     return [("message", {"text": text}), ("idle", {})]
 
 
-def _planner(sessions, *, config=None, pii=None, opened=None):
+def _planner(sessions, *, config=None, pii=None, opened=None, on_progress=None):
     it = iter(sessions)
 
     def open_session(ctx, nb, model, effort):
@@ -93,11 +94,14 @@ def _planner(sessions, *, config=None, pii=None, opened=None):
         return next(it)
 
     return InvestigatePlanner(
-        config=config or InvestigateConfig(enabled=True, branch_timeout=2),
+        # max_concurrency=2: the factory resolves AUTO(0) before constructing a planner,
+        # so a directly-built planner must pass a concrete cap or it degrades to serial.
+        config=config or InvestigateConfig(enabled=True, branch_timeout=2, max_concurrency=2),
         pii=pii or PiiConfig(),
         build_context=lambda nb, ds: f"CTX nb={nb} ds={ds}",
         open_session=open_session,
         default_notebook_rel="notebooks/current.py",
+        on_progress=on_progress,
     )
 
 
@@ -197,6 +201,52 @@ def test_merge_drops_a_checksum_pii_line_from_a_finding():
 
 def test_empty_findings_merge_to_empty_string():
     assert merge_findings([BranchResult("q", "failed", error="boom")]) == ""
+
+
+def test_resolve_concurrency_is_provider_aware_and_explicit_wins():
+    # AUTO (0): a Copilot branch is a subprocess + a premium request, so keep it small;
+    # an OpenAI/LiteLLM branch is just an HTTP stream, so a wider fan-out is cheap.
+    assert resolve_concurrency(0, "copilot") == 2
+    assert resolve_concurrency(0, "openai") == 6
+    assert resolve_concurrency(0, "litellm") == 6
+    assert resolve_concurrency(0, "") == 6  # unknown provider -> the light default
+    assert resolve_concurrency(0, "COPILOT") == 2  # case-insensitive
+    # An explicitly configured value always wins over AUTO, for every provider.
+    assert resolve_concurrency(4, "copilot") == 4
+    assert resolve_concurrency(1, "openai") == 1
+
+
+def test_planner_emits_value_free_progress_as_branches_finish():
+    events: list[dict] = []
+    sessions = [ScriptedSession(_msg(f"f{i}")) for i in range(3)]
+    _planner(sessions, on_progress=events.append).run(
+        [BranchJob(question=f"q{i}") for i in range(3)]
+    )
+    assert events[0] == {"phase": "start", "done": 0, "total": 3}
+    assert [e["done"] for e in events if e["phase"] == "branch"] == [1, 2, 3]
+    assert events[-1] == {"phase": "done", "done": 3, "total": 3, "found": 3}
+    # Value-free: counts + statuses only — never a sub-question or a finding.
+    blob = repr(events)
+    assert "q0" not in blob and "f0" not in blob
+
+
+def test_planner_progress_counts_only_answered_branches_as_found():
+    events: list[dict] = []
+    sessions = [ScriptedSession(_msg("answered")), ScriptedSession([("idle", {})])]
+    _planner(sessions, on_progress=events.append).run(
+        [BranchJob(question="q0"), BranchJob(question="q1")]
+    )
+    assert events[-1]["found"] == 1 and events[-1]["total"] == 2
+
+
+def test_planner_survives_a_broken_progress_sink():
+    def boom(_event):
+        raise RuntimeError("sink exploded")
+
+    [r] = _planner([ScriptedSession(_msg("ok"))], on_progress=boom).run(
+        [BranchJob(question="q")]
+    )
+    assert r.status == "finding"  # a broken cue never sinks the investigation
 
 
 def test_readonly_openai_session_drops_run_investigation_so_it_cannot_recurse():

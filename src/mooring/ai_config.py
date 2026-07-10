@@ -103,7 +103,11 @@ class InvestigateConfig:
 
     enabled: bool = True
     max_branches: int = 8
-    max_concurrency: int = 3
+    # 0 = AUTO: resolved per provider, because a branch's cost is provider-shaped — a
+    # Copilot branch is a ~150 MB CLI subprocess AND a premium request, an OpenAI/LiteLLM
+    # branch is just HTTP + tokens. See mooring.ai.investigate.resolve_concurrency. Any
+    # value > 0 is an explicit override and always wins.
+    max_concurrency: int = 0
     branch_timeout: int = 180  # wall-clock seconds per branch
     pii_policy: str = "block_branch"  # "block_branch" | "block_investigation"
 
@@ -225,7 +229,7 @@ def load_ai_config(ai: Mapping, env: Mapping[str, str]) -> AiConfig:
         enabled=_as_bool(env.get("MOORING_AI_INVESTIGATE"), _as_bool(inv.get("enabled"), True)),
         max_branches=int(env.get("MOORING_AI_INVESTIGATE_MAX_BRANCHES", inv.get("max_branches", 8))),
         max_concurrency=int(
-            env.get("MOORING_AI_INVESTIGATE_MAX_CONCURRENCY", inv.get("max_concurrency", 3))
+            env.get("MOORING_AI_INVESTIGATE_MAX_CONCURRENCY", inv.get("max_concurrency", 0))
         ),
         branch_timeout=int(
             env.get("MOORING_AI_INVESTIGATE_BRANCH_TIMEOUT_SEC", inv.get("branch_timeout_sec", 180))

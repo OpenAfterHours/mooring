@@ -135,10 +135,16 @@ It preserves every guarantee above, and its safety rests on one load-bearing inv
   value-free PII pre-flight before any session opens; there is no human at a sub-agent, so a
   block-mode hold blocks that branch rather than being auto-confirmed.
 
-Because each branch is a full model session against your account's quota, it is capped
-(`[ai.investigate] max_branches`, `max_concurrency`) and is most economical on the
-OpenAI/LiteLLM (HTTP) path — on the Copilot provider each branch is a separate CLI
-subprocess, so keep the concurrency small.
+Because each branch is a full model session against your account's quota, it is capped by
+`[ai.investigate] max_branches` (default 8) and `max_concurrency`. `max_concurrency`
+defaults to `0` = **auto**, resolved per provider because the per-branch cost differs by an
+order of magnitude: **2 on Copilot** (each branch is a ~150 MB CLI subprocess *and* a
+premium request) and **6 on OpenAI/LiteLLM** (each branch is just an HTTP stream). Any value
+above `0` is an explicit override and wins for every provider.
+
+While a fan-out runs, the chat streams an inline progress cue on the tool line
+("investigating · researched 2 of 3…"). That cue carries **counts and statuses only** —
+never a sub-question or a finding — and it goes to your browser, not to the model.
 
 ## Choosing the AI backend: Copilot or an OpenAI-compatible endpoint { #ai-backend }
 

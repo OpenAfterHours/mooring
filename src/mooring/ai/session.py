@@ -294,6 +294,7 @@ class CopilotChatSession(ChatBroadcaster):
             semantic_models=self._semantic_models,
             code_index=self._helpers,
             run_investigation=self._run_investigation,
+            emit_tool_progress=self._emit_tool_progress,
             pii_enabled=self._pii_enabled,
         )
         extra: dict[str, Any] = {}
@@ -321,6 +322,14 @@ class CopilotChatSession(ChatBroadcaster):
                 await self._client.stop()
 
     # -- events -------------------------------------------------------------
+
+    def _emit_tool_progress(self, text: str) -> None:
+        """A value-free in-flight cue for a long-running tool (the investigate fan-out),
+        on the SAME ``tool`` progress channel the SDK's TOOL_EXECUTION_PROGRESS uses. It
+        carries counts/statuses only, goes to the local UI (never the model), and touches
+        the activity clock so a multi-minute investigation is never idle-reaped."""
+        self.touch()
+        self._broadcast(ChatEvent("tool", {"progress": text}))
 
     def _emit_proposal(self, code: str, rationale: str = "") -> None:
         self._broadcast(ChatEvent("proposal", {"code": code, "rationale": rationale}))

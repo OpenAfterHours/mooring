@@ -26,11 +26,29 @@ from __future__ import annotations
 import contextlib
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Callable
 
 from mooring.ai import fanout
+
+# AUTO concurrency (``[ai.investigate] max_concurrency = 0``), per provider. A branch's
+# cost is provider-shaped: a Copilot branch spawns a ~150 MB CLI subprocess AND spends a
+# premium request, so keep it small; an OpenAI/LiteLLM branch is just an HTTP stream, so a
+# wider fan-out is cheap. An explicitly configured value always wins over these.
+_AUTO_CONCURRENCY = {"copilot": 2}
+_AUTO_CONCURRENCY_DEFAULT = 6
+
+
+def resolve_concurrency(configured: int, provider: str) -> int:
+    """The effective number of branches to run at once.
+
+    ``configured > 0`` is an explicit operator override and always wins. ``0`` means AUTO:
+    a provider-aware default (see :data:`_AUTO_CONCURRENCY`), because the per-branch cost
+    differs by an order of magnitude between the Copilot and OpenAI/LiteLLM backends."""
+    if configured and configured > 0:
+        return configured
+    return _AUTO_CONCURRENCY.get((provider or "").strip().lower(), _AUTO_CONCURRENCY_DEFAULT)
 
 
 @dataclass(frozen=True)
@@ -67,6 +85,11 @@ class InvestigatePlanner:
       context (opaque here; whatever ``open_session`` needs).
     * ``open_session(ctx, notebook_rel, model, effort) -> ChatBroadcaster`` — open a
       READ-ONLY value-blind session (no propose/edit tool, no ``mooring_investigate``).
+
+    ``on_progress(event: dict)`` (optional) receives VALUE-FREE lifecycle events —
+    ``{"phase": "start"|"branch"|"done", "done": int, "total": int, "status": str}`` — so a
+    caller can stream a progress cue while the parent turn blocks. It carries counts and
+    statuses only, never a sub-question or a finding.
     """
 
     def __init__(
@@ -77,6 +100,7 @@ class InvestigatePlanner:
         build_context: Callable,
         open_session: Callable,
         default_notebook_rel: str = "",
+        on_progress: Callable[[dict], None] | None = None,
         abort: threading.Event | None = None,
     ) -> None:
         self._cfg = config
@@ -84,11 +108,24 @@ class InvestigatePlanner:
         self._build_context = build_context
         self._open_session = open_session
         self._default_notebook = default_notebook_rel
+        self._on_progress = on_progress
         self._abort = abort or threading.Event()
 
+    def _emit(self, **data) -> None:
+        """Publish one value-free progress event; a broken sink never sinks a branch."""
+        if self._on_progress is None:
+            return
+        with contextlib.suppress(Exception):
+            self._on_progress(data)
+
     def run(self, branches) -> list[BranchResult]:
-        """Run every branch concurrently (capped at ``max_concurrency``, at most
-        ``max_branches`` total) and return results in submission order."""
+        """Run every branch concurrently (at most ``max_concurrency`` at once, at most
+        ``max_branches`` total) and return results in SUBMISSION order.
+
+        ``max_concurrency`` must already be resolved by the caller (see
+        :func:`resolve_concurrency`); a 0 here degrades safely to serial. Progress is
+        emitted as each branch FINISHES (not in submission order), so a caller can stream
+        an honest "k of N done" cue while the parent turn blocks."""
         jobs = list(branches)[: max(1, self._cfg.max_branches)]
         if not jobs:
             return []
@@ -102,7 +139,7 @@ class InvestigatePlanner:
         abort_all = bool(blocked) and str(self._cfg.pii_policy).strip() == "block_investigation"
 
         results: list[BranchResult | None] = [None] * len(jobs)
-        pending = []
+        futures: dict = {}
         with ThreadPoolExecutor(
             max_workers=max(1, self._cfg.max_concurrency), thread_name_prefix="investigate"
         ) as pool:
@@ -115,12 +152,20 @@ class InvestigatePlanner:
                         job.question, "not_run", error="Investigation cancelled."
                     )
                     continue
-                pending.append((i, pool.submit(self._run_branch, job)))
-            for i, fut in pending:
+                futures[pool.submit(self._run_branch, job)] = i
+            total = len(futures)
+            self._emit(phase="start", done=0, total=total)
+            done = 0
+            for fut in as_completed(futures):
+                i = futures[fut]
                 try:
                     results[i] = fut.result()
                 except Exception as exc:  # noqa: BLE001 - one branch must not sink the rest
                     results[i] = BranchResult(jobs[i].question, "failed", error=str(exc))
+                done += 1
+                self._emit(phase="branch", done=done, total=total, status=results[i].status)
+        found = sum(1 for r in results if r is not None and r.status == "finding")
+        self._emit(phase="done", done=total, total=total, found=found)
         return [r for r in results if r is not None]
 
     def _run_branch(self, job: BranchJob) -> BranchResult:

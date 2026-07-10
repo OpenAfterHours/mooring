@@ -32,6 +32,7 @@ const TOOL_LABELS = {
   mooring_list_tables: "listing dictionary tables",
   mooring_describe_table: "describing a table",
   mooring_search_dictionary: "searching the dictionary",
+  mooring_investigate: "investigating",
   mooring_get_semantic_model: "reading the semantic model",
   mooring_describe_model_table: "describing a model table",
   mooring_get_measure: "fetching a measure's DAX",
@@ -254,11 +255,17 @@ function onTool(d) {
       el.append(g, l);
     });
     row._detail = "";
+    row._baseLabel = label;
     toolStack.push(row);
   } else if (d.progress) {
     const row = toolStack.at(-1);
     if (row) {
       row._detail = d.progress;
+      // Surface progress INLINE, not only behind the click-to-expand detail: a fan-out
+      // ("investigating") blocks the turn for as long as its slowest branch, so a static
+      // line would read as a hang.
+      const label = row.querySelector(".tool-label");
+      if (label && row._baseLabel) label.textContent = `${row._baseLabel} · ${d.progress}`;
       makeExpandable(row);
     }
   }

@@ -107,7 +107,7 @@ def test_investigate_tool_only_registered_with_run_investigation(ws):
 def test_investigate_tool_calls_the_coordinator_and_returns_its_findings(ws):
     seen = {}
 
-    def run_investigation(branches):
+    def run_investigation(branches, on_progress=None):
         seen["branches"] = branches
         return "## what columns?\norders has id, ts, amount"
 
@@ -125,6 +125,59 @@ def test_investigate_tool_calls_the_coordinator_and_returns_its_findings(ws):
     assert not out.is_error
     assert "orders has id, ts, amount" in out.text
     assert seen["branches"] == [{"question": "what columns?"}]
+
+
+def test_investigate_tool_streams_value_free_progress_cues(ws):
+    cues: list[str] = []
+    question = "SENTINEL_QUESTION"
+    finding = "SENTINEL_FINDING"
+
+    def run_investigation(branches, on_progress=None):
+        # Replay the planner's value-free lifecycle events.
+        on_progress({"phase": "start", "done": 0, "total": 3})
+        on_progress({"phase": "branch", "done": 1, "total": 3, "status": "finding"})
+        on_progress({"phase": "done", "done": 3, "total": 3, "found": 2})
+        return finding
+
+    spec = {
+        s.name: s
+        for s in build_tool_specs(
+            workspace=ws,
+            folders=("data",),
+            notebook_rel="nb.py",
+            emit_proposal=lambda *a, **k: None,
+            run_investigation=run_investigation,
+            emit_tool_progress=cues.append,
+        )
+    }["mooring_investigate"]
+    out = spec.handler(_invocation(branches=[{"question": question}]))
+    assert cues == [
+        "researching 3 questions in parallel…",
+        "researched 1 of 3…",
+        "merging findings from 2 of 3 branches…",
+    ]
+    # The cue carries COUNTS only — never a sub-question's text nor a finding's text.
+    # (The findings themselves still reach the model, but as the tool RESULT.)
+    assert not any(question in c or finding in c for c in cues)
+    assert finding in out.text
+
+
+def test_investigate_progress_is_a_noop_without_a_sink(ws):
+    def run_investigation(branches, on_progress=None):
+        on_progress({"phase": "start", "done": 0, "total": 2})  # must not raise
+        return "findings"
+
+    spec = {
+        s.name: s
+        for s in build_tool_specs(
+            workspace=ws,
+            folders=("data",),
+            notebook_rel="nb.py",
+            emit_proposal=lambda *a, **k: None,
+            run_investigation=run_investigation,
+        )
+    }["mooring_investigate"]
+    assert not spec.handler(_invocation(branches=[{"question": "q"}])).is_error
 
 
 def test_investigate_tool_rejects_empty_branches(ws):
