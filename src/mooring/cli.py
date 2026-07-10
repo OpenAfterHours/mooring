@@ -1791,9 +1791,15 @@ def cmd_ai_context(
             print("\nNote: [ai] context is OFF on this machine — set it true to read them in chat.")
         return 0
 
-    folder = workspace_config.normalize_notebook(args.folder)
+    # safe_folder, not normalize_notebook: this is the CLI's half of the escape check the
+    # hub route does with resolve()/relative_to. Any DEPTH is allowed (finance/dictionary);
+    # a "..", a drive letter, or the bare root is not.
+    folder = workspace_config.safe_folder(args.folder)
     if not folder:
-        sys.exit("Give a workspace-relative folder, e.g. `mooring ai context add finance/dictionary`.")
+        sys.exit(
+            "Give a workspace-relative folder inside the repo, e.g. "
+            "`mooring ai context add finance/dictionary` (no '..', no drive letter)."
+        )
 
     if cmd in ("use", "unuse"):
         offer = workspace_config.context_folders(workspace)

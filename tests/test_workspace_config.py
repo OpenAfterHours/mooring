@@ -85,6 +85,78 @@ def test_context_folder_preserves_sibling_ai_keys(tmp_path):
     assert wc.context_folders(tmp_path) == ()
 
 
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        ("context", "context"),
+        ("reports/finance", "reports/finance"),  # any DEPTH is fine
+        ("a/b/c/d", "a/b/c/d"),
+        ("\\reports\\finance\\", "reports/finance"),
+        ("./reports/finance", "reports/finance"),
+        ("  reports/finance  ", "reports/finance"),
+        # Leaving the workspace is not.
+        ("", ""),
+        (".", ""),
+        ("/", ""),
+        ("..", ""),
+        ("../x", ""),
+        ("a/../../b", ""),
+        ("C:/x", ""),  # absolute: Path(ws) / "C:/x" IS "C:/x" on Windows
+        ("C:x", ""),
+        ("c:/Windows", ""),
+    ],
+)
+def test_safe_folder_keeps_nested_and_rejects_escapes(raw, expected):
+    assert wc.safe_folder(raw) == expected
+
+
+def test_safe_folder_rejects_windows_absolute_on_every_platform():
+    # mooring.toml is SYNCED: an entry authored on Windows must be rejected the same way
+    # on macOS/Linux, where "C:/x" would otherwise look like a folder named "C:".
+    assert wc.safe_folder("C:/secrets") == ""
+
+
+def test_context_folders_read_drops_escaping_entries(tmp_path):
+    # A hand-edited / teammate-pushed mooring.toml can carry anything. The offer is folded
+    # straight into cfg.folders, so the read side must drop escapes exactly as [sync] folders
+    # does — an absolute entry would otherwise make sync.synced_paths walk outside the
+    # workspace and raise ValueError from relative_to mid-scan, wedging status/pull.
+    (tmp_path / "mooring.toml").write_text(
+        '[ai]\ncontext_folders = ["..", "../evil", "C:/secrets", "reports/finance"]\n', "utf-8"
+    )
+    assert wc.context_folders(tmp_path) == ("reports/finance",)
+
+
+def test_offering_an_escaping_folder_is_refused(tmp_path):
+    with pytest.raises(ValueError):
+        wc.set_context_folder(tmp_path, "../evil", True)
+    with pytest.raises(ValueError):
+        wc.set_context_folder(tmp_path, "C:/secrets", True)
+    assert wc.context_folders(tmp_path) == ()
+
+
+def test_withdrawing_purges_a_legacy_escaping_entry(tmp_path):
+    # Written by an older version that had no guard. Withdrawing is never refused, and any
+    # write purges the unreadable entry rather than carrying it forward.
+    (tmp_path / "mooring.toml").write_text(
+        '[ai]\ncontext_folders = ["..", "reports/finance"]\n', "utf-8"
+    )
+    wc.set_context_folder(tmp_path, "reports/finance", False)
+    data = tomllib.loads((tmp_path / "mooring.toml").read_text("utf-8")) if (
+        tmp_path / "mooring.toml"
+    ).exists() else {}
+    assert ".." not in data.get("ai", {}).get("context_folders", [])
+    assert wc.context_folders(tmp_path) == ()
+
+
+def test_sync_folders_read_drops_absolute_entries(tmp_path):
+    # The [sync] folders parser already dropped "..", but not a drive-letter absolute.
+    (tmp_path / "mooring.toml").write_text(
+        '[sync]\nfolders = ["..", "C:/x", "pkg/notebooks"]\n', "utf-8"
+    )
+    assert wc.extra_folders(tmp_path) == ("pkg/notebooks",)
+
+
 def test_context_folders_fails_open_on_corrupt_read(tmp_path):
     (tmp_path / "mooring.toml").write_text("this is = not valid = toml", "utf-8")
     assert wc.context_folders(tmp_path) == ()  # read side fails open

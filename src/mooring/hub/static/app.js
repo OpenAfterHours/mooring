@@ -1350,8 +1350,8 @@ function buildTreeFileRow(file, depth) {
 
 // One folder header row in the tree: caret (collapse in place) + name (drills IN to focus
 // this sub-folder; the breadcrumb climbs back out) + subtree count + "New here" (and a
-// ☆/★ Feature star on top-level folders in repo mode). An empty declared leaf gets a
-// disabled caret and the "here's where notebooks go" nub.
+// ☆/★ Feature star on top-level folders, plus a ◆ AI-context toggle at any depth, in repo
+// mode). An empty declared leaf gets a disabled caret and the "here's where notebooks go" nub.
 function buildFolderHeader(node, depth, expanded, ctx) {
   const caret = document.createElement("button");
   caret.className = "small caret";
@@ -1404,9 +1404,12 @@ function buildFolderHeader(node, depth, expanded, ctx) {
       action("/api/hub/feature", { folder: node.path, featured: !featured }));
     actionsTd.append(star);
   }
-  // "AI context" toggle: offer/withdraw a top-level folder as team copilot context.
-  // Repo mode + AI on only. Independent of the ☆ star — this governs what the model reads.
-  if (ctx && ctx.contextCurateable && depth === 0) {
+  // "AI context" toggle: offer/withdraw a folder as team copilot context. Repo mode + AI on
+  // only. Independent of the ☆ star — this governs what the model reads, not display order.
+  // Rendered at EVERY depth (and inside a focus), unlike the star: the offer is a path, and
+  // `node.path` is always the full repo-root-relative one, so `reports/finance` round-trips
+  // through /api/hub/context-folder untouched. Reach a deep folder by expanding or drilling in.
+  if (ctx && ctx.contextCurateable) {
     const offered = ctx.contextSet.has(node.path);
     const b = document.createElement("button");
     b.className = "small ctx-folder" + (offered ? " on" : "");
@@ -1751,9 +1754,10 @@ function renderFiles(files, artifacts, declaredFolders) {
     // (unfocused) view, repo mode. `featuredSet` tells a header filled vs hollow.
     featureable: !focus && canFeature,
     featuredSet: new Set(lastFeatured),
-    // The "AI context" toggle offers a top-level folder to the team copilot. Independent
-    // of the ☆ star (governance, not display order) — rendered on every top-level folder.
-    contextCurateable: !focus && canCurateContext,
+    // The "AI context" toggle offers a folder to the team copilot. Independent of the ☆ star
+    // (governance, not display order) — rendered on every folder node at every depth, and
+    // NOT suppressed by a focus, since drilling in is how you reach a deep folder.
+    contextCurateable: canCurateContext,
     contextSet: new Set(lastContextFolders),
   };
   const shownArtifacts = focus
@@ -1787,10 +1791,12 @@ function renderFiles(files, artifacts, declaredFolders) {
     }
   }
   // Stale AI-context offers (folder renamed/deleted): keep them withdrawable. A folder that
-  // exists but is folded under "More folders" is still live — liveFolders spans all top-level
-  // nodes regardless of fold state — so only truly-gone offered paths surface here.
-  if (ctx.contextCurateable) {
-    const liveFolders = new Set(t.folders.map((n) => n.path));
+  // exists but is folded under "More folders" — or NESTED several levels down — is still
+  // live: currentNodePaths is allFolderPaths(t), every node at every depth regardless of
+  // fold state, so only truly-gone offered paths surface here. Root view only: under a focus
+  // the tree holds just that subtree, so every offer outside it would look gone.
+  if (ctx.contextCurateable && !focus) {
+    const liveFolders = new Set(currentNodePaths);
     const seenCtx = new Set();
     for (const raw of lastContextFolders) {
       const p = FilesTree.norm(raw);

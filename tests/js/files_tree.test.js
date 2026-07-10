@@ -184,6 +184,22 @@ test("allFolderPaths: every node path, depth-first", () => {
     ["data", "reports", "reports/2026"]);
 });
 
+test("allFolderPaths: a NESTED offered folder counts as live (the stale-offer set)", () => {
+  // renderFiles builds the "is this offered AI-context folder still in the repo?" set from
+  // allFolderPaths, not from the top-level t.folders. With the latter a nested offer like
+  // reports/finance is never live and the row wrongly reads "no longer in the repo".
+  const t = FT.tree([f("reports/finance/instructions.md")], [], "");
+  assert.deepEqual(t.folders.map((n) => n.path), ["reports"]); // top-level only: misses it
+  assert.ok(FT.allFolderPaths(t).includes("reports/finance")); // all depths: finds it
+});
+
+test("tree: node paths stay repo-root-relative under a focus", () => {
+  // The ◆ AI-context toggle POSTs node.path at any depth, including inside a drill-down,
+  // so a focused node must still carry its FULL path or the wrong folder gets offered.
+  const t = FT.tree([f("reports/finance/instructions.md")], [], "reports");
+  assert.deepEqual(t.folders.map((n) => n.path), ["reports/finance"]);
+});
+
 test("expandableCount: counts only steerable nodes, not empty declared leaves", () => {
   // Two declared-but-empty siblings — nothing to expand, so the toggles shouldn't show.
   assert.equal(FT.expandableCount(FT.tree([], ["notebooks", "reports"], "")), 0);
