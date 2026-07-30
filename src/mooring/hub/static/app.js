@@ -910,6 +910,124 @@ $("review-close").addEventListener("click", () => {
   reviewPath = null;
 });
 
+// -- merge cell by cell (the per-cell conflict resolution) -------------------
+// The fourth resolution for a conflicted NOTEBOOK, offered beside the three
+// whole-file ones (which stay exactly as they were, and are the only option
+// when this refuses). Two calls: a read-only plan, then the write. The plan's
+// three SHAs ride back with the write so the server can refuse (409) if your
+// copy or the team's moved while you were deciding.
+
+let mergePath = null;
+let mergePlan = null;
+let mergeChoices = {};
+
+async function mergeAction(path) {
+  const data = await api("/api/resolve/cells", { path });
+  if (data.error) {
+    // "unavailable" is a designed answer, not a failure: this conflict can't be
+    // merged per cell (not a notebook, restructured, no shared version), so say
+    // why and leave the row's three whole-file resolutions to do the job.
+    return showError(
+      data.unavailable
+        ? `${data.error} Use one of the other resolutions on ${path}.`
+        : data.error,
+    );
+  }
+  mergePath = path;
+  mergePlan = data;
+  mergeChoices = {};
+  renderMerge();
+}
+
+function renderMerge() {
+  const card = $("merge-card");
+  card.classList.remove("hidden");
+  $("merge-title").textContent = `Merge cell by cell — ${mergePath}`;
+  $("merge-summary").textContent = MergeFmt.summary(mergePlan);
+  const box = $("merge-cells");
+  box.textContent = ""; // clear children — cell diffs are untrusted, plain text only
+  for (const block of MergeFmt.buildBlocks(mergePlan)) {
+    const cell = document.createElement("div");
+    cell.className = block.status === "choice" ? "merge-cell merge-choice" : "merge-cell";
+    const label = document.createElement("div");
+    label.className = "merge-cell-label";
+    label.textContent = block.label;
+    cell.appendChild(label);
+    if (block.options.length) cell.appendChild(mergeOptions(block));
+    if (block.diff) {
+      const pre = document.createElement("pre");
+      pre.className = "merge-cell-diff";
+      pre.textContent = block.diff;
+      cell.appendChild(pre);
+    }
+    box.appendChild(cell);
+  }
+  updateMergeReady();
+  card.scrollIntoView({ block: "nearest" });
+}
+
+// One radio group per contested cell, named by the cell id so the browser
+// enforces "at most one side wins" for us. Nothing is checked initially.
+function mergeOptions(block) {
+  const row = document.createElement("div");
+  row.className = "merge-options";
+  for (const option of block.options) {
+    const label = document.createElement("label");
+    const input = document.createElement("input");
+    input.type = "radio";
+    input.name = `merge-${block.id}`;
+    input.value = option.value;
+    input.checked = mergeChoices[block.id] === option.value;
+    input.addEventListener("change", () => {
+      mergeChoices[block.id] = option.value;
+      updateMergeReady();
+    });
+    const text = document.createElement("span");
+    text.textContent = option.label;
+    label.append(input, text);
+    row.appendChild(label);
+  }
+  return row;
+}
+
+// The write button stays disabled until every contested cell has a side. The
+// count of what's left is the whole instruction, so it lives on the button.
+function updateMergeReady() {
+  const left = MergeFmt.unresolved(mergePlan, mergeChoices).length;
+  const button = $("merge-apply");
+  button.disabled = left > 0;
+  button.textContent = left
+    ? `Choose ${left} more cell${left === 1 ? "" : "s"}`
+    : "Write the merged notebook";
+}
+
+function mergeApply() {
+  if (!mergePath || !MergeFmt.ready(mergePlan, mergeChoices)) return;
+  const body = {
+    path: mergePath,
+    choices: mergeChoices,
+    base_sha: mergePlan.base_sha,
+    local_sha: mergePlan.local_sha,
+    remote_sha: mergePlan.remote_sha,
+  };
+  // Through action() so the busy cue, the log card, and the trash Undo toast
+  // (the merge's safety net) all work exactly as they do for pull/resolve.
+  action("/api/resolve/cells/apply", body, true, "Merging cells…").then((data) => {
+    if (!data || data.error) return;
+    closeMerge();
+  });
+}
+
+function closeMerge() {
+  $("merge-card").classList.add("hidden");
+  mergePath = null;
+  mergePlan = null;
+  mergeChoices = {};
+}
+
+$("merge-apply").addEventListener("click", mergeApply);
+$("merge-close").addEventListener("click", closeMerge);
+
 // -- what's new (the pull digest) + the per-file watch set -------------------
 // The digest answers "who changed what since MY last sync" (server-computed
 // against the manifest horizon); watching a file promotes it — a badge on its
@@ -1092,6 +1210,15 @@ function fileActions(file, opts) {
   // "Discard my changes" (ditto), and "History…" all need the team repo. A
   // conflicted row keeps its badge: the cached remote still classifies it.
   if (file.state === "conflict" && !offlineMode) {
+    // "Merge cell by cell…" leads: on a notebook it is the only resolution that
+    // keeps BOTH sides' work in one file, and it usually asks nothing (a cell
+    // only one of you touched merges itself). Offered on any notebook row —
+    // whether this particular conflict is mergeable is a server answer, and it
+    // says why and points back here when it isn't. The three whole-file
+    // resolutions below are unchanged and remain the fallback.
+    if (isNotebook && file.has_local) {
+      actions.push(["Merge cell by cell…", () => mergeAction(file.path)]);
+    }
     actions.push(
       ["Use remote", () => action("/api/resolve", { path: file.path, strategy: "theirs" })],
       ["Keep both", () => action("/api/resolve", { path: file.path, strategy: "keep-both" })],

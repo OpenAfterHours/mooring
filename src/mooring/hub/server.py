@@ -1082,6 +1082,12 @@ def create_app(hub: Hub) -> Starlette:
             Route("/api/push", sync_routes.api_push, methods=["POST"]),
             Route("/api/propose", sync_routes.api_propose, methods=["POST"]),
             Route("/api/resolve", sync_routes.api_resolve, methods=["POST"]),
+            Route("/api/resolve/cells", sync_routes.api_resolve_cells, methods=["POST"]),
+            Route(
+                "/api/resolve/cells/apply",
+                sync_routes.api_resolve_cells_apply,
+                methods=["POST"],
+            ),
             Route("/api/recall", sync_routes.api_recall, methods=["POST"]),
             Route("/api/new", files.api_new, methods=["POST"]),
             Route("/api/duplicate", files.api_duplicate, methods=["POST"]),

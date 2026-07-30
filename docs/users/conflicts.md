@@ -22,9 +22,42 @@ each local file, so it always knows whether a file is **modified locally**,
 
 So a conflict simply means: *both sides changed; pick what should win.*
 
+## Merging a notebook cell by cell
+
+Most conflicts aren't really a disagreement: two people edited **different
+cells** of the same notebook. For those, **Merge cell by cell…** — the first
+action on a conflicted notebook row — does the whole job.
+
+It compares three versions of the notebook: the one you both last synced, your
+copy, and the team's. Then:
+
+- a cell **only one of you changed** is merged for you, whichever side changed
+  it — that's usually every cell, and the panel tells you how many;
+- a cell **you both changed** is the only thing you're asked about. You see the
+  two versions side by side and pick one per cell;
+- a cell **only one of you added** is kept; a cell **only one of you deleted**
+  is dropped.
+
+Nothing is preselected, and the **Write the merged notebook** button stays
+disabled until every contested cell has an answer.
+
+!!! note "Merging doesn't publish anything"
+
+    The merge writes **your local file only**. Afterwards the notebook is a
+    normal *modified* file — review it, run it, then **Push** it like any other
+    change. Your previous copy goes to the local trash first, so the **Undo**
+    toast — and the hub's Activity page, once the toast is gone — puts it
+    straight back.
+
+Mooring only offers this when it can be honest about it. If the file isn't a
+marimo notebook, if either version can't be read as cells, if you and the team
+created the file separately (so there's no shared version to merge against), or
+if the notebook has been restructured so heavily that mooring can't line the
+cells up confidently, it says so and leaves you the three resolutions below.
+
 ## The three resolutions
 
-On a conflicted file the hub offers:
+On any conflicted file the hub offers:
 
 | Choice | Result |
 |--------|--------|
@@ -34,8 +67,9 @@ On a conflicted file the hub offers:
 
 !!! tip
 
-    There's no wrong choice you can't recover from — **Keep both** and
-    **Push as copy** are non-destructive, so reach for those when unsure.
+    There's no wrong choice you can't recover from — **Merge cell by cell**,
+    **Keep both** and **Push as copy** are all non-destructive, so reach for
+    those when unsure.
 
 ## From the command line
 
