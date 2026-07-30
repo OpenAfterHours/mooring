@@ -307,6 +307,79 @@ wiring for you — but it never sees `c.secret`.
     database drivers — your own environment supplies `snowflake-connector` / `pyodbc` / etc.
     (add them with `mooring deps add`).
 
+## Pointing at data too big to sync
+
+The 400 MB parquet your reports run off **can't** live in the repo — pushes refuse
+at 45 MB. So it sits on a network share, and its path ends up typed into somebody's
+cell, where nobody else can find it and IT can break it by remounting the drive.
+
+Give that location a **name** instead. Like a connection, the pointer travels with
+the repo while the file itself never does:
+
+```bash
+mooring datasets add sales kind=share path="//fileserver/finance/sales.parquet"
+mooring datasets add archive kind=https url="https://data.example.org/archive.csv"
+mooring datasets list          # what's defined, where each lands here, and if it's there
+```
+
+Then notebooks ask for the name, never the path:
+
+```python
+import mooring_datasets as md
+import polars as pl
+
+sales = pl.read_parquet(md.path("sales"))
+```
+
+`md.path()` resolves the name **on the machine that runs the notebook**, so the same
+notebook works for everyone. A `kind=https` dataset is downloaded once into
+`.mooring/` (which never syncs) and reused after that.
+
+### When your copy is somewhere else
+
+Mapped the share to `D:` instead? Point **your** machine at it. This never syncs, so
+it can't break anyone else:
+
+```bash
+mooring datasets set-local sales "D:/finance/sales.parquet"
+mooring datasets set-local sales --clear    # back to the team's pointer
+```
+
+Resolution order, highest first:
+
+1. a `MOORING_DATASET_SALES_PATH` environment variable (handy for a scheduled run)
+2. your local redirect — `.mooring/datasets.local.toml`, set by `datasets set-local`
+3. the team's pointer in the synced `mooring.toml`
+
+If nothing resolves, the error names the dataset, where it looked, which of those
+three sent it there, and the exact command to fix it.
+
+### Prove the file hasn't moved
+
+A pointer says **where** the data came from. Pair it with an [input
+fingerprint](#fingerprinting-your-inputs) to prove **it's the same data** as last
+time:
+
+```python
+import mooring_inputs as mi
+
+sales = pl.read_parquet(md.path("sales"))
+mi.fingerprint(sales, "sales", path=md.path("sales"))
+```
+
+!!! warning "A pointer carries a location — never a credential"
+
+    mooring **refuses** to write a `password`/`token`/`key`-shaped field into the
+    synced `mooring.toml`, and it refuses a **pre-signed or SAS URL** as a location:
+    for those links the query string *is* the key, so sharing one shares the keys to
+    the data. Sign in to (or mount) the source on each machine and use
+    `datasets set-local` where it differs. `mooring datasets check` flags anything
+    that got in by hand.
+
+    The copilot sees dataset **names and file formats** only — never the path, the
+    server, or the URL. It has everything it needs to write `md.path("sales")` for
+    you, and nothing else.
+
 ## Proposing changes for review
 
 If your team prefers changes to be reviewed before they land, use **Propose**
@@ -425,7 +498,9 @@ with the notebook.
 
     Pushes **warn at 10 MB** and **refuse at 45 MB** per file (a GitHub
     Contents API limit). Store large or sensitive datasets elsewhere and have
-    notebooks load them at runtime.
+    notebooks load them at runtime — and give that "elsewhere" a **name**, with
+    [a dataset pointer](#pointing-at-data-too-big-to-sync), so it is shared with the
+    team instead of buried in one person's cell.
 
 ## What you can import in a notebook
 

@@ -396,6 +396,33 @@ def _build_parser() -> argparse.ArgumentParser:
         "check", help="scan the synced connection definitions for anything secret-shaped"
     )
 
+    ds_cmd = sub.add_parser(
+        "datasets",
+        help="point at data files too big to sync; each machine can redirect them locally",
+    )
+    ds_sub = ds_cmd.add_subparsers(dest="datasets_command", required=True)
+    ds_sub.add_parser("list", help="the defined datasets, where each resolves here, and if it's there")
+    ds_add = ds_sub.add_parser(
+        "add", help="define/update a pointer, e.g. add sales kind=share path=//fs/finance/sales.parquet"
+    )
+    ds_add.add_argument("name", help="a dataset name (e.g. sales)")
+    ds_add.add_argument(
+        "fields", nargs="+", metavar="field=value", help="kind= plus path=/url= (NO credentials)"
+    )
+    ds_rm = ds_sub.add_parser("rm", help="remove a dataset pointer")
+    ds_rm.add_argument("name", help="the dataset name to remove")
+    ds_local = ds_sub.add_parser(
+        "set-local", help="point a dataset somewhere else on THIS machine (never synced)"
+    )
+    ds_local.add_argument("name", help="the dataset name")
+    ds_local.add_argument(
+        "location", nargs="?", default=None, help="the file/UNC path it lives at here"
+    )
+    ds_local.add_argument(
+        "--clear", action="store_true", help="remove this machine's redirect instead of setting it"
+    )
+    ds_sub.add_parser("check", help="scan the synced dataset pointers for anything credential-shaped")
+
     sched_cmd = sub.add_parser(
         "schedule", help="refresh a notebook on a cadence (local to this machine)"
     )
@@ -1345,6 +1372,116 @@ def _connections_check(ws) -> int:
     for line in problems:
         print(f"  {line}")
     print("Store the credential locally: mooring connections set-secret <name>")
+    return 1
+
+
+def cmd_datasets(cfg: config.Config, args: argparse.Namespace) -> int:
+    from mooring import datasets, workspace_config
+
+    ws = cfg.workspace()
+    sub = args.datasets_command
+    if sub == "list":
+        defined = workspace_config.datasets(ws)
+        if not defined:
+            print("No datasets defined. Point at one that's too big to sync, e.g.:")
+            print("  mooring datasets add sales kind=share path=//fileserver/finance/sales.parquet")
+            return 0
+        for name in sorted(defined):
+            found = datasets.resolve(ws, name)
+            where = {"env": "env var", "local": "local redirect", "cache": "cached download"}.get(
+                found.source, "team pointer"
+            )
+            state = "present" if found.exists else "MISSING"
+            print(f"{name}: {found.path or '(no location)'}  [{where}; {state}]")
+        return 0
+    if sub == "add":
+        from mooring.ai import secrets as ai_secrets
+
+        fields: dict = {}
+        for item in args.fields:
+            if "=" not in item:
+                sys.exit(f"Bad field {item!r} — use field=value (e.g. kind=share).")
+            key, value = item.split("=", 1)
+            fields[key.strip()] = _coerce_field(value)
+        # Defence in depth over set_dataset's own guard (the connections `add` reasoning):
+        # the richer ai.secrets scanner catches a high-entropy credential embedded in a
+        # location that the field-name / URL-parameter floor would miss. Value-free: names only.
+        leaky = sorted(
+            k for k, v in fields.items() if isinstance(v, str) and ai_secrets.has_secrets(v)
+        )
+        if leaky:
+            sys.exit(
+                f"These field values look like credentials: {', '.join(leaky)}. A dataset "
+                "pointer carries only a location — keep the credential off the synced file."
+            )
+        try:
+            workspace_config.set_dataset(ws, args.name, fields)
+        except ValueError as exc:
+            sys.exit(str(exc))
+        name = workspace_config.normalize_dataset_name(args.name)
+        telemetry.log_event("datasets", action="add")  # value-free: just the action
+        print(f"Defined dataset '{name}'. Push mooring.toml to share the pointer with the team.")
+        print(f'In a notebook: import mooring_datasets as md; md.path("{name}")')
+        found = datasets.resolve(ws, name)
+        if not found.exists and found.source != "cache":
+            print(f"Heads up: nothing at {found.path} on this machine yet.")
+        return 0
+    if sub == "rm":
+        removed = workspace_config.remove_dataset(ws, args.name)
+        print("Removed the dataset pointer." if removed else "No such dataset.")
+        return 0
+    if sub == "set-local":
+        name = workspace_config.normalize_dataset_name(args.name)
+        if args.clear:
+            cleared = datasets.clear_local_override(ws, name)
+            print("Cleared this machine's redirect." if cleared else "No redirect to clear.")
+            return 0
+        if not args.location:
+            sys.exit(
+                f"Where does '{name}' live on this machine? "
+                f'e.g. mooring datasets set-local {name} "D:/finance/sales.parquet"'
+            )
+        path = datasets.set_local_override(ws, name, args.location)
+        telemetry.log_event("datasets", action="set_local")  # value-free: the action only
+        print(
+            f"'{name}' now resolves to {datasets.local_path(ws, args.location)} on this machine "
+            f"({path.relative_to(ws).as_posix()} is under .mooring, which never syncs)."
+        )
+        if not Path(datasets.local_path(ws, args.location)).is_file():
+            print("Heads up: there's no file there yet.")
+        return 0
+    if sub == "check":
+        return _datasets_check(ws)
+    return 0
+
+
+def _datasets_check(ws) -> int:
+    """Pre-flight scan of the SYNCED dataset pointers for anything credential-shaped — a
+    hand-added secret field, a pre-signed/SAS URL, or a credential embedded in a location.
+    Value-free output; this just surfaces earlier what the read side already drops."""
+    from mooring.ai import secrets as ai_secrets
+
+    raw = workspace_config.datasets_raw(ws)
+    problems: list[str] = []
+    for name in sorted(raw):
+        for field, value in raw[name].items():
+            if workspace_config.is_secret_field(field):
+                problems.append(f"{name}.{field}: field name looks like a credential")
+            elif workspace_config.location_looks_secret(value):
+                problems.append(f"{name}.{field}: a pre-signed/SAS URL — the link IS the key")
+            else:
+                for finding in ai_secrets.scan(str(value)):
+                    problems.append(f"{name}.{field}: {finding.kind}")
+    if not problems:
+        print("No credentials found in the dataset pointers.")
+        return 0
+    print("Found credential-shaped content in mooring.toml [datasets] — it must NOT be synced:")
+    for line in problems:
+        print(f"  {line}")
+    print(
+        "A pointer carries only a location. Mount or sign in to the source on each machine, "
+        "then: mooring datasets set-local <name> <path>"
+    )
     return 1
 
 
@@ -2959,6 +3096,8 @@ def _dispatch(
         return cmd_deps(cfg, args)
     if command == "connections":
         return cmd_connections(cfg, args)
+    if command == "datasets":
+        return cmd_datasets(cfg, args)
     if command == "shadow":
         return cmd_shadow(cfg, args)
     if command == "build-requirements":

@@ -212,6 +212,7 @@ def build_system_context(
     sql_help: str = "",
     inputs_help: str = "",
     connections_help: str = "",
+    datasets_help: str = "",
 ) -> str:
     """Assemble the value-blind context handed to the assistant.
 
@@ -248,6 +249,10 @@ def build_system_context(
     # connections_help carries USER-authored connection shape values (unlike the static
     # checks_help/sql_help capability notes), so it gets the same scrub backstop.
     connections_help, _ = scrub_text(connections_help)
+    # datasets_help carries only user-authored dataset NAMES and file formats (never a
+    # location — see mooring.datasets.copilot_guide), but a name is still user-authored
+    # text, so it gets the same scrub backstop.
+    datasets_help, _ = scrub_text(datasets_help)
 
     has_team = bool(instructions_text.strip() or dictionary_text.strip())
     parts = [
@@ -317,5 +322,10 @@ def build_system_context(
     # fragment was scrubbed above.
     if connections_help.strip():
         parts.append(connections_help.strip())
+    # The dataset POINTERS the team defined (see mooring.datasets.copilot_guide) — names
+    # and file formats only, NEVER a path/share/URL: md.path() resolves the location in
+    # the kernel, so the model needs no channel to it.
+    if datasets_help.strip():
+        parts.append(datasets_help.strip())
     parts.append(f"CURRENT NOTEBOOK ({notebook_rel}) SOURCE:\n{notebook_source.strip()}")
     return "\n\n".join(parts)

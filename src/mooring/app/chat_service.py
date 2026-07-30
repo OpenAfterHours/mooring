@@ -21,7 +21,7 @@ import contextlib
 import threading
 from pathlib import Path
 
-from mooring import checks, inputs, workspace_config
+from mooring import checks, datasets, inputs, workspace_config
 from mooring.app import notebooks
 
 
@@ -293,6 +293,9 @@ class ChatService:
             # The team's value-free connection SHAPES (names + fields, never the secret),
             # so the copilot can write connection code that references them.
             connections_help=workspace_config.connections_hint(workspace),
+            # The team's dataset POINTERS — names + file formats only, so the copilot can
+            # write `md.path("sales")` wiring without ever learning where the file lives.
+            datasets_help=datasets.copilot_guide(workspace),
         )
         return context, (index if has_dict else DictionaryIndex()), pii_banner, live_text, models, code_index
 

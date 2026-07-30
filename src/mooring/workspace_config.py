@@ -26,6 +26,11 @@ It carries these — paths and policy tokens only, never a data value:
   copilot) can reference it by name. A secret-shaped field is REFUSED on write —
   the secret NEVER goes here; it stays local (env var / a sync-excluded local
   file), so it can never ride a push. See :mod:`mooring.connections`.
+- ``[datasets]`` — value-free POINTERS to data files that are too big to sync
+  (a network share, a URL), so a notebook resolves ``md.path("sales")`` instead
+  of hard-coding someone's UNC path. A credential-bearing location (a SAS or
+  pre-signed URL) is REFUSED on write; each machine can redirect a name locally.
+  See :mod:`mooring.datasets`.
 """
 
 from __future__ import annotations
@@ -762,6 +767,195 @@ def remove_connection(workspace: Path, name: str) -> bool:
             data["connections"] = conns
         else:
             data.pop("connections", None)
+        if data:
+            _write_data(workspace, data)
+        else:
+            config_path(workspace).unlink(missing_ok=True)
+    return True
+
+
+# -- dataset pointers (a value-free WHERE; the file itself never syncs) ---------
+# The file-shaped sibling of [connections]. A push warns at 10 MB and refuses at
+# 45 MB, so the big parquet/CSV a team reports off lives OUTSIDE the repo — today as
+# a UNC path buried in someone's cell, invisible and unshareable. A pointer names
+# that location once, in the synced mooring.toml, so `md.path("sales")` means the
+# same file for everyone while each machine can redirect it locally (a different
+# drive letter / mount). Only a LOCATION, never a data value — and, exactly as with
+# [connections], never a credential: a pre-signed / SAS URL is refused here, because
+# for that URL shape the query string IS the key. See mooring.datasets.
+
+DATASET_KINDS = ("share", "https")
+
+# Query-parameter names that make a URL itself a bearer credential (Azure SAS,
+# S3/GCS pre-signed links). Unlike a password these carry no field NAME to catch —
+# the whole URL is the secret — so the location VALUE is matched instead. Broad on
+# purpose: a false refusal costs a `datasets set-local`, a false accept pushes a
+# live key to every teammate. Kept in sync with mooring._datasets_runtime (the
+# injected kernel module can't import this one); tests/test_datasets.py pins that.
+_URL_SECRET_PATTERN = (
+    r"[?&](?:sig|signature|sas|sas[_-]?token|token|access[_-]?token|api[_-]?key|apikey|"
+    r"auth|password|passwd|pwd|secret|credential|awsaccesskeyid|x-amz-signature|"
+    r"x-amz-credential|x-amz-security-token|x-goog-signature|x-goog-credential)="
+)
+_URL_SECRET_RE = None  # compiled lazily in location_looks_secret
+
+
+def location_looks_secret(value) -> bool:
+    """Whether a dataset LOCATION is itself a credential — a pre-signed or SAS URL.
+
+    :func:`is_secret_field` cannot help here: the field is innocently named ``url`` and
+    the secret hides in the query string, so the value is what must be inspected."""
+    import re
+
+    global _URL_SECRET_RE
+    if _URL_SECRET_RE is None:
+        _URL_SECRET_RE = re.compile(_URL_SECRET_PATTERN, re.IGNORECASE)
+    return isinstance(value, str) and bool(_URL_SECRET_RE.search(value))
+
+
+def normalize_dataset_name(name: str) -> str:
+    """A dataset's identity key — the same bare, lower-cased token rule as a connection
+    name, so the ``[datasets.<name>]`` table, the ``MOORING_DATASET_<NAME>_PATH`` env var
+    and the local override all key off one spelling."""
+    return normalize_connection_name(name)
+
+
+def dataset_location(shape: dict) -> str:
+    """The single LOCATION a pointer carries: ``url`` for a ``kind=https`` pointer,
+    ``path`` otherwise. ``""`` when the shape has neither — which is what a caller sees
+    after :func:`datasets` drops a credential-bearing location, so an unusable pointer
+    fails loudly instead of resolving to something surprising."""
+    if not isinstance(shape, dict):
+        return ""
+    kind = str(shape.get("kind", "")).strip().lower()
+    order = ("url", "path") if kind == "https" else ("path", "url")
+    for field in order:
+        value = shape.get(field)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def _validate_dataset(shape: dict) -> None:
+    """Refuse a pointer that could not resolve — or that could resolve to the wrong
+    KIND of thing. Raises ``ValueError`` with the fix in the message.
+
+    The scheme check is the load-bearing one: ``urlopen`` happily serves ``file://``,
+    so without it a single pushed ``mooring.toml`` would make every teammate's kernel
+    read an arbitrary local path under the guise of a download."""
+    kind = str(shape.get("kind", "")).strip().lower()
+    if kind not in DATASET_KINDS:
+        raise ValueError(
+            f"A dataset needs kind=<{'|'.join(DATASET_KINDS)}> — 'share' for a file on a "
+            "network share or local disk, 'https' for one fetched over http(s)."
+        )
+    location = dataset_location(shape)
+    if not location:
+        raise ValueError(
+            "A dataset needs a location: path=<file or UNC path> for kind=share, "
+            "url=<https://…> for kind=https."
+        )
+    lowered = location.lower()
+    if kind == "https" and not lowered.startswith(("http://", "https://")):
+        raise ValueError("A kind=https dataset's url= must start with http:// or https://.")
+    if kind == "share" and lowered.startswith(("http://", "https://")):
+        raise ValueError("That location is a URL — define it with kind=https url=… instead.")
+
+
+def _datasets(data: dict) -> dict[str, dict]:
+    """The value-free dataset pointers from already-parsed data, with any secret-shaped
+    FIELD and any credential-bearing LOCATION dropped (defence in depth on the READ
+    side, mirroring :func:`_connections`) — so a hand-edited SAS URL never reaches a
+    caller, the kernel, or the copilot. Tolerant of a malformed table."""
+    sets = data.get("datasets")
+    if not isinstance(sets, dict):
+        return {}
+    out: dict[str, dict] = {}
+    for name, shape in sets.items():
+        if not isinstance(shape, dict):
+            continue
+        clean = {
+            k: _scalar(v)
+            for k, v in shape.items()
+            if not is_secret_field(k)
+            and _scalar(v) is not None
+            and not _value_looks_secret(v)
+            and not location_looks_secret(v)
+        }
+        out[normalize_dataset_name(name)] = clean
+    return out
+
+
+def datasets(workspace: Path) -> dict[str, dict]:
+    """The repo's value-free dataset pointers (``{name: {field: value}}``). Fails open
+    like the rest of the read side (a malformed file → no datasets)."""
+    return _datasets(_read_data(workspace))
+
+
+def datasets_raw(workspace: Path) -> dict[str, dict]:
+    """The RAW ``[datasets]`` table as written (nothing dropped) — for the pre-flight
+    ``mooring datasets check`` only, which must be able to SEE a hand-added credential in
+    order to warn about it. Every other consumer uses :func:`datasets`."""
+    sets = _read_data(workspace).get("datasets")
+    if not isinstance(sets, dict):
+        return {}
+    return {
+        normalize_dataset_name(n): dict(s) for n, s in sets.items() if isinstance(s, dict)
+    }
+
+
+def set_dataset(workspace: Path, name: str, fields: dict) -> None:
+    """Write a dataset POINTER to ``mooring.toml``, preserving every other key/section
+    (the :func:`set_ai_disabled` idiom) and MERGING into an existing pointer like
+    :func:`set_connection`. Raises ``ValueError`` for a credential-shaped field or
+    location, or a pointer that could not resolve; ``tomllib.TOMLDecodeError`` on a
+    corrupt file rather than overwriting it."""
+    key = normalize_dataset_name(name)
+    if not key:
+        raise ValueError("A dataset needs a name.")
+    bad = sorted(
+        k
+        for k, v in fields.items()
+        if is_secret_field(k) or _value_looks_secret(v) or location_looks_secret(v)
+    )
+    if bad:
+        raise ValueError(
+            "These fields carry a credential and must not be synced: "
+            f"{', '.join(bad)}. A pointer carries only a LOCATION — mount the share (or "
+            "sign in to it) on each machine, and use `mooring datasets set-local` to point "
+            "the name at an already-authenticated path where it differs."
+        )
+    clean = {k: _scalar(v) for k, v in fields.items() if _scalar(v) is not None}
+    if isinstance(clean.get("kind"), str):
+        clean["kind"] = clean["kind"].strip().lower()
+    with _WRITE_LOCK:
+        data = _read_data_strict(workspace)
+        sets = data.get("datasets")
+        if not isinstance(sets, dict):
+            sets = {}
+        existing = sets.get(key)
+        merged = dict(existing) if isinstance(existing, dict) else {}
+        merged.update(clean)
+        _validate_dataset(merged)  # validate the MERGED pointer — that is what will resolve
+        sets[key] = merged
+        data["datasets"] = sets
+        _write_data(workspace, data)
+
+
+def remove_dataset(workspace: Path, name: str) -> bool:
+    """Delete a dataset pointer, preserving everything else. Returns whether one was
+    removed. Prunes an emptied ``[datasets]`` table (and a wholly empty file)."""
+    key = normalize_dataset_name(name)
+    with _WRITE_LOCK:
+        data = _read_data_strict(workspace)
+        sets = data.get("datasets")
+        if not isinstance(sets, dict) or key not in sets:
+            return False
+        del sets[key]
+        if sets:
+            data["datasets"] = sets
+        else:
+            data.pop("datasets", None)
         if data:
             _write_data(workspace, data)
         else:
