@@ -211,6 +211,7 @@ def build_system_context(
     checks_help: str = "",
     sql_help: str = "",
     inputs_help: str = "",
+    workbook_help: str = "",
     connections_help: str = "",
 ) -> str:
     """Assemble the value-blind context handed to the assistant.
@@ -311,6 +312,12 @@ def build_system_context(
     # never a value, so it carries no user data and no scrub applies.
     if inputs_help.strip():
         parts.append(inputs_help.strip())
+    # A sibling value-free capability note (see mooring.workbook.copilot_guide) telling the
+    # model it can author the Excel-delivery cell (mooring_deliver). It names sheets and
+    # frames the model already sees in the source; the workbook it eventually produces is
+    # written locally by the kernel and never read back here, so no new egress channel.
+    if workbook_help.strip():
+        parts.append(workbook_help.strip())
     # The connection SHAPES the team defined (see mooring.workspace_config.connections_hint)
     # — names + shape fields only, NEVER the secret (resolved locally in the kernel, no
     # channel here). The shape VALUES are user-authored, so unlike checks_help/sql_help this

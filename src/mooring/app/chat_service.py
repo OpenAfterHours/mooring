@@ -21,7 +21,7 @@ import contextlib
 import threading
 from pathlib import Path
 
-from mooring import checks, inputs, workspace_config
+from mooring import checks, inputs, workbook, workspace_config
 from mooring.app import notebooks
 
 
@@ -290,6 +290,9 @@ class ChatService:
             # And author value-free input fingerprints (mooring_inputs) on request — a
             # hash/shape/schema receipt, never a value, so no new egress channel.
             inputs_help=inputs.copilot_guide(),
+            # And author the Excel-delivery cell (mooring_deliver) on request — sheet
+            # names and frames it can already see in the source, so no new channel either.
+            workbook_help=workbook.copilot_guide(),
             # The team's value-free connection SHAPES (names + fields, never the secret),
             # so the copilot can write connection code that references them.
             connections_help=workspace_config.connections_hint(workspace),

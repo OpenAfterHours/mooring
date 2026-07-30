@@ -52,6 +52,7 @@ EXPECTED_ROUTES = {
     ("/api/open", ("POST",), "api_open"),
     ("/api/reveal", ("POST",), "api_reveal"),
     ("/api/deliver", ("POST",), "api_deliver"),  # render a notebook to the local outbox
+    ("/api/deliver/excel", ("POST",), "api_deliver_excel"),  # ...as a .xlsx for Excel readers
     ("/api/verify", ("POST",), "api_verify"),  # smoke-run a notebook -> value-free trust badge
     ("/api/delete", ("POST",), "api_delete"),
     ("/api/rollback", ("POST",), "api_rollback"),

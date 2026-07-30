@@ -1088,6 +1088,7 @@ def create_app(hub: Hub) -> Starlette:
             Route("/api/open", files.api_open, methods=["POST"]),
             Route("/api/reveal", files.api_reveal, methods=["POST"]),
             Route("/api/deliver", files.api_deliver, methods=["POST"]),
+            Route("/api/deliver/excel", files.api_deliver_excel, methods=["POST"]),
             Route("/api/verify", files.api_verify, methods=["POST"]),
             Route("/api/delete", files.api_delete, methods=["POST"]),
             Route("/api/rollback", files.api_rollback, methods=["POST"]),

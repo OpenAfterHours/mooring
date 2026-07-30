@@ -436,6 +436,15 @@ function deliverAction(path) {
     "Rendering… this re-runs the whole notebook (can take a minute).");
 }
 
+// Deliver as Excel: the same last mile for a stakeholder who works in Excel rather
+// than reading a chart. Runs the notebook and collects the tables it named with
+// `import mooring_deliver` into one .xlsx in the same never-synced outbox. Not opened
+// for preview — Excel locks an open workbook, which would block the next delivery.
+function deliverExcelAction(path) {
+  return action("/api/deliver/excel", { path }, false,
+    "Building the workbook… this re-runs the whole notebook (can take a minute).");
+}
+
 // Verify: smoke-run this notebook once on your machine and record whether it ran clean
 // (the trust badge). Runs in the real environment; nothing is committed and no value
 // leaves the machine — the receipt is a boolean keyed to the file's content, so the
@@ -1133,6 +1142,10 @@ function fileActions(file, opts) {
   // the "hand it to a stakeholder" step. Notebooks only; the output never syncs.
   if (isNotebook && file.has_local) {
     actions.push(["Deliver", () => deliverAction(file.path)]);
+    // The Excel variant sits right beside it: same step, different last mile. Always
+    // offered — whether the notebook named any tables is only knowable by running it,
+    // and the server explains what to add when it named none.
+    actions.push(["Deliver as Excel", () => deliverExcelAction(file.path)]);
   }
   // Verify: smoke-run the notebook on this machine and badge the row with whether it
   // ran clean (a value-free trust receipt). The "does this still run before I share it?"
