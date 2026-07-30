@@ -291,7 +291,8 @@ async def api_resolve_cells_apply(request: Request) -> JSONResponse:
     analyst publishes themselves, and its pre-merge bytes are in the local trash, so
     the response's ``trashed`` drives the hub's existing Undo toast. The request
     carries only per-cell decisions — the server recomputes the plan and refuses
-    (409) if any of the three sides moved since it was rendered."""
+    (409) if any of the three sides moved since it was rendered, or 400s if the
+    request did not say which versions it was rendered against."""
     hub = request.app.state.hub
     data = await request.json()
     try:
@@ -299,6 +300,9 @@ async def api_resolve_cells_apply(request: Request) -> JSONResponse:
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
     choices = {str(k): str(v) for k, v in (data.get("choices") or {}).items()}
+    # A missing sha is passed through as "" rather than defaulted or dropped: the
+    # engine treats a blank as a malformed request (400), so ONE place decides
+    # whether a merge may proceed and neither adapter can waive the check.
     expect = {key: str(data.get(key) or "") for key in ("base_sha", "local_sha", "remote_sha")}
     try:
         outcome = await asyncio.to_thread(

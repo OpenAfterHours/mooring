@@ -71,12 +71,19 @@ test("a cell neither side inherited is numbered separately from the shared cells
   );
 });
 
-test("a contested cell always asks — base and added alike", () => {
+test("only a cell BOTH of you changed is ever contested", () => {
+  // Two people's brand-new cells are both kept, never put head to head — pairing
+  // them by similarity is what discarded a teammate's cell (see conflict_merge).
   assert.equal(MF.cellLabel(choice()), "Cell 2 — you both changed it · choose one");
+});
+
+test("frameNote names the header carry-over only when it is the team's", () => {
   assert.equal(
-    MF.cellLabel(choice({ origin: "both", index_base: null }), 1),
-    "New cell 1 — you both added a cell here · choose one",
+    MF.frameNote({ frame_from: "remote" }),
+    "The team's notebook header — its script dependencies and app settings — is kept.",
   );
+  assert.equal(MF.frameNote({ frame_from: "local" }), "");
+  assert.equal(MF.frameNote(null), "");
 });
 
 test("a side that deleted the cell offers Drop, not an empty version", () => {
@@ -204,7 +211,7 @@ test("merge_fmt.js exposes both the bare global and window.MergeFmt (browser + N
   vm.runInContext(src + "\n;window.__bare = MergeFmt;", sandbox);
   assert.equal(typeof sandbox.window.MergeFmt, "object");
   assert.equal(sandbox.window.__bare, sandbox.window.MergeFmt);
-  for (const fn of ["cellLabel", "buildBlocks", "summary", "ready", "unresolved"]) {
+  for (const fn of ["cellLabel", "buildBlocks", "summary", "ready", "unresolved", "frameNote"]) {
     assert.equal(typeof sandbox.window.MergeFmt[fn], "function", `window.MergeFmt.${fn}`);
   }
 });

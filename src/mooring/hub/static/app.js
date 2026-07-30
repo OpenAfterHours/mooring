@@ -944,6 +944,9 @@ function renderMerge() {
   card.classList.remove("hidden");
   $("merge-title").textContent = `Merge cell by cell — ${mergePath}`;
   $("merge-summary").textContent = MergeFmt.summary(mergePlan);
+  const frame = MergeFmt.frameNote(mergePlan);
+  $("merge-frame").textContent = frame;
+  $("merge-frame").classList.toggle("hidden", !frame);
   const box = $("merge-cells");
   box.textContent = ""; // clear children — cell diffs are untrusted, plain text only
   for (const block of MergeFmt.buildBlocks(mergePlan)) {

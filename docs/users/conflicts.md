@@ -35,8 +35,14 @@ copy, and the team's. Then:
   it — that's usually every cell, and the panel tells you how many;
 - a cell **you both changed** is the only thing you're asked about. You see the
   two versions side by side and pick one per cell;
-- a cell **only one of you added** is kept; a cell **only one of you deleted**
-  is dropped.
+- a cell **only one of you added** is kept — *both* cells survive when you each
+  added one, the same as git would do; a cell **only one of you deleted** is
+  dropped.
+
+The notebook's header — its `# /// script` dependency block and its
+`marimo.App(...)` settings — comes along too, so a teammate's dependency pin
+isn't quietly reverted, and each merged cell keeps its own `@app.cell` settings
+(a cell the team deliberately disabled stays disabled).
 
 Nothing is preselected, and the **Write the merged notebook** button stays
 disabled until every contested cell has an answer.
@@ -45,15 +51,22 @@ disabled until every contested cell has an answer.
 
     The merge writes **your local file only**. Afterwards the notebook is a
     normal *modified* file — review it, run it, then **Push** it like any other
-    change. Your previous copy goes to the local trash first, so the **Undo**
-    toast — and the hub's Activity page, once the toast is gone — puts it
-    straight back.
+    change. It **does replace your working copy**, so your previous version is
+    saved to the local trash first: the **Undo** toast — and the hub's Activity
+    page, once the toast is gone — puts it straight back. If that copy can't be
+    saved for any reason, the merge is refused rather than written.
 
-Mooring only offers this when it can be honest about it. If the file isn't a
-marimo notebook, if either version can't be read as cells, if you and the team
-created the file separately (so there's no shared version to merge against), or
-if the notebook has been restructured so heavily that mooring can't line the
-cells up confidently, it says so and leaves you the three resolutions below.
+### When mooring refuses to merge
+
+A wrong merge is much worse than no merge, so mooring only offers this when it
+can be honest about it. It steps aside — and leaves you the three resolutions
+below — when the file isn't a marimo notebook, when either version can't be
+read as cells, when you and the team created the file separately (there's no
+shared version to merge against), when the notebook was restructured so heavily
+that cells can't be lined up confidently, when it can't tell a *rewritten* cell
+from a deleted one plus a new one, when you both changed the notebook's header,
+or when the merged result would define the same name in two cells (which marimo
+refuses to run).
 
 ## The three resolutions
 
@@ -67,9 +80,10 @@ On any conflicted file the hub offers:
 
 !!! tip
 
-    There's no wrong choice you can't recover from — **Merge cell by cell**,
-    **Keep both** and **Push as copy** are all non-destructive, so reach for
-    those when unsure.
+    **Keep both** and **Push as copy** leave every file where it is, so reach
+    for those when unsure. **Merge cell by cell** and **Use remote** do rewrite
+    your working copy — but both save it to the trash first, so **Undo** brings
+    it back.
 
 ## From the command line
 

@@ -20,11 +20,9 @@ const MergeFmt = (function () {
 
   function cellLabel(cell, newNo) {
     const name = cellName(cell, newNo);
-    if (cell.status === "choice") {
-      return cell.origin === "base"
-        ? `${name} — you both changed it · choose one`
-        : `${name} — you both added a cell here · choose one`;
-    }
+    // Only a cell BOTH of you changed is ever contested — two people's brand-new
+    // cells are both kept, never put head to head (see conflict_merge).
+    if (cell.status === "choice") return `${name} — you both changed it · choose one`;
     if (cell.side === "unchanged") return `${name} — unchanged`;
     if (cell.dropped) {
       if (cell.side === "both") return `${name} — you both deleted it`;
@@ -111,7 +109,26 @@ const MergeFmt = (function () {
     return parts.join(" · ");
   }
 
-  return { cellName, cellLabel, choiceOptions, buildBlocks, conflictIds, unresolved, ready, summary };
+  // A notebook's header (PEP 723 script dependencies, marimo.App settings) is
+  // merged whole, not per cell — say so when the team's is the one being kept, or
+  // it reads as if their dependency pin vanished.
+  function frameNote(plan) {
+    return plan && plan.frame_from === "remote"
+      ? "The team's notebook header — its script dependencies and app settings — is kept."
+      : "";
+  }
+
+  return {
+    cellName,
+    cellLabel,
+    choiceOptions,
+    buildBlocks,
+    conflictIds,
+    unresolved,
+    ready,
+    summary,
+    frameNote,
+  };
 })();
 
 if (typeof window !== "undefined") window.MergeFmt = MergeFmt;
