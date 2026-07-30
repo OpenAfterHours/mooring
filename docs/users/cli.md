@@ -53,6 +53,7 @@ mooring schedule rm | pause | resume notebooks/board.py
 mooring schedule background enable | disable | status
 mooring refresh notebooks/board.py [--no-pull] [--deliver] [--json]
 mooring refresh --due [--json]
+mooring lineage [data/sales.csv]
 mooring ai status
 mooring ai login [--host HOST]
 mooring ai dictionary check [--repo ALIAS]
@@ -184,10 +185,25 @@ branch, so the changes can be reviewed as a pull request (see
 - `checks` — list the tie-out / data-quality check results recorded per notebook
   by `import mooring_checks` calls (value-free: names and pass/fail counts only).
   See [Checking your numbers tie out](daily-workflow.md#checking-your-numbers-tie-out).
-- `inputs` — list the value-free input fingerprints recorded per notebook by
-  `import mooring_inputs` calls (content hash + shape + schema, never a value), and how
-  many changed since the last run. `--clear [PATH]` resets them. See
-  [Fingerprinting your inputs](daily-workflow.md#fingerprinting-your-inputs).
+- `inputs` — list the value-free fingerprints recorded per notebook by
+  `import mooring_inputs` calls (content hash + shape + schema, never a value) for the
+  files it reads *and* writes, and how many changed since the last run. `--clear [PATH]`
+  resets them. See [Fingerprinting your inputs](daily-workflow.md#fingerprinting-your-inputs).
+
+### `lineage`
+
+Answer *"if I change this file, what breaks?"* from the recorded fingerprints — one
+notebook's `mi.output` path is another's `mi.fingerprint` path, and that is a dependency.
+
+- `lineage` — every recorded file with the notebooks that read and write it.
+- `lineage data/sales.csv` — that file's readers and writers, what is further downstream
+  through the files those notebooks write, and what it is built from.
+
+Local and value-free (paths and counts only; the receipts live in the never-synced
+`.mooring/`). It knows **only** notebooks that call `mooring_inputs`, so every answer is a
+floor: "3 notebooks read this" is a fact, "nothing recorded reads this" is not evidence
+that a file is unused. Every run prints that caveat. See
+["If I change this file, what breaks?"](daily-workflow.md#if-i-change-this-file-what-breaks).
 
 ### `schedule`
 

@@ -1,4 +1,4 @@
-"""mooring_inputs — value-free input-data fingerprints for a notebook cell.
+"""mooring_inputs — value-free fingerprints of what a notebook cell READS and WRITES.
 
 mooring INJECTS this module into ``<workspace>/.mooring/pylib/mooring_inputs.py``
 and puts that directory on the marimo kernel's import path (see
@@ -6,18 +6,29 @@ and puts that directory on the marimo kernel's import path (see
 
     import mooring_inputs as mi
     sales = pl.read_csv("data/sales.csv")
-    mi.fingerprint(sales, "sales", path="data/sales.csv")
+    mi.fingerprint(sales, "sales", path="data/sales.csv")     # what this run READ
+    ...
+    monthly.write_csv("data/monthly.csv")
+    mi.output(monthly, "monthly", path="data/monthly.csv")    # what this run WROTE
 
-to pin the exact inputs a run read. Each call records a VALUE-FREE fingerprint of the
-input — its file content HASH, its SHAPE (row/column counts), and its SCHEMA (column
-names + dtypes) — and compares it to the previous run's, so a changed input is flagged
-(the reproducibility question "same inputs, same numbers?"). It answers the auditor
-without ever storing a data value.
+Each call records a VALUE-FREE fingerprint — the file's content HASH, its SHAPE
+(row/column counts), and its SCHEMA (column names + dtypes) — and compares it to the
+previous run's, so a moved input (or a moved output) is flagged: the reproducibility
+question "same inputs, same numbers?". It answers the auditor without ever storing a
+data value.
+
+The two sides together are also the ONLY thing mooring knows about lineage. One
+notebook's recorded output path matching another's recorded input path is an edge in
+the graph :mod:`mooring.lineage` derives — which is what lets the hub say "3 notebooks
+read this" before you overwrite a file. That graph is exactly as complete as these
+calls are, and never more: nothing here infers a dependency from source or from the
+filesystem, because a fingerprint you can trust has to be one you asked for.
 
 Everything recorded is value-free: a per-notebook receipt under
-``<workspace>/.mooring/inputs/`` holding ``{path, sha, rows, cols, schema, changed}``
-per input — a hash, two counts, and column names/types, never a cell value. The receipt
-lives in the sync-excluded ``.mooring`` directory and is NEVER sent to the AI copilot.
+``<workspace>/.mooring/inputs/`` holding ``{path, rel, sha, rows, cols, schema,
+changed}`` per input and per output — a hash, two counts, and column names/types,
+never a cell value. The receipt lives in the sync-excluded ``.mooring`` directory and
+is NEVER sent to the AI copilot.
 
 Standalone by design: it imports only the standard library and duck-types the dataframe
 you pass (polars OR pandas), so it works in the team's locked uv env and in the frozen
@@ -38,20 +49,34 @@ _STATE_DIR = ".mooring"
 _INPUTS_DIRNAME = "inputs"
 _HASH_CHUNK = 1 << 20  # 1 MiB
 
+# The receipt's two sections. "inputs" is the original and only key older receipts have,
+# so every reader must treat a missing "outputs" as empty rather than as malformed —
+# the format only ever GROWS, and a receipt from a previous mooring must keep working.
+_INPUTS = "inputs"
+_OUTPUTS = "outputs"
+
 
 class Result:
-    """The outcome of fingerprinting one input. Truthy when the input is UNCHANGED
+    """The outcome of fingerprinting one input or output. Truthy when it is UNCHANGED
     since the last run (so ``assert mi.fingerprint(df, "sales", path=...)`` reads as
     "assert this input hasn't moved"); a first sighting counts as unchanged. ``repr``
     is the one-line summary printed into the cell output."""
 
-    __slots__ = ("name", "changed", "seen_before", "note")
+    __slots__ = ("name", "changed", "seen_before", "note", "kind")
 
-    def __init__(self, name: str, changed: bool, seen_before: bool, note: str = "") -> None:
+    def __init__(
+        self,
+        name: str,
+        changed: bool,
+        seen_before: bool,
+        note: str = "",
+        kind: str = "input",
+    ) -> None:
         self.name = name
         self.changed = bool(changed)
         self.seen_before = bool(seen_before)
         self.note = note
+        self.kind = kind
 
     def __bool__(self) -> bool:
         return not self.changed
@@ -64,7 +89,7 @@ class Result:
         else:
             mark = "SAME"
         extra = f" — {self.note}" if self.note else ""
-        return f"[{mark}] input {self.name}{extra}"
+        return f"[{mark}] {self.kind} {self.name}{extra}"
 
 
 # -- dataframe introspection (duck-typed: polars OR pandas, never imported) ------
@@ -178,36 +203,60 @@ def fingerprint(df=None, name: str | None = None, *, path: str | None = None) ->
 
     Returns a :class:`Result` that is falsy when the input CHANGED since the previous
     run — so you can ``assert`` a run read the same inputs as before."""
+    return _record(_INPUTS, "input", df, name, path)
+
+
+def output(df=None, name: str | None = None, *, path: str | None = None) -> Result:
+    """Record a value-free fingerprint of something this notebook WROTE.
+
+    The mirror image of :func:`fingerprint`: same arguments, same value-free receipt
+    (content hash + shape + schema, never a value), same falsy-when-it-changed
+    :class:`Result` — so ``assert mi.output(...)`` reads as "assert my numbers didn't
+    move". Call it AFTER the file is written, so the hash is of what actually landed.
+
+    Pass ``path=`` even more religiously here than for an input. The path is the JOIN:
+    it is what lets :mod:`mooring.lineage` match this output to the notebook downstream
+    that fingerprints the same file as ITS input, and a name-only output is invisible to
+    that graph."""
+    return _record(_OUTPUTS, "output", df, name, path)
+
+
+def _record(section: str, kind: str, df, name: str | None, path: str | None) -> Result:
+    """The shared body of :func:`fingerprint` and :func:`output` — one implementation so
+    the two sides of the graph can never drift into recording different things."""
     if name is None and path is not None:
         name = os.path.basename(str(path)) or str(path)
     if not name:
-        raise ValueError("fingerprint() needs a name or a path")
+        raise ValueError(f"{kind}() needs a name or a path")
     rows, cols = (_shape(df) if df is not None else (None, 0))
     schema = _schema(df) if df is not None else []
     hashed = path is not None  # a content hash was INTENDED (a path was supplied)
     sha = _file_sha(path) if hashed else None
     entry = {
         "path": str(path).replace(os.sep, "/") if path is not None else "",
+        "rel": _workspace_rel(path),  # the lineage join key; "" when not resolvable
         "hashed": hashed,
         "sha": sha,  # the hex digest, or None — NEVER "" (which would fake a hash)
         "rows": rows,  # int, or None when unknown (a lazy frame)
         "cols": cols,
         "schema": schema,
     }
-    prior = _load_entry(name)
+    prior = _load_entry(section, name)
     seen_before = prior is not None
     changed = seen_before and _differs(prior, entry)
     entry["changed"] = changed
     note = _describe(prior, entry, seen_before, changed)
-    _write_receipt(name, entry)
-    result = Result(name, changed, seen_before, note)
+    _write_receipt(section, name, entry)
+    result = Result(name, changed, seen_before, note, kind)
     print(repr(result))
     return result
 
 
 def reset(name: str | None = None) -> None:
-    """Clear this notebook's recorded input fingerprints — call at the top of the cell
-    so a renamed or dropped input does not linger. With ``name``, clear only that one."""
+    """Clear this notebook's recorded input AND output fingerprints — call at the top of
+    the cell so a renamed or dropped one does not linger (and, since lineage is derived
+    from these receipts, so a dependency you removed stops being claimed). With ``name``,
+    clear only that one, from whichever side recorded it."""
     path = _receipt_path()
     if path is None:
         return
@@ -219,9 +268,15 @@ def reset(name: str | None = None) -> None:
         return
     try:
         data = json.loads(path.read_text("utf-8"))
-        inputs = data.get("inputs")
-        if isinstance(inputs, dict) and name in inputs:
-            del inputs[name]
+        if not isinstance(data, dict):
+            return  # a foreign/corrupt receipt: nothing of ours to clear
+        dropped = False
+        for section in (_INPUTS, _OUTPUTS):
+            bucket = data.get(section)
+            if isinstance(bucket, dict) and name in bucket:
+                del bucket[name]
+                dropped = True
+        if dropped:
             _atomic_write(path, json.dumps(data, ensure_ascii=False))
     except (OSError, ValueError):
         pass
@@ -311,6 +366,23 @@ def _detect_notebook(ws: Path) -> str | None:
     return found
 
 
+def _workspace_rel(path) -> str:
+    """``path`` as a workspace-relative POSIX path — the key lineage joins two notebooks
+    on — or ``""`` when it resolves outside the workspace (or not at all).
+
+    Resolved HERE, in the kernel, because only the kernel knows its own working
+    directory: ``"data/sales.csv"`` names a different file depending on which notebook
+    wrote it, and mooring cannot recover that later from the string alone. Resolution is
+    non-strict, so an output can be fingerprinted whether or not the file exists yet."""
+    ws = _workspace()
+    if ws is None or path is None:
+        return ""
+    try:
+        return str(Path(path).resolve().relative_to(ws)).replace(os.sep, "/")
+    except (OSError, ValueError):
+        return ""
+
+
 def _slug(rel: str) -> str:
     """An INJECTIVE per-notebook receipt filename: escape ``_`` first so the ``__`` that
     encodes ``/`` is unambiguous (``a/b`` and ``a__b`` map to different files)."""
@@ -325,7 +397,7 @@ def _receipt_path() -> Path | None:
     return ws / _STATE_DIR / _INPUTS_DIRNAME / (_slug(rel) + ".json")
 
 
-def _load_entry(name: str) -> dict | None:
+def _load_entry(section: str, name: str) -> dict | None:
     path = _receipt_path()
     if path is None or not path.is_file():
         return None
@@ -333,29 +405,36 @@ def _load_entry(name: str) -> dict | None:
         data = json.loads(path.read_text("utf-8"))
     except (OSError, ValueError):
         return None
-    inputs = data.get("inputs") if isinstance(data, dict) else None
-    entry = inputs.get(name) if isinstance(inputs, dict) else None
+    bucket = data.get(section) if isinstance(data, dict) else None
+    entry = bucket.get(name) if isinstance(bucket, dict) else None
     return entry if isinstance(entry, dict) else None
 
 
-def _write_receipt(name: str, entry: dict) -> None:
+def _write_receipt(section: str, name: str, entry: dict) -> None:
+    """Merge one entry into this notebook's receipt, leaving the OTHER section alone.
+
+    The read-modify-write keeps a receipt that predates outputs intact when an output is
+    first recorded into it (and vice versa); only the section being written is rebuilt
+    when it is missing or malformed."""
     ws = _workspace()
     if ws is None:
         return
     rel = _detect_notebook(ws) or "_notebook"
     path = ws / _STATE_DIR / _INPUTS_DIRNAME / (_slug(rel) + ".json")
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    data: dict = {"notebook": rel, "updated": now, "inputs": {}}
+    data: dict = {"notebook": rel, "updated": now}
     try:
         if path.is_file():
             existing = json.loads(path.read_text("utf-8"))
-            if isinstance(existing, dict) and isinstance(existing.get("inputs"), dict):
+            if isinstance(existing, dict):
                 data = existing
     except (OSError, ValueError):
         pass
     data["notebook"] = rel
     data["updated"] = now
-    data.setdefault("inputs", {})[name] = {**entry, "ts": now}
+    if not isinstance(data.get(section), dict):
+        data[section] = {}
+    data[section][name] = {**entry, "ts": now}
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         _atomic_write(path, json.dumps(data, ensure_ascii=False))

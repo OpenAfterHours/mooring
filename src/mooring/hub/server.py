@@ -32,6 +32,7 @@ from mooring import (
     checks,
     config,
     inputs,
+    lineage,
     notebook_template,
     pbip,
     pbip_model,
@@ -334,10 +335,19 @@ class Hub:
         # read_results from re-hashing every verified notebook on each poll.
         local_shas = {f.path: f.local_sha for f in report.files if f.local_sha is not None}
         verify_results = verify.read_results(workspace, local_shas)
-        # Value-free input fingerprints per notebook (.mooring/inputs/*.json), written by
-        # mooring_inputs.fingerprint calls in the kernel — content hash + shape + schema,
+        # Value-free input/output fingerprints per notebook (.mooring/inputs/*.json),
+        # written by mooring_inputs calls in the kernel — content hash + shape + schema,
         # never a value. Surfaced as a row badge: N inputs pinned, M changed since last run.
-        input_results = inputs.read_results(workspace)
+        # The same receipts carry the lineage graph, so read them ONCE and derive both.
+        receipts = inputs.read_receipts(workspace)
+        input_results = inputs.summarize(receipts)
+        # "3 notebooks read this" for a data file others depend on — the warning that makes
+        # overwriting one a decision rather than an accident. Only paths with a recorded
+        # reader or writer get an entry: lineage knows only opted-in notebooks, so the row
+        # may claim what IS recorded and must never imply a bare row is safe to change.
+        lineage_counts = lineage.counts(
+            lineage.from_receipts(receipts), [f.path for f in report.files]
+        )
         # Notebooks whose filename shadows an importable module (e.g. polars.py) —
         # surfaced as a per-row badge instead of an inscrutable kernel traceback.
         shadowed: dict[str, str] = {}
@@ -375,6 +385,7 @@ class Hub:
                 **({"checks": check_results[f.path]} if f.path in check_results else {}),
                 **({"verified": verify_results[f.path]} if f.path in verify_results else {}),
                 **({"inputs": input_results[f.path]} if f.path in input_results else {}),
+                **({"lineage": lineage_counts[f.path]} if f.path in lineage_counts else {}),
                 **({"is_notebook": True} if f.path in notebooks else {}),
                 **({"title": titles[f.path]} if f.path in titles else {}),
                 **(

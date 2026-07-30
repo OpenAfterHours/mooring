@@ -228,18 +228,26 @@ sales = pl.read_csv("data/sales.csv")
 mi.fingerprint(sales, "sales", path="data/sales.csv")    # hash + shape + schema
 ```
 
+Record what the notebook **writes** the same way, with `mi.output(...)` after the write:
+
+```python
+monthly.write_csv("data/monthly.csv")
+mi.output(monthly, "monthly", path="data/monthly.csv")
+```
+
 Each call records a **value-free** fingerprint — the file's **content hash**, its
 **shape** (row/column counts), and its **schema** (column names + types), **never a data
-value** — and compares it to the previous run. If an input changed under you (different
+value** — and compares it to the previous run. If something changed under you (different
 content, more rows, a new column), the cell prints `[CHANGED] …` and the hub shows an
-amber **⚠ input changed** badge on the notebook's row; otherwise a green **⛓ N inputs
-pinned** badge. `mooring inputs` lists them from the terminal, and `mooring inputs --clear`
-resets them.
+amber **⚠ 1 input changed** badge on the notebook's row; otherwise a green **⛓ N inputs
+pinned** badge. An output that moved goes amber too — the numbers this notebook publishes
+are no longer the ones it published last run. `mooring inputs` lists them from the
+terminal, and `mooring inputs --clear` resets them.
 
-Always pass **`path=`** to the source file — that's what gives the *content* guarantee
-(the file hash catches a same-shape value change). Without a `path`, only the shape and
-schema are compared. Starting the cell with `mi.reset()` keeps the badge honest if you
-later rename or drop an input.
+Always pass **`path=`** to the file — that's what gives the *content* guarantee (the file
+hash catches a same-shape value change). Without a `path`, only the shape and schema are
+compared. Starting the cell with `mi.reset()` keeps the badge honest if you later rename
+or drop an input.
 
 Because `mi.fingerprint(...)` returns falsy when the input changed, you can even make it a
 guard:
@@ -260,6 +268,34 @@ assert mi.fingerprint(sales, "sales", path="data/sales.csv"), "sales.csv moved �
 
     Ask the copilot to *"fingerprint the inputs"* — it reads your schema and source (never
     your data) and proposes the `mooring_inputs` cell for you to review and apply.
+
+## "If I change this file, what breaks?"
+
+Once notebooks record both sides, mooring can join them: one notebook's `mi.output`
+**path** is another's `mi.fingerprint` **path**, and that is a dependency. You get the
+answer no notebook tool usually gives you — *who else is relying on this file?* — without
+anyone drawing a diagram.
+
+It shows up in two places. In the hub, a data file others depend on carries a
+**⇄ 3 notebooks read this** badge on its row. And when **Pull** is about to replace or
+delete such a file, mooring says so *before* it lands, naming the files and how many
+notebooks read them, so you can re-run those notebooks rather than find out from a number
+that quietly moved.
+
+From the terminal, [`mooring lineage`](cli.md#lineage) lists every recorded file with its
+readers and writers, and `mooring lineage data/sales.csv` answers the impact question for
+one file — its direct readers, what is further downstream through the files *those*
+notebooks write, and what it is built from.
+
+!!! warning "It only knows what was recorded"
+
+    Lineage is derived **entirely** from `mooring_inputs` calls. A notebook that doesn't
+    make them — or a colleague's Excel refresh, or anything outside mooring — is invisible
+    to it. So treat every answer as a **floor**: *"3 notebooks read this"* is a fact, but
+    *"nothing recorded reads this"* is **not** evidence that a file is safe to change. It
+    only means nobody wrote it down. (This is also why mooring never infers dependencies
+    by reading your code: a guessed edge would make the whole graph un-trustable.)
+
 ## Connecting to a database
 
 Pulling from a warehouse (Snowflake, SQL Server, …)? mooring lets the team share the

@@ -177,6 +177,7 @@ source_modules =
     mooring.checks
     mooring.verify
     mooring.inputs
+    mooring.lineage
     mooring.connections
     mooring.schedule
     mooring.config

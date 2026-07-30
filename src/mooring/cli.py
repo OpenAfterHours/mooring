@@ -225,7 +225,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     inputs_cmd = sub.add_parser(
         "inputs",
-        help="show the value-free input fingerprints (content hash + shape + schema) per notebook",
+        help="show the value-free input/output fingerprints (hash + shape + schema) per notebook",
     )
     inputs_cmd.add_argument(
         "--clear",
@@ -234,6 +234,16 @@ def _build_parser() -> argparse.ArgumentParser:
         default=False,
         metavar="PATH",
         help="clear recorded input fingerprints (all, or just one notebook path)",
+    )
+
+    lineage_cmd = sub.add_parser(
+        "lineage",
+        help="show which notebooks read and write each data file, and what a change would hit",
+    )
+    lineage_cmd.add_argument(
+        "path",
+        nargs="?",
+        help="a data file — show what reads it and what is recorded downstream of a change",
     )
 
     delete_cmd = sub.add_parser(
@@ -1738,17 +1748,83 @@ def cmd_inputs(cfg: config.Config, args: argparse.Namespace) -> int:
     results = inputs.read_results(cfg.workspace())
     if not results:
         print(
-            "No input fingerprints yet. In a notebook cell: import mooring_inputs as mi; "
-            'mi.fingerprint(df, "sales", path="data/sales.csv").'
+            "No fingerprints yet. In a notebook cell: import mooring_inputs as mi; "
+            'mi.fingerprint(df, "sales", path="data/sales.csv") for an input, '
+            'mi.output(df, "monthly", path="data/monthly.csv") for a file you write.'
         )
         return 0
     for rel in sorted(results):
         result = results[rel]
-        mark = "ok    " if result["changed"] == 0 else "CHANGED"
-        if result["changed"]:
-            print(f"{mark} {rel}: {result['changed']} of {result['total']} input(s) changed")
+        total = result["total"] + result["outputs"]
+        changed = result["changed"] + result["outputs_changed"]
+        pinned = f"{result['total']} input(s)"
+        if result["outputs"]:
+            pinned += f" + {result['outputs']} output(s)"
+        if changed:
+            print(f"CHANGED {rel}: {changed} of {total} fingerprint(s) changed ({pinned})")
         else:
-            print(f"{mark} {rel}: {result['total']} input(s) pinned, unchanged")
+            print(f"ok      {rel}: {pinned} pinned, unchanged")
+    return 0
+
+
+def cmd_lineage(cfg: config.Config, args: argparse.Namespace) -> int:
+    """``mooring lineage [path]`` — the recorded read/write graph, or one file's impact.
+
+    The coverage caveat is printed UNCONDITIONALLY, most of all when there is nothing to
+    show: "nothing reads this" is the one answer here a user could act on dangerously, so
+    it never appears without the sentence saying what the graph cannot see."""
+    from mooring import lineage
+
+    graph = lineage.build(cfg.workspace())
+    path = getattr(args, "path", None)
+    if not path:
+        for dataset in sorted(graph.display.values()):
+            print(dataset)
+            written = lineage.writers(graph, dataset)
+            read = lineage.readers(graph, dataset)
+            if written:
+                print(f"    written by  {', '.join(written)}")
+            if read:
+                print(f"    read by     {', '.join(read)}")
+        if not graph.display and graph.notebooks:
+            # Fingerprints exist but none names a file — say WHY nothing joined rather
+            # than printing an empty list that reads as "no dependencies".
+            print("No file paths recorded — a fingerprint only joins when you pass path=.")
+        print()
+        print(lineage.coverage_note(graph))
+        return 0
+
+    rel = str(path).replace("\\", "/")
+    read = lineage.readers(graph, rel)
+    written = lineage.writers(graph, rel)
+    print(rel)
+    if read:
+        print(f"  Recorded readers ({len(read)}) — change this and they are affected:")
+        for notebook in read:
+            print(f"    {notebook}")
+    if written:
+        print(f"  Recorded writers ({len(written)}):")
+        for notebook in written:
+            print(f"    {notebook}")
+    if not read and not written:
+        print("  Nothing recorded reads or writes this.")
+    # The transitive tail only: the direct readers are already listed above, so this
+    # block earns its space only when the chain actually runs further than one hop.
+    impact = lineage.downstream(graph, rel)
+    onward = [nb for nb in impact.notebooks if nb not in read]
+    if onward or impact.datasets:
+        print("  Further downstream (through the files those notebooks write):")
+        for notebook in onward:
+            print(f"    {notebook}")
+        for dataset in impact.datasets:
+            print(f"    {dataset}")
+    source = lineage.upstream(graph, rel)
+    if source.datasets:
+        print("  Built from:")
+        for dataset in source.datasets:
+            print(f"    {dataset}")
+    print()
+    print(lineage.coverage_note(graph))
     return 0
 
 
@@ -2953,6 +3029,8 @@ def _dispatch(
         return cmd_checks(cfg, args)
     if command == "inputs":
         return cmd_inputs(cfg, args)
+    if command == "lineage":
+        return cmd_lineage(cfg, args)
     if command == "init":
         return cmd_init(cfg)
     if command == "deps":

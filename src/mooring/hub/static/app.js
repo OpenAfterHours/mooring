@@ -1318,17 +1318,54 @@ function inputsBadge(inp) {
   const span = document.createElement("span");
   const changed = inp.changed || 0;
   const total = inp.total || 0;
-  if (changed > 0) {
+  const outputs = inp.outputs || 0;
+  const outputsChanged = inp.outputs_changed || 0;
+  const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+  // An output that moved is the same alarm as an input that moved — the numbers this
+  // notebook PUBLISHES are no longer the ones it published last run — so either goes amber.
+  if (changed > 0 || outputsChanged > 0) {
+    const bits = [];
+    if (changed) bits.push(plural(changed, "input"));
+    if (outputsChanged) bits.push(plural(outputsChanged, "output"));
     span.className = "badge inputs-changed";
-    span.textContent = `⚠ ${changed} input${changed === 1 ? "" : "s"} changed`;
-    span.title = `${changed} of ${total} pinned input(s) changed since the last run ` +
-      "(content, row count, or schema) — check the numbers still hold. Value-free and local.";
+    span.textContent = `⚠ ${bits.join(" + ")} changed`;
+    span.title = `Of this notebook's ${total} pinned input(s) and ${outputs} recorded ` +
+      `output(s), ${changed + outputsChanged} changed since the last run (content, row ` +
+      "count, or schema) — check the numbers still hold. Value-free and local.";
   } else {
+    const bits = [];
+    if (total) bits.push(`${plural(total, "input")} pinned`);
+    if (outputs) bits.push(plural(outputs, "output"));
     span.className = "badge inputs-ok";
-    span.textContent = `⛓ ${total} input${total === 1 ? "" : "s"} pinned`;
-    span.title = `${total} input(s) fingerprinted (content hash + shape + schema), unchanged ` +
-      "since the last run. Value-free and never pushed.";
+    span.textContent = `⛓ ${bits.join(", ")}`;
+    span.title = `${total} input(s) and ${outputs} output(s) fingerprinted (content hash + ` +
+      "shape + schema), unchanged since the last run. Value-free and never pushed.";
   }
+  return span;
+}
+
+// "3 notebooks read this" for a file others depend on, derived from the value-free
+// mooring_inputs receipts (one notebook's recorded output path = another's input path).
+// The server sends `lineage` only for a path with a recorded reader or writer, so this
+// makes a POSITIVE claim or none at all: lineage sees only the notebooks that record
+// their inputs, and an unbadged row means "nothing recorded", NOT "safe to change".
+function lineageBadge(lin) {
+  const span = document.createElement("span");
+  const readers = lin.readers || 0;
+  const writers = lin.writers || 0;
+  const bits = [];
+  if (readers) {
+    const noun = `notebook${readers === 1 ? "" : "s"}`;
+    bits.push(`${readers} ${noun} read${readers === 1 ? "s" : ""} this`);
+  }
+  if (writers) bits.push(`written by ${writers}`);
+  span.className = "badge lineage";
+  span.textContent = `⇄ ${bits.join(" · ")}`;
+  span.title = `Recorded lineage: ${readers} notebook(s) read this file and ${writers} ` +
+    "write(s) it. Built only from notebooks that record their inputs/outputs with " +
+    "mooring_inputs, so it is a floor — there may be more readers it cannot see, and no " +
+    "badge is not evidence a file is unused. `mooring lineage <path>` shows the whole " +
+    "recorded chain. Value-free and local.";
   return span;
 }
 
@@ -1346,7 +1383,12 @@ function buildFileRow(file, opts) {
   // The trust badge from a Verify run (present only while it matches the file's SHA).
   if (file.verified) extras.push(" ", verifiedBadge(file.verified));
   // The input-fingerprint badge: N inputs pinned, amber if one changed since last run.
-  if (file.inputs && file.inputs.total) extras.push(" ", inputsBadge(file.inputs));
+  if (file.inputs && (file.inputs.total || file.inputs.outputs)) {
+    extras.push(" ", inputsBadge(file.inputs));
+  }
+  // Recorded lineage: who else reads this file. Present only when there IS a reader
+  // or writer — the row never claims a file is unused.
+  if (file.lineage) extras.push(" ", lineageBadge(file.lineage));
   // A watched file with a teammate change waiting gets its promotion badge —
   // quiet otherwise (watching an in-sync file must not add row noise).
   if (watchedPaths.has(file.path) && PULL_STATES.has(file.state)) {
@@ -2688,7 +2730,31 @@ $("schedule-cancel").addEventListener("click", () => {
   renderSchedules(); // the card hides itself again when there are no schedules to show
 });
 $("schedule-cadence").addEventListener("change", syncScheduleDayVisibility);
+// A pull REPLACES local files. When one of them is a dataset other notebooks are
+// recorded as reading, say so BEFORE it lands, instead of leaving the analyst to
+// discover it a week later in a number that moved. Advisory, never blocking: pulling
+// the team's work is right almost every time, and lineage under-reports by
+// construction — so this informs the choice and is worded to claim only what is
+// recorded. Scoped to the toolbar Pull, the unaimed bulk action; the per-row stale
+// dialog already names the one file it is about, and a second modal there is noise.
+function confirmPullImpact() {
+  const hits = Freshness.pullImpact(lastFiles);
+  if (!hits.length) return true;
+  const lines = hits.map((h) => {
+    const verb = h.state === "deleted remotely" ? "removes" : "replaces";
+    const n = h.readers;
+    return `  ${h.path} — ${verb} a file ${n} notebook${n === 1 ? "" : "s"} read${n === 1 ? "s" : ""}`;
+  });
+  return confirm(
+    "This pull changes files other notebooks depend on:\n\n" + lines.join("\n") +
+    "\n\nRe-run those notebooks afterwards to see what moved. (Lineage only sees " +
+    "notebooks that record their inputs, so there may be more.)\n\n" +
+    "OK pulls anyway; Cancel leaves your copies alone."
+  );
+}
+
 $("btn-pull").addEventListener("click", async () => {
+  if (!confirmPullImpact()) return;
   const data = await action("/api/pull", {});
   // The pull response carries the digest of what just landed, computed against
   // the PRE-pull horizon — so a pull is never a black box. States shown are the

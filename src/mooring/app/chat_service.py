@@ -287,8 +287,10 @@ class ChatService:
             # Likewise, let it author marimo SQL (mo.sql / DuckDB) cells — authored code
             # the model never sees the result of, so no new egress channel either.
             sql_help=tools.sql_cell_guide(),
-            # And author value-free input fingerprints (mooring_inputs) on request — a
-            # hash/shape/schema receipt, never a value, so no new egress channel.
+            # And author value-free input/output fingerprints (mooring_inputs) on request
+            # — a hash/shape/schema receipt, never a value, so no new egress channel. The
+            # guide DESCRIBES the API; the receipts themselves (and the lineage graph
+            # derived from them) are never read into the model's context.
             inputs_help=inputs.copilot_guide(),
             # The team's value-free connection SHAPES (names + fields, never the secret),
             # so the copilot can write connection code that references them.
