@@ -47,6 +47,9 @@ const Freshness = (function () {
     return n;
   }
 
+  // (The Pull impact confirm — which rows a pull would overwrite that others depend on —
+  // lives in lineage_fmt.js with the rest of the lineage wording.)
+
   // Compact age for the banner: "just now" under a minute, then minutes/hours/days.
   function ageText(ms) {
     if (!(ms >= 0)) return "";
