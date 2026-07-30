@@ -1777,15 +1777,27 @@ def cmd_lineage(cfg: config.Config, args: argparse.Namespace) -> int:
 
     graph = lineage.build(cfg.workspace())
     path = getattr(args, "path", None)
+
+    def _dated(notebook: str) -> str:
+        """A notebook with WHEN it last confirmed its edges. An entry is only removed by
+        ``mi.reset()``, so a notebook that stopped reading a file keeps asserting it did
+        until it next runs — the date is what lets a reader tell a live dependency from
+        a fossil, and it is never printed without one."""
+        stamp = graph.confirmed.get(notebook, "")
+        if not stamp:
+            return f"{notebook} (never dated)"
+        marker = ", not confirmed since" if lineage.is_stale(stamp) else ""
+        return f"{notebook} ({stamp[:10]}{marker})"
+
     if not path:
         for dataset in sorted(graph.display.values()):
             print(dataset)
             written = lineage.writers(graph, dataset)
             read = lineage.readers(graph, dataset)
             if written:
-                print(f"    written by  {', '.join(written)}")
+                print(f"    written by  {', '.join(_dated(nb) for nb in written)}")
             if read:
-                print(f"    read by     {', '.join(read)}")
+                print(f"    read by     {', '.join(_dated(nb) for nb in read)}")
         if not graph.display and graph.notebooks:
             # Fingerprints exist but none names a file — say WHY nothing joined rather
             # than printing an empty list that reads as "no dependencies".
@@ -1801,11 +1813,11 @@ def cmd_lineage(cfg: config.Config, args: argparse.Namespace) -> int:
     if read:
         print(f"  Recorded readers ({len(read)}) — change this and they are affected:")
         for notebook in read:
-            print(f"    {notebook}")
+            print(f"    {_dated(notebook)}")
     if written:
         print(f"  Recorded writers ({len(written)}):")
         for notebook in written:
-            print(f"    {notebook}")
+            print(f"    {_dated(notebook)}")
     if not read and not written:
         print("  Nothing recorded reads or writes this.")
     # The transitive tail only: the direct readers are already listed above, so this
@@ -1815,7 +1827,7 @@ def cmd_lineage(cfg: config.Config, args: argparse.Namespace) -> int:
     if onward or impact.datasets:
         print("  Further downstream (through the files those notebooks write):")
         for notebook in onward:
-            print(f"    {notebook}")
+            print(f"    {_dated(notebook)}")
         for dataset in impact.datasets:
             print(f"    {dataset}")
     source = lineage.upstream(graph, rel)

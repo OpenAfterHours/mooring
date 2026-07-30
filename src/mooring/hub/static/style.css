@@ -514,8 +514,12 @@ button.caret:disabled { opacity: 0.4; cursor: default; }
 .badge.inputs-changed { color: var(--warn); border-color: var(--warn); }
 
 /* recorded lineage ("3 notebooks read this"): informational, not an alarm — it says a file
-   has dependants, not that anything is wrong, so it stays in the quiet accent tone */
+   has dependants, not that anything is wrong, so it stays in the quiet accent tone. A claim
+   no run has re-confirmed for a month drops to muted and carries its date in the text: it is
+   still shown (dropping it would be the silent all-clear the feature exists to avoid), just
+   no longer presented as current. */
 .badge.lineage { color: var(--accent); border-color: var(--accent); }
+.badge.lineage.stale { color: var(--muted); border-color: var(--border); font-style: italic; }
 
 /* -- scheduled refresh: the morning status board -------------------------------
    The board's whole job is that a stale refresh cannot hide, so the state badge

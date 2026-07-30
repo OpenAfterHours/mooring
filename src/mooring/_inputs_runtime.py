@@ -217,7 +217,8 @@ def output(df=None, name: str | None = None, *, path: str | None = None) -> Resu
     Pass ``path=`` even more religiously here than for an input. The path is the JOIN:
     it is what lets :mod:`mooring.lineage` match this output to the notebook downstream
     that fingerprints the same file as ITS input, and a name-only output is invisible to
-    that graph."""
+    that graph. So is one written to a file outside the workspace, which has no
+    workspace-relative identity to join on."""
     return _record(_OUTPUTS, "output", df, name, path)
 
 
@@ -370,10 +371,13 @@ def _workspace_rel(path) -> str:
     """``path`` as a workspace-relative POSIX path — the key lineage joins two notebooks
     on — or ``""`` when it resolves outside the workspace (or not at all).
 
-    Resolved HERE, in the kernel, because only the kernel knows its own working
-    directory: ``"data/sales.csv"`` names a different file depending on which notebook
-    wrote it, and mooring cannot recover that later from the string alone. Resolution is
-    non-strict, so an output can be fingerprinted whether or not the file exists yet."""
+    Resolved HERE, in the kernel, because this is where the working directory is a FACT
+    rather than an assumption. Under mooring every marimo process is launched with
+    ``cwd = workspace``, so a repo-relative spelling would in practice join correctly
+    without this; what ``rel`` buys is that the join no longer DEPENDS on that staying
+    true, and that absolute and ``..`` spellings of the same file collapse onto the same
+    node instead of becoming separate ones. Resolution is non-strict, so an output can be
+    fingerprinted whether or not the file exists yet."""
     ws = _workspace()
     if ws is None or path is None:
         return ""

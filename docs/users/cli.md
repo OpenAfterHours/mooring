@@ -199,7 +199,11 @@ notebook's `mi.output` path is another's `mi.fingerprint` path, and that is a de
 - `lineage data/sales.csv` — that file's readers and writers, what is further downstream
   through the files those notebooks write, and what it is built from.
 
-Local and value-free (paths and counts only; the receipts live in the never-synced
+Each notebook is printed with **when it last recorded that dependency** — a fingerprint
+sticks until the notebook next runs `mi.reset()`, so anything unconfirmed for over a month
+is marked *"not confirmed since"* rather than stated as current.
+
+Local and value-free (paths, counts and dates only; the receipts live in the never-synced
 `.mooring/`). It knows **only** notebooks that call `mooring_inputs`, so every answer is a
 floor: "3 notebooks read this" is a fact, "nothing recorded reads this" is not evidence
 that a file is unused. Every run prints that caveat. See

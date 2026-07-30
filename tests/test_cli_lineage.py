@@ -7,10 +7,18 @@ is exercised against the real injected runtime in test_lineage.py.
 """
 
 import json
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from mooring import cli, inputs, paths
+from mooring import cli, inputs, lineage, paths
+
+# Relative to the real clock, never hardcoded: a fixed date would silently cross the
+# staleness threshold as time passes and turn these into a slow time bomb.
+FRESH = datetime.now(timezone.utc).isoformat(timespec="seconds")
+LONG_AGO = (
+    datetime.now(timezone.utc) - timedelta(days=lineage.STALE_AFTER_DAYS + 60)
+).isoformat(timespec="seconds")
 
 
 @pytest.fixture
@@ -32,7 +40,7 @@ def _entry(rel):
     return {"path": rel, "rel": rel, "hashed": True, "sha": "a" * 64, "changed": False}
 
 
-def _receipt(ws, notebook, reads=(), writes=()):
+def _receipt(ws, notebook, reads=(), writes=(), updated=FRESH):
     (ws / notebook).parent.mkdir(parents=True, exist_ok=True)
     (ws / notebook).write_text("# notebook\n", "utf-8")
     directory = inputs.inputs_dir(ws)
@@ -42,7 +50,7 @@ def _receipt(ws, notebook, reads=(), writes=()):
         json.dumps(
             {
                 "notebook": notebook,
-                "updated": "2026-01-01T00:00:00+00:00",
+                "updated": updated,
                 "inputs": {rel: _entry(rel) for rel in reads},
                 "outputs": {rel: _entry(rel) for rel in writes},
             }
@@ -63,8 +71,21 @@ def test_lineage_lists_every_recorded_file(workspace, capsys):
     out = capsys.readouterr().out
     assert "data/sales.csv" in out and "data/raw.csv" in out and "data/monthly.csv" in out
     assert "written by  notebooks/ingest.py" in out
-    assert "read by     notebooks/board.py, notebooks/recon.py" in out
+    assert "notebooks/board.py" in out and "notebooks/recon.py" in out
     assert "3 notebook(s)" in out and "floor" in out  # the caveat rides along
+    assert out.count(FRESH[:10]) >= 3  # every notebook named is dated
+
+
+def test_a_claim_no_run_has_confirmed_says_so(workspace, capsys):
+    # The failure mode this dating exists for: b.py fingerprinted the file months ago,
+    # the analyst deleted that line, and the receipt goes on asserting the dependency
+    # until b.py next runs mi.reset(). It must not be able to read as current.
+    _receipt(workspace, "notebooks/stale.py", reads=["data/sales.csv"], updated=LONG_AGO)
+    _receipt(workspace, "notebooks/live.py", reads=["data/sales.csv"])
+    assert cli.main(["lineage", "data/sales.csv"]) == 0
+    out = capsys.readouterr().out
+    assert f"notebooks/stale.py ({LONG_AGO[:10]}, not confirmed since)" in out
+    assert f"notebooks/live.py ({FRESH[:10]})" in out  # dated, but not flagged
 
 
 def test_lineage_for_one_path_answers_what_breaks(workspace, capsys):

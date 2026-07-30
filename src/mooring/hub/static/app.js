@@ -678,12 +678,25 @@ function proposeAction(paths, count) {
   });
 }
 
+// The recorded-lineage clause for a row that is about to be destroyed, looked up from the
+// last /api/state rows so every destructive confirm can carry it without a new argument.
+// "" when nothing is recorded — a dialog must never gain a reassuring "nothing depends on
+// this", which is a claim lineage cannot make.
+function impactClause(path) {
+  const file = lastFiles.find((f) => f.path === path);
+  return file ? LineageFmt.impactWarning(file.lineage) : "";
+}
+
 function deleteAction(path, kind) {
   const name = path.split("/").pop();
   const what = kind === "project" ? `the Power BI project ${name}` : name;
+  // Delete is strictly more destructive than Pull — it removes the local file and, once
+  // pushed, removes it for the whole team — so the row that badges "3 notebooks read
+  // this" must not offer a bare confirm that says nothing about them.
   const ok = confirm(
     `Delete ${what} from your workspace?\n\n` +
-    "This removes the local file(s). Push or Propose afterwards to remove it from the team repo."
+    "This removes the local file(s). Push or Propose afterwards to remove it from the " +
+    "team repo." + impactClause(path)
   );
   if (ok) action("/api/delete", { path });
 }
@@ -704,7 +717,8 @@ function revertAction(path, state) {
     `Discard your changes to ${name} and restore the last synced version?` +
     (undoable
       ? "\n\nYour current version is saved locally, so you can Undo this."
-      : "\n\nThis cannot be undone.")
+      : "\n\nThis cannot be undone.") +
+    impactClause(path)
   );
   if (!ok) return;
   // Register the Undo affordance only once the revert succeeds AND the server returns
@@ -771,7 +785,7 @@ async function restoreVersion(path, sha, asCopy) {
       "Your current bytes are saved first, so this is undoable. The restored " +
       "file stays LOCAL until you push it — and pushing a version older than " +
       "your last pull replaces newer team work on purpose. Old code may also " +
-      "not run under the repo's current packages."
+      "not run under the repo's current packages." + impactClause(path)
     );
     if (!ok) return;
   }
@@ -1346,26 +1360,15 @@ function inputsBadge(inp) {
 
 // "3 notebooks read this" for a file others depend on, derived from the value-free
 // mooring_inputs receipts (one notebook's recorded output path = another's input path).
-// The server sends `lineage` only for a path with a recorded reader or writer, so this
-// makes a POSITIVE claim or none at all: lineage sees only the notebooks that record
-// their inputs, and an unbadged row means "nothing recorded", NOT "safe to change".
+// The wording — which is entirely positive claims, each dated — lives in LineageFmt so it
+// can be unit-tested; a null there means the payload supports no claim, so no badge.
 function lineageBadge(lin) {
+  const parts = LineageFmt.badge(lin);
+  if (!parts) return null;
   const span = document.createElement("span");
-  const readers = lin.readers || 0;
-  const writers = lin.writers || 0;
-  const bits = [];
-  if (readers) {
-    const noun = `notebook${readers === 1 ? "" : "s"}`;
-    bits.push(`${readers} ${noun} read${readers === 1 ? "s" : ""} this`);
-  }
-  if (writers) bits.push(`written by ${writers}`);
-  span.className = "badge lineage";
-  span.textContent = `⇄ ${bits.join(" · ")}`;
-  span.title = `Recorded lineage: ${readers} notebook(s) read this file and ${writers} ` +
-    "write(s) it. Built only from notebooks that record their inputs/outputs with " +
-    "mooring_inputs, so it is a floor — there may be more readers it cannot see, and no " +
-    "badge is not evidence a file is unused. `mooring lineage <path>` shows the whole " +
-    "recorded chain. Value-free and local.";
+  span.className = lin.stale ? "badge lineage stale" : "badge lineage";
+  span.textContent = parts.text;
+  span.title = parts.title;
   return span;
 }
 
@@ -1388,7 +1391,10 @@ function buildFileRow(file, opts) {
   }
   // Recorded lineage: who else reads this file. Present only when there IS a reader
   // or writer — the row never claims a file is unused.
-  if (file.lineage) extras.push(" ", lineageBadge(file.lineage));
+  if (file.lineage) {
+    const lin = lineageBadge(file.lineage);
+    if (lin) extras.push(" ", lin);
+  }
   // A watched file with a teammate change waiting gets its promotion badge —
   // quiet otherwise (watching an in-sync file must not add row noise).
   if (watchedPaths.has(file.path) && PULL_STATES.has(file.state)) {
@@ -2731,22 +2737,19 @@ $("schedule-cancel").addEventListener("click", () => {
 });
 $("schedule-cadence").addEventListener("change", syncScheduleDayVisibility);
 // A pull REPLACES local files. When one of them is a dataset other notebooks are
-// recorded as reading, say so BEFORE it lands, instead of leaving the analyst to
-// discover it a week later in a number that moved. Advisory, never blocking: pulling
-// the team's work is right almost every time, and lineage under-reports by
-// construction — so this informs the choice and is worded to claim only what is
-// recorded. Scoped to the toolbar Pull, the unaimed bulk action; the per-row stale
-// dialog already names the one file it is about, and a second modal there is noise.
+// recorded as reading (or generating), say so BEFORE it lands, instead of leaving the
+// analyst to discover it a week later in a number that moved. Advisory, never blocking:
+// pulling the team's work is right almost every time, and lineage under-reports by
+// construction — so this informs the choice, claims only what is recorded, and DATES
+// each claim so a six-month-old one cannot masquerade as current. Scoped to the toolbar
+// Pull, the unaimed bulk action; the per-row stale dialog already names the one file it
+// is about, and a second modal there is noise.
 function confirmPullImpact() {
-  const hits = Freshness.pullImpact(lastFiles);
+  const hits = LineageFmt.pullImpact(lastFiles);
   if (!hits.length) return true;
-  const lines = hits.map((h) => {
-    const verb = h.state === "deleted remotely" ? "removes" : "replaces";
-    const n = h.readers;
-    return `  ${h.path} — ${verb} a file ${n} notebook${n === 1 ? "" : "s"} read${n === 1 ? "s" : ""}`;
-  });
   return confirm(
-    "This pull changes files other notebooks depend on:\n\n" + lines.join("\n") +
+    "This pull changes files other notebooks depend on:\n\n" +
+    hits.map(LineageFmt.impactLine).join("\n") +
     "\n\nRe-run those notebooks afterwards to see what moved. (Lineage only sees " +
     "notebooks that record their inputs, so there may be more.)\n\n" +
     "OK pulls anyway; Cancel leaves your copies alone."

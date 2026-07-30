@@ -64,45 +64,6 @@ test("pullCount counts exactly the pull states", () => {
   assert.equal(F.pullCount(undefined), 0);
 });
 
-test("pullImpact: only states where the pull actually replaces or removes the file", () => {
-  const withReaders = (state) => file(state, { path: `${state}.csv`, lineage: { readers: 2 } });
-  const hits = F.pullImpact([
-    withReaders("remote changed"),
-    withReaders("deleted remotely"),
-    // "new remote" has no local copy to overwrite, and pull SKIPS a conflict — warning
-    // about either would be a warning the user cannot act on.
-    withReaders("new remote"),
-    withReaders("conflict"),
-    withReaders("synced"),
-    withReaders("modified"),
-  ]);
-  assert.deepEqual(hits.map((h) => h.state), ["deleted remotely", "remote changed"]);
-});
-
-test("pullImpact: a file with no recorded reader is absent, never a zero entry", () => {
-  // Positive claims only: lineage sees just the notebooks that record their inputs, so
-  // it can never establish that overwriting something is safe.
-  assert.deepEqual(
-    F.pullImpact([
-      file("remote changed", { path: "a.csv" }),
-      file("remote changed", { path: "b.csv", lineage: { readers: 0, writers: 3 } }),
-    ]),
-    []
-  );
-  assert.deepEqual(F.pullImpact([]), []);
-  assert.deepEqual(F.pullImpact(undefined), []);
-});
-
-test("pullImpact: busiest file first, then by path", () => {
-  const hits = F.pullImpact([
-    file("remote changed", { path: "z.csv", lineage: { readers: 1 } }),
-    file("remote changed", { path: "b.csv", lineage: { readers: 4 } }),
-    file("remote changed", { path: "a.csv", lineage: { readers: 1 } }),
-  ]);
-  assert.deepEqual(hits.map((h) => h.path), ["b.csv", "a.csv", "z.csv"]);
-  assert.equal(hits[0].readers, 4);
-});
-
 test("ageText boundaries", () => {
   assert.equal(F.ageText(0), "just now");
   assert.equal(F.ageText(59_000), "just now");

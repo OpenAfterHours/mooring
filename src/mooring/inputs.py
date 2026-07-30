@@ -40,6 +40,14 @@ INPUTS_DIRNAME = "inputs"
 INPUTS_KEY = "inputs"
 OUTPUTS_KEY = "outputs"
 
+# What the runtime files a receipt under when it cannot tell which notebook called it
+# (outside marimo, or when frame detection fails). Every failed detection shares this ONE
+# bucket and overwrites the previous, so it names no notebook and counts as no notebook —
+# :mod:`mooring.lineage` excludes it rather than treat an unknown as a reader. Kept in
+# step by hand with the same literal in :mod:`mooring._inputs_runtime`, which is standalone
+# and cannot import this.
+UNKNOWN_NOTEBOOK = "_notebook"
+
 # The packaged payload (this file's sibling) and the importable name it is written out
 # as in the notebook kernel.
 _RUNTIME_SRC = "_inputs_runtime.py"
@@ -107,7 +115,7 @@ def read_receipts(workspace: Path | str) -> list[dict]:
         rel = data.get("notebook")
         if not isinstance(rel, str) or not rel:
             continue
-        if rel != "_notebook" and not (ws / rel).is_file():
+        if rel != UNKNOWN_NOTEBOOK and not (ws / rel).is_file():
             continue  # the notebook was deleted — don't badge (or route) a file that's gone
         sections = {}
         for key in (INPUTS_KEY, OUTPUTS_KEY):

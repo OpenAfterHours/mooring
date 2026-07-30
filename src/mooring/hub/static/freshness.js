@@ -47,26 +47,8 @@ const Freshness = (function () {
     return n;
   }
 
-  // Row states where a pull actually REPLACES (or removes) the local file — the only
-  // ones the lineage impact confirm fires for. "new remote" has no local copy to
-  // overwrite, and pull SKIPS a conflict, so warning about either would be a warning
-  // the user cannot act on.
-  const OVERWRITE_STATES = new Set(["remote changed", "deleted remotely"]);
-
-  // Rows a Pull would overwrite that other notebooks are recorded as READING —
-  // [{path, readers, state}], busiest first. Positive claims only: a file with no
-  // recorded reader is simply absent from the result, because lineage sees only the
-  // notebooks that record their inputs and so can never establish that overwriting
-  // something is safe.
-  function pullImpact(files) {
-    const hits = [];
-    for (const f of files || []) {
-      if (!OVERWRITE_STATES.has(f.state)) continue;
-      const readers = (f.lineage && f.lineage.readers) || 0;
-      if (readers > 0) hits.push({ path: f.path, readers, state: f.state });
-    }
-    return hits.sort((a, b) => b.readers - a.readers || a.path.localeCompare(b.path));
-  }
+  // (The Pull impact confirm — which rows a pull would overwrite that others depend on —
+  // lives in lineage_fmt.js with the rest of the lineage wording.)
 
   // Compact age for the banner: "just now" under a minute, then minutes/hours/days.
   function ageText(ms) {
@@ -87,7 +69,7 @@ const Freshness = (function () {
     return lastStateAt != null && now - lastStateAt >= throttleMs;
   }
 
-  return { warnState, dismissKey, pullCount, pullImpact, ageText, shouldAutoRefresh };
+  return { warnState, dismissKey, pullCount, ageText, shouldAutoRefresh };
 })();
 
 if (typeof window !== "undefined") window.Freshness = Freshness;
