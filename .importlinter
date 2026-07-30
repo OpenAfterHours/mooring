@@ -178,6 +178,7 @@ source_modules =
     mooring.verify
     mooring.inputs
     mooring.connections
+    mooring.schedule
     mooring.config
     mooring.config_store
     mooring.ai_config

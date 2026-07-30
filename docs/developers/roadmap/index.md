@@ -40,6 +40,7 @@ what cloud notebook platforms do.
 | [Handover explainer](handover-explainer.md) | ✅ Shipped 2026-07 | S | One-shot copilot walkthrough of an inherited notebook, cell by cell. |
 | [Traceback fixer](traceback-fixer.md) | ✅ Phases 1–4 shipped 2026-07 | M | Debug from a traceback without the model ever seeing the data values inside it. |
 | [Power BI semantic model](pbi-semantic-model.md) | ✅ Phases 1–3 shipped 2026-07 | M | Let the copilot read synced PBIP tables, relationships, and DAX — schema and authored code, never data. |
+| [Scheduled refresh](scheduled-refresh.md) | ✅ Shipped 2026-07 | M–L | Runs on a cadence via a capability ladder (catch-up-on-open → OS task), so staleness is never silent, a failed run has no write authority, and no user needs admin rights. **Reverses** the rejection below. |
 
 The first five shipped plans were the review's consensus top five, with
 duplicate-as-draft following; each page's status admonition records exactly
@@ -82,7 +83,11 @@ reasoning isn't lost when they resurface:
   already own that conversation for this audience.
 - **Scheduled refresh via Task Scheduler** — a silently stale board report is
   worse than no feature; unattended runs on analyst laptops are a support
-  tarpit.
+  tarpit. **Revisited 2026-07-30**: both objections are treated as the design
+  constraint in [Scheduled refresh](scheduled-refresh.md), which makes staleness
+  travel with the artifact and gives an unattended run no write authority at
+  all. The rejection above stands for any version that doesn't hold those two
+  lines.
 - **Dependency licence/vulnerability audit** — Dependabot already does this
   server-side on the repo mooring syncs; a docs pointer delivers most of it.
 - **Publish-to-Pages / Outlook delivery** — deliberately commits output *data

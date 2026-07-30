@@ -62,6 +62,14 @@ EXPECTED_ROUTES = {
     ("/api/restore", ("POST",), "api_restore"),
     # The cell-aware pre-push diff (roadmap: review-my-changes).
     ("/api/diff", ("POST",), "api_diff"),
+    # Scheduled refresh: the board, its edits, and running one now (roadmap:
+    # scheduled-refresh). /api/refresh EXECUTES a notebook; it never pushes.
+    ("/api/schedules", ("GET",), "api_schedules"),
+    ("/api/schedule/add", ("POST",), "api_schedule_add"),
+    ("/api/schedule/remove", ("POST",), "api_schedule_remove"),
+    ("/api/schedule/pause", ("POST",), "api_schedule_pause"),
+    ("/api/schedule/background", ("POST",), "api_schedule_background"),
+    ("/api/refresh", ("POST",), "api_refresh"),
     # The local safety net: the trash + activity ledger (roadmap: local-safety-net).
     ("/activity", ("GET",), "activity_page"),
     ("/api/trash", ("GET",), "api_trash"),
