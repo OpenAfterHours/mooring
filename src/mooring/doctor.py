@@ -285,6 +285,39 @@ def _probe_workspace(cfg: config.Config) -> ProbeResult:
     return ProbeResult("workspace", "Workspace placement", PASS, "No placement concerns.")
 
 
+def _probe_schedules(cfg: config.Config) -> ProbeResult:
+    """"My refresh stopped" — the one question a schedule generates, answered paste-safely.
+
+    Reports WHICH clock is actually running (the hub's own sweep, a sign-in agent, or a
+    Windows task) and how many schedules are overdue. Reporting the tier matters as much as
+    the overdue count: "it never ran" has a completely different fix depending on whether
+    anything was registered to run it. Value-free — counts and a tier name, never a path."""
+    from mooring import schedule, schedule_os
+
+    schedules = schedule.load(cfg.workspace())
+    if not schedules:
+        return ProbeResult("schedules", "Scheduled refreshes", PASS, "No schedules on this machine.")
+    tier = schedule_os.current_tier("")
+    overdue = sum(1 for s in schedules if schedule.is_overdue(s))
+    paused = sum(1 for s in schedules if s.paused)
+    where = schedule_os.TIER_NAMES[tier]
+    detail = f"{len(schedules)} schedule(s); refreshes run {where}."
+    if paused:
+        detail += f" {paused} paused."
+    if not overdue:
+        return ProbeResult("schedules", "Scheduled refreshes", PASS, detail)
+    fix = (
+        "Open the hub to catch up, or run `mooring refresh --due`."
+        if tier < schedule_os.TIER_LOGON_AGENT
+        else "Run `mooring schedule list` to see which, and `mooring refresh --due` to catch up."
+    )
+    if tier < schedule_os.TIER_LOGON_AGENT:
+        fix += " `mooring schedule background enable` runs them with the hub closed."
+    return ProbeResult(
+        "schedules", "Scheduled refreshes", WARN, f"{detail} {overdue} overdue.", fix
+    )
+
+
 _PROBES: tuple[Callable[[config.Config], ProbeResult], ...] = (
     _probe_python,
     _probe_runtime_imports,
@@ -293,6 +326,7 @@ _PROBES: tuple[Callable[[config.Config], ProbeResult], ...] = (
     _probe_github_auth,
     _probe_deps_lock,
     _probe_workspace,
+    _probe_schedules,
 )
 
 

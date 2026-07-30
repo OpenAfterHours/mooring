@@ -17,6 +17,7 @@ from mooring import (
     config,
     paths,
     pyproject_env,
+    schedule,
     shadow,
     telemetry,
     workspace_config,
@@ -394,6 +395,111 @@ def _build_parser() -> argparse.ArgumentParser:
     conn_sub.add_parser(
         "check", help="scan the synced connection definitions for anything secret-shaped"
     )
+
+    sched_cmd = sub.add_parser(
+        "schedule", help="refresh a notebook on a cadence (local to this machine)"
+    )
+    sched_sub = sched_cmd.add_subparsers(dest="schedule_command", required=True)
+    sched_list = sched_sub.add_parser(
+        "list", help="show every schedule, when it last ran and when it's due"
+    )
+    sched_list.add_argument("--repo", default=None, metavar="ALIAS", help=_REPO_ARG_HELP)
+    sched_add = sched_sub.add_parser("add", help="schedule a notebook (it must have verified)")
+    sched_add.add_argument("path", help="workspace-relative notebook path")
+    sched_add.add_argument(
+        "--cadence",
+        default="daily",
+        metavar="WHEN",
+        help=f"one of {', '.join(schedule.CADENCES)} (default: daily)",
+    )
+    sched_add.add_argument(
+        "--at", default=None, metavar="HH:MM", help="local time of day (default: 07:30)"
+    )
+    sched_add.add_argument(
+        "--day", default=None, metavar="DAY", help="weekly cadence only: mon..sun (default: mon)"
+    )
+    sched_add.add_argument(
+        "--grace-hours",
+        type=int,
+        default=None,
+        metavar="N",
+        help="hours past the due time before the schedule is flagged overdue (default: 4)",
+    )
+    sched_add.add_argument(
+        "--no-deliver",
+        action="store_true",
+        help="record the run receipt only; don't render an HTML artifact to the outbox",
+    )
+    sched_add.add_argument(
+        "--no-pull", action="store_true", help="don't pull the team's latest before running"
+    )
+    sched_add.add_argument("--repo", default=None, metavar="ALIAS", help=_REPO_ARG_HELP)
+    sched_bg = sched_sub.add_parser(
+        "background",
+        help="run refreshes even when the hub is closed (no admin rights needed)",
+        description=(
+            "Register mooring's refresh clock with Windows so schedules fire with the hub "
+            "closed. Uses Task Scheduler when policy allows it, otherwise a sign-in agent "
+            "from your own Startup folder. Neither needs admin rights, and with neither "
+            "available refreshes still run whenever the hub is open."
+        ),
+    )
+    sched_bg_sub = sched_bg.add_subparsers(dest="background_command", required=False)
+    # --repo goes on each LEAF as well as the parent: with a subcommand present, argparse
+    # routes trailing optionals to the leaf parser, so `background enable --repo x` needs it
+    # there, while the bare `background --repo x` needs it on the parent.
+    sched_bg.add_argument("--repo", default=None, metavar="ALIAS", help=_REPO_ARG_HELP)
+    for _name, _help in (
+        ("enable", "register background refresh at the best tier"),
+        ("disable", "stop background refresh (schedules are kept)"),
+        ("status", "show what is registered and what this machine allows"),
+    ):
+        _leaf = sched_bg_sub.add_parser(_name, help=_help)
+        _leaf.add_argument("--repo", default=None, metavar="ALIAS", help=_REPO_ARG_HELP)
+
+    sched_rm = sched_sub.add_parser("rm", help="remove a notebook's schedule")
+    sched_rm.add_argument("path", help="workspace-relative notebook path")
+    sched_rm.add_argument("--repo", default=None, metavar="ALIAS", help=_REPO_ARG_HELP)
+    sched_pause = sched_sub.add_parser("pause", help="stop a schedule running, keeping it")
+    sched_pause.add_argument("path", help="workspace-relative notebook path")
+    sched_pause.add_argument("--repo", default=None, metavar="ALIAS", help=_REPO_ARG_HELP)
+    sched_resume = sched_sub.add_parser("resume", help="resume a paused schedule")
+    sched_resume.add_argument("path", help="workspace-relative notebook path")
+    sched_resume.add_argument("--repo", default=None, metavar="ALIAS", help=_REPO_ARG_HELP)
+
+    refresh_cmd = sub.add_parser(
+        "refresh",
+        help="run a scheduled notebook now: pull, run it, report checks — never pushes",
+        description=(
+            "Pull the team's latest (if possible), run the notebook, and record a value-free "
+            "receipt. Never pushes, proposes, or resolves a conflict. Exit codes: 0 refreshed "
+            "clean, 1 did not run, 3 ran but a tie-out check failed, 4 refreshed but degraded "
+            "(e.g. offline, so it ran against your local copy)."
+        ),
+    )
+    refresh_cmd.add_argument(
+        "path", nargs="?", default=None, help="notebook to refresh (omit with --due)"
+    )
+    refresh_cmd.add_argument(
+        "--due", action="store_true", help="refresh every schedule that is currently due"
+    )
+    refresh_cmd.add_argument(
+        "--json", action="store_true", help="emit machine-readable JSON (for an orchestrator)"
+    )
+    refresh_cmd.add_argument(
+        "--no-pull", action="store_true", help="skip the pull; run against the local copy"
+    )
+    refresh_cmd.add_argument(
+        "--deliver",
+        action="store_true",
+        help="render the HTML artifact even for an unscheduled notebook",
+    )
+    refresh_cmd.add_argument(
+        "--agent",
+        action="store_true",
+        help="stay resident and refresh what's due on a timer (what the sign-in agent runs)",
+    )
+    refresh_cmd.add_argument("--repo", default=None, metavar="ALIAS", help=_REPO_ARG_HELP)
 
     ai = sub.add_parser("ai", help="AI copilot: sign in to Copilot and check status")
     ai_sub = ai.add_subparsers(dest="ai_command", required=True)
@@ -1323,6 +1429,275 @@ def cmd_verify(cfg: config.Config, args: argparse.Namespace) -> int:
     if not result.passed:
         print("(The badge clears automatically when you edit the notebook.)")
     return 0 if result.passed else 1
+
+
+def cmd_schedule(
+    app_cfg: config.AppConfig, cfg: config.Config, args: argparse.Namespace
+) -> int:
+    sub = args.schedule_command
+    ws = cfg.workspace()
+    alias = getattr(args, "repo", None) or app_cfg.active_alias
+    if sub == "list":
+        return _print_schedules(cfg, ws, alias)
+    if sub == "background":
+        return _schedule_background(
+            ws, alias, getattr(args, "background_command", None) or "status"
+        )
+    rel = args.path.replace("\\", "/")
+    if sub == "add":
+        return _schedule_add(cfg, ws, args, rel, alias)
+    if sub == "rm":
+        if not schedule.remove(ws, rel):
+            sys.exit(f"No schedule for {rel}.")
+        print(f"Removed the schedule for {rel}.")
+        return 0
+    if sub in ("pause", "resume"):
+        updated = schedule.set_paused(ws, rel, sub == "pause")
+        if updated is None:
+            sys.exit(f"No schedule for {rel}.")
+        print(f"{'Paused' if sub == 'pause' else 'Resumed'} the schedule for {rel}.")
+        return 0
+    return 2
+
+
+def _schedule_add(
+    cfg: config.Config, ws: Path, args: argparse.Namespace, rel: str, alias: str
+) -> int:
+    from mooring import verify
+    from mooring.app import refresh, verify_run
+
+    # Refuse a target that could never be run — same gate as Verify/Deliver, so a helper
+    # module or a .pbip project is rejected here rather than failing on every future tick.
+    try:
+        rel = verify_run.ensure_runnable(ws, rel, refresh.RefreshRefused)
+    except (ValueError, FileNotFoundError, refresh.RefreshRefused) as exc:
+        sys.exit(str(exc))
+    # The preflight gate: only a notebook that has RUN CLEAN may be scheduled. This closes
+    # the largest class of unattended-run support tickets ("it never worked in the first
+    # place"), and costs one call because verify receipts are already SHA-keyed.
+    receipt = verify.read_results(ws).get(rel)
+    if not (receipt and receipt.get("passed")):
+        sys.exit(
+            f"Verify {rel} first — only a notebook that has run clean can be scheduled.\n"
+            f"  Run `mooring verify {rel}`, then add the schedule again."
+        )
+    try:
+        cadence = schedule.normalize_cadence(args.cadence)
+        at = schedule.normalize_at(args.at) if args.at else schedule.DEFAULT_AT
+        day = schedule.normalize_day(args.day) if args.day else 0
+    except schedule.ScheduleError as exc:
+        sys.exit(str(exc))
+    existing = schedule.get(ws, rel)
+    sched = schedule.Schedule(
+        notebook=rel,
+        cadence=cadence,
+        at=at,
+        day=day,
+        deliver=not args.no_deliver,
+        pull=not args.no_pull,
+        grace_hours=(
+            args.grace_hours if args.grace_hours is not None else schedule.DEFAULT_GRACE_HOURS
+        ),
+        # Amending a schedule keeps its history but clears any auto-pause: the user has just
+        # told us what they want, so re-arming is the intent.
+        last_run=existing.last_run if existing else schedule.LastRun(),
+    )
+    try:
+        schedule.put(ws, sched)
+    except OSError as exc:
+        sys.exit(f"Could not save the schedule: {exc}")
+    telemetry.log_event("schedule", action="add", cadence=cadence)  # value-free: no path
+    verb = "Updated" if existing else "Scheduled"
+    print(f"{verb} {rel} — {sched.describe_cadence()}.")
+    print(f"  Next due {schedule.next_due(sched):%a %d %b %H:%M}.")
+    print(_tier_note(alias))
+    return 0
+
+
+def _tier_note(alias: str = "") -> str:
+    """The honest statement of WHEN a schedule will actually fire on this machine.
+
+    The cadence is a freshness contract, not a promise that something will be awake to
+    honour it — so the user is told which clock they are relying on rather than being left
+    to assume an OS-level one exists."""
+    from mooring import schedule_os
+
+    tier = schedule_os.current_tier(alias)
+    if tier >= schedule_os.TIER_LOGON_AGENT:
+        return f"  Refreshes run {schedule_os.TIER_NAMES[tier]}."
+    return (
+        "  Refreshes run when the mooring hub is open (it catches up on anything due).\n"
+        "  `mooring schedule background enable` runs them with the hub closed too."
+    )
+
+
+def _schedule_background(ws: Path, alias: str, sub: str) -> int:
+    from mooring import schedule_os
+
+    if sub == "disable":
+        removed = schedule_os.disable(alias)
+        print(
+            "Background refresh disabled — schedules are kept and still run when the hub is open."
+            if removed
+            else "Background refresh was not enabled; nothing to do."
+        )
+        return 0
+    if sub == "enable":
+        try:
+            installed = schedule_os.enable(ws, alias)
+        except schedule_os.UnstableInstall as exc:
+            sys.exit(str(exc))
+        print(installed.detail)
+        if installed.reason:
+            # A demotion is a normal outcome on a managed laptop, not an error — but it must
+            # be stated, because it changes WHEN refreshes actually fire.
+            print(f"  {installed.reason}")
+        print(f"  Refreshes now run {schedule_os.TIER_NAMES[installed.tier]}.")
+        telemetry.log_event("schedule_background", action="enable", tier=installed.tier)
+        return 0
+    # status
+    tier = schedule_os.current_tier(alias)
+    print(f"Registered: {schedule_os.TIER_NAMES[tier]}.")
+    if tier >= schedule_os.TIER_OS_TASK:
+        print(f"  Windows task: {schedule_os.task_name(alias)!r}")
+    elif tier >= schedule_os.TIER_LOGON_AGENT:
+        print(f"  Sign-in agent: {schedule_os.agent_script(alias)}")
+    else:
+        capability = schedule_os.probe()
+        if capability.can_background:
+            print("  This machine supports background refresh — enable it with")
+            print("    mooring schedule background enable")
+        else:
+            print(f"  {capability.reason}")
+    return 0
+
+
+def _print_schedules(cfg: config.Config, ws: Path, alias: str = "") -> int:
+    from mooring.app import refresh
+
+    schedules = schedule.load(ws)
+    if not schedules:
+        print("No schedules yet. Add one with `mooring schedule add <notebook>`.")
+        return 0
+    width = max(len(s.notebook) for s in schedules)
+    overdue = 0
+    for sched in schedules:
+        state = _schedule_state(cfg, sched)
+        if schedule.is_overdue(sched):
+            overdue += 1
+        print(f"  {sched.notebook:<{width}}  {sched.describe_cadence():<24}  {state}")
+        if sched.last_run.reason:
+            print(f"  {'':<{width}}  {'':<24}  ({sched.last_run.reason})")
+    print(f"{len(schedules)} schedule(s), {overdue} overdue.")
+    if any(s.paused for s in schedules):
+        print("A paused schedule never runs — `mooring schedule resume <path>` to re-arm it.")
+    if not any(refresh.preflight(cfg, s).verified for s in schedules):
+        print("Tip: re-verify a notebook to restore its full retry budget.")
+    return 0
+
+
+def _schedule_state(cfg: config.Config, sched: schedule.Schedule) -> str:
+    if sched.paused:
+        if sched.consecutive_failures:
+            return f"PAUSED — auto-paused after {sched.consecutive_failures} failed run(s)"
+        return "paused"
+    last = sched.last_run
+    if not last.outcome:
+        return f"never run — due {schedule.next_due(sched):%a %H:%M}"
+    marks = {
+        schedule.OK: "ok  ",
+        schedule.DEGRADED: "warn",
+        schedule.CHECKS_FAILED: "FAIL",
+        schedule.FAILED: "FAIL",
+    }
+    mark = marks.get(last.outcome, "?   ")
+    stale = " OVERDUE" if schedule.is_overdue(sched) else ""
+    return f"{mark} last {last.at[:16].replace('T', ' ')}{stale}"
+
+
+def cmd_refresh(cfg: config.Config, args: argparse.Namespace) -> int:
+    import dataclasses
+    import json as _json
+
+    from mooring.app import refresh
+
+    ws = cfg.workspace()
+    if args.agent:
+        return _refresh_agent(cfg)
+    if args.due:
+        results = refresh.run_due(cfg)
+    elif args.path:
+        rel = args.path.replace("\\", "/")
+        sched = schedule.get(ws, rel)
+        try:
+            results = [
+                refresh.refresh_notebook(
+                    cfg,
+                    rel,
+                    sched=sched,
+                    pull=False if args.no_pull else None,
+                    do_deliver=True if args.deliver else None,
+                )
+            ]
+        except (ValueError, FileNotFoundError, refresh.RefreshRefused, refresh.RefreshBusy) as exc:
+            if args.json:
+                print(_json.dumps({"error": str(exc), "results": []}))
+            sys.exit(str(exc))
+    else:
+        sys.exit("Give a notebook path to refresh, or --due to run everything that's due.")
+
+    if args.json:
+        print(_json.dumps({"results": [dataclasses.asdict(r) for r in results]}, indent=2))
+    else:
+        for result in results:
+            print(refresh.describe_result(result))
+        if not results:
+            print("Nothing due.")
+    return _refresh_exit_code(results)
+
+
+def _refresh_agent(cfg: config.Config) -> int:
+    """Stay resident and refresh what's due on a timer — what the sign-in agent (tier 2) runs.
+
+    Deliberately lean: it imports the schedule model and the refresh orchestrator, never the
+    hub or marimo, so an idle agent costs a small Python process rather than a web server.
+    ``auto_only`` matches the hub's sweep — only a verified, unpaused, didn't-fail-last-time
+    schedule fires without a human.
+
+    Never exits on error. This process is started at sign-in and nobody is watching it, so a
+    transient failure must not silently end background refresh for the rest of the session;
+    the failure is recorded on the schedule where the board will show it."""
+    import time
+
+    from mooring.app import refresh
+
+    interval = 300
+    print(f"mooring refresh agent started (every {interval // 60} min). Ctrl+C to stop.")
+    while True:
+        try:
+            for result in refresh.run_due(cfg, auto_only=True):
+                print(refresh.describe_result(result))
+        except KeyboardInterrupt:
+            return 0
+        except BaseException as exc:  # noqa: BLE001  # an unwatched loop must never die
+            telemetry.log_error(exc=type(exc)("refresh agent tick failed"), command="refresh")
+        try:
+            time.sleep(interval)
+        except KeyboardInterrupt:
+            return 0
+
+
+def _refresh_exit_code(results: list) -> int:
+    """0 clean · 1 a run failed · 3 tie-out checks failed · 4 degraded. Documented on the
+    command's --help so an orchestrator can branch on them (see the roadmap's phase 4)."""
+    outcomes = {r.outcome for r in results}
+    if schedule.FAILED in outcomes:
+        return 1
+    if schedule.CHECKS_FAILED in outcomes:
+        return 3
+    if schedule.DEGRADED in outcomes:
+        return 4
+    return 0
 
 
 def cmd_checks(cfg: config.Config, args: argparse.Namespace) -> int:
@@ -2570,6 +2945,10 @@ def _dispatch(
         return cmd_deliver(cfg, args.path)
     if command == "verify":
         return cmd_verify(cfg, args)
+    if command == "schedule":
+        return cmd_schedule(app_cfg, cfg, args)
+    if command == "refresh":
+        return cmd_refresh(cfg, args)
     if command == "checks":
         return cmd_checks(cfg, args)
     if command == "inputs":

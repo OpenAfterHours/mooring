@@ -1,7 +1,7 @@
 """The verify runner: run a notebook, keep only a value-free receipt, delete the render.
 
-The marimo export subprocess is faked at the ``_run_export`` seam (a real one spawns a
-kernel); these pin the pass/fail-from-exit-code-AND-render contract, the value-free
+The marimo export subprocess is faked at the shared runner's ``_exec`` seam (a real one
+spawns a kernel); these pin the pass/fail-from-exit-code-AND-render contract, the value-free
 failed-cell count, that the value-bearing HTML is deleted, the environment-vs-notebook
 attribution, the SHA-before-run fail-safe, and the activity receipt.
 """
@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 
 from mooring import activity, cli, gitsha, verify
-from mooring.app import verify_run
+from mooring.app import notebook_run, verify_run
 from mooring.config import Config
 
 NOTEBOOK = "import marimo\n\napp = marimo.App()\n\n\n@app.cell\ndef _():\n    return\n"
@@ -33,12 +33,12 @@ def _out_of(cmd):
 
 
 def _fake_export(returncode, stderr="", *, produce=True, before=None):
-    """Stand in for `_run_export`: write an HTML at the `-o` target (marimo writes one
+    """Stand in for `notebook_run._exec`: write an HTML at the `-o` target (marimo writes one
     whenever it actually runs — even on a cell failure) unless ``produce`` is False (an
     environment failure where marimo never starts), and return the given exit code.
     ``before`` runs first, to simulate an edit landing mid-run."""
 
-    def _run(cmd, cwd, env):
+    def _run(cmd, cwd, env, timeout):
         if before is not None:
             before()
         if produce:
@@ -61,7 +61,7 @@ def _mk(tmp_path, rel="sales.py", src=NOTEBOOK):
 
 def test_clean_run_records_a_passing_receipt(tmp_path, monkeypatch):
     cfg, ws = _mk(tmp_path, "notebooks/sales.py")
-    monkeypatch.setattr(verify_run, "_run_export", _fake_export(0))
+    monkeypatch.setattr(notebook_run, "_exec", _fake_export(0))
 
     result = verify_run.verify_notebook(cfg, "notebooks/sales.py")
 
@@ -78,7 +78,7 @@ def test_failing_run_counts_cells_value_free(tmp_path, monkeypatch):
         "MarimoExceptionRaisedError: 'SECRET_VALUE_DO_NOT_LEAK'\n"
         "Error: Export was successful, but some cells failed to execute.\n"
     )
-    monkeypatch.setattr(verify_run, "_run_export", _fake_export(1, stderr))
+    monkeypatch.setattr(notebook_run, "_exec", _fake_export(1, stderr))
 
     result = verify_run.verify_notebook(cfg, "sales.py")
 
@@ -97,7 +97,7 @@ def test_marker_count_is_line_anchored(tmp_path, monkeypatch):
         "MarimoExceptionRaisedError: boom\n"
         "some cell printed: look a MarimoExceptionRaisedError in my logs\n"
     )
-    monkeypatch.setattr(verify_run, "_run_export", _fake_export(1, stderr))
+    monkeypatch.setattr(notebook_run, "_exec", _fake_export(1, stderr))
 
     result = verify_run.verify_notebook(cfg, "sales.py")
     assert result.cells_failed == 1
@@ -105,7 +105,7 @@ def test_marker_count_is_line_anchored(tmp_path, monkeypatch):
 
 def test_the_value_bearing_render_is_deleted(tmp_path, monkeypatch):
     cfg, ws = _mk(tmp_path)
-    monkeypatch.setattr(verify_run, "_run_export", _fake_export(1, "boom"))
+    monkeypatch.setattr(notebook_run, "_exec", _fake_export(1, "boom"))
 
     verify_run.verify_notebook(cfg, "sales.py")
 
@@ -119,7 +119,7 @@ def test_environment_failure_is_not_blamed_on_the_notebook(tmp_path, monkeypatch
     # before the notebook ran). That's an environment fault, not the notebook's — it
     # must surface as a VerifyError, NOT a recorded "failed to run" receipt.
     cfg, ws = _mk(tmp_path)
-    monkeypatch.setattr(verify_run, "_run_export", _fake_export(1, "no such dependency", produce=False))
+    monkeypatch.setattr(notebook_run, "_exec", _fake_export(1, "no such dependency", produce=False))
 
     with pytest.raises(verify_run.VerifyError):
         verify_run.verify_notebook(cfg, "sales.py")
@@ -130,7 +130,7 @@ def test_nonzero_exit_with_render_but_no_markers_is_unknown_not_zero(tmp_path, m
     # A module-level error DOES still produce a render (marimo ran) but emits no per-cell
     # markers — report "unknown" (None), never "0 cells failed" (which reads as clean).
     cfg, ws = _mk(tmp_path)
-    monkeypatch.setattr(verify_run, "_run_export", _fake_export(1, "SyntaxError: bad"))
+    monkeypatch.setattr(notebook_run, "_exec", _fake_export(1, "SyntaxError: bad"))
 
     result = verify_run.verify_notebook(cfg, "sales.py")
     assert result.passed is False
@@ -147,7 +147,7 @@ def test_receipt_keys_to_pre_run_bytes_so_a_mid_run_edit_auto_clears(tmp_path, m
     def _edit_midrun():
         (ws / "sales.py").write_text(NOTEBOOK + "\n# edited mid-run\n", encoding="utf-8")
 
-    monkeypatch.setattr(verify_run, "_run_export", _fake_export(0, before=_edit_midrun))
+    monkeypatch.setattr(notebook_run, "_exec", _fake_export(0, before=_edit_midrun))
     result = verify_run.verify_notebook(cfg, "sales.py")
 
     assert result.passed is True  # the run itself passed (on the old bytes)
@@ -157,7 +157,7 @@ def test_receipt_keys_to_pre_run_bytes_so_a_mid_run_edit_auto_clears(tmp_path, m
 
 def test_records_a_value_free_activity_entry(tmp_path, monkeypatch):
     cfg, ws = _mk(tmp_path)
-    monkeypatch.setattr(verify_run, "_run_export", _fake_export(0))
+    monkeypatch.setattr(notebook_run, "_exec", _fake_export(0))
 
     verify_run.verify_notebook(cfg, "sales.py")
 
@@ -175,10 +175,10 @@ def test_refuses_a_plain_module(tmp_path):
 def test_timeout_surfaces_verify_error_and_cleans_up(tmp_path, monkeypatch):
     cfg, ws = _mk(tmp_path)
 
-    def _slow(cmd, cwd, env):
+    def _slow(cmd, cwd, env, timeout):
         raise subprocess.TimeoutExpired(cmd, 1)
 
-    monkeypatch.setattr(verify_run, "_run_export", _slow)
+    monkeypatch.setattr(notebook_run, "_exec", _slow)
     with pytest.raises(verify_run.VerifyError):
         verify_run.verify_notebook(cfg, "sales.py")
     assert not verify.render_target(ws, "sales.py").is_file()
@@ -189,10 +189,10 @@ def test_launch_oserror_surfaces_verify_error(tmp_path, monkeypatch):
     # it must become a clean VerifyError, not an unhandled 500/traceback.
     cfg, ws = _mk(tmp_path)
 
-    def _boom(cmd, cwd, env):
+    def _boom(cmd, cwd, env, timeout):
         raise PermissionError("access denied")
 
-    monkeypatch.setattr(verify_run, "_run_export", _boom)
+    monkeypatch.setattr(notebook_run, "_exec", _boom)
     with pytest.raises(verify_run.VerifyError):
         verify_run.verify_notebook(cfg, "sales.py")
 

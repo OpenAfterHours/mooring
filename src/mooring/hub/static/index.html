@@ -238,6 +238,65 @@
       </div>
     </section>
 
+    <!-- Scheduled refresh: the morning status board. The card only appears once there is
+         at least one schedule (or the form is open), so a user who never asked for this
+         never sees it. Rendered by renderSchedules. -->
+    <section id="schedules-card" class="card hidden">
+      <div class="schedules-head">
+        <h3>Scheduled refreshes</h3>
+        <button id="btn-run-due" class="small" title="Run every schedule that is currently due">&#8635; Run what&#8217;s due</button>
+      </div>
+      <div id="schedules-banner" class="notice notice-fresh hidden" role="status"></div>
+      <div id="schedule-form" class="schedule-form hidden">
+        <div class="schedule-form-title">Refresh <b id="schedule-form-path"></b></div>
+        <div class="schedule-form-row">
+          <label>Repeat
+            <select id="schedule-cadence">
+              <option value="daily">Daily</option>
+              <option value="weekdays">Every weekday</option>
+              <option value="weekly">Weekly</option>
+              <option value="hourly">Hourly</option>
+            </select>
+          </label>
+          <label id="schedule-day-label" class="hidden">On
+            <select id="schedule-day">
+              <option value="mon">Monday</option>
+              <option value="tue">Tuesday</option>
+              <option value="wed">Wednesday</option>
+              <option value="thu">Thursday</option>
+              <option value="fri">Friday</option>
+              <option value="sat">Saturday</option>
+              <option value="sun">Sunday</option>
+            </select>
+          </label>
+          <label>At <input id="schedule-at" type="time" value="07:30"></label>
+        </div>
+        <label class="schedule-check"><input id="schedule-pull" type="checkbox" checked>
+          Pull the team&#8217;s latest first (falls back to your copy if it can&#8217;t)</label>
+        <label class="schedule-check"><input id="schedule-deliver" type="checkbox" checked>
+          Save an HTML snapshot to your local outbox each time</label>
+        <div class="toolbar">
+          <button id="schedule-save" class="primary small">Save schedule</button>
+          <button id="schedule-cancel" class="small">Cancel</button>
+        </div>
+      </div>
+      <table id="schedules-table">
+        <thead><tr><th>Notebook</th><th>Repeats</th><th>Status</th><th>Actions</th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <!-- Which clock is actually running. The tier IS the freshness guarantee, so it is
+           stated rather than left to assumption; renderSchedules fills it. -->
+      <div class="schedules-foot">
+        <span id="schedules-tier" class="muted"></span>
+        <button id="btn-background-on" class="small hidden"
+                title="Run refreshes even when the hub is closed. No admin rights needed.">Run in the background</button>
+        <button id="btn-background-off" class="small hidden"
+                title="Stop background refresh; schedules are kept">Stop background refresh</button>
+        <div id="schedules-tier-reason" class="muted schedule-detail hidden"></div>
+        <div class="muted schedule-detail">A refresh never pushes; any snapshot stays in your local outbox.</div>
+      </div>
+    </section>
+
     <section id="log-card" class="card hidden">
       <h3>Last operation</h3>
       <pre id="log"></pre>
@@ -358,6 +417,7 @@
   <script src="/static/history_fmt.js"></script>
   <script src="/static/diff_fmt.js"></script>
   <script src="/static/whatsnew_fmt.js"></script>
+  <script src="/static/schedule_fmt.js"></script>
   <script src="/static/checklist.js"></script>
   <!-- Shared appearance module (applyTheme + cross-tab follower). Before app.js,
        which aliases window.MooringTheme. The zero-flash pre-paint stays inline in

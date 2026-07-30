@@ -34,6 +34,7 @@ page that opens when you run the app). The same actions are available from the
 | **New notebook** | Create a fresh marimo notebook from a template and open it. A bare name lands in `notebooks/`; type a path (e.g. `packages/finance/notebooks/sales`) to place it in a sub-folder — mooring registers that folder so it syncs for the team. |
 | **Deliver** | Render a notebook to a **self-contained HTML snapshot** (code hidden) you can email a stakeholder who won't open marimo. See [Delivering a result](#delivering-a-result-for-a-stakeholder). |
 | **Verify runs** | Smoke-run the notebook once on your machine and badge the row with whether it **ran clean** — the "does this still run before I share it?" check. See [Verifying a notebook runs](#verifying-a-notebook-runs). |
+| **Schedule refresh…** | Re-run a notebook on a cadence (pull → run → report), so you stop having to remember. Appears once the notebook has verified clean. See [Refreshing a notebook on a schedule](#refreshing-a-notebook-on-a-schedule). |
 | **Push** | Upload your changed files to the team repo — **one commit per file**. Blocked for any file that's in conflict. |
 | **Propose** | Like Push, but uploads to a **review branch** instead of the shared branch, so a teammate can review the changes as a pull request before they land. See [Proposing changes](#proposing-changes-for-review). |
 | **Revert** | Appears on a *modified* or locally-deleted file. Discards your local changes and restores the last version you pulled or pushed. Your current version is snapshotted first, so a Revert can itself be undone. See [Reverting a file](#reverting-a-file). |
@@ -155,6 +156,63 @@ its number, **Verify** it.
     correct — for that, tie your numbers out with
     [`mooring_checks`](#checking-your-numbers-tie-out) and review the logic with the
     copilot's [Review logic](ai-copilot.md#review-my-logic).
+
+## Refreshing a notebook on a schedule
+
+A month-end board pack, a daily reconciliation, a weekly exception report — the same
+notebook run against new data, on a cadence. **Schedule** it and stop having to remember.
+
+On a notebook's **Actions ▾** menu, choose **Schedule refresh…**, pick how often
+(daily / every weekday / weekly / hourly) and at what time, and save. A **Scheduled
+refreshes** card then appears below your files.
+
+Each refresh **pulls the team's latest**, runs the notebook on your machine, and reports
+three things — none of which is a data value:
+
+| It reports | From |
+|------------|------|
+| whether it **ran** | the run itself |
+| whether your numbers **still tie out** | your [`mooring_checks`](#checking-your-numbers-tie-out) cell |
+| whether an **input changed** | your [`mooring_inputs`](#fingerprinting-your-inputs) cell |
+
+That middle row is the point: *"your daily reconciliation ran at 07:30, but segment totals
+no longer reconcile"* is worth more than the file it produces.
+
+!!! info "When a refresh actually runs"
+
+    By default, refreshes run **while the mooring hub is open** — it catches up on anything
+    due the moment you open it, and keeps to the cadence while it stays open. Nothing is
+    installed and nothing needs admin rights.
+
+    To have them run **with the hub closed**, click **Run in the background** on the
+    schedules card (or `mooring schedule background enable`). mooring registers a Windows
+    scheduled task if your machine allows it, and otherwise falls back to a sign-in agent
+    started from your own Startup folder — **neither needs admin rights**, and it tells you
+    which one you got. If your machine permits neither, refreshes keep working through the
+    hub; the card always says which clock is running.
+
+    Open mooring after a week away and a daily schedule runs **once**, not seven times.
+
+!!! warning "A schedule can never go stale quietly"
+
+    If a refresh doesn't happen when it was due, the card goes **amber** and says so. And
+    every HTML snapshot a schedule produces is stamped with its cadence and its **next due
+    date** in the footer — so someone you emailed it to three weeks ago can see it's out of
+    date without asking you.
+
+**Before you can schedule a notebook it has to have [verified](#verifying-a-notebook-runs)
+clean** — mooring won't schedule something that has never been shown to work. Editing a
+scheduled notebook clears that verification, so it gets one retry instead of three until it
+runs clean again.
+
+A refresh **never pushes**. It only pulls, runs, and writes to your own machine — so a
+refresh that goes wrong can't touch the team repo. If it can't reach GitHub it runs against
+your local copy and says so rather than failing. If the run fails, your last good snapshot
+is left exactly as it was; after a few consecutive failures the schedule pauses itself and
+tells you. Fix the notebook, hit **Run now**, and it re-arms itself.
+
+On the command line this is [`mooring schedule`](cli.md#schedule) and
+[`mooring refresh`](cli.md#refresh).
 
 ## Fingerprinting your inputs
 

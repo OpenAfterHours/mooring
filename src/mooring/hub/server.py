@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import contextlib
 import threading
+import time
 import webbrowser
 from importlib import resources
 from pathlib import Path
@@ -1050,6 +1051,7 @@ def create_app(hub: Hub) -> Starlette:
     # module is fully initialized.
     from mooring.hub import pages
     from mooring.hub.routes import batch, chat, files, reviews, settings, setup
+    from mooring.hub.routes import schedule as schedule_routes
     from mooring.hub.routes import sync as sync_routes
 
     app = Starlette(
@@ -1099,6 +1101,16 @@ def create_app(hub: Hub) -> Starlette:
             Route("/api/reviews", reviews.api_reviews),
             Route("/api/reviews/detail", reviews.api_review_detail, methods=["POST"]),
             Route("/api/reviews/submit", reviews.api_review_submit, methods=["POST"]),
+            Route("/api/schedules", schedule_routes.api_schedules),
+            Route("/api/schedule/add", schedule_routes.api_schedule_add, methods=["POST"]),
+            Route("/api/schedule/remove", schedule_routes.api_schedule_remove, methods=["POST"]),
+            Route("/api/schedule/pause", schedule_routes.api_schedule_pause, methods=["POST"]),
+            Route(
+                "/api/schedule/background",
+                schedule_routes.api_schedule_background,
+                methods=["POST"],
+            ),
+            Route("/api/refresh", schedule_routes.api_refresh, methods=["POST"]),
             Route("/api/trash", files.api_trash),
             Route("/api/trash/restore", files.api_trash_restore, methods=["POST"]),
             Route("/api/activity", files.api_activity),
@@ -1149,6 +1161,49 @@ def create_app(hub: Hub) -> Starlette:
 DEFAULT_HUB_PORT = 8724
 
 
+# The refresh sweep's tick. A tick with nothing due costs a small JSON read and a few
+# datetime comparisons, so this can be frequent; what it must not do is let a schedule sit
+# visibly overdue for long once the hub IS open.
+_SWEEP_INTERVAL_S = 300
+# Delay before the first (catch-up) sweep, so a notebook run never competes with hub
+# startup, the editor pre-warm, and the user's first click.
+_SWEEP_FIRST_DELAY_S = 30
+
+
+def _start_refresh_sweep(hub: Hub) -> None:
+    """Start the background clock behind scheduled refreshes (roadmap tiers 0 and 1).
+
+    Tier 0 ("catch up when the hub opens") and tier 1 ("fire on cadence while the hub is
+    open") are the SAME loop — tier 0 is simply its first tick. Neither needs any OS
+    permission, which is the point: on a managed laptop where Task Scheduler is blocked by
+    policy, this is still the whole feature.
+
+    Three deliberate restraints:
+
+    * Only ``run_hub`` starts this — never ``create_app`` — so the test suite and any
+      embedded use never execute a notebook (the same posture as the editor pre-warm).
+    * ``auto_only`` means only a verified, unpaused, didn't-fail-last-time schedule fires by
+      itself. Anything doubtful waits for a human to click Run now, so an unattended run
+      never surprises someone whose notebook is in a questionable state.
+    * It sweeps the ACTIVE repo's workspace only. Refreshing notebooks in a repo the user
+      isn't looking at would be a surprise, and ``hub.cfg`` follows a repo switch.
+
+    Best-effort throughout: a sweep that raises must never take the hub down with it."""
+
+    def _sweep() -> None:
+        from mooring.app import refresh
+
+        time.sleep(_SWEEP_FIRST_DELAY_S)
+        while True:
+            with contextlib.suppress(Exception):
+                results = refresh.run_due(hub.cfg, auto_only=True)
+                for result in results:
+                    print(f"mooring refresh: {refresh.describe_result(result)}")
+            time.sleep(_SWEEP_INTERVAL_S)
+
+    threading.Thread(target=_sweep, name="refresh-sweep", daemon=True).start()
+
+
 def run_hub(app_cfg: config.AppConfig, open_browser: bool = True, port: int | None = None) -> int:
     hub = Hub(app_cfg)
     app = create_app(hub)
@@ -1169,6 +1224,7 @@ def run_hub(app_cfg: config.AppConfig, open_browser: bool = True, port: int | No
             )
 
     threading.Thread(target=_prune_trash, name="trash-prune", daemon=True).start()
+    _start_refresh_sweep(hub)
     print(f"mooring hub running at {url} (Ctrl+C to quit)")
     if open_browser:
         threading.Timer(0.8, webbrowser.open, args=(url,)).start()

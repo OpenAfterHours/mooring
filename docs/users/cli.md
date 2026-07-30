@@ -45,6 +45,14 @@ mooring deps remove polars
 mooring deps list
 mooring deps lock
 mooring build-requirements [-o FILE]
+mooring schedule list
+mooring schedule add notebooks/board.py [--cadence daily|weekdays|weekly|hourly]
+                     [--at HH:MM] [--day mon..sun] [--grace-hours N]
+                     [--no-deliver] [--no-pull]
+mooring schedule rm | pause | resume notebooks/board.py
+mooring schedule background enable | disable | status
+mooring refresh notebooks/board.py [--no-pull] [--deliver] [--json]
+mooring refresh --due [--json]
 mooring ai status
 mooring ai login [--host HOST]
 mooring ai dictionary check [--repo ALIAS]
@@ -180,6 +188,57 @@ branch, so the changes can be reviewed as a pull request (see
   `import mooring_inputs` calls (content hash + shape + schema, never a value), and how
   many changed since the last run. `--clear [PATH]` resets them. See
   [Fingerprinting your inputs](daily-workflow.md#fingerprinting-your-inputs).
+
+### `schedule`
+
+Refresh a notebook on a cadence. Schedules are **local to this machine** (they live in the
+never-synced `.mooring/`), so scheduling a notebook does not schedule it for your teammates.
+See [Refreshing a notebook on a schedule](daily-workflow.md#refreshing-a-notebook-on-a-schedule).
+
+- `schedule list` — every schedule, how it repeats, how the last run went, and how many are
+  overdue.
+- `schedule add <path>` — schedule a notebook. It must have **verified clean** first
+  (`mooring verify <path>`); mooring will not schedule something never shown to work.
+  `--cadence daily|weekdays|weekly|hourly` (default `daily`), `--at HH:MM` (local, default
+  `07:30`), `--day mon..sun` (weekly only), `--grace-hours N` (how late before it counts as
+  overdue, default 4), `--no-deliver` (record the receipt but skip the HTML snapshot),
+  `--no-pull` (run against your local copy instead of pulling first).
+- `schedule rm <path>` — remove a schedule. `pause` / `resume <path>` — stop and restart one
+  without losing it.
+- `schedule background enable` — run refreshes **with the hub closed**. Registers a Windows
+  scheduled task when policy allows it, otherwise a sign-in agent from your own Startup
+  folder; **neither needs admin rights**, and the command reports which one you got.
+  `disable` removes it (schedules are kept); `status` shows which clock is running.
+
+!!! note "If your machine blocks both"
+
+    Plenty of managed laptops block `schtasks.exe` by policy. That is a supported outcome,
+    not a failure: refreshes keep running whenever the hub is open, and `schedule background
+    status` says so plainly. mooring also refuses to register anything when it is running
+    from a temporary `uvx` cache — a background task pointing at a cache that gets cleaned up
+    would stop working silently. Install durably first (`uv tool install mooring`).
+
+### `refresh`
+
+Run a scheduled notebook now: **pull** the team's latest (if it can), run the notebook, and
+record a value-free receipt. It **never pushes, proposes, or resolves a conflict** — the worst
+a refresh can do is fail to write a local file.
+
+- `refresh <path>` — refresh one notebook. `--no-pull` skips the pull; `--deliver` renders
+  the HTML snapshot even for a notebook with no schedule.
+- `refresh --due` — refresh everything currently due. After a week away a daily schedule runs
+  **once**, not seven times.
+- `--json` — machine-readable output for an orchestrator.
+
+Exit codes (stable, for scripting): **0** refreshed clean · **1** did not run · **3** ran but
+a tie-out check failed · **4** refreshed but degraded (e.g. offline, so it ran against your
+local copy).
+
+!!! tip "Driving mooring from Airflow / Dagster / a Windows Service"
+
+    `mooring refresh --json` is non-interactive and has stable exit codes precisely so a team
+    that already runs an orchestrator can call it from a task. mooring deliberately does not
+    embed one — see the [roadmap plan](../developers/roadmap/scheduled-refresh.md#why-not-an-orchestrator).
 
 ### `connections` — share a DB connection shape, keep the secret local
 

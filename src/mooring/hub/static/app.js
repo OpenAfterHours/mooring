@@ -445,6 +445,202 @@ function verifyAction(path) {
     "Verifying… this re-runs the whole notebook (can take a minute).");
 }
 
+// -- scheduled refresh -------------------------------------------------------
+// The board that makes a stale refresh impossible to miss. lastSchedules is the last
+// /api/schedules payload, kept so a background poll can re-render without refetching and
+// so the form can prefill from an existing schedule.
+let lastSchedules = { schedules: [], overdue: 0, due: 0 };
+let schedulingPath = "";
+
+// Open the inline editor for one notebook, prefilled from its existing schedule if it has
+// one. Deliberately part of the schedules card rather than a modal: the card is where the
+// consequence shows up, so the user edits it in the place they will read it.
+function scheduleAction(path) {
+  schedulingPath = path;
+  const existing = (lastSchedules.schedules || []).find((r) => r.notebook === path);
+  $("schedule-form-path").textContent = path;
+  $("schedule-cadence").value = existing ? existing.cadence : "daily";
+  $("schedule-at").value = existing ? existing.at : "07:30";
+  $("schedule-day").value = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"][
+    existing ? existing.day : 0
+  ];
+  $("schedule-deliver").checked = existing ? !!existing.deliver : true;
+  $("schedule-pull").checked = existing ? !!existing.pull : true;
+  syncScheduleDayVisibility();
+  $("schedules-card").classList.remove("hidden");
+  $("schedule-form").classList.remove("hidden");
+  $("schedules-card").scrollIntoView({ behavior: "smooth", block: "nearest" });
+}
+
+// "On <weekday>" is meaningful for a weekly cadence only.
+function syncScheduleDayVisibility() {
+  $("schedule-day-label").classList.toggle("hidden", $("schedule-cadence").value !== "weekly");
+}
+
+function closeScheduleForm() {
+  schedulingPath = "";
+  $("schedule-form").classList.add("hidden");
+}
+
+async function saveSchedule() {
+  if (!schedulingPath) return;
+  const body = {
+    path: schedulingPath,
+    cadence: $("schedule-cadence").value,
+    at: $("schedule-at").value || "07:30",
+    day: $("schedule-day").value,
+    deliver: $("schedule-deliver").checked,
+    pull: $("schedule-pull").checked,
+  };
+  const data = await action("/api/schedule/add", body, false);
+  // A 409 here is the preflight gate ("verify it first"), which action() has already
+  // surfaced as an error banner — keep the form open so the user can act on it.
+  if (data && !data.error) {
+    closeScheduleForm();
+    applySchedules(data);
+  }
+}
+
+// Run one schedule now (or everything due, when path is ""). This EXECUTES the notebook,
+// so it gets the same in-flight status line Deliver/Verify use.
+function runRefresh(path) {
+  const status = path
+    ? "Refreshing… this pulls and re-runs the whole notebook (can take a minute)."
+    : "Refreshing everything due… this re-runs each notebook (can take a while).";
+  return action("/api/refresh", path ? { path } : {}, true, status).then((data) => {
+    if (data && !data.error) applySchedules(data);
+    return data;
+  });
+}
+
+// Adopt a board payload returned by any of the schedule endpoints (they all echo it) and
+// re-render, so the card is never a poll behind the action the user just took.
+function applySchedules(data) {
+  if (!data || !Array.isArray(data.schedules)) return;
+  lastSchedules = {
+    schedules: data.schedules,
+    overdue: data.overdue || 0,
+    due: data.due || 0,
+    background: data.background || null,
+  };
+  renderSchedules();
+}
+
+// Turn background refresh (the OS task / sign-in agent) on or off. The response says which
+// tier was actually registered — enabling can legitimately land on the sign-in agent when
+// Task Scheduler is blocked by policy — so the log lines are the real feedback here.
+function setBackground(enabled) {
+  return action("/api/schedule/background", { enabled }, false).then((data) => {
+    if (data && !data.error) applySchedules(data);
+    return data;
+  });
+}
+
+// The "which clock is running" line under the board, plus the button that upgrades it.
+function renderBackground() {
+  const bg = lastSchedules.background;
+  const line = $("schedules-tier");
+  const reason = $("schedules-tier-reason");
+  const on = $("btn-background-on");
+  const off = $("btn-background-off");
+  if (!bg) {
+    line.textContent = "";
+    reason.classList.add("hidden");
+    on.classList.add("hidden");
+    off.classList.add("hidden");
+    return;
+  }
+  line.textContent = `Refreshes run ${bg.tier_text}.`;
+  // Offer the upgrade only when this machine can actually deliver it, and explain the
+  // absence when it can't — an unexplained missing button reads as a bug.
+  on.classList.toggle("hidden", !bg.offer);
+  off.classList.toggle("hidden", bg.tier < 2);
+  reason.textContent = bg.reason || "";
+  reason.classList.toggle("hidden", !bg.reason);
+}
+
+function renderSchedules() {
+  const rows = lastSchedules.schedules || [];
+  const card = $("schedules-card");
+  const formOpen = !$("schedule-form").classList.contains("hidden");
+  // The card exists only once it has something to say — a user who never asked for a
+  // schedule never sees it.
+  card.classList.toggle("hidden", !rows.length && !formOpen);
+  if (!rows.length && !formOpen) return;
+  renderBackground();
+
+  const banner = $("schedules-banner");
+  const text = ScheduleFmt.banner(lastSchedules);
+  banner.textContent = text;
+  banner.classList.toggle("hidden", !text);
+  banner.classList.toggle("notice-error", lastSchedules.overdue > 0);
+  $("btn-run-due").classList.toggle("hidden", !lastSchedules.due);
+
+  const body = $("schedules-table").querySelector("tbody");
+  body.textContent = "";
+  for (const row of rows) {
+    const tr = document.createElement("tr");
+
+    const name = document.createElement("td");
+    name.className = "schedule-name";
+    name.textContent = row.notebook;
+    tr.appendChild(name);
+
+    const cadence = document.createElement("td");
+    cadence.textContent = row.cadence_text;
+    const next = document.createElement("div");
+    next.className = "muted schedule-next";
+    next.textContent = ScheduleFmt.nextDue(row);
+    cadence.appendChild(next);
+    tr.appendChild(cadence);
+
+    const status = document.createElement("td");
+    const state = ScheduleFmt.state(row);
+    const badge = document.createElement("span");
+    badge.className = `schedule-badge schedule-${state.tone}`;
+    badge.textContent = state.text;
+    status.appendChild(badge);
+    const last = (row.last_run || {}).at;
+    if (last) {
+      const stamp = document.createElement("div");
+      stamp.className = "muted schedule-next";
+      stamp.textContent = ScheduleFmt.when(last);
+      status.appendChild(stamp);
+    }
+    for (const line of [ScheduleFmt.detail(row), ScheduleFmt.autoHint(row)]) {
+      if (!line) continue;
+      const note = document.createElement("div");
+      note.className = "muted schedule-detail";
+      note.textContent = line;
+      status.appendChild(note);
+    }
+    tr.appendChild(status);
+
+    const actionsCell = document.createElement("td");
+    const actions = [
+      ["Run now", () => runRefresh(row.notebook)],
+      ["Edit schedule", () => scheduleAction(row.notebook)],
+      [row.paused ? "Resume" : "Pause", () =>
+        action("/api/schedule/pause", { path: row.notebook, paused: !row.paused }, false)
+          .then(applySchedules)],
+      ["Unschedule", () =>
+        action("/api/schedule/remove", { path: row.notebook }, false).then(applySchedules)],
+    ];
+    if (row.last_run && row.last_run.artifact) {
+      actions.splice(1, 0, ["Open last snapshot", () =>
+        action("/api/reveal", { path: row.last_run.artifact }, false)]);
+    }
+    actionsCell.appendChild(actionsMenu(actions, row.notebook));
+    tr.appendChild(actionsCell);
+    body.appendChild(tr);
+  }
+}
+
+async function loadSchedules() {
+  const data = await api("/api/schedules");
+  if (data && !data.error) applySchedules(data);
+}
+
 // A safe playground: byte-copy this notebook to a personal {stem}-{login}-draft.py
 // sibling. To the three-way engine the draft is just a new local file — it can never
 // conflict with the team file and is only shared by an explicit push. The response's
@@ -943,6 +1139,14 @@ function fileActions(file, opts) {
   // step. Notebooks only; the badge auto-clears when the file is edited.
   if (isNotebook && file.has_local) {
     actions.push(["Verify runs", () => verifyAction(file.path)]);
+  }
+  // Schedule a recurring refresh (pull → run → report). Only offered on a notebook that
+  // has run clean — the server enforces that too (a 409), but offering it on an unverified
+  // notebook and then refusing would be a worse first experience than not offering it.
+  if (isNotebook && file.has_local && file.verified && file.verified.passed) {
+    const scheduled = (lastSchedules.schedules || []).some((r) => r.notebook === file.path);
+    actions.push([scheduled ? "Edit refresh schedule" : "Schedule refresh…",
+      () => scheduleAction(file.path)]);
   }
   // A plain helper module (non-marimo .py) can't open in marimo (it would be rewritten
   // into notebook form), so instead of Open it gets Reveal — open it in the file manager
@@ -2094,6 +2298,15 @@ async function refresh() {
   $("connect-repo").classList.toggle("hidden", state.configured || showAddRepo);
   $("login-card").classList.toggle("hidden", !state.configured || state.logged_in);
   $("files-card").classList.toggle("hidden", !showFiles);
+  // The schedules board reads purely local state (no network), so it works offline and in
+  // local mode — which matters, since a refresh degrades to "ran against your copy" rather
+  // than failing when GitHub is unreachable. Fire-and-forget: a board that can't load must
+  // never hold up the file list.
+  if (showFiles) {
+    loadSchedules();
+  } else {
+    $("schedules-card").classList.add("hidden");
+  }
   // Copilot sign-in menu: shown wherever the notebook surface is usable (local mode
   // or logged in) and AI is enabled. Copilot's sign-in is independent of the GitHub
   // login, so it lives in its own header dropdown rather than taking up a card the
@@ -2466,6 +2679,15 @@ function draftShareSelection(candidates) {
 
 $("login-start").addEventListener("click", startLogin);
 $("btn-refresh").addEventListener("click", refresh);
+$("btn-run-due").addEventListener("click", () => runRefresh(""));
+$("btn-background-on").addEventListener("click", () => setBackground(true));
+$("btn-background-off").addEventListener("click", () => setBackground(false));
+$("schedule-save").addEventListener("click", saveSchedule);
+$("schedule-cancel").addEventListener("click", () => {
+  closeScheduleForm();
+  renderSchedules(); // the card hides itself again when there are no schedules to show
+});
+$("schedule-cadence").addEventListener("change", syncScheduleDayVisibility);
 $("btn-pull").addEventListener("click", async () => {
   const data = await action("/api/pull", {});
   // The pull response carries the digest of what just landed, computed against
