@@ -38,6 +38,7 @@ DAX), but never the data itself.
 | **Schema** — column names, dtypes, row count | Built by `schema.py`, which reads only a parquet footer or a csv/xlsx header. It never materialises a row, so no value is ever produced — proven by the `test_schema.py` "value never leaks" tests. |
 | **Live dataframe schemas** — names + dtypes of dataframes loaded in your kernel | Built by `ai/introspect.py`, which runs a **fixed, value-free probe** in your kernel and reads back only names + dtypes. Covers data loaded from *outside* the workspace. Value-free by construction, not by physical impossibility — see [Live dataframe schemas](#live-dataframe-schemas-data-outside-the-workspace). |
 | **Notebook `.py` source** | A marimo notebook is pure Python; the data is loaded at *runtime* (`pl.read_parquet(...)`). The source is code, not data. |
+| **The notebook catalog** — every notebook's title, its own first-markdown-cell description, its imports, and the inputs/checks/SQL tables its **source declares** | A reduced, allowlisted view of the same authored source above — never another notebook's code, never a cell output, and never a `.mooring/` run receipt. Fetched on demand through three name-lookup tools. See [the notebook catalog](#notebook-catalog). |
 | **Power BI semantic model** — table/column names + types, relationships, measure and calculated-column DAX | Extracted by an **allowlist** parser (`pbip_model.py`) from a synced PBIP's TMDL text: partition/source **M expressions** are skipped *without being captured*, **RLS roles** and **translations** are never opened, annotations and unknown constructs are dropped. DAX is authored code — the same class as notebook source, with the same best-effort scanning caveat. See [the semantic model](#power-bi-semantic-model) below. |
 | **Your chat messages** | What you type. The `/explain` walkthrough (and its "Add as notes cell" follow-up) sends **fixed, value-free prompt text** over this same channel — no new egress surface. A pasted **traceback** is rewritten value-safe and held for your confirmation before it can leave — see [Pasted tracebacks](#pasted-tracebacks). |
 
@@ -72,6 +73,9 @@ DAX), but never the data itself.
    tools (`list_tables`, `describe_table`, `search_dictionary`) serve it; they look
    up tables by name in an **in-memory parsed index** (never a filesystem path) and
    return only the five allowlisted fields (see [Team context](#team-context-opt-in-not-a-structural-guarantee)).
+   Three more (`list_notebooks`, `search_notebooks`, `describe_notebook`) serve the
+   repo-wide [notebook catalog](#notebook-catalog) the same way — name lookups in a
+   pre-parsed in-memory index, returning metadata only, never another notebook's code.
    When the workspace holds a Power BI semantic model, three more
    (`get_semantic_model`, `describe_model_table`, `get_measure`) serve its
    pre-parsed allowlist skeleton the same way — name lookups in memory, every
@@ -121,7 +125,8 @@ It preserves every guarantee above, and its safety rests on one load-bearing inv
   finding is the sub-agent's *own* answer, returned to the main copilot as a tool result.
   That answer is trusted to be value-free because the sub-agent is **structurally
   value-blind**: it is built with **no propose, edit, or any value-returning tool** — only
-  the value-free read tools (schema, notebook source, dictionary, semantic model). The
+  the value-free read tools (schema, notebook source, dictionary, semantic model, and the
+  notebook catalog — "which notebook already does this?" is exactly a branch's job). The
   read-only tool subset is enforced in one place (`ai/tools.py`: the propose tool is gated
   on the `emit_proposal` callback, which a sub-agent is never given) and pinned by a test.
   The merge still applies the checksum-PII floor as defence-in-depth, but that floor is
@@ -321,6 +326,58 @@ Run **`mooring ai model check`** to see exactly what the extractor would emit �
 per model: which files were read, which tables/measures were kept, what was
 excluded (partitions skipped, roles/translations never opened, constructs
 dropped), and any scrubber findings — *offline*, before the copilot ever sees it.
+
+## The notebook catalog: what the repo's other notebooks are for { #notebook-catalog }
+
+The copilot can read **one** notebook: the one you have open. But the question a growing
+team actually asks is *"has someone already built this?"* — so mooring additionally gives
+it a **catalog** of every marimo notebook in the workspace, reachable through three
+on-demand tools (`mooring_list_notebooks`, `mooring_search_notebooks`,
+`mooring_describe_notebook`). It is **on by default** (`[ai] notebook_catalog = true`)
+for the same reason as the semantic model: every field is derived from **authored source**
+— the class the assistant already sees — and reduced much further.
+
+Per notebook, the catalog holds exactly: its **path**, its **title**, the collapsed text
+of its **first markdown cell**, the dotted **names** of what it imports, the `name`/`path`
+**string literals** it hands `mooring_inputs.fingerprint`, which `mooring_checks` function
+it calls plus that check's literal `name=`, and the identifier-shaped **table names** its
+`mo.sql` queries select FROM. What keeps it there:
+
+- **An `ast` allowlist, never an execution.** `notebookindex/` parses the `.py` text; it
+  never imports, runs, or `literal_eval`s a notebook (pinned by a canary test that plants
+  a file-writing side effect and proves it never fires). A cell **body**, an
+  **expression**, an arbitrary **literal**, and a cell **output** have *no slot* in the
+  model — they are structurally impossible to send, not merely filtered.
+- **A literal is lifted only from a named slot of a known call.** A *computed* argument —
+  an f-string, a variable, a concatenation — is dropped rather than captured, because a
+  runtime-built string is exactly where a data value would appear. The SQL reduction can
+  only match an identifier after FROM/JOIN, so a value inlined into a WHERE clause has no
+  way to be read as a "table".
+- **A run receipt is never opened.** `.mooring/inputs` and `.mooring/checks` record what a
+  run against **real data** observed; the catalog reports only what the **source
+  declares**. Routing a receipt to the model would be a new egress channel, so no code
+  path here can reach one.
+- **No tool returns another notebook's source.** Only the open notebook's code is
+  readable (`mooring_read_notebook_source`); a second notebook's full authored code would
+  be a new, unreviewed egress and is deliberately not served.
+- **The per-notebook opt-out applies here too.** A notebook the team
+  [turned AI off for](#turning-the-copilot-off-for-a-notebook) is dropped from the catalog
+  before the tools are built, so fencing one off also removes it from search.
+
+**The honest classification:** the one free-text slot is the **markdown summary** — prose
+an analyst wrote, the same best-effort tier as a code-library docstring or a dictionary
+description. It is capped, scanned, and withheld whole on a high-confidence hit, but a
+plain-text value a regex can't match can survive. Everything else is structural.
+
+The same value-free entries feed the hub's own **search box** (so a local search and the
+model's view of a notebook can never drift apart) — but that path is local: it is matched
+in your browser and goes nowhere. Turn the copilot's half off with
+`[ai] notebook_catalog = false` (or `MOORING_AI_NOTEBOOK_CATALOG=0`, or the Settings page)
+and the assistant is back to seeing only the notebook you have open; the hub's search box
+is unaffected.
+
+Run **`mooring catalog [terms…]`** to see exactly what the catalog tools would emit —
+*offline*, before the copilot ever reads it.
 
 ## Live dataframe schemas (data outside the workspace)
 
@@ -731,7 +788,11 @@ prose — so the rule stands regardless.
   semantic model, `tests/test_pbip_model.py` and `tests/test_ai_model_tools.py`
   prove a sentinel planted in a partition M expression, an RLS role, an annotation,
   or a translation reaches no output, and that the model tools are name-lookups
-  that cannot reach a path. For live-kernel
+  that cannot reach a path. For the notebook catalog,
+  `tests/test_notebookindex.py` and `tests/test_ai_catalog_tools.py` plant the sentinel
+  in a cell body, a filter literal, a computed path, and a markdown paragraph and prove
+  none reaches a tool result, that a receipt on disk is never read, and that extraction
+  never executes the notebook. For live-kernel
   schemas, `tests/test_introspect.py` runs the exact probe the kernel runs and proves
   the names-and-dtypes readback never carries a value. For the traceback guard,
   `tests/test_traceback.py` proves a planted secret never survives the rewrite —

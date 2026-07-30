@@ -231,6 +231,22 @@ EDITABLE: tuple[SettingSpec, ...] = (
         "Off by default; a per-module opt-out lives in the synced mooring.toml.",
     ),
     SettingSpec(
+        key="ai.notebook_catalog",
+        accessor="ai_notebook_catalog",
+        label="Index every notebook (repo-wide catalog)",
+        group="ai",
+        type="bool",
+        control="toggle",
+        default=True,
+        sensitivity="needs_care",
+        env_var="MOORING_AI_NOTEBOOK_CATALOG",
+        help="Let the copilot search every notebook in the repo — each one's title, its "
+        "own description, and the inputs/checks/tables its source declares — so it can "
+        "point at work a teammate already did instead of duplicating it. Never another "
+        "notebook's code, its outputs, or any data value. OFF is the more conservative "
+        "choice (the copilot then sees only the notebook you have open).",
+    ),
+    SettingSpec(
         key="ai.traceback_guard",
         accessor="ai_traceback_guard",
         label="Sanitise pasted tracebacks",

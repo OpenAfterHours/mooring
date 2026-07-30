@@ -37,6 +37,7 @@ mooring propose [paths...] [-m "message"] [--repo ALIAS]
 mooring open notebooks/sales.py
 mooring open reports/sales.pbip
 mooring new sales-analysis
+mooring catalog [terms...] [--full]
 mooring delete notebooks/sales.py [-y]
 mooring rollback notebooks/sales.py [-y] [--conflicts]
 mooring init
@@ -168,6 +169,26 @@ branch, so the changes can be reviewed as a pull request (see
   `new sales-analysis`). Pass a path to place it in a sub-folder (e.g.
   `new packages/finance/notebooks/sales`); mooring registers that folder so it
   syncs for the team. A bare name goes in `notebooks/`.
+
+### `catalog`
+
+Search every notebook in the workspace — "has someone already built this?" — by name,
+title, or **what it does**: the description in its own first markdown cell, what it
+imports, the datasets it fingerprints, the checks it asserts, and the tables its SQL
+queries. All terms must match; omit them to list the whole catalog. `--full` prints each
+match in detail instead of one line each. Exits non-zero when nothing matches.
+
+```
+mooring catalog                     # every notebook, path-sorted
+mooring catalog gl_ledger           # who reads this dataset?
+mooring catalog month end recon     # all three terms must match
+mooring catalog tieout --full       # with the inputs/checks each one declares
+```
+
+Local and offline: it parses each notebook with `ast` and never runs one, never opens a
+`.mooring/` run receipt, and never talks to GitHub. It is also the way to preview exactly
+what the copilot's catalog tools can see — see
+[why the copilot can't see your data](../admins/ai-privacy.md#notebook-catalog).
 
 ### `deliver` / `verify` / `checks` / `inputs`
 

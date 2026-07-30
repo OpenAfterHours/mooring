@@ -121,6 +121,17 @@ code_index = false          # OPT-IN, off by default: read the team's importable
                             # value-free; docstrings are the one best-effort slot (scanned,
                             # like a dictionary description). A per-module opt-out lives in
                             # the SYNCED mooring.toml ([ai] disabled_code_modules).
+notebook_catalog = true     # index every marimo notebook in the workspace so the copilot
+                            # (and the hub's search box) can answer "has someone already
+                            # built this?". Per notebook: its title, the text of its FIRST
+                            # markdown cell, what it imports, and the inputs it fingerprints
+                            # / checks it asserts / SQL tables it queries AS WRITTEN IN THE
+                            # SOURCE. Extracted with `ast` — notebooks are never executed,
+                            # and .mooring/ run receipts are never read. A cell body, a cell
+                            # output, and an arbitrary literal have no slot. Off = the
+                            # copilot sees only the notebook you have open. The per-notebook
+                            # opt-out in the SYNCED mooring.toml ([ai] disabled_notebooks)
+                            # removes a notebook from the catalog too.
 traceback_guard = true      # when a chat message contains a pasted Python traceback,
                             # rewrite it value-safe before it leaves (exception types and
                             # workspace frames kept — their source re-read from disk —

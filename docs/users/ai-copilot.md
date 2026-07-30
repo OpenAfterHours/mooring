@@ -93,6 +93,39 @@ copilot about its schema straight away — see the
     numbers, so the rule still stands. See
     [the privacy page](../admins/ai-privacy.md#structured-pii-pre-flight-scan-opt-in-best-effort).
 
+## "Has someone already built this?" { #has-someone-already-built-this }
+
+In a repo of thirty notebooks, the expensive mistake isn't a bad line of code — it's
+rebuilding an analysis a teammate finished last quarter. The copilot can **search every
+notebook in the repo**, so ask it first:
+
+> *"Does anyone already reconcile the GL feed?"*
+> *"Which notebook produces the month-end number?"*
+> *"What reads `gl_ledger.parquet`?"*
+
+It answers from a **catalog** mooring builds from your notebooks' source: each one's
+title, the text of its first markdown cell (its own description of itself), what it
+imports, the inputs it fingerprints, the checks it asserts, and the tables its SQL
+queries. It will point you at the notebook — open that instead of starting over — or,
+when nothing matches, say so and propose the new cell.
+
+Two things it does **not** do, deliberately:
+
+- **It never reads another notebook's code.** Only the notebook you have open is
+  readable; for every other one it sees the catalog entry and nothing more.
+- **It never reads a run's results.** The inputs and checks it lists are the ones the
+  *source* declares, not what a run against real data actually saw — those receipts stay
+  on your machine and are never sent anywhere. See
+  [the privacy page](../admins/ai-privacy.md#notebook-catalog).
+
+You get the same search without the AI: the hub's **search box** above the file list now
+matches a notebook's title and content, not just its filename — type `gl_ledger` and the
+notebooks that read it surface. Offline and from the terminal, `mooring catalog <terms>`
+prints exactly the same thing (and is the way to preview what the copilot can see).
+
+A notebook you've [turned AI off for](#turn-ai-off-for-a-notebook) is left out of the
+catalog too, so fencing one off really does fence it off.
+
 ## Explain this notebook
 
 Inherited a notebook — a leaver's month-end report, say — and need to know what

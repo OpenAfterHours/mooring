@@ -97,6 +97,28 @@ test("matches: space-separated terms are ANDed", () => {
 test("matches: missing title/tags don't throw", () => {
   assert.equal(FT.matches({ path: "a.py" }, "a"), true);
   assert.equal(FT.matches({ path: "a.py", tags: null }, "a"), true);
+  assert.equal(FT.matches({ path: "a.py", terms: null }, "a"), true);
+});
+
+test("matches: searches the notebook's content terms, not just its name", () => {
+  // `terms` is the value-free catalog index the hub sends per notebook row: what it says
+  // it does, what it imports, and the inputs/checks/tables its source declares.
+  const f = {
+    path: "notebooks/q3_recon_v2.py",
+    title: "Quarterly Reconciliation",
+    terms: ["Ties the ledger to the GL feed.", "data/gl_ledger.parquet", "unique_key", "gl_feed"],
+  };
+  assert.equal(FT.matches(f, "ledger"), true); // a dataset it fingerprints
+  assert.equal(FT.matches(f, "gl_feed"), true); // a table its SQL queries
+  assert.equal(FT.matches(f, "unique_key"), true); // a check it asserts
+  assert.equal(FT.matches(f, "ties the ledger"), true); // its own description
+  assert.equal(FT.matches(f, "payroll"), false);
+});
+
+test("matches: terms are ANDed with path/title terms", () => {
+  const f = { path: "notebooks/recon.py", title: "Recon", terms: ["gl_feed"] };
+  assert.equal(FT.matches(f, "recon gl_feed"), true); // one term from each source
+  assert.equal(FT.matches(f, "recon payroll"), false);
 });
 
 // -- scope(): the "focus one folder" filter ---------------------------------

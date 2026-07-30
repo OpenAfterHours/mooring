@@ -112,7 +112,8 @@ class ChatService:
         dataset_rel: str,
         folders: tuple[str, ...] = (),
     ):
-        """Return ``(system_context, dictionary_index, pii_banner, live_text, models)``.
+        """Return ``(system_context, dictionary_index, pii_banner, live_text, models,
+        code_index, catalog)``.
 
         The value-free core is the dataset SCHEMA + notebook SOURCE. When the
         opt-in context feature is on, it also folds in the team instructions and
@@ -271,6 +272,21 @@ class ChatService:
             )
             helpers_text = locality.helper_seed_text(hmods, hreasons, hmore)
 
+        # The repo-wide notebook catalog: every marimo notebook reduced (by ast, never
+        # executed and never from a .mooring receipt) to title + first-markdown-cell
+        # summary + declared inputs/checks/imports/SQL tables. It rides as the 7th tuple
+        # element and reaches the model ONLY through the on-demand catalog tools — nothing
+        # enters the system context, because a listing scales with the repo and would be
+        # paid on every turn even when the analyst never asks "has someone built this?".
+        # The team's per-notebook AI opt-out is applied HERE: a notebook the team fenced
+        # off must not become searchable metadata either.
+        catalog = None
+        if app_cfg.ai_notebook_catalog:
+            from mooring.ai import notebookindex
+
+            ai_off = sorted(workspace_config.disabled_notebooks(workspace))
+            catalog = notebookindex.load_catalog(workspace, tuple(folders), exclude=ai_off)
+
         context = egress.build_system_context(
             schema_text=schema_text,
             notebook_source=source,
@@ -294,7 +310,15 @@ class ChatService:
             # so the copilot can write connection code that references them.
             connections_help=workspace_config.connections_hint(workspace),
         )
-        return context, (index if has_dict else DictionaryIndex()), pii_banner, live_text, models, code_index
+        return (
+            context,
+            (index if has_dict else DictionaryIndex()),
+            pii_banner,
+            live_text,
+            models,
+            code_index,
+            catalog,
+        )
 
     # -- live-kernel schema pipeline ---------------------------------------------
 

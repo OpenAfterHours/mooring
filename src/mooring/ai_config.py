@@ -138,6 +138,14 @@ class AiConfig:
     # by default: it is a new egress surface (docstrings are best-effort, like a dictionary
     # description). A synced per-module opt-out lives in the workspace mooring.toml.
     code_index: bool = False
+    # Index every marimo notebook in the workspace (title, first markdown cell, imports,
+    # and the inputs/checks/SQL tables its SOURCE declares) so the copilot — and the hub's
+    # search box — can answer "has someone already built this?". Defaults ON like
+    # ``semantic_model``: every field is derived from authored source, the class the
+    # assistant already sees, and reduced to a structural allowlist (a cell body, an
+    # output, and a .mooring receipt have no slot). The per-notebook opt-out already in
+    # the synced mooring.toml ([ai] disabled_notebooks) also removes a notebook here.
+    notebook_catalog: bool = True
     # Sanitise-and-hold for pasted Python tracebacks (which can embed data values).
     # Default ON: it only ever REMOVES information, and the raw paste is never
     # stored, so there is no send-raw path. Turning it off is a weakening flip.
@@ -278,6 +286,9 @@ def load_ai_config(ai: Mapping, env: Mapping[str, str]) -> AiConfig:
             env.get("MOORING_AI_SEMANTIC_MODEL"), _as_bool(ai.get("semantic_model"), True)
         ),
         code_index=_as_bool(env.get("MOORING_AI_CODE_INDEX"), _as_bool(ai.get("code_index"), False)),
+        notebook_catalog=_as_bool(
+            env.get("MOORING_AI_NOTEBOOK_CATALOG"), _as_bool(ai.get("notebook_catalog"), True)
+        ),
         traceback_guard=_as_bool(
             env.get("MOORING_AI_TRACEBACK_GUARD"), _as_bool(ai.get("traceback_guard"), True)
         ),
