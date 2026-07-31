@@ -1432,6 +1432,11 @@ def cmd_datasets(cfg: config.Config, args: argparse.Namespace) -> int:
         return 0
     if sub == "set-local":
         name = workspace_config.normalize_dataset_name(args.name)
+        if not name:
+            sys.exit(
+                f"{args.name!r} is not a usable dataset name — it must be a bare token "
+                "(letters, digits, dot, underscore, hyphen)."
+            )
         if args.clear:
             cleared = datasets.clear_local_override(ws, name)
             print("Cleared this machine's redirect." if cleared else "No redirect to clear.")
@@ -1464,18 +1469,26 @@ def _datasets_check(ws) -> int:
     raw = workspace_config.datasets_raw(ws)
     problems: list[str] = []
     for name in sorted(raw):
+        if not workspace_config.normalize_dataset_name(name):
+            # A name is a folder component under .mooring — an escaping one is dropped on
+            # read, but say so, or the pointer just silently doesn't exist.
+            problems.append(f"{name!r}: not a usable dataset name (it must be a bare token)")
+            continue
         for field, value in raw[name].items():
             if workspace_config.is_secret_field(field):
                 problems.append(f"{name}.{field}: field name looks like a credential")
             elif workspace_config.location_looks_secret(value):
-                problems.append(f"{name}.{field}: a pre-signed/SAS URL — the link IS the key")
+                problems.append(
+                    f"{name}.{field}: a URL with a query string, fragment or embedded "
+                    "credentials — that is where a pre-signed/SAS link keeps its key"
+                )
             else:
                 for finding in ai_secrets.scan(str(value)):
                     problems.append(f"{name}.{field}: {finding.kind}")
     if not problems:
         print("No credentials found in the dataset pointers.")
         return 0
-    print("Found credential-shaped content in mooring.toml [datasets] — it must NOT be synced:")
+    print("Found unusable or credential-shaped content in mooring.toml [datasets]:")
     for line in problems:
         print(f"  {line}")
     print(

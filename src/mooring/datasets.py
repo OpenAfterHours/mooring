@@ -110,10 +110,21 @@ def cache_dir(workspace: Path | str) -> Path:
     return Path(workspace) / STATE_DIR / CACHE_DIRNAME / "cache"
 
 
+def _safe_key(name: str) -> str:
+    """``name`` as a path-safe dataset key, or ``ValueError``. Every function here that
+    builds a path or a store key from a name goes through this, so an unsafe name is
+    rejected at the boundary rather than reaching the filesystem (see
+    :func:`mooring.workspace_config.normalize_dataset_name`)."""
+    key = normalize_dataset_name(name)
+    if not key:
+        raise ValueError(f"{name!r} is not a usable dataset name.")
+    return key
+
+
 def env_var_name(name: str) -> str:
     """The environment variable that redirects a dataset on this machine (the highest-
     priority local source, e.g. for CI): ``MOORING_DATASET_<NAME>_PATH``."""
-    token = normalize_dataset_name(name).upper().replace("-", "_").replace(".", "_")
+    token = _safe_key(name).upper().replace("-", "_").replace(".", "_")
     return f"{ENV_PREFIX}{token}_PATH"
 
 
@@ -121,7 +132,7 @@ def local_override(workspace: Path | str, name: str) -> str | None:
     """This machine's redirect for ``name`` — the env var first, then the sync-excluded
     local file — NEVER the synced ``mooring.toml``. ``None`` when the team's pointer
     should be used as-is."""
-    key = normalize_dataset_name(name)
+    key = _safe_key(name)
     env = os.environ.get(env_var_name(key))
     if env and env.strip():
         return env.strip()
@@ -140,7 +151,7 @@ def local_override(workspace: Path | str, name: str) -> str | None:
 def set_local_override(workspace: Path | str, name: str, location: str) -> Path:
     """Redirect ``name`` on THIS machine, preserving other datasets' entries. Returns the
     file path. The file lives under ``.mooring`` — never synced by construction."""
-    key = normalize_dataset_name(name)
+    key = _safe_key(name)
     path = local_override_path(workspace)
     try:
         data = tomllib.loads(path.read_text("utf-8"))
@@ -160,7 +171,7 @@ def set_local_override(workspace: Path | str, name: str, location: str) -> Path:
 
 def clear_local_override(workspace: Path | str, name: str) -> bool:
     """Drop this machine's redirect for ``name``. Returns whether one was removed."""
-    key = normalize_dataset_name(name)
+    key = _safe_key(name)
     path = local_override_path(workspace)
     try:
         data = tomllib.loads(path.read_text("utf-8"))
@@ -207,7 +218,7 @@ def cache_target(workspace: Path | str, name: str, url: str) -> Path:
     """Where a ``kind=https`` dataset is cached. The URL's last path segment is kept for
     its EXTENSION (``pl.read_parquet`` vs ``read_csv`` reads better than an opaque hash)
     but sanitised to one bare filename, so a crafted URL cannot escape the cache dir."""
-    key = normalize_dataset_name(name)
+    key = _safe_key(name)
     tail = str(url).split("?", 1)[0].split("#", 1)[0].rstrip("/").rsplit("/", 1)[-1]
     safe = "".join(c for c in tail if c.isalnum() or c in "._-").strip("._-")
     return cache_dir(workspace) / key / (safe or "data")
@@ -221,7 +232,7 @@ def resolve(workspace: Path | str, name: str) -> Resolved:
     the team's synced pointer (for ``kind=https``, the cache file its download would
     land in). Raises ``KeyError`` when the dataset is not defined."""
     ws = Path(workspace)
-    key = normalize_dataset_name(name)
+    key = normalize_dataset_name(name)  # "" for an unsafe name -> KeyError below
     defined = workspace_config.datasets(ws)
     if key not in defined:
         raise KeyError(name)

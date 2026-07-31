@@ -369,16 +369,42 @@ mi.fingerprint(sales, "sales", path=md.path("sales"))
 
 !!! warning "A pointer carries a location — never a credential"
 
-    mooring **refuses** to write a `password`/`token`/`key`-shaped field into the
-    synced `mooring.toml`, and it refuses a **pre-signed or SAS URL** as a location:
-    for those links the query string *is* the key, so sharing one shares the keys to
-    the data. Sign in to (or mount) the source on each machine and use
-    `datasets set-local` where it differs. `mooring datasets check` flags anything
-    that got in by hand.
+    A `kind=https` URL may not carry a **query string**, a **fragment**, or embedded
+    `user:password@` credentials. mooring refuses all three outright — not by trying to
+    recognise a credential, but because a location does not need them, and that is
+    exactly where every pre-signed / SAS link (Azure `sig`, S3 `X-Amz-Signature`,
+    Backblaze `Authorization`, SharePoint `tempauth`, Dropbox `rlkey`, …) keeps its
+    key. A `password`/`token`/`key`-shaped **field** is refused too.
+
+    So `?download=1` is refused along with the rest. That is deliberate: for anything
+    that needs authentication, sign in to (or mount) the source on each machine and use
+    `datasets set-local` / `MOORING_DATASET_*_PATH` to point the name at your copy.
+
+    **What this does not catch:** a token buried in a plain path segment
+    (`https://host/AKIA…/sales.csv`) is indistinguishable from a folder name.
+    `mooring datasets add` and `mooring datasets check` scan for known token shapes,
+    but that is a best-effort scan, not the structural rule above.
 
     The copilot sees dataset **names and file formats** only — never the path, the
     server, or the URL. It has everything it needs to write `md.path("sales")` for
     you, and nothing else.
+
+!!! note "What a pointer lets a teammate do"
+
+    A pointer is a **read** instruction that anyone who can push to the repo can
+    change. Repointing `sales` at a different file on the share — or at any file your
+    Windows account can read — makes the next run load that file instead, and it looks
+    like a perfectly normal dataframe. That is inherent to the feature (the whole point
+    is reading files outside the repo), and it is the same trust model as a teammate
+    editing a notebook's `pl.read_parquet(...)` line. It is worth knowing about because
+    a pointer is quieter: `datasets check` scans for credentials, **not** for a location
+    somebody changed.
+
+    Two things bound it: `mooring datasets list` shows exactly where every name lands
+    on your machine, and [an input fingerprint](#prove-the-file-hasnt-moved) fails
+    loudly when a dataset's content changes underneath a notebook. A `kind=https`
+    pointer additionally cannot aim at `127.0.0.1` or a cloud metadata address — see
+    the [threat model](../admins/threat-model.md).
 
 ## Proposing changes for review
 

@@ -82,13 +82,43 @@ _SECRET_TOKENS = (
 )
 _SECRET_EXACT = {"pass", "auth", "pat", "cred", "creds"}
 
-# A pre-signed / SAS URL is itself the credential — no field name to catch, so the VALUE
-# is matched. Dropped on read here for the same reason it is refused on write.
-_URL_SECRET_PATTERN = (
-    r"[?&](?:sig|signature|sas|sas[_-]?token|token|access[_-]?token|api[_-]?key|apikey|"
-    r"auth|password|passwd|pwd|secret|credential|awsaccesskeyid|x-amz-signature|"
-    r"x-amz-credential|x-amz-security-token|x-goog-signature|x-goog-credential)="
+# A credential in an innocently-named field (an embedded `password=` pair, a DSN with
+# inline credentials). Dropped on read here for the same reason it is refused on write —
+# the library and the kernel must agree, or the kernel FETCHES what `datasets list` says
+# it dropped.
+_SECRET_VALUE_PATTERN = (
+    r"(?:password|passwd|passphrase|pwd|secret|token|api[_-]?key|access[_-]?key|"
+    r"private[_-]?key|account[_-]?key|credential|bearer)\s*[=:]"
+    r"|[a-z][a-z0-9+.\-]*://[^\s/@]+:[^\s/@]+@"
 )
+# A pre-signed / SAS URL is itself the credential — no field name to catch, so the VALUE
+# is matched, STRUCTURALLY: any query string, fragment or userinfo on a URL.
+_URL_SCHEME_PATTERN = r"\A[a-z][a-z0-9+.\-]*://"
+_URL_SECRET_PATTERN = (
+    r"[?&#/](?:sig|signature|sas|sas[_-]?token|token|access[_-]?token|api[_-]?key|apikey|"
+    r"authorization|tempauth|rlkey|auth|key|password|passwd|pwd|secret|credential|"
+    r"awsaccesskeyid|x-amz-signature|x-amz-credential|x-amz-security-token|"
+    r"x-goog-signature|x-goog-credential)="
+)
+# A dataset name becomes a DIRECTORY COMPONENT under .mooring/datasets/cache, and
+# mooring.toml is SYNCED — so the name is an ALLOWLIST, not a denylist. Without it a
+# pushed [datasets."../../pwned"] or [datasets."c:/users/public/x"] would make this
+# kernel write outside the workspace (and .mooring/pylib is on sys.path).
+_NAME_PATTERN = r"[a-z0-9][a-z0-9._-]*\Z"
+_RESERVED_DEVICE_NAMES = frozenset(
+    {"con", "prn", "aux", "nul", *(f"com{i}" for i in range(1, 10)),
+     *(f"lpt{i}" for i in range(1, 10))}
+)
+_CONTROL_CHARS = "".join(chr(c) for c in (*range(0x00, 0x20), 0x7F))
+_NAME_TRANSLATION = str.maketrans("", "", _CONTROL_CHARS)
+
+# Hosts a dataset may never be fetched from, whatever the pointer says. A synced
+# mooring.toml is attacker-reachable input, so an https pointer is an SSRF primitive
+# aimed at whatever this machine can reach: 127.0.0.1 is mooring's own hub, and
+# 169.254.169.254 is the cloud instance-metadata endpoint. PRIVATE ranges are
+# deliberately allowed — an intranet file server is the point of the feature — which is
+# recorded in docs/admins/threat-model.md rather than silently assumed.
+_ALLOWED_SCHEMES = ("http://", "https://")
 
 
 class Dataset:
@@ -113,7 +143,14 @@ class Dataset:
 
 
 def _normalize(name: str) -> str:
-    return str(name).strip().strip("/").replace(" ", "_").lower()
+    """A dataset's path-safe identity key, or ``""`` — see ``_NAME_PATTERN``. Mirrors
+    :func:`mooring.workspace_config.normalize_dataset_name`."""
+    import re
+
+    key = str(name).translate(_NAME_TRANSLATION).strip().strip("/").replace(" ", "_").lower()
+    if not key or not re.match(_NAME_PATTERN, key):
+        return ""
+    return "" if key.split(".", 1)[0] in _RESERVED_DEVICE_NAMES else key
 
 
 def _is_secret_field(name: str) -> bool:
@@ -121,10 +158,26 @@ def _is_secret_field(name: str) -> bool:
     return norm in _SECRET_EXACT or any(tok in norm for tok in _SECRET_TOKENS)
 
 
-def _location_looks_secret(value) -> bool:
+def _value_looks_secret(value) -> bool:
     import re
 
-    return isinstance(value, str) and bool(re.search(_URL_SECRET_PATTERN, value, re.IGNORECASE))
+    return isinstance(value, str) and bool(re.search(_SECRET_VALUE_PATTERN, value, re.IGNORECASE))
+
+
+def _location_looks_secret(value) -> bool:
+    """Structural for a URL — any query string, fragment or userinfo — with the token
+    pattern as a floor. Mirrors :func:`mooring.workspace_config.location_looks_secret`."""
+    import re
+
+    if not isinstance(value, str):
+        return False
+    text = value.strip()
+    if re.match(_URL_SCHEME_PATTERN, text, re.IGNORECASE):
+        rest = text.split("://", 1)[1]
+        authority = re.split(r"[/?#]", rest, maxsplit=1)[0]
+        if "@" in authority or "?" in rest or "#" in rest:
+            return True
+    return bool(re.search(_URL_SECRET_PATTERN, text, re.IGNORECASE))
 
 
 def _workspace() -> Path | None:
@@ -148,17 +201,18 @@ def _all_pointers() -> dict[str, dict]:
         return {}
     out: dict[str, dict] = {}
     for name, shape in sets.items():
-        if not isinstance(shape, dict):
-            continue
-        clean = {
+        key = _normalize(name)
+        if not key or not isinstance(shape, dict):
+            continue  # an unsafe name is not a dataset
+        out[key] = {
             k: v
             for k, v in shape.items()
             if isinstance(k, str)
             and not _is_secret_field(k)
+            and not _value_looks_secret(v)
             and not _location_looks_secret(v)
             and isinstance(v, (str, int, float, bool))
         }
-        out[_normalize(name)] = clean
     return out
 
 
@@ -215,30 +269,108 @@ def _local_path(location: str) -> str:
 
 
 def _cache_target(name: str, url: str) -> Path:
-    """Where a kind=https dataset is cached, under the sync-excluded ``.mooring``. The
-    URL's last segment is kept for its EXTENSION but sanitised to one bare filename, so a
-    crafted URL cannot write outside the cache."""
+    """Where a kind=https dataset is cached, under the sync-excluded ``.mooring``. BOTH
+    halves of the path are sanitised: the dataset name through ``_normalize`` (an
+    allowlist — it is a directory component) and the URL's last segment down to one bare
+    filename, keeping only its EXTENSION-bearing characters. Either one unsanitised is an
+    arbitrary-file-write primitive driven by a synced file."""
     ws = _workspace() or Path.cwd()
+    key = _normalize(name)
+    if not key:
+        raise ValueError(f"{name!r} is not a usable dataset name.")
     tail = str(url).split("?", 1)[0].split("#", 1)[0].rstrip("/").rsplit("/", 1)[-1]
     safe = "".join(c for c in tail if c.isalnum() or c in "._-").strip("._-")
-    return ws / _STATE_DIR / _CACHE_DIRNAME / "cache" / _normalize(name) / (safe or "data")
+    return ws / _STATE_DIR / _CACHE_DIRNAME / "cache" / key / (safe or "data")
+
+
+def _safe_url(url: str) -> str:
+    """``scheme://host`` — never the path, query or fragment, any of which can carry a
+    credential. Error text is a plausible paste into the copilot chat, so it must not be
+    the one place a token survives."""
+    text = str(url).strip()
+    if "://" not in text:
+        return "(not a URL)"
+    scheme, rest = text.split("://", 1)
+    host = rest.split("/", 1)[0].split("?", 1)[0].split("#", 1)[0]
+    return f"{scheme}://{host.rsplit('@', 1)[-1]}"
+
+
+def _redact_urls(text: str) -> str:
+    """Every URL inside ``text`` cut down to ``scheme://host``. Transport errors can echo
+    the request URL back, so this runs over any message that reaches the analyst."""
+    import re
+
+    return re.sub(r"[a-zA-Z][a-zA-Z0-9+.\-]*://\S+", lambda m: _safe_url(m.group(0)), str(text))
+
+
+def _check_fetchable(url: str) -> None:
+    """Refuse a URL this kernel must never fetch: a non-http(s) scheme, or a loopback /
+    link-local host.
+
+    Both are mooring's OWN guards, not a dependency's. ``urlopen`` serves ``file://``
+    happily, and while CPython's redirect handler happens to restrict targets to
+    http/https/ftp, "happens to" is not a control — so the scheme is re-checked on the
+    RESPONSE url too (below). The host check closes the SSRF the synced pointer opens:
+    ``127.0.0.1`` is mooring's own hub and ``169.254.169.254`` is the cloud
+    instance-metadata endpoint. Ordinary private ranges stay allowed — an intranet file
+    server is the point of the feature. DNS rebinding between this check and the fetch is
+    NOT defended; see docs/admins/threat-model.md.
+    """
+    import ipaddress
+    import socket
+
+    text = str(url).strip()
+    if not text.lower().startswith(_ALLOWED_SCHEMES):
+        raise ValueError(
+            f"Refusing to fetch {_safe_url(text)}: a dataset URL must be http:// or https://."
+        )
+    authority = text.split("://", 1)[1].split("/", 1)[0].rsplit("@", 1)[-1]
+    host = authority.rsplit(":", 1)[0] if authority.count(":") == 1 else authority
+    host = host.strip("[]")
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except OSError:
+        return  # unresolvable: let the fetch fail with its own transport error
+    for info in infos:
+        try:
+            address = ipaddress.ip_address(info[4][0])
+        except ValueError:
+            continue
+        if address.is_loopback or address.is_link_local:
+            raise ValueError(
+                f"Refusing to fetch {_safe_url(text)}: it resolves to a loopback or "
+                "link-local address (this machine's own services, or a cloud metadata "
+                "endpoint). A dataset pointer is a synced file — it must not be able to "
+                "aim your kernel at your own network stack."
+            )
+
+
+def _opener():
+    """A urllib opener that re-runs :func:`_check_fetchable` on every REDIRECT target,
+    before that hop is issued — so the guard holds for the whole chain and not just the
+    first request."""
+    import urllib.request
+
+    class _GuardedRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            _check_fetchable(newurl)
+            return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+    return urllib.request.build_opener(_GuardedRedirect)
 
 
 def _download(url: str, target: Path) -> None:
-    """Fetch ``url`` into ``target`` (atomically, via a sibling temp file).
-
-    http(s) ONLY, checked here and not just on write: ``urlopen`` serves ``file://``
-    happily, and the URL comes from a SYNCED file, so without this check one pushed
-    ``mooring.toml`` would make every teammate's kernel read an arbitrary local path.
-    """
+    """Fetch ``url`` into ``target`` (atomically, via a sibling temp file), after
+    :func:`_check_fetchable` — on the URL, on every redirect hop, and once more on the URL
+    actually served, so nothing lands in the cache from a host the pre-check refused."""
     import urllib.request
 
-    if not str(url).lower().startswith(("http://", "https://")):
-        raise ValueError(f"Refusing to fetch {url!r}: a dataset URL must be http:// or https://.")
+    _check_fetchable(url)
     target.parent.mkdir(parents=True, exist_ok=True)
     tmp = target.with_name(target.name + ".part")
     request = urllib.request.Request(url, headers={"User-Agent": "mooring-datasets"})
-    with urllib.request.urlopen(request, timeout=_DOWNLOAD_TIMEOUT) as response:
+    with _opener().open(request, timeout=_DOWNLOAD_TIMEOUT) as response:
+        _check_fetchable(getattr(response, "url", None) or url)
         with open(tmp, "wb") as handle:
             shutil.copyfileobj(response, handle)
     os.replace(tmp, target)
@@ -336,10 +468,13 @@ def path(name: str, *, refresh: bool = False) -> str:
         try:
             _download(dataset.location, target)
         except Exception as exc:  # noqa: BLE001 - any transport failure gets the same advice
+            # scheme://host only, in the message AND in the wrapped transport error: a
+            # path, query or fragment can carry a credential, and this text is a plausible
+            # paste into the copilot chat.
             raise FileNotFoundError(
-                f"Dataset {dataset.name!r} could not be downloaded: {exc}\n"
-                f"  from: {dataset.location.split('?', 1)[0]}\n"
-                f'  Once you have a copy, point this machine at it: mooring datasets '
+                f"Dataset {dataset.name!r} could not be downloaded from "
+                f"{_safe_url(dataset.location)}: {_redact_urls(exc)}"
+                f"\n  Once you have a copy, point this machine at it: mooring datasets "
                 f'set-local {dataset.name} "<path to the file>"'
             ) from exc
     if target is None or not target.is_file():
