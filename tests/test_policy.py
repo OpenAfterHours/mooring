@@ -296,11 +296,35 @@ def test_a_deeply_nested_settings_table_cannot_brick_the_app(tmp_path):
     assert policy.guard_mode(workspace) == "warn"
     assert policy.ai_gate(workspace)("notebooks/a.py") is False
     assert policy.tighten(config.AppConfig(), pol) == config.AppConfig()
-    # A legitimate policy BESIDE the bomb still applies — one rule, not the file.
+    # NB: "a legitimate rule beside the bomb still applies" is NOT asserted here, and
+    # cannot be at this depth — on a parser that refuses the whole file there are no
+    # rules to salvage, so the honest outcome is a loud fail-open. That claim is about
+    # OUR depth cap rather than the parser's, and is pinned at a depth every parser
+    # accepts by the next test.
+
+
+def test_nesting_past_our_own_cap_drops_the_RULE_not_the_FILE(tmp_path):
+    """Per-rule degradation, at a depth EVERY tomllib accepts.
+
+    ``MAX_SETTINGS_DEPTH`` is 8 and tomllib's own limit is 1000 key parts, so this sits
+    in the band where the parser always succeeds and mooring's cap is what does the
+    dropping. That separation is the point: the bomb test above proves the app survives
+    a file the PARSER rejects, and this proves a file the parser ACCEPTS degrades one
+    rule at a time. Conflating them made the suite's answer depend on which CPython
+    patch release happened to be running it.
+    """
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    depth = policy.MAX_SETTINGS_DEPTH * 8  # far past ours, far inside every parser's
+    header = "[policy.settings." + ".".join(f"k{i}" for i in range(depth)) + "]\nx = true\n"
     (workspace / "mooring.toml").write_text(
         '[policy]\npush_guard = "block"\n' + header, "utf-8"
     )
-    assert policy.load(workspace).guard_mode("warn") == "block"
+
+    pol = policy.load(workspace)
+    assert pol.unreadable is False, "the parser accepted this file — only our cap fires"
+    assert pol.settings == {}, "the over-deep subtree is dropped"
+    assert pol.guard_mode("warn") == "block", "...and the sibling rule survives it"
 
 
 def test_a_parser_that_REFUSES_deep_nesting_cannot_brick_the_app(monkeypatch, tmp_path):
