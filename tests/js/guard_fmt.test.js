@@ -49,10 +49,11 @@ test("canOverride: warn mode yes, block mode never", () => {
 });
 
 // -- the dependency-change gate ---------------------------------------------
-// A push can trip two different guards. The content scanners ask "do these bytes look
-// sensitive?"; the deps gate asks "does the repo still RUN against this uv.lock?". They
-// travel in separate lists so the dialog can ask the right question, and so a team's
-// block-mode CONTENT policy can never wall off a broken-notebook warning.
+// A push can trip THREE different guards. The content scanners ask "do these bytes look
+// sensitive?"; the deps gate asks "does the repo still RUN against this uv.lock?"; the
+// policy gate asks "is this path allowed a direct push at all?". They travel in separate
+// lists so the dialog can ask the right question, and so a team's block-mode CONTENT
+// policy can never wall off a broken-notebook warning.
 
 const SWEEP = [
   {
@@ -91,4 +92,54 @@ test("a deps-only 409 stays overridable even under a block-mode content policy",
     GF.canOverride({ needs_confirm: true, guard_mode: "warn", sweep_findings: SWEEP }),
     true
   );
+});
+
+// -- the team policy's propose-only blocks (no token, no override) ------------
+
+const BLOCKED = {
+  policy_blocked: [
+    { path: "reports/q1.py", reason: "direct push blocked by team policy (propose-only path): reports/**" },
+  ],
+};
+
+test("policyRows: one row per policy-blocked file", () => {
+  assert.deepEqual(GF.policyRows(BLOCKED), [
+    "reports/q1.py — direct push blocked by team policy (propose-only path): reports/**",
+  ]);
+  assert.deepEqual(GF.policyRows({}), []);
+  assert.deepEqual(GF.policyRows(null), []);
+});
+
+test("a policy block opens the dialog even with no scanner findings", () => {
+  assert.equal(GF.needsDialog(Object.assign({ guard_findings: [] }, BLOCKED)), true);
+});
+
+test("a policy block is never overridable", () => {
+  // The server sets needs_confirm=false when only the policy fired, so there is
+  // no "Push anyway" — and no token exists that could clear it.
+  const data = Object.assign({ guard_findings: [], needs_confirm: false, guard_mode: "warn" }, BLOCKED);
+  assert.equal(GF.canOverride(data), false);
+  assert.deepEqual(GF.allTokens(data.guard_findings), []);
+  assert.deepEqual(GF.allTokens(data), []); // nothing in the payload carries a token
+});
+
+test("all three guards on one push: three lists, one token set, one dialog", () => {
+  // The composition that only exists once all three are on the seam. Each guard keeps
+  // its own list so the dialog can word each remedy; only the two TOKENED ones
+  // contribute to the acknowledged re-POST.
+  const data = Object.assign(
+    {
+      guard_findings: FINDINGS,
+      sweep_findings: SWEEP,
+      needs_confirm: true,
+      guard_mode: "warn",
+    },
+    BLOCKED
+  );
+  assert.equal(GF.needsDialog(data), true);
+  assert.equal(GF.rows(data.guard_findings).length, 3);
+  assert.equal(GF.depsRows(data).length, 1);
+  assert.equal(GF.policyRows(data).length, 1);
+  assert.deepEqual(GF.allTokens(data), ["t1", "t2", "s1"]); // never a policy token
+  assert.equal(GF.canOverride(data), true);
 });

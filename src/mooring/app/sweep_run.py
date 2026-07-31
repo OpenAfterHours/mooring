@@ -3,7 +3,8 @@
 ``Verify`` is a per-notebook question; after a ``mooring deps add`` the interesting question
 is about the whole repo — *does the team's work still run against the new lock?* This
 orchestrator asks it, and it deliberately adds no new way to run a notebook: each one goes
-through :func:`mooring.app.verify_run.verify_notebook`, so a swept notebook records the
+through :func:`mooring.app.verify_run.run_verified` — the same body a hand Verify runs,
+minus only the lock the sweep already holds — so a swept notebook records the
 byte-identical receipt a hand-verified one does and badges in the hub exactly the same way
 (including auto-clearing on the next edit). The only thing this module adds on top is the
 report — see :mod:`mooring.sweep`.
@@ -15,13 +16,20 @@ Four decisions worth keeping:
 * **One failure never stops the sweep.** Every per-notebook exception is caught and
   recorded as that notebook's outcome; the point of a sweep is the notebooks *after* the
   broken one.
-* **It takes the refresh lock.** A sweep and a scheduled refresh both pull CPU and both
-  write receipts, so they serialize on :func:`mooring.app.refresh.workspace_guard` — the
-  same cross-process lockfile the background agent takes. A sweep that finds the workspace
-  busy raises :class:`mooring.app.refresh.RefreshBusy` rather than racing.
-* **Cancel is checked at the notebook boundary.** The runner already bounds a single
-  notebook (a timeout plus a process-TREE kill), so cancelling stops the *sweep* — the
-  notebook already executing finishes or times out on its own. Surfaces must say that.
+* **It takes the workspace run lock ONCE, around the whole sweep.** Every whole-notebook
+  run — Verify, Deliver, a scheduled refresh, a parameterised fan-out — serializes on
+  :func:`mooring.app.notebook_run.workspace_guard`, the one cross-process lockfile. The
+  sweep holds it for the WHOLE loop (the fan-out's shape, not Verify's): taking it per
+  notebook would let a scheduled refresh interleave halfway through and pull new bytes
+  under a sweep that has already reported on the old ones. So the per-notebook body is
+  the UNGUARDED :func:`mooring.app.verify_run.run_verified`, which is the same code a hand
+  Verify runs — one receipt writer, structurally. A sweep that finds the workspace busy
+  raises :class:`mooring.app.notebook_run.RunBusy` rather than racing.
+* **Cancel stops the notebook that is running, not just the next one.** The event goes
+  to the runner, which kills the process TREE (the same kill its timeout uses) and removes
+  the half-written render; the values never reached are recorded as skipped rather than
+  quietly dropped. On an operation measured in minutes per notebook, a Cancel that only
+  declined to start the next one would be a Cancel in name only.
 
 Value-free throughout: booleans, counts, timestamps, content hashes and curated reasons.
 Nothing here reaches the AI copilot, and nothing is written outside ``.mooring/``.
@@ -29,16 +37,23 @@ Nothing here reaches the AI copilot, and nothing is written outside ``.mooring/`
 
 from __future__ import annotations
 
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 
 from mooring import gitsha, notebook_template, sweep, sync, telemetry, verify
-from mooring.app import refresh, verify_run
+from mooring.app import notebook_run, verify_run
 from mooring.config import Config
 
 # Re-exported so callers need only this module to handle "someone else has the workspace".
-RefreshBusy = refresh.RefreshBusy
+# It is notebook_run's lock: a sweep, a refresh, a Verify, a Deliver and a fan-out all
+# contend for the same one.
+RunBusy = notebook_run.RunBusy
+
+# The runner's cancel exception, and the curated reason a killed notebook records.
+_CancelledRun = notebook_run.RunCancelled
+_CANCELLED_MIDWAY = "cancelled while it was running"
 
 
 def notebooks_in(cfg: Config) -> list[str]:
@@ -127,7 +142,7 @@ def sweep_workspace(
     *,
     rels: list[str] | None = None,
     skip_verified: bool = False,
-    cancel=None,
+    cancel: threading.Event | None = None,
     on_progress=None,
 ) -> sweep.SweepReport:
     """Verify every notebook (or just ``rels``) and record one value-free report.
@@ -137,11 +152,13 @@ def sweep_workspace(
     PREVIOUS SWEEP ran clean **under the same lock**, so a resume across a dependency
     change silently degrades to a full run instead of manufacturing a green report.
 
-    ``cancel`` is any zero-argument truth test (a ``threading.Event`` works —
-    ``event.is_set``); ``on_progress(done, total, item)`` is called after each notebook.
+    ``cancel`` is a ``threading.Event`` another thread may set to stop the sweep; it is
+    checked at each notebook boundary AND handed to the runner, so the notebook already
+    executing is killed rather than left to finish. ``on_progress(done, total, item)`` is
+    called after each notebook.
 
-    Raises :class:`mooring.app.refresh.RefreshBusy` when a refresh or another sweep already
-    holds this workspace."""
+    Raises :class:`mooring.app.notebook_run.RunBusy` when a refresh, a fan-out, a Deliver
+    or another sweep already holds this workspace."""
     workspace = cfg.workspace()
     targets = list(rels) if rels is not None else notebooks_in(cfg)
     started = datetime.now(timezone.utc)
@@ -150,7 +167,7 @@ def sweep_workspace(
     lock = sweep.lock_fingerprint(workspace)
     skippable = resume_scope(cfg, lock)[0] if skip_verified else frozenset()
 
-    with refresh.workspace_guard(workspace):
+    with notebook_run.workspace_guard(workspace):
         items, cancelled = _run_all(cfg, targets, skippable, cancel, on_progress)
 
     report = sweep.SweepReport(
@@ -189,7 +206,7 @@ def _run_all(
     cancelled = False
     total = len(targets)
     for index, rel in enumerate(targets, start=1):
-        if cancelled or (cancel is not None and cancel()):
+        if cancelled or (cancel is not None and cancel.is_set()):
             cancelled = True
             items.append(
                 sweep.SweepItem(
@@ -211,7 +228,10 @@ def _run_all(
                 )
             )
         else:
-            items.append(_run_one(cfg, rel))
+            item = _run_one(cfg, rel, cancel)
+            if item.outcome == sweep.SKIPPED and item.reason == _CANCELLED_MIDWAY:
+                cancelled = True  # the runner was killed part-way: the sweep is cancelled
+            items.append(item)
         if on_progress is not None:
             on_progress(index, total, items[-1])
     return items, cancelled
@@ -224,12 +244,26 @@ def _sha(workspace: Path, rel: str) -> str:
         return ""  # unreadable: no SHA means the item can never vouch (sweep._moved)
 
 
-def _run_one(cfg: Config, rel: str) -> sweep.SweepItem:
-    """One notebook, through the shared attended-verify path. Never raises: whatever went
-    wrong becomes this notebook's recorded outcome so the sweep carries on."""
+def _run_one(cfg: Config, rel: str, cancel=None) -> sweep.SweepItem:
+    """One notebook, through the shared attended-verify body — under the lock the SWEEP
+    already holds, never taking it again. Never raises: whatever went wrong becomes this
+    notebook's recorded outcome so the sweep carries on."""
     began = time.monotonic()
     try:
-        result = verify_run.verify_notebook(cfg, rel)
+        rel_posix = verify_run.ensure_runnable(
+            cfg.workspace(), rel, verify_run.VerifyError
+        )
+        result = verify_run.run_verified(cfg, rel_posix, cancel=cancel)
+    except _CancelledRun:
+        # Killed part-way by Cancel. NOT a failing notebook and not a blocked one — it was
+        # simply never given the chance to answer, which is what SKIPPED means here.
+        return sweep.SweepItem(
+            notebook=rel,
+            outcome=sweep.SKIPPED,
+            sha=_sha(cfg.workspace(), rel),
+            reason=_CANCELLED_MIDWAY,
+            seconds=_elapsed(began),
+        )
     except verify_run.VerifyError as exc:
         # "Could not be run at all" — a missing renderer, a timeout, a broken environment.
         # notebook_run deliberately does NOT badge this as a failing notebook, and neither

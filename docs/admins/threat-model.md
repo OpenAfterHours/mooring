@@ -114,7 +114,7 @@ code change to break, and are pinned by tests):
 
 ## Trust boundaries and data flow
 
-There are three trust boundaries. The value-blindness guarantee is about **only
+There are four trust boundaries. The value-blindness guarantee is about **only
 the first one**.
 
 1. **Workspace → Model** (GitHub Copilot). The subject of this document.
@@ -123,6 +123,12 @@ the first one**.
    not by any mooring value-blindness claim. See [`sync-source`](#data-exposure-vectors).
 3. **App → Admin telemetry sink** (optional, off by default). Counts and identity
    only; see [`telemetry`](#data-exposure-vectors).
+4. **Team GitHub repo → this machine's filesystem and network** (the *inbound*
+   direction of boundary 2). The synced `mooring.toml` is **attacker-reachable
+   input**: anyone who can push can change what every teammate's kernel reads.
+   Nothing in the value-blindness claim covers it, and it is the boundary that
+   `[datasets]` — and any future synced pointer — sits on. See
+   [Synced config as input](#synced-config-as-input) below.
 
 The diagram shows what crosses boundary (1) — the model boundary. Solid arrows are
 paths that exist in the default configuration; dashed arrows are opt-in.
@@ -163,6 +169,25 @@ variable values have no code path to the model.** Everything reaching the model
 goes through the egress choke point. The *values that do cross* are the ones a
 human authored (into code, a prompt, DAX, or a context file) or that appear in a
 schema position (a column name, a variable name, a row count) — enumerated below.
+
+### Synced config as input { #synced-config-as-input }
+
+`mooring.toml` travels with the repo, so **every value in it is input written by
+somebody else**. Anyone with push access can change it, and it takes effect on every
+teammate's machine at the next pull. The controls are structural, not detective:
+
+| What a pushed `mooring.toml` could try | Control | Residual |
+|---|---|---|
+| **Write outside the workspace** — a `[datasets."../../x"]` / `[datasets."c:/users/public/x"]` / UNC name becomes a directory under `.mooring/datasets/cache` (and `.mooring/pylib` is on the kernel's `sys.path`) | Dataset names are an **allowlist** (`[a-z0-9][a-z0-9._-]*`, no device names) applied in `workspace_config.normalize_dataset_name` **and** independently in the injected kernel payload; the cached filename is separately reduced to one bare token | None known. The same rule as `safe_folder`, applied to a second path-bearing key. |
+| **Read an arbitrary local file** via a `file://` dataset URL | `kind=https` locations must be `http(s)`, checked on write **and** before every fetch (including each redirect hop) — mooring's own guard, not `urllib`'s | None known. |
+| **SSRF** — aim a kernel at `127.0.0.1` (mooring's own hub) or `169.254.169.254` (cloud instance metadata) | Every resolved address of a dataset URL is refused if loopback or link-local, before the fetch and on each redirect | **DNS rebinding between the check and the fetch is not defended.** Ordinary private ranges (`10./172.16./192.168.`) are **deliberately allowed** — an intranet file server is the point of the feature. |
+| **Exfiltrate a credential** by putting one in a synced location | A URL carrying a query string, fragment or userinfo is refused outright (structural, not a denylist); secret-shaped fields are refused; both are dropped again on read, in the library and the kernel | A token in a plain **path segment** is only best-effort scanned (`ai.secrets`) — it is indistinguishable from a folder name. |
+| **Prompt-inject the copilot** through a name that reaches the system context | Control characters are stripped from every name key; dataset names are the allowlist above; the format hint is clamped to a short alphanumeric token | A name is still team-authored text in the prompt, bounded to one harmless token. |
+| **Repoint a dataset** at a different file the analyst can read | *Not prevented* — this is the feature. `mooring datasets list` shows where every name lands; an [input fingerprint](../users/daily-workflow.md#prove-the-file-hasnt-moved) fails loudly when content changes | **Accepted.** Same trust model as a teammate editing a `pl.read_parquet(...)` line, but quieter — `datasets check` scans for credentials, not for a changed location. |
+
+The same reasoning applies to every other synced key (`[ai] context_folders`,
+`[sync] folders`, `[hub] featured_folders`): treat a new one as attacker input and
+sanitise it where it becomes a path, a URL, or prompt text.
 
 ## Assets protected
 

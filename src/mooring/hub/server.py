@@ -32,9 +32,11 @@ from mooring import (
     checks,
     config,
     inputs,
+    lineage,
     notebook_template,
     pbip,
     pbip_model,
+    policy,
     pyproject_env,
     shadow,
     sync,
@@ -83,7 +85,12 @@ _UNKNOWN_CHAT_SESSION = "Unknown chat session."
 
 class Hub:
     def __init__(self, app_cfg: config.AppConfig) -> None:
-        self.app_cfg = app_cfg
+        # The RAW per-machine config. Everything reads it through the app_cfg
+        # PROPERTY below, which folds the team policy over it on the way out.
+        self._app_cfg = app_cfg
+        # (workspace, stat-signature) -> Policy, so the property costs one stat()
+        # rather than a TOML parse (the _model_summary_cache idiom).
+        self._policy_cache: tuple[tuple, policy.Policy] | None = None
         # One editor per workspace, created lazily: switching repos must not
         # kill marimo tabs open against the previous workspace.
         self.editors: dict[str, EditorServer] = {}
@@ -105,6 +112,16 @@ class Hub:
         # The catalog-wide verify sweep, run on a worker thread so the browser can watch
         # its progress and reach a Cancel button (app/sweep_service.py).
         self.sweep = SweepService()
+        # The one in-flight parameterised run (app/param_runs.RunHandle), or None. A
+        # single slot rather than a registry on purpose: the workspace run lock already
+        # permits exactly one whole-notebook run at a time, so a second slot could only
+        # ever hold something that is blocked. Kept after it finishes so the page can
+        # still read the final per-value report on a reload. The lock makes check-then-claim
+        # atomic: two concurrent POSTs to /api/run/start both run on the threadpool, and
+        # without it the loser would overwrite the winner's handle with a run about to die
+        # on the workspace lock — losing the live one from the UI.
+        self.param_run = None
+        self.param_run_lock = threading.Lock()
         # One AI provider reused across opens, so the provider's auth (45s TTL) and
         # model-list (300s TTL) caches actually hit instead of being rebuilt — and
         # thrown away — on every chat-open / models request. Keyed on the config that
@@ -123,10 +140,11 @@ class Hub:
         # The env can't change within a running process, so enumerate site-packages
         # once instead of on every /api/state poll. See _notebook_env.
         self._top_level_pkgs: list[str] | None = None
-        # Cache of the notebook-vs-module sniff (see _is_notebook), keyed by absolute
-        # path → (mtime_ns, is_notebook). /api/state re-lists on every refresh, so this
-        # avoids re-reading every .py off disk each time; a changed mtime invalidates it.
-        self._notebook_cache: dict[str, tuple[int, bool]] = {}
+        # Cache of the notebook sniff (see _sniff_notebook), keyed by absolute path →
+        # (mtime_ns, is_notebook, title, catalog terms). /api/state re-lists on every
+        # refresh, so this avoids re-reading AND re-parsing every .py each time; a changed
+        # mtime invalidates it.
+        self._notebook_cache: dict[str, tuple[int, bool, str, tuple[str, ...]]] = {}
         # Cache of each PBIP semantic model's tables/measures summary (the artifact
         # row's `model` field), keyed by model dir → (definition signature, summary).
         # The same idiom as _notebook_cache: _files_artifacts runs on EVERY /api/state
@@ -144,6 +162,48 @@ class Hub:
         self._whatsnew_detail: dict[tuple[str, str, str], dict] = {}
 
     # -- helpers -------------------------------------------------------------
+
+    @property
+    def app_cfg(self) -> config.AppConfig:
+        """The per-machine config with the repo's admin policy folded over it.
+
+        A PROPERTY, not an attribute set at three well-chosen moments: a policy
+        arrives by PULL, mid-session, and every "fold it at each assignment"
+        scheme missed that — the pull route touches none of them, so every
+        ``[policy.settings]`` knob kept its permissive value for the rest of the
+        session while the Settings page rendered the row as locked. Folding on
+        READ makes the seam impossible to bypass; it mirrors ``cfg`` below, which
+        already re-reads the synced file on every access for the same reason.
+        Tighten-only, so with no ``[policy]`` block this returns the raw config
+        unchanged (``policy.tighten`` short-circuits on an empty rule set).
+        """
+        return policy.tighten(self._app_cfg, self.team_policy())
+
+    @app_cfg.setter
+    def app_cfg(self, value: config.AppConfig) -> None:
+        self._app_cfg = value
+
+    def team_policy(self) -> policy.Policy:
+        """The active repo's policy, re-read whenever the synced file changes.
+
+        Cached on a stat signature (mtime_ns + size + path) so the hot read path
+        pays one ``stat()``; a pull that rewrites ``mooring.toml`` changes the
+        signature and the next read re-parses. The single source the Settings
+        page, the sync routes and the ``app_cfg`` fold all ask.
+        """
+        workspace = self._app_cfg.config_for(None).workspace()
+        path = workspace_config.config_path(workspace)
+        try:
+            st = path.stat()
+            sig = (str(path), st.st_mtime_ns, st.st_size)
+        except OSError:
+            sig = (str(path), None, None)
+        cached = self._policy_cache
+        if cached is not None and cached[0] == sig:
+            return cached[1]
+        pol = policy.load(workspace)
+        self._policy_cache = (sig, pol)
+        return pol
 
     @property
     def cfg(self) -> config.Config:
@@ -169,9 +229,11 @@ class Hub:
         # In-flight batches are bound to the old workspace too — cancel them (their
         # un-reviewed proposals are lost; the UI warns not to switch repos mid-batch).
         self.batch.abort_all()
-        # ...and so is a running sweep: it holds the OLD workspace's refresh lock and
-        # would keep writing receipts there while the UI shows another repo.
+        # ...and so are the two long-running whole-notebook jobs: each holds the OLD
+        # workspace's run lock and would keep executing (and writing receipts) there while
+        # the page shows the new one. Same reason, so they are cancelled together.
         self.sweep.cancel()
+        self._cancel_param_run()
         # The provider is shaped by [ai] provider/model — a reload may change them,
         # so drop the cached one (rebuilt lazily on next use).
         with self._provider_lock:
@@ -302,10 +364,19 @@ class Hub:
         return self.chat.pii_status(self.app_cfg)
 
 
+    def _cancel_param_run(self) -> None:
+        """Stop any in-flight fan-out and forget it. Best-effort — the runner's own
+        process-tree kill is what actually stops marimo; this only fires the event."""
+        handle, self.param_run = self.param_run, None
+        if handle is not None:
+            with contextlib.suppress(Exception):
+                handle.cancel.set()
+
     def shutdown(self) -> None:
         self.chat.close_all()
         self.batch.abort_all()
         self.sweep.cancel()
+        self._cancel_param_run()
         for editor in self.editors.values():
             # Suppress per editor (mirrors _close_all_chats): one editor failing to
             # die must not leak the others' marimo trees or skip the lifespan's
@@ -328,8 +399,10 @@ class Hub:
         cfg = self.cfg
         artifacts, _ = pbip.group(report.files)
         artifact_of = {m.path: a.key for a in artifacts for m in a.members}
-        # Notebooks the team has turned the copilot off for (synced mooring.toml).
-        ai_off = workspace_config.disabled_notebooks(workspace)
+        # Is the copilot off for this path? The per-notebook opt-out list UNIONED
+        # with the policy's [policy] ai_off globs (mooring.policy.ai_gate) — one
+        # read of the shared file, then a cheap predicate per row.
+        ai_off = policy.ai_gate(workspace)
         # Value-free tie-out check results per notebook (.mooring/checks/*.json),
         # written by mooring_checks calls in the kernel — surfaced as a green/red
         # row badge. Counts + names only; local-only, never synced, never seen by AI.
@@ -342,10 +415,19 @@ class Hub:
         # read_results from re-hashing every verified notebook on each poll.
         local_shas = {f.path: f.local_sha for f in report.files if f.local_sha is not None}
         verify_results = verify.read_results(workspace, local_shas)
-        # Value-free input fingerprints per notebook (.mooring/inputs/*.json), written by
-        # mooring_inputs.fingerprint calls in the kernel — content hash + shape + schema,
+        # Value-free input/output fingerprints per notebook (.mooring/inputs/*.json),
+        # written by mooring_inputs calls in the kernel — content hash + shape + schema,
         # never a value. Surfaced as a row badge: N inputs pinned, M changed since last run.
-        input_results = inputs.read_results(workspace)
+        # The same receipts carry the lineage graph, so read them ONCE and derive both.
+        receipts = inputs.read_receipts(workspace)
+        input_results = inputs.summarize(receipts)
+        # "3 notebooks read this" for a data file others depend on — the warning that makes
+        # overwriting one a decision rather than an accident. Only paths with a recorded
+        # reader or writer get an entry: lineage knows only opted-in notebooks, so the row
+        # may claim what IS recorded and must never imply a bare row is safe to change.
+        lineage_counts = lineage.counts(
+            lineage.from_receipts(receipts), [f.path for f in report.files]
+        )
         # Notebooks whose filename shadows an importable module (e.g. polars.py) —
         # surfaced as a per-row badge instead of an inscrutable kernel traceback.
         shadowed: dict[str, str] = {}
@@ -360,31 +442,41 @@ class Hub:
             return f.state is sync.FileState.LOCAL or f.local_sha is not None
 
         # Tell a runnable marimo notebook from a plain helper module (sniffed off disk),
-        # and harvest each notebook's value-free title in the same read. Only meaningful
-        # for a .py that exists locally; drives the Open/AI buttons, the "module" badge,
-        # the catalog title/search, and keeps the editor from opening a module.
+        # and harvest each notebook's value-free title + catalog terms in the same read.
+        # Only meaningful for a .py that exists locally; drives the Open/AI buttons, the
+        # "module" badge, the catalog title/search, and keeps the editor opening a module.
         notebooks: set[str] = set()
         titles: dict[str, str] = {}
+        terms: dict[str, list[str]] = {}
         for f in report.files:
             if f.path.endswith(".py") and _has_local(f):
-                is_notebook, title = self._sniff_notebook(workspace, f.path)
+                is_notebook, title, row_terms = self._sniff_notebook(workspace, f.path)
                 if is_notebook:
                     notebooks.add(f.path)
                     if title:
                         titles[f.path] = title
+                    if row_terms:
+                        terms[f.path] = list(row_terms)
         files = [
             {
                 "path": f.path,
                 "state": f.state.value,
                 "has_local": _has_local(f),
                 **({"artifact": artifact_of[f.path]} if f.path in artifact_of else {}),
-                **({"ai_disabled": True} if f.path.endswith(".py") and f.path in ai_off else {}),
+                **({"ai_disabled": True} if f.path.endswith(".py") and ai_off(f.path) else {}),
                 **({"shadows": shadowed[f.path]} if f.path in shadowed else {}),
                 **({"checks": check_results[f.path]} if f.path in check_results else {}),
                 **({"verified": verify_results[f.path]} if f.path in verify_results else {}),
                 **({"inputs": input_results[f.path]} if f.path in input_results else {}),
+                **({"lineage": lineage_counts[f.path]} if f.path in lineage_counts else {}),
                 **({"is_notebook": True} if f.path in notebooks else {}),
                 **({"title": titles[f.path]} if f.path in titles else {}),
+                # The notebook's value-free catalog terms (mooring.ai.notebookindex) —
+                # what it says it does, what it imports, the inputs/checks/tables its
+                # source declares — so the hub's filter box searches CONTENT, not just a
+                # filename. Client-side only; the same allowlist the copilot's catalog
+                # tools serve, so local search and the model's view never diverge.
+                **({"terms": terms[f.path]} if f.path in terms else {}),
                 **(
                     {"is_module": True}
                     if f.path.endswith(".py") and _has_local(f) and f.path not in notebooks
@@ -460,34 +552,48 @@ class Hub:
         self._model_summary_cache[cache_key] = (sig, summary)
         return summary
 
-    def _sniff_notebook(self, workspace: Path, rel: str) -> tuple[bool, str]:
-        """``(is_notebook, title)`` for the local ``.py`` at ``rel``, from ONE mtime-cached
-        file read (this runs per row on every /api/state).
+    def _sniff_notebook(self, workspace: Path, rel: str) -> tuple[bool, str, tuple[str, ...]]:
+        """``(is_notebook, title, terms)`` for the local ``.py`` at ``rel``, from ONE
+        mtime-cached file read + parse (this runs per row on every /api/state).
 
         ``is_notebook``: whether it is a marimo notebook (vs a plain helper module). A
         blank/whitespace-only file counts as a notebook — it opens as a fresh notebook,
         matching the open guards — EXCEPT a dunder package marker like ``__init__.py``
         (see :func:`notebook_template.opens_as_notebook`). ``title``: the notebook's own
         first-markdown-cell heading, harvested value-free (authored text, never a data
-        value; ``""`` for a module or a title-less notebook). The whole file is read (the
-        marimo marker can sit past a large header). Missing/unreadable → ``(False, "")``."""
+        value; ``""`` for a module or a title-less notebook). ``terms``: that notebook's
+        value-free catalog terms, so the hub's filter box can search CONTENT — the same
+        :mod:`mooring.ai.notebookindex` allowlist the copilot's catalog tools serve, so
+        the two can never drift apart. The whole file is read (the marimo marker can sit
+        past a large header). Missing/unreadable → ``(False, "", ())``."""
         path = workspace / rel
         try:
             mtime = path.stat().st_mtime_ns
         except OSError:
-            return (False, "")
+            return (False, "", ())
         key = str(path)
         cached = self._notebook_cache.get(key)
         if cached is not None and cached[0] == mtime:
-            return (cached[1], cached[2])
+            return (cached[1], cached[2], cached[3])
         try:
             source = path.read_bytes().decode("utf-8", "ignore")
         except OSError:
-            return (False, "")
+            return (False, "", ())
         is_notebook = notebook_template.opens_as_notebook(rel, source)
-        title = notebook_template.notebook_title(source) if is_notebook else ""
-        self._notebook_cache[key] = (mtime, is_notebook, title)
-        return (is_notebook, title)
+        title = ""
+        terms: tuple[str, ...] = ()
+        if is_notebook:
+            from mooring.ai import notebookindex
+
+            title = notebook_template.notebook_title(source)
+            # extract_notebook never raises: a half-written notebook reports a parse error
+            # and yields no terms, rather than blanking the whole file listing. The path
+            # is dropped from the row's copy — /api/state polls, and `matches` already
+            # searches `file.path`, so repeating it would be payload for nothing.
+            entry, report = notebookindex.extract_notebook(source, rel)
+            terms = () if report.error else tuple(t for t in entry.terms() if t != rel)
+        self._notebook_cache[key] = (mtime, is_notebook, title, terms)
+        return (is_notebook, title, terms)
 
     def _is_notebook(self, workspace: Path, rel: str) -> bool:
         return self._sniff_notebook(workspace, rel)[0]
@@ -560,6 +666,10 @@ class Hub:
         labels = spec.enum_labels or spec.enum_values
         return [{"value": v, "label": label} for v, label in zip(spec.enum_values, labels)]
 
+    def _policy_lock(self, key: str) -> bool | None:
+        """The value the team's policy pins ``key`` to, or ``None`` when free."""
+        return self.team_policy().locked_value(key)
+
     def _needs_confirm(self, spec, value) -> bool:
         """Whether writing ``value`` is a privacy-weakening flip that needs an explicit
         confirm. Wraps the registry rule with one runtime refinement: the warn-only
@@ -579,11 +689,17 @@ class Hub:
         import os
 
         cfg = self.app_cfg
+        pol = self.team_policy()
         editable = []
         for spec in settings_schema.EDITABLE:
             value = getattr(cfg, spec.accessor)
             if isinstance(value, tuple):
                 value = list(value)
+            # HONESTY: a policy-locked row says so, and says where the lock came
+            # from. The value shown is already the tightened one (app_cfg is folded
+            # at every assignment), so the page can never display a setting the app
+            # is not actually running with.
+            locked = pol.locked_value(spec.key)
             editable.append(
                 {
                     "key": spec.key,
@@ -602,6 +718,10 @@ class Hub:
                     "env_overridden": bool(
                         spec.env_var and os.environ.get(spec.env_var) is not None
                     ),
+                    "locked": locked is not None,
+                    "locked_note": (
+                        settings_schema.POLICY_LOCK_NOTE if locked is not None else ""
+                    ),
                 }
             )
         return {
@@ -609,7 +729,24 @@ class Hub:
             "editable": editable,
             "admin": self._admin_rows(),
             "pii": self._pii_status(),
+            "policy": self._policy_rows(pol),
             "ai_enabled": cfg.ai_enabled,
+        }
+
+    def _policy_rows(self, pol: policy.Policy) -> dict:
+        """The value-free "what your team enforces" block for the Settings page:
+        counts, rule names, and the ignored-rule warning — never a data value."""
+        from mooring import __version__
+
+        return {
+            "in_force": pol.in_force,
+            "unreadable": pol.unreadable,
+            "lines": policy.describe(
+                pol,
+                current_version=__version__,
+                local_guard=workspace_config.guard_mode(self.cfg.workspace()),
+            ),
+            "locked_keys": sorted(pol.settings),
         }
 
     def _admin_rows(self) -> list[dict]:
@@ -631,7 +768,30 @@ class Hub:
             {"label": "PII name model variant", "value": cfg.ai_pii_name_variant or "default"},
             {"label": "Synced folders", "value": ", ".join(cfg.folders) or "—"},
             {"label": "Sync excludes", "value": ", ".join(cfg.exclude) or "—"},
+            {"label": "Team policy", "value": self._policy_admin_value()},
         ]
+
+    def _policy_admin_value(self) -> str:
+        """A one-line, value-free summary of the synced team policy for the admin block."""
+        pol = self.team_policy()
+        if pol.unreadable:
+            return "unreadable mooring.toml — no policy in force"
+        if not pol.in_force:
+            return "none"
+        parts = []
+        if pol.min_version:
+            parts.append(f"min version {pol.min_version}")
+        if pol.push_guard:
+            parts.append(f"push guard {pol.push_guard}")
+        if pol.propose_only:
+            parts.append(f"{len(pol.propose_only.globs)} propose-only")
+        if pol.ai_off:
+            parts.append(f"{len(pol.ai_off.globs)} AI-off")
+        if pol.settings:
+            parts.append(f"{len(pol.settings)} locked setting(s)")
+        if pol.ignored:
+            parts.append(f"{len(pol.ignored)} rule(s) ignored")
+        return ", ".join(parts)
 
 
     def _apply_setting_change(self) -> None:
@@ -818,13 +978,15 @@ class Hub:
         dictionary=None,
         semantic_models=None,
         helpers=None,
+        catalog=None,
     ):
         """Open a streaming Copilot chat session bound to this notebook.
 
         ``model``/``reasoning_effort`` override the configured defaults;
         ``dictionary`` (a parsed index) enables the value-free dictionary tools;
         ``semantic_models`` (pre-parsed, already-gated Power BI models from
-        build_context) enables the semantic-model tools.
+        build_context) enables the semantic-model tools; ``catalog`` (the parsed
+        repo-wide notebook index) enables the notebook-catalog tools.
         Raises AIError (-> 502) if Copilot isn't available/installed; a sign-in or
         handshake failure surfaces over the SSE stream instead (the session starts
         in the background — ``background=True`` — so the open response is immediate).
@@ -865,6 +1027,7 @@ class Hub:
             dictionary=dictionary,
             semantic_models=semantic_models,
             helpers=helpers,
+            catalog=catalog,
             run_investigation=run_investigation,
             # The whole guard config travels as ONE object, so a field can't be
             # silently dropped on the way to the session (the session downloads any
@@ -890,11 +1053,11 @@ class Hub:
         as the interactive chat, but built with NO propose/edit tool and NO
         ``mooring_investigate`` (so it can neither write nor recurse), and the PII guard
         forced to BLOCK mode because there is no human at a sub-agent to confirm. ``ctx`` is
-        the 6-tuple ``build_context`` returns; a branch's finding is trusted because this
+        the 7-tuple ``build_context`` returns; a branch's finding is trusted because this
         session is structurally value-blind, which the read_only tool subset guarantees."""
         from dataclasses import replace
 
-        system_context, index, _pii_banner, _live_text, models, code_index = ctx
+        system_context, index, _pii_banner, _live_text, models, code_index, catalog = ctx
         provider = self._provider_for()
         return provider.open_chat(
             system_context=system_context,
@@ -906,6 +1069,7 @@ class Hub:
             dictionary=index,
             semantic_models=models,
             helpers=code_index,
+            catalog=catalog,
             read_only=True,
             pii=replace(self.app_cfg.ai.pii, block_prompt=True),
             traceback_guard=self.app_cfg.ai.traceback_guard,
@@ -1015,7 +1179,7 @@ class Hub:
             open_session=lambda ctx, nb, model, effort, dic: self._make_batch_session(
                 ctx, nb, model=model, reasoning_effort=(effort or None), dictionary=dic
             ),
-            is_disabled=lambda nb: workspace_config.is_ai_disabled(workspace, nb),
+            is_disabled=policy.ai_gate(workspace),
             discard_notebook=lambda nb: batch_service.discard_batch_notebook(workspace, nb),
             # emit_job is the broadcaster's PUBLIC progress channel: it touches the
             # activity clock (so a building run is never idle-reaped) and fans out.
@@ -1058,7 +1222,7 @@ def create_app(hub: Hub) -> Starlette:
     # constants) never form an import cycle: by the time create_app runs, this
     # module is fully initialized.
     from mooring.hub import pages
-    from mooring.hub.routes import batch, chat, files, reviews, settings, setup
+    from mooring.hub.routes import batch, chat, files, reviews, runs, settings, setup
     from mooring.hub.routes import schedule as schedule_routes
     from mooring.hub.routes import sync as sync_routes
 
@@ -1090,12 +1254,19 @@ def create_app(hub: Hub) -> Starlette:
             Route("/api/push", sync_routes.api_push, methods=["POST"]),
             Route("/api/propose", sync_routes.api_propose, methods=["POST"]),
             Route("/api/resolve", sync_routes.api_resolve, methods=["POST"]),
+            Route("/api/resolve/cells", sync_routes.api_resolve_cells, methods=["POST"]),
+            Route(
+                "/api/resolve/cells/apply",
+                sync_routes.api_resolve_cells_apply,
+                methods=["POST"],
+            ),
             Route("/api/recall", sync_routes.api_recall, methods=["POST"]),
             Route("/api/new", files.api_new, methods=["POST"]),
             Route("/api/duplicate", files.api_duplicate, methods=["POST"]),
             Route("/api/open", files.api_open, methods=["POST"]),
             Route("/api/reveal", files.api_reveal, methods=["POST"]),
             Route("/api/deliver", files.api_deliver, methods=["POST"]),
+            Route("/api/deliver/excel", files.api_deliver_excel, methods=["POST"]),
             Route("/api/verify", files.api_verify, methods=["POST"]),
             Route("/api/sweep", files.api_sweep, methods=["GET", "POST"]),
             Route("/api/sweep/plan", files.api_sweep_plan),
@@ -1122,6 +1293,11 @@ def create_app(hub: Hub) -> Starlette:
                 methods=["POST"],
             ),
             Route("/api/refresh", schedule_routes.api_refresh, methods=["POST"]),
+            # Attended parameterised runs: one notebook, once per value (roadmap:
+            # parameterised-runs). /api/run/start EXECUTES a notebook; it never pushes.
+            Route("/api/run/start", runs.api_run_start, methods=["POST"]),
+            Route("/api/run/state", runs.api_run_state),
+            Route("/api/run/cancel", runs.api_run_cancel, methods=["POST"]),
             Route("/api/trash", files.api_trash),
             Route("/api/trash/restore", files.api_trash_restore, methods=["POST"]),
             Route("/api/activity", files.api_activity),

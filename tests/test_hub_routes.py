@@ -46,12 +46,16 @@ EXPECTED_ROUTES = {
     ("/api/push", ("POST",), "api_push"),
     ("/api/propose", ("POST",), "api_propose"),
     ("/api/resolve", ("POST",), "api_resolve"),
+    # Cell-level conflict merge: plan, then write the merged notebook (local only).
+    ("/api/resolve/cells", ("POST",), "api_resolve_cells"),
+    ("/api/resolve/cells/apply", ("POST",), "api_resolve_cells_apply"),
     ("/api/recall", ("POST",), "api_recall"),  # push guard's "recall last push"
     ("/api/new", ("POST",), "api_new"),
     ("/api/duplicate", ("POST",), "api_duplicate"),  # the fearless personal draft copy
     ("/api/open", ("POST",), "api_open"),
     ("/api/reveal", ("POST",), "api_reveal"),
     ("/api/deliver", ("POST",), "api_deliver"),  # render a notebook to the local outbox
+    ("/api/deliver/excel", ("POST",), "api_deliver_excel"),  # ...as a .xlsx for Excel readers
     ("/api/verify", ("POST",), "api_verify"),  # smoke-run a notebook -> value-free trust badge
     # The catalog-wide sweep: what it would cost, start/poll, and a reachable cancel.
     ("/api/sweep/plan", ("GET",), "api_sweep_plan"),
@@ -74,6 +78,11 @@ EXPECTED_ROUTES = {
     ("/api/schedule/pause", ("POST",), "api_schedule_pause"),
     ("/api/schedule/background", ("POST",), "api_schedule_background"),
     ("/api/refresh", ("POST",), "api_refresh"),
+    # Attended parameterised runs: start a fan-out, poll its per-value progress, cancel it
+    # (roadmap: parameterised-runs). /api/run/start EXECUTES a notebook; it never pushes.
+    ("/api/run/start", ("POST",), "api_run_start"),
+    ("/api/run/state", ("GET",), "api_run_state"),
+    ("/api/run/cancel", ("POST",), "api_run_cancel"),
     # The local safety net: the trash + activity ledger (roadmap: local-safety-net).
     ("/activity", ("GET",), "activity_page"),
     ("/api/trash", ("GET",), "api_trash"),

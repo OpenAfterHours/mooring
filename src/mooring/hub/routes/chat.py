@@ -12,7 +12,7 @@ from starlette.concurrency import run_in_threadpool
 from starlette.requests import Request
 from starlette.responses import JSONResponse, StreamingResponse
 
-from mooring import telemetry, workspace_config
+from mooring import policy, telemetry, workspace_config
 from mooring.hub.sse import chat_replay, event_stream, sse_response
 
 
@@ -38,15 +38,14 @@ async def api_chat_open(request: Request) -> JSONResponse:
     workspace = hub.cfg.workspace()
     # Per-notebook opt-out (synced mooring.toml). 403 + reason distinguishes
     # this from the global-off 404 above, so the chat UI shows the right message.
-    if workspace_config.is_ai_disabled(workspace, notebook):
+    if policy.ai_disabled(workspace, notebook):
         return JSONResponse({"enabled": False, "reason": "notebook_disabled"}, status_code=403)
     try:
         # File IO (notebook source, dataset schema, team context, semantic-model
         # extraction) — off the event loop so a slow read can't stall the hub's
         # other requests.
-        context, index, pii_banner, live_text, models, code_index = await run_in_threadpool(
-            hub._build_chat_context, workspace, notebook, dataset
-        )
+        ctx = await run_in_threadpool(hub._build_chat_context, workspace, notebook, dataset)
+        context, index, pii_banner, live_text, models, code_index, catalog = ctx
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
     except FileNotFoundError as exc:
@@ -62,6 +61,7 @@ async def api_chat_open(request: Request) -> JSONResponse:
             dictionary=index,
             semantic_models=models,
             helpers=code_index,
+            catalog=catalog,
         )
     except Exception as exc:  # noqa: BLE001  # AIError surfaces to the UI in Phase 1
         return JSONResponse({"error": str(exc)}, status_code=502)

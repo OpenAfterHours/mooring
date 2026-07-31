@@ -90,6 +90,12 @@ dev = [
     "polars",
     "openpyxl",
     "fastexcel",
+    # BOTH Excel engines the injected mooring_deliver runtime writes through, so the
+    # suite exercises each write path rather than only whichever one happens to be
+    # installed. xlsxwriter is the PREFERRED engine (it is what a polars user already
+    # has via write_excel), and every engine divergence an adversarial review found
+    # lived on the path CI was not running. Test-only, like the readers above.
+    "xlsxwriter",
 ]
 
 [build-system]

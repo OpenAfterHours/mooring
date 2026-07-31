@@ -317,3 +317,59 @@ def test_existing_visible_markdown_is_not_re_hidden_on_an_unrelated_edit():
         nb, [CellOp(op="edit", index=1, anchor=cells[1][1], code="x = 99")]
     )
     assert "hide_code" not in out
+
+
+# -- the compose seam: a notebook rebuilt from OTHER notebooks' cells -----------
+# What the cell-level conflict merge writes through (app/conflict_merge.py). The
+# properties pinned here are the ones apply_cell_patch's replace_all cannot give,
+# because it takes code strings: a CHOSEN frame (header + marimo.App options), and
+# cells that arrive whole rather than renamed and stripped of their options.
+
+FRAMED = (
+    "# /// script\n"
+    '# dependencies = ["polars==1.2"]\n'
+    "# ///\n"
+    "import marimo\n\n"
+    '__generated_with = "0.23.9"\n'
+    'app = marimo.App(width="medium", app_title="Sales")\n\n\n'
+    "@app.cell(disabled=True, hide_code=True)\n"
+    "def loader():\n"
+    "    heavy = 1\n"
+    "    return (heavy,)\n\n\n"
+    'if __name__ == "__main__":\n'
+    "    app.run()\n"
+)
+
+
+def test_read_notebook_frame_returns_the_header_and_app_options():
+    header, options = marimo_rt.read_notebook_frame(FRAMED)
+    assert 'dependencies = ["polars==1.2"]' in header
+    assert options == {"width": "medium", "app_title": "Sales"}
+    # A notebook with neither is an EMPTY frame, not an error — that is how a
+    # caller three-ways "did this side change the frame?".
+    assert marimo_rt.read_notebook_frame(NB) == ("", {})
+
+
+def test_compose_notebook_keeps_the_chosen_frame():
+    out = marimo_rt.compose_notebook(FRAMED, [(NB, 0), (NB, 1)])
+    assert 'dependencies = ["polars==1.2"]' in out
+    assert 'app_title="Sales"' in out
+    assert _codes(out) == ["seed = 1", "x = seed + 1"]
+    # ...and composing on the other frame drops it, which is the point of the arg.
+    assert "polars==1.2" not in marimo_rt.compose_notebook(NB, [(NB, 0)])
+
+
+def test_compose_notebook_carries_a_cells_name_and_options_across_notebooks():
+    # A cell its author deliberately marked disabled must not come back ENABLED
+    # just because it was picked from the other side of a merge.
+    out = marimo_rt.compose_notebook(NB, [(NB, 0), (FRAMED, 0)])
+    assert "@app.cell(disabled=True, hide_code=True)" in out
+    assert "def loader():" in out
+    assert _codes(out) == ["seed = 1", "heavy = 1"]
+
+
+def test_compose_notebook_refuses_an_out_of_range_or_empty_pick():
+    with pytest.raises(ValueError):
+        marimo_rt.compose_notebook(NB, [(NB, 9)])
+    with pytest.raises(ValueError):
+        marimo_rt.compose_notebook(NB, [])

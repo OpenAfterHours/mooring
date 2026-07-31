@@ -150,6 +150,53 @@ def _deliver(hub, rel_path: str) -> JSONResponse:
     )
 
 
+async def api_deliver_excel(request: Request) -> JSONResponse:
+    """Run a notebook and collect the tables it named into one ``.xlsx`` in the
+    sync-excluded ``.mooring/outbox``, then reveal it in the file manager.
+
+    The Excel last mile for the part of the audience that forwards numbers rather
+    than charts. Same shape as ``/api/deliver``: it EXECUTES the notebook and can be
+    slow, so it runs off the event loop; the workbook holds real values but lives
+    under ``.mooring/``, which :func:`mooring.sync.is_synced_path` excludes
+    structurally, so it can never ride a push. No channel here reaches the AI."""
+    hub = request.app.state.hub
+    data = await request.json()
+    rel_path = str(data.get("path", ""))
+    return await run_in_threadpool(_deliver_excel, hub, rel_path)
+
+
+def _deliver_excel(hub, rel_path: str) -> JSONResponse:
+    import contextlib
+
+    from mooring.app import deliver
+
+    try:
+        result = deliver.deliver_excel(hub.cfg, rel_path)
+    except (ValueError, FileNotFoundError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    except deliver.DeliverError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=502)
+    telemetry.log_event("deliver", kind="xlsx")
+    with contextlib.suppress(Exception):
+        reveal.reveal(result.out_path)  # best-effort: no-op off Windows
+    # Deliberately NOT opened for preview like the HTML: launching a .xlsx hands the
+    # file to Excel, which locks it and would block the next delivery's write.
+    name = result.out_rel.rsplit("/", 1)[-1]
+    sheets = ", ".join(result.sheets)
+    return JSONResponse(
+        {
+            "path": rel_path,
+            "out": result.out_rel,
+            "sheets": list(result.sheets),
+            "lines": [
+                f"Delivered {result.notebook_rel} → {name}" + (f" ({sheets})" if sheets else ""),
+                "Saved to .mooring/outbox (local only, never pushed) and revealed in "
+                "your file manager.",
+            ],
+        }
+    )
+
+
 async def api_verify(request: Request) -> JSONResponse:
     """Smoke-run a notebook locally and record a value-free trust receipt: did it run
     clean? The row then badges "✓ ran clean" (kept only while the file's SHA matches,
@@ -228,8 +275,8 @@ async def api_sweep(request: Request) -> JSONResponse:
 
 
 async def api_sweep_cancel(request: Request) -> JSONResponse:
-    """Stop the running sweep at the next notebook boundary. The notebook already
-    executing is bounded by the runner's own timeout + process-tree kill."""
+    """Stop the running sweep, killing the process tree of the notebook currently
+    executing — not merely declining to start the next one."""
     request.app.state.hub.sweep.cancel()
     return JSONResponse({"cancelled": True})
 

@@ -20,12 +20,23 @@ with a warn-and-confirm flow. Like the detectors themselves this is
 **defence in depth, never a guarantee** — a clean scan does not mean a file
 is value-free (see docs/admins/ai-privacy.md).
 
-The same seam now carries a second, non-content gate: :func:`make_lock_guard`
-questions a ``uv.lock`` change against the workspace's last verify sweep (see
-:mod:`mooring.sweep`). It is a separate guard with its own tokens because it
-warns unconditionally — a team's ``[guard] push = "block"`` policy is about
-sensitive content and must not turn a broken-notebook warning into a wall.
-:func:`combine` runs both behind the one ``guard_fn`` sync expects.
+THREE guards now ride that one seam, with deliberately DIFFERENT override
+rules — none of them may be folded into another:
+
+* **content** (this module, :func:`make_guard`) — acknowledgeable in warn mode,
+  refused under ``[guard] push = "block"``; runs on push AND propose.
+* **dependency change** (:func:`make_lock_guard`) — ALWAYS acknowledgeable,
+  block mode included; runs on push AND propose.
+* **policy propose-only** (:func:`mooring.policy.make_propose_gate`) — NEVER
+  acknowledgeable, no token exists; runs on DIRECT push only, because Propose
+  is the road it is pointing at.
+
+:func:`mooring.policy.compose_guards` runs them behind the single ``guard_fn``
+sync expects, each keeping its own ``collected`` map and so its own tokens —
+which is exactly what lets one seam carry three override policies. The deps
+gate is separate rather than another detector inside :func:`make_guard`
+because a team's ``[guard] push = "block"`` is a policy about sensitive
+CONTENT and must not silently become a wall around lock files.
 """
 
 from __future__ import annotations
@@ -99,14 +110,19 @@ def _looks_like_data_export(text: str, suffix: str) -> int:
     return rows
 
 
-def scan_text(rel_path: str, data: bytes) -> list[Finding]:
+def scan_text(rel_path: str, data: bytes | None) -> list[Finding]:
     """Value-free findings for one outgoing file (empty when clean or binary).
 
     Runs the secret + structured-PII detectors over text-like files, drops any
     finding whose line carries the ``mooring: push-ok`` pragma, and adds the
     raw-data heuristic for tabular files. Read-only: never modifies ``data``.
+
+    ``data is None`` marks a DELETION (sync now offers every candidate to the
+    guard, not only the ones that upload bytes). This guard is a CONTENT guard,
+    so a deletion is clean by construction — it publishes nothing. The path
+    rules that DO care about a deletion live in :mod:`mooring.policy`.
     """
-    if not _is_text(rel_path):
+    if data is None or not _is_text(rel_path):
         return []
     text = data.decode("utf-8", "replace")
     findings: list[Finding] = []
@@ -132,7 +148,9 @@ def scan_text(rel_path: str, data: bytes) -> list[Finding]:
     return findings
 
 
-def file_token(rel_path: str, data: bytes, findings: list[Finding], *, extra: str = "") -> str:
+def file_token(
+    rel_path: str, data: bytes | None, findings: list[Finding], *, extra: str = ""
+) -> str:
     """A stateless per-file confirm token binding the exact findings set to the
     exact bytes: a confirmed token stops matching the moment the file changes or
     a new finding appears, so an old confirm can never cover new exposure.
@@ -143,7 +161,7 @@ def file_token(rel_path: str, data: bytes, findings: list[Finding], *, extra: st
     the same, so it binds to a digest of the result instead (see sweep.LockGate)."""
     h = hashlib.sha256()
     h.update(rel_path.encode("utf-8"))
-    h.update(hashlib.sha256(data).digest())
+    h.update(hashlib.sha256(data if data is not None else b"").digest())
     for f in sorted(findings, key=lambda x: (x.line, x.kind)):
         h.update(f"{f.line}:{f.kind}".encode())
     if extra:
@@ -170,7 +188,7 @@ def make_guard(allowed_tokens: frozenset[str] | set[str] = frozenset()):
     """
     collected: dict[str, dict] = {}
 
-    def guard_fn(rel_path: str, data: bytes) -> list[str]:
+    def guard_fn(rel_path: str, data: bytes | None) -> list[str]:
         findings = scan_text(rel_path, data)
         if not findings:
             return []
@@ -183,7 +201,9 @@ def make_guard(allowed_tokens: frozenset[str] | set[str] = frozenset()):
     return guard_fn, collected
 
 
-def lock_findings(workspace, rel_path: str, data: bytes, notebooks=None) -> list[Finding]:
+def lock_findings(
+    workspace, rel_path: str, data: bytes | None, notebooks=None
+) -> list[Finding]:
     """The dependency-change gate's findings for one outgoing file, as ``Finding``\\ s —
     the scan half of :func:`make_lock_guard`, exposed so an adapter's
     ``--acknowledge-findings`` path can still SHOW what it is letting through."""
@@ -214,17 +234,24 @@ def make_lock_guard(
     to how it reads. Deliberately a SEPARATE guard rather than an extra detector inside
     ``make_guard``: the team's ``[guard] push = "block"`` policy is about sensitive
     CONTENT, and must not silently become "you may never push a lock file that breaks
-    something" — this gate warns and is always acknowledgeable. Compose the two with
-    :func:`combine`.
+    something" — this gate warns and is always acknowledgeable. Compose the three
+    guards on this seam with :func:`mooring.policy.compose_guards`.
 
     ``notebooks_fn`` is an optional zero-argument callable returning the workspace's
     current notebook list. It is called ONLY when a ``uv.lock`` is actually being pushed
     (enumerating costs a workspace walk), and lets the gate notice a notebook added since
     the sweep instead of falling silent over it.
+
+    Like the policy gate — and unlike the content guard — this fires for a DELETION
+    (``data is None``) too. Removing the team's ``uv.lock`` is the most drastic
+    environment change there is: everyone stops running against a pinned resolution. The
+    NO_LOCK sentinel makes that fall out rather than needing a special case — a sweep
+    taken WITH a lock cannot match ``fingerprint(None)``, so the deletion is questioned
+    exactly like a rewrite.
     """
     collected: dict[str, dict] = {}
 
-    def guard_fn(rel_path: str, data: bytes) -> list[str]:
+    def guard_fn(rel_path: str, data: bytes | None) -> list[str]:
         if not sweep.is_lock(rel_path):
             return []  # cheap gate first: never walk the workspace for an ordinary file
         notebooks = notebooks_fn() if notebooks_fn is not None else None
@@ -241,19 +268,3 @@ def make_lock_guard(
         return [f.kind for f in findings]
 
     return guard_fn, collected
-
-
-def combine(*guards):
-    """One ``guard_fn`` running several in order, concatenating their findings.
-
-    Each guard keeps its own ``collected`` map (and so its own confirm tokens), which is
-    what lets the content guard and the dependency gate carry different override policies
-    while ``sync.push`` still sees the single callable it expects."""
-
-    def guard_fn(rel_path: str, data: bytes) -> list[str]:
-        out: list[str] = []
-        for guard in guards:
-            out.extend(guard(rel_path, data))
-        return out
-
-    return guard_fn

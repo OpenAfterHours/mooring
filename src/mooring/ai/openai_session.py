@@ -38,6 +38,7 @@ from mooring.ai import egress
 from mooring.ai.base import AIError, AINotConnectedError
 from mooring.ai.chat import ChatBroadcaster, ChatEvent
 from mooring.ai.session import (
+    _CATALOG_TOOL_GUIDE,
     _DICT_TOOL_GUIDE,
     _HELPER_TOOL_GUIDE,
     _INVESTIGATE_GUIDE,
@@ -74,6 +75,7 @@ class OpenAIChatSession(ChatBroadcaster):
         dictionary=None,
         semantic_models=None,
         helpers=None,
+        catalog=None,
         read_only: bool = False,
         run_investigation=None,
         pii_enabled: bool = False,
@@ -110,6 +112,8 @@ class OpenAIChatSession(ChatBroadcaster):
             guide += _DICT_TOOL_GUIDE
         if helpers is not None and not helpers.is_empty():
             guide += _HELPER_TOOL_GUIDE
+        if catalog is not None and not catalog.is_empty():
+            guide += _CATALOG_TOOL_GUIDE
         if semantic_models:
             guide += _MODEL_TOOL_GUIDE
         if self._run_investigation is not None:
@@ -120,6 +124,7 @@ class OpenAIChatSession(ChatBroadcaster):
         self._notebook_rel = notebook_rel
         self._dictionary = dictionary
         self._helpers = helpers
+        self._catalog = catalog
         self._semantic_models = list(semantic_models or [])
         self._pii_enabled = pii_enabled
         self._client_factory = client_factory
@@ -181,6 +186,7 @@ class OpenAIChatSession(ChatBroadcaster):
                 dictionary=self._dictionary,
                 semantic_models=self._semantic_models,
                 code_index=self._helpers,
+                catalog=self._catalog,
                 run_investigation=self._run_investigation,
                 emit_tool_progress=self._emit_tool_progress,
                 pii_enabled=self._pii_enabled,

@@ -57,6 +57,18 @@ class SettingSpec:
     confirm: str = ""
 
 
+# Shown on a row the repo's admin policy has pinned, and returned as the 409
+# message when a write to one is refused. It says WHERE the lock came from and
+# which direction it can move — a locked row must never look like a broken
+# control, and "policy can only make a setting stricter" is the whole contract.
+# The lock itself is decided in mooring.policy (this module stays a pure leaf).
+POLICY_LOCK_NOTE = (
+    "Locked by your team's policy (the [policy] block in this repo's synced "
+    "mooring.toml). A policy can only make a setting stricter, never weaker — change "
+    "it with `mooring policy set/unset` and push, or ask whoever maintains the repo."
+)
+
+
 # Display order of the editable groups (the read-only admin block is separate).
 GROUPS: tuple[dict, ...] = (
     {"id": "appearance", "label": "Appearance"},
@@ -229,6 +241,29 @@ EDITABLE: tuple[SettingSpec, ...] = (
         help="Let the copilot discover and REUSE your team's helper functions/classes "
         "(from importable .py under the synced folders) instead of re-implementing them. "
         "Off by default; a per-module opt-out lives in the synced mooring.toml.",
+    ),
+    SettingSpec(
+        key="ai.notebook_catalog",
+        accessor="ai_notebook_catalog",
+        label="Let the copilot search every notebook (repo-wide catalog)",
+        group="ai",
+        type="bool",
+        control="toggle",
+        default=False,
+        sensitivity="weakens",
+        env_var="MOORING_AI_NOTEBOOK_CATALOG",
+        weaken_value=True,
+        confirm="Turning the notebook catalog ON widens what the copilot sees from the "
+        "ONE notebook you have open to EVERY notebook in the repo. For each it gets the "
+        "`# H1` title, the imports, and the inputs/checks/SQL tables the source declares "
+        "— never another notebook's code, its outputs, or a run receipt. Those facts are "
+        "value-free by construction, but the title is prose your team wrote (scanned, "
+        "like a docstring), so this is a weaker tier than the value-blind schema. "
+        "Continue?",
+        help="Let the copilot find work a teammate already did — 'does anyone already "
+        "reconcile the GL feed?' — instead of rebuilding it. Off by default; a notebook "
+        "you have turned AI off for is left out. The hub's own search box indexes the "
+        "same facts locally either way.",
     ),
     SettingSpec(
         key="ai.traceback_guard",

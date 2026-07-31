@@ -37,6 +37,8 @@ mooring propose [paths...] [-m "message"] [--repo ALIAS]
 mooring open notebooks/sales.py
 mooring open reports/sales.pbip
 mooring new sales-analysis
+mooring catalog [terms...] [--full]
+mooring deliver notebooks/sales.py [--excel]
 mooring delete notebooks/sales.py [-y]
 mooring rollback notebooks/sales.py [-y] [--conflicts]
 mooring verify notebooks/sales.py
@@ -55,12 +57,22 @@ mooring schedule rm | pause | resume notebooks/board.py
 mooring schedule background enable | disable | status
 mooring refresh notebooks/board.py [--no-pull] [--deliver] [--json]
 mooring refresh --due [--json]
+mooring run notebooks/board.py --for region=EMEA,APAC,AMER [--no-deliver] [--json]
+mooring run notebooks/board.py --for month=2026-01..2026-06
+mooring lineage [data/sales.csv]
 mooring ai status
 mooring ai login [--host HOST]
 mooring ai dictionary check [--repo ALIAS]
 mooring ai pii check [--repo ALIAS] [--notebook REL]
 mooring ai pii model [--repo ALIAS]
 mooring ai pii doctor
+mooring policy show [--repo ALIAS]
+mooring policy set min-version 0.4.29 | push-guard block
+mooring policy set propose-only "reports/**" [more...]
+mooring policy set ai-off "hr/**" [more...]
+mooring policy set setting ai.pii.enabled true
+mooring policy unset min-version | push-guard | propose-only | ai-off
+mooring policy unset setting ai.pii.enabled
 mooring config set <key> <value...> | config get <key>
 mooring config unset <key> | config list | config path
 mooring selftest
@@ -171,6 +183,28 @@ branch, so the changes can be reviewed as a pull request (see
   `new packages/finance/notebooks/sales`); mooring registers that folder so it
   syncs for the team. A bare name goes in `notebooks/`.
 
+### `catalog`
+
+Search every notebook in the workspace — "has someone already built this?" — by name,
+heading, or **what it does**: what it imports, the datasets it fingerprints, the checks it
+asserts, and the tables its SQL queries. All terms must match; omit them to list the whole
+catalog. `--full` prints each match in detail instead of one line each. Exits non-zero
+when nothing matches.
+
+```
+mooring catalog                     # every notebook, path-sorted
+mooring catalog gl_ledger           # who reads this dataset?
+mooring catalog month end recon     # all three terms must match
+mooring catalog tieout --full       # with the inputs/checks each one declares
+```
+
+Local and offline: it parses each notebook with `ast` and never runs one, never opens a
+`.mooring/` run receipt, and never talks to GitHub. It works whether or not the copilot's
+own catalog is enabled — and when that opt-in **is** on, this is the way to preview
+exactly what its tools can see (the same per-notebook AI opt-out is applied, so the
+preview is never a superset). See
+[why the copilot can't see your data](../admins/ai-privacy.md#notebook-catalog).
+
 ### `deliver` / `verify` / `checks` / `inputs`
 
 - `deliver <workspace-relative-path>` — render a notebook to a self-contained
@@ -178,6 +212,14 @@ branch, so the changes can be reviewed as a pull request (see
   (e.g. `deliver notebooks/sales.py`). The notebook runs on your machine; the
   HTML embeds the values but lives in `.mooring`, which never syncs — attach it to
   email/Teams yourself. See [Delivering a result](daily-workflow.md#delivering-a-result-for-a-stakeholder).
+  `--excel` delivers an `.xlsx` instead: one sheet per table the notebook named with
+  `import mooring_deliver`, plus a **Provenance** sheet mooring stamps after the run.
+  It is all-or-nothing — a table that could not be written fails the command and names
+  the lost sheet, rather than delivering a workbook missing one. The workbook is
+  written by the notebook's own environment, so the repo needs an Excel writer
+  (`mooring deps add openpyxl`); without one the run still completes and the command
+  says what to add. See
+  [Delivering it as an Excel workbook](daily-workflow.md#delivering-it-as-an-excel-workbook).
 - `verify <workspace-relative-path>` — smoke-run a notebook once on your machine and
   print whether it ran clean; exits non-zero if a cell failed. Records a value-free
   trust receipt (a boolean, never a value) that badges the notebook's row in the hub
@@ -197,10 +239,29 @@ branch, so the changes can be reviewed as a pull request (see
 - `checks` — list the tie-out / data-quality check results recorded per notebook
   by `import mooring_checks` calls (value-free: names and pass/fail counts only).
   See [Checking your numbers tie out](daily-workflow.md#checking-your-numbers-tie-out).
-- `inputs` — list the value-free input fingerprints recorded per notebook by
-  `import mooring_inputs` calls (content hash + shape + schema, never a value), and how
-  many changed since the last run. `--clear [PATH]` resets them. See
-  [Fingerprinting your inputs](daily-workflow.md#fingerprinting-your-inputs).
+- `inputs` — list the value-free fingerprints recorded per notebook by
+  `import mooring_inputs` calls (content hash + shape + schema, never a value) for the
+  files it reads *and* writes, and how many changed since the last run. `--clear [PATH]`
+  resets them. See [Fingerprinting your inputs](daily-workflow.md#fingerprinting-your-inputs).
+
+### `lineage`
+
+Answer *"if I change this file, what breaks?"* from the recorded fingerprints — one
+notebook's `mi.output` path is another's `mi.fingerprint` path, and that is a dependency.
+
+- `lineage` — every recorded file with the notebooks that read and write it.
+- `lineage data/sales.csv` — that file's readers and writers, what is further downstream
+  through the files those notebooks write, and what it is built from.
+
+Each notebook is printed with **when it last recorded that dependency** — a fingerprint
+sticks until the notebook next runs `mi.reset()`, so anything unconfirmed for over a month
+is marked *"not confirmed since"* rather than stated as current.
+
+Local and value-free (paths, counts and dates only; the receipts live in the never-synced
+`.mooring/`). It knows **only** notebooks that call `mooring_inputs`, so every answer is a
+floor: "3 notebooks read this" is a fact, "nothing recorded reads this" is not evidence
+that a file is unused. Every run prints that caveat. See
+["If I change this file, what breaks?"](daily-workflow.md#if-i-change-this-file-what-breaks).
 
 ### `schedule`
 
@@ -253,6 +314,60 @@ local copy).
     that already runs an orchestrator can call it from a task. mooring deliberately does not
     embed one — see the [roadmap plan](../developers/roadmap/scheduled-refresh.md#why-not-an-orchestrator).
 
+### `run`
+
+Run the same notebook repeatedly — once per region, entity or month — and save **one artifact
+per value** into your local outbox. This is the month-end "same pack, six times" loop, minus
+the editing. See [Running one notebook for each value](daily-workflow.md#running-one-notebook-for-each-value).
+
+```bash
+mooring run notebooks/board.py --for region=EMEA,APAC,AMER
+mooring run notebooks/board.py --for month=2026-01..2026-06
+```
+
+- `--for NAME=VALUES` (required) — the parameter and its values, comma-separated. An item may
+  be a range: whole numbers (`1..4`) or calendar months (`2026-01..2026-06`). Anything else is
+  taken literally, so `--for entity="ACME,Globex"` needs no special syntax.
+- `--no-deliver` — run each value and report, without writing artifacts.
+- `--json` — machine-readable output, including a per-value outcome.
+
+The notebook reads its value with the injected `mooring_params` helper:
+
+```python
+import mooring_params
+
+region = mooring_params.get("region", "EMEA")   # the default is required
+```
+
+**The default is what keeps the notebook normal.** With no parameter supplied — opening it in
+the editor, `mooring verify`, a scheduled refresh — `get` returns the default and the notebook
+behaves exactly as it did before.
+
+`mooring run` refuses a notebook with no **visible** `mooring_params.get("<name>", …)` call
+for the parameter you named, because running it once per value would write differently-named
+artifacts holding identical numbers. The check reads the notebook's syntax tree, so a column
+called `"region"` elsewhere in the file does not satisfy it — and neither does a `get` call
+that lives in a helper module or whose name is computed. That is deliberate: it errs towards
+refusing a run you could have had, never towards shipping a mislabelled pack. Spell the call
+out in the notebook itself.
+
+Values run **one at a time**, and one failing value never stops the others — each is reported
+separately. A value whose artifact could not be written (its previous one open in Excel or a
+browser, say) is reported **failed**, not clean: the file still at that path is the earlier
+delivery. `Ctrl+C` genuinely stops the run — the marimo process tree is killed, the
+value-bearing render is removed, and every value that never ran is listed as such.
+
+Exit codes (stable, for scripting): **0** every value ran clean · **1** at least one value
+failed · **4** stopped part-way, so the pack is incomplete.
+
+!!! warning "`run` is attended; it is not a schedule"
+
+    `mooring run` needs you watching — it is not something to put on a cadence. A schedule's
+    promise is one notebook, one receipt, one artifact whose staleness is arithmetic; N
+    artifacts on a cadence is a different promise about retention that mooring has not made.
+    Every way of running a notebook (`verify`, `deliver`, `refresh`, `run`) shares one
+    workspace lock, so no two can run over each other.
+
 ### `connections` — share a DB connection shape, keep the secret local
 
 Define a database connection's **shape** (host/database/warehouse/role/…) in the
@@ -268,6 +383,43 @@ while the **secret stays on each machine**. See
   `--stdin`); it lives under `.mooring`, which never syncs. `--clear` removes it.
 - `connections rm <name>` — remove a connection definition.
 - `connections check` — scan the synced definitions for anything secret-shaped.
+
+### `policy` — the team rules this client enforces
+
+Show or author the repo's admin policy: the `[policy]` block in the **synced**
+`mooring.toml`. It travels with the repo, and mooring enforces it on every
+machine — a policy can only ever make things *stricter* than your own settings,
+never weaker. Full reference: [Team policy](../admins/policy.md).
+
+- `policy show` — what is in force, and any rule that had to be ignored.
+- `policy set <rule> <value…>` — author one rule. Rules: `min-version`,
+  `push-guard` (`warn`/`block`), `propose-only` and `ai-off` (path patterns, the
+  list is replaced), and `setting <key> <true|false>`.
+- `policy unset <rule> [key]` — remove a rule.
+
+`set`/`unset` write a **synced** file, so the change reaches your team only after
+`mooring push`. Setting a rule that would loosen something is refused.
+
+### `datasets` — name the data files that are too big to sync
+
+Give a file that lives **outside** the repo (a network share, a URL) a name in the
+synced `mooring.toml`, so notebooks read `md.path("sales")` instead of hard-coding
+one person's UNC path — while each machine can redirect that name locally. See
+[Pointing at data too big to sync](daily-workflow.md#pointing-at-data-too-big-to-sync).
+
+- `datasets list` — every pointer, where it resolves on **this** machine (team
+  pointer, local redirect, env var or cached download), and whether the file is there.
+- `datasets add <name> kind=<share|https> path=…|url=…` — define/update a pointer
+  (e.g. `datasets add sales kind=share path="//fileserver/finance/sales.parquet"`).
+  A `password`/`token`/`key`-shaped field, and any **pre-signed or SAS URL**, is
+  **refused** — a pointer carries a location, never a credential.
+- `datasets set-local <name> <path>` — point the name somewhere else on this machine;
+  it lives under `.mooring`, which never syncs. `--clear` reverts to the team's pointer.
+- `datasets rm <name>` — remove a pointer.
+- `datasets check` — scan the synced pointers for anything credential-shaped.
+
+Resolution order in a notebook: `MOORING_DATASET_<NAME>_PATH` → your local redirect →
+the team's pointer (for `kind=https`, the copy cached under `.mooring/`).
 
 ### `init` / `deps` — notebook dependencies
 

@@ -39,7 +39,7 @@ L3.5 app/                   application services shared by BOTH adapters (notebo
                             chat_service, apply, batch_service) — imports no adapter
 L3   ai/*                   AI orchestration + privacy/safety
 L2   sync, manifest, pbip, pbip_model, whatsnew, deletion   domain core  ·  editor, schema, marimo_rt, celldiff   marimo bridge
-L1   config, config_store, auth, github, runtime, ai_config   identity + config
+L1   config, config_store, auth, github, runtime, ai_config, policy   identity + config
 L0   githost, paths, gitsha  stdlib-pure leaves (import nothing else in mooring)
 ```
 
@@ -74,6 +74,8 @@ Tests that pin these guarantees use a `SECRET_VALUE_DO_NOT_LEAK` fixture and ass
 ### Config layering
 
 `config.py` merges, lowest-to-highest precedence: baked `config_default.toml` → user `config.toml` (`mooring config` commands edit it) → `MOORING_*` env vars. Separately, `workspace_config.py` reads a **synced** `mooring.toml` at the workspace root for per-repo, travels-with-the-repo settings (e.g. `[ai] disabled_notebooks`).
+
+**Above all of that sits `policy.py`** — the synced `mooring.toml` `[policy]` block, the admin policy the client *enforces* (a version floor, a push-guard floor, propose-only path globs, AI-off path globs, and pinned safety settings). Its one rule: **policy can only ever be MORE restrictive than local config, never less**, and that is structural, not conventional — each governed knob declares one `safe` value and a `[policy.settings]` entry survives only if it equals it (`policy._parse_settings`). `mooring.toml` is treated as attacker-controlled: a bad key/type/glob drops that one rule (recorded in `Policy.ignored`), never crashes and never weakens. Both adapters apply the same one fold (`policy.tighten_app_config` in `cli.main` and at every `Hub.app_cfg` assignment); propose-only rides `sync.push`'s injected `guard_fn` seam beside the push guard. See `docs/admins/policy.md`.
 
 ## Gotchas
 

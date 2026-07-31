@@ -19,7 +19,7 @@ from __future__ import annotations
 import threading
 
 from mooring import sweep
-from mooring.app import refresh, sweep_run
+from mooring.app import notebook_run, sweep_run
 from mooring.config import Config
 
 
@@ -56,8 +56,8 @@ class SweepService:
         cost prompt anyway). One walk per sweep, none of it on the event loop.
 
         Raises :class:`SweepBusy` if one is already running here, and
-        :class:`mooring.app.refresh.RefreshBusy` — surfaced from the worker into the
-        snapshot's ``error`` — when a scheduled refresh holds the workspace."""
+        :class:`mooring.app.notebook_run.RunBusy` — surfaced from the worker into the
+        snapshot's ``error`` — when another whole-notebook run holds the workspace."""
         with self._lock:
             if self._state.get("running"):
                 raise SweepBusy("A check is already running.")
@@ -73,8 +73,8 @@ class SweepService:
         return self.snapshot()
 
     def cancel(self) -> None:
-        """Stop the sweep at the next notebook boundary (the notebook already running is
-        bounded by the runner's own timeout + process-tree kill)."""
+        """Stop the sweep — including the notebook currently executing, whose process TREE
+        the runner kills. Idempotent, and safe on an idle service."""
         self._cancel.set()
 
     def wait(self, timeout: float | None = None) -> bool:
@@ -99,9 +99,9 @@ class SweepService:
 
         try:
             report = sweep_run.sweep_workspace(
-                cfg, skip_verified=resume, cancel=cancel.is_set, on_progress=_progress
+                cfg, skip_verified=resume, cancel=cancel, on_progress=_progress
             )
-        except refresh.RefreshBusy as exc:
+        except notebook_run.RunBusy as exc:
             self._finish({"error": str(exc)})
             return
         except BaseException as exc:  # noqa: BLE001

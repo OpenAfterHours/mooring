@@ -31,6 +31,7 @@ push, propose, and sending a delivered artifact — never the local run itself.
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -68,17 +69,53 @@ def verify_notebook(cfg: Config, rel_path: str) -> VerifyResult:
     translate these to their transport (a hub 4xx / a CLI message)."""
     workspace = cfg.workspace()
     rel_posix = ensure_runnable(workspace, rel_path, VerifyError)
-    target = workspace / rel_posix
+    try:
+        # The workspace run lock. A verify launched while a scheduled refresh or a
+        # parameterised fan-out is going would put two kernels on one CPU AND write the same
+        # per-notebook throwaway render — which the other run would then promote as ITS
+        # artifact, giving a file labelled with a value it does not contain.
+        with notebook_run.workspace_guard(workspace):
+            return run_verified(cfg, rel_posix)
+    except notebook_run.RunBusy as exc:
+        raise VerifyError(str(exc)) from exc
 
+
+def run_verified(
+    cfg: Config, rel_posix: str, *, cancel: threading.Event | None = None
+) -> VerifyResult:
+    """The verify body WITHOUT the workspace lock — for a caller that already holds it.
+
+    The catalog sweep (:mod:`mooring.app.sweep_run`) runs N of these under ONE lock, the
+    way the parameterised fan-out runs N values: taking the lock per notebook would either
+    deadlock against the caller's own hold or let a scheduled refresh interleave halfway
+    through a sweep. Splitting the body rather than reimplementing it is what keeps a SWEPT
+    receipt byte-identical to a hand-verified one — one writer, structurally, not by
+    two code paths agreeing today.
+
+    ``cancel`` is passed straight to the runner, so a sweep's Cancel kills the process
+    TREE of the notebook currently executing rather than merely declining to start the
+    next one.
+
+    ``rel_posix`` must already have passed :func:`ensure_runnable`."""
+    workspace = cfg.workspace()
     # Capture the SHA of the bytes marimo is about to run BEFORE launching it, so an
     # edit landing mid-run keys the receipt to now-stale bytes and the badge auto-clears
     # (fail-safe) instead of vouching for code the run never executed.
-    sha = gitsha.local_blob_sha(target, rel_posix)
-
+    sha = gitsha.local_blob_sha(workspace / rel_posix, rel_posix)
     try:
         outcome = notebook_run.run(
-            workspace, rel_posix, verify.render_target(workspace, rel_posix), keep_on_success=False
+            workspace,
+            rel_posix,
+            verify.render_target(workspace, rel_posix),
+            keep_on_success=False,
+            cancel=cancel,
         )
+    except notebook_run.RunCancelled:
+        # Ordered BEFORE the RunError catch it subclasses: "you stopped it" is not "it
+        # could not run", and a caller that passed a cancel event needs to tell them
+        # apart (the sweep records a cancelled notebook as skipped, not as broken). A
+        # caller that passes no event can never reach this — the runner never raises it.
+        raise
     except notebook_run.RunError as exc:
         raise VerifyError(str(exc)) from exc
 

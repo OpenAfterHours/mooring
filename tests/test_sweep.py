@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import argparse
 import subprocess
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -63,7 +65,7 @@ def _fake_exec(outcomes=None, *, default=(0, ""), calls=None, during=None):
     environment failure a broken lock produces)."""
     outcomes = outcomes or {}
 
-    def _run(cmd, cwd, env, timeout):
+    def _run(cmd, cwd, env, timeout, *, cancel=None):
         out = _out_of(cmd)
         name = out.name
         if calls is not None:
@@ -80,6 +82,13 @@ def _fake_exec(outcomes=None, *, default=(0, ""), calls=None, during=None):
         return subprocess.CompletedProcess(cmd, code, "", stderr)
 
     return _run
+
+
+def _set_event() -> threading.Event:
+    """An already-set cancel — "the user pressed Cancel before anything ran"."""
+    event = threading.Event()
+    event.set()
+    return event
 
 
 def _slug(rel: str) -> str:
@@ -145,7 +154,7 @@ def test_a_blocked_reason_carries_the_exception_TYPE_not_its_path(monkeypatch, t
     # reasons to .mooring/sweep.json, so the exception contributes its type only.
     cfg, ws = _mk(tmp_path, "notebooks/a.py")
 
-    def _boom(cmd, cwd, env, timeout):
+    def _boom(cmd, cwd, env, timeout, *, cancel=None):
         raise PermissionError(r"[Errno 13] Permission denied: 'C:\Users\alice\secret\x.py'")
 
     monkeypatch.setattr(notebook_run, "_exec", _boom)
@@ -297,19 +306,49 @@ def test_cancel_actually_stops_the_sweep(monkeypatch, tmp_path):
     cfg, ws = _mk(tmp_path, "notebooks/a.py", "notebooks/b.py", "notebooks/c.py")
     calls: list[str] = []
     monkeypatch.setattr(notebook_run, "_exec", _fake_exec(calls=calls))
-    stop = {"now": False}
+    stop = threading.Event()
 
     def _after_first(done, total, item):
-        stop["now"] = True
+        stop.set()
 
-    report = sweep_run.sweep_workspace(
-        cfg, cancel=lambda: stop["now"], on_progress=_after_first
-    )
+    report = sweep_run.sweep_workspace(cfg, cancel=stop, on_progress=_after_first)
 
     assert len(calls) == 1  # only the first notebook actually ran
     assert report.cancelled is True
     assert report.clean == 1 and report.skipped == 2
     assert "(cancelled)" in sweep.headline(report)
+
+
+def test_cancel_kills_the_notebook_that_is_RUNNING_not_just_the_next_one(
+    monkeypatch, tmp_path
+):
+    # The runner grew a real cancel (a process-TREE kill) with the parameterised-run
+    # merge, so the sweep no longer has to let a five-minute notebook finish before
+    # noticing. A killed notebook is SKIPPED — it was never given a chance to answer, so
+    # it is neither a failure nor a blocked environment.
+    cfg, ws = _mk(tmp_path, "notebooks/a.py", "notebooks/b.py")
+    stop = threading.Event()
+    calls: list[str] = []
+
+    def _cancel_midway(cmd, cwd, env, timeout, *, cancel=None):
+        # The runner only passes `cancel` through when it HAS one — so receiving it here
+        # is itself the proof that the sweep wired its event to the process-tree kill.
+        calls.append(_out_of(cmd).name)
+        assert cancel is stop, "the sweep must hand its cancel event to the RUNNER"
+        cancel.set()  # the user hits Cancel while THIS notebook is executing
+        # What the real _exec returns after its watchdog kills the tree: a dead process
+        # and no render (the runner then sees cancel.is_set() and raises RunCancelled).
+        return subprocess.CompletedProcess(cmd, 1, "", "")
+
+    monkeypatch.setattr(notebook_run, "_exec", _cancel_midway)
+
+    report = sweep_run.sweep_workspace(cfg, cancel=stop)
+
+    assert len(calls) == 1  # the second notebook was never launched
+
+    assert report.cancelled is True
+    assert report.skipped == 2 and report.clean == 0 and report.failed == 0
+    assert report.of(sweep.SKIPPED)[0].reason == "cancelled while it was running"
 
 
 def test_resume_skips_what_is_still_verified(monkeypatch, tmp_path):
@@ -419,6 +458,60 @@ def test_a_sweep_and_a_scheduled_refresh_cannot_run_concurrently(monkeypatch, tm
     monkeypatch.setattr(notebook_run, "_exec", _fake_exec(during=_during))
     sweep_run.sweep_workspace(cfg)
     assert seen["refresh_got_in"] is False
+
+
+def test_the_lock_is_heartbeaten_WHILE_a_child_process_blocks(monkeypatch, tmp_path):
+    """Does the heartbeat tick during a blocking child, or only between operations?
+
+    This is the question a sweep makes load-bearing and no other caller does. A sweep holds
+    ONE lock across N sequential ``notebook_run.run`` calls, each of which blocks the
+    holding thread inside ``proc.communicate`` for as long as marimo takes. If the mtime
+    were only refreshed between operations, a sweep longer than ``_LOCK_STALE_S`` would
+    have its lock STOLEN mid-run by a scheduled refresh — two kernels on one CPU, two
+    writers of the same throwaway render, and this sweep's ``finally`` then unlinking the
+    lock the refresh holds.
+
+    Answer, pinned here: it ticks. ``workspace_guard`` runs the heartbeat on its own daemon
+    thread, so it is independent of whatever the holding thread is blocked on. The window
+    and beat are shrunk so a real blocking child crosses the staleness threshold several
+    times over."""
+    monkeypatch.setattr(notebook_run, "_LOCK_STALE_S", 0.4)
+    monkeypatch.setattr(notebook_run, "_LOCK_BEAT_S", 0.05)
+    cfg, ws = _mk(tmp_path, "notebooks/a.py", "notebooks/b.py")
+
+    def _slow_child(cmd, cwd, env, timeout, *, cancel=None):
+        time.sleep(0.6)  # a child that blocks the holder for longer than the stale window
+        out = _out_of(cmd)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text("<html>ok</html>", encoding="utf-8")
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(notebook_run, "_exec", _slow_child)
+
+    refusals: list[bool] = []
+    done = threading.Event()
+
+    def _probe() -> None:
+        # A background refresh trying to take the workspace, over and over, for the whole
+        # sweep. Every single attempt must be refused.
+        while not done.wait(0.1):
+            try:
+                with notebook_run.workspace_guard(ws):
+                    refusals.append(False)  # STOLE the lock — the heartbeat is not ticking
+            except notebook_run.RunBusy:
+                refusals.append(True)
+
+    prober = threading.Thread(target=_probe, daemon=True)
+    prober.start()
+    try:
+        report = sweep_run.sweep_workspace(cfg)
+    finally:
+        done.set()
+        prober.join(timeout=5)
+
+    assert report.clean == 2
+    assert len(refusals) >= 4, "the probe must have tried across more than one stale window"
+    assert all(refusals), "a live sweep's lock was stolen — the heartbeat does NOT tick"
 
 
 def test_the_report_is_structurally_unsyncable(tmp_path):
@@ -636,22 +729,63 @@ def test_an_edit_since_the_sweep_reopens_the_gate(monkeypatch, tmp_path):
 def test_a_cancelled_sweep_does_not_vouch(monkeypatch, tmp_path):
     cfg, ws = _mk(tmp_path, "notebooks/a.py", "notebooks/b.py")
     monkeypatch.setattr(notebook_run, "_exec", _fake_exec())
-    sweep_run.sweep_workspace(cfg, cancel=lambda: True)
+    sweep_run.sweep_workspace(cfg, cancel=_set_event())
 
     guard_fn, _ = _guard(ws)
     assert "cancelled" in guard_fn("uv.lock", LOCK.encode())[0]
 
 
-def test_combine_runs_both_guards_behind_one_guard_fn(tmp_path):
+def test_all_three_guards_ride_one_seam_with_their_own_ledgers(tmp_path, monkeypatch):
+    # THE composition, once admin policy landed a third guard: one guard_fn, three
+    # `collected` maps, three override rules. Each finding must land in its OWN ledger —
+    # merging any two of them would quietly give one guard the other's override policy.
+    from mooring import policy, workspace_config
+
     cfg, ws = _mk(tmp_path, "notebooks/a.py")
+    (ws / "reports").mkdir()
+    (ws / "reports" / "q1.py").write_text(NOTEBOOK, encoding="utf-8")
+    (ws / "mooring.toml").write_text(
+        '[policy]\npropose_only = ["reports/**"]\n', encoding="utf-8"
+    )
+    pol = policy.load(ws)
+    assert pol.propose_only.patterns  # the fixture really did register a rule
+
     content_fn, content_collected = pushguard.make_guard()
     lock_fn, lock_collected = _guard(ws)
-    guard_fn = pushguard.combine(content_fn, lock_fn)
+    gate_fn, blocked = policy.make_propose_gate(pol)
+    guard_fn = policy.compose_guards(content_fn, lock_fn, gate_fn)
 
     assert guard_fn("uv.lock", LOCK.encode())  # the deps gate fires
     assert guard_fn("notes.md", b"ghp_" + b"a" * 36 + b"\n")  # the content scan fires
+    assert guard_fn("reports/q1.py", NOTEBOOK.encode())  # the policy gate fires
+
     assert set(content_collected) == {"notes.md"}
     assert set(lock_collected) == {"uv.lock"}
+    assert set(blocked) == {"reports/q1.py"}
+    # Only the two scanner guards mint a token; a propose-only block has no override.
+    assert content_collected["notes.md"]["token"]
+    assert lock_collected["uv.lock"]["token"]
+    assert isinstance(blocked["reports/q1.py"], str)
+    # ...and a deletion reaches every guard (sync offers data=None for one).
+    assert guard_fn("reports/q1.py", None), "a propose-only DELETE is still a direct write"
+    assert workspace_config.guard_mode(ws) == "warn"
+
+
+def test_a_deleted_lock_is_questioned_like_a_rewrite(monkeypatch, tmp_path):
+    # sync now offers every candidate to the guard, deletions included. Removing the
+    # team's uv.lock is the most drastic environment change there is — everyone stops
+    # running against a pinned resolution — so it must not slip through as "no bytes".
+    cfg, ws = _mk(tmp_path, "notebooks/a.py")
+    monkeypatch.setattr(notebook_run, "_exec", _fake_exec())
+    sweep_run.sweep_workspace(cfg)  # a clean sweep UNDER the lock
+
+    guard_fn, collected = _guard(ws)
+    assert guard_fn("uv.lock", LOCK.encode()) == []  # the rewrite it covers passes
+
+    guard_fn, collected = _guard(ws)
+    findings = guard_fn("uv.lock", None)  # ...the DELETION does not
+    assert findings and "different uv.lock" in findings[0]
+    assert collected["uv.lock"]["token"]
 
 
 # -- the CLI surface ---------------------------------------------------------
@@ -785,16 +919,17 @@ def test_cli_push_warns_about_an_unchecked_lock_and_acknowledging_shows_it(
     from mooring import cli
 
     cfg, ws = _mk(tmp_path, "notebooks/a.py")
-    guard_fn, collected, lock_collected, *_ = cli._push_guard_fn(cfg, False)
-    assert guard_fn("uv.lock", LOCK.encode())
-    assert set(lock_collected) == {"uv.lock"} and collected == {}
+    g = cli._push_guard_fn(cfg, False)
+    assert g.guard_fn("uv.lock", LOCK.encode())
+    assert set(g.lock_collected) == {"uv.lock"}
+    assert g.collected == {} and g.blocked == {}
 
     # --acknowledge-findings does NOT turn the gate off: it lets the push through and
     # SHOWS what was let through — in the DEPS ledger, not the content one, so it can
     # never print in the content guard's "now visible to everyone" vocabulary.
-    guard_fn, collected, lock_collected, mode, ack, lock_ack = cli._push_guard_fn(cfg, True)
-    assert guard_fn("uv.lock", LOCK.encode()) == []
-    assert set(lock_ack) == {"uv.lock"} and ack == {}
+    g = cli._push_guard_fn(cfg, True)
+    assert g.guard_fn("uv.lock", LOCK.encode()) == []
+    assert set(g.lock_acknowledged) == {"uv.lock"} and g.acknowledged == {}
 
 
 def test_block_mode_never_walls_off_a_dependency_warning(tmp_path, monkeypatch):
@@ -805,11 +940,11 @@ def test_block_mode_never_walls_off_a_dependency_warning(tmp_path, monkeypatch):
     cfg, ws = _mk(tmp_path, "notebooks/a.py")
     monkeypatch.setattr(workspace_config, "guard_mode", lambda ws_: "block")
 
-    guard_fn, collected, lock_collected, mode, ack, lock_ack = cli._push_guard_fn(cfg, True)
+    g = cli._push_guard_fn(cfg, True)
 
-    assert mode == "block"
-    assert guard_fn("uv.lock", LOCK.encode()) == []  # the deps gate stays acknowledgeable
-    assert set(lock_ack) == {"uv.lock"}
+    assert g.mode == "block"
+    assert g.guard_fn("uv.lock", LOCK.encode()) == []  # the deps gate stays acknowledgeable
+    assert set(g.lock_acknowledged) == {"uv.lock"}
 
 
 # -- the hub surface ---------------------------------------------------------
@@ -890,3 +1025,86 @@ def test_hub_push_409_carries_the_sweep_finding_and_its_own_token(monkeypatch, t
     assert body["sweep_findings"][0]["path"] == "uv.lock"
     assert "breaks 1 notebook" in body["sweep_findings"][0]["findings"][0]["kind"]
     assert body["sweep_findings"][0]["token"]
+    assert body["policy_blocked"] == []
+
+
+def test_hub_409_reports_all_three_guards_each_under_its_own_rule(monkeypatch, tmp_path):
+    """The composition the merge created: three guards, one push, three lists.
+
+    Each keeps its own override rule, and the response has to carry all three faithfully —
+    folding any pair together would silently give one guard the other's policy. Here the
+    content policy is BLOCK, which is the sharpest case: content is unacknowledgeable,
+    the deps gate is still acknowledgeable, and the policy block has no token at all.
+    """
+    import json as _json
+
+    from mooring import policy
+    from mooring.hub.routes import sync as sync_routes
+
+    cfg, ws = _mk(tmp_path, "notebooks/a.py")
+    (ws / "reports").mkdir()
+    (ws / "reports" / "q1.py").write_text(NOTEBOOK, encoding="utf-8")
+    (ws / "mooring.toml").write_text(
+        '[policy]\npush_guard = "block"\npropose_only = ["reports/**"]\n', encoding="utf-8"
+    )
+    hub = _hub(tmp_path, monkeypatch)
+    monkeypatch.setattr(notebook_run, "_exec", _fake_exec(default=(1, "MarimoExc\n")))
+    sweep_run.sweep_workspace(hub.cfg)
+    assert policy.load(ws).guard_mode("warn") == "block"
+
+    def _sync_op_body(name, op):
+        op()
+        return {"lines": [], "summary": ""}, 200
+
+    def _run(guard_fn):
+        guard_fn("uv.lock", LOCK.encode())  # deps gate
+        guard_fn("notes.md", b"ghp_" + b"a" * 36 + b"\n")  # content scanner
+        guard_fn("reports/q1.py", NOTEBOOK.encode())  # policy propose-only
+
+    monkeypatch.setattr(hub, "_sync_op_body", _sync_op_body)
+    body = _json.loads(sync_routes._guarded_sync_op(hub, "push", {}, _run).body)
+
+    assert [f["path"] for f in body["guard_findings"]] == ["notes.md"]
+    assert [f["path"] for f in body["sweep_findings"]] == ["uv.lock"]
+    assert [b["path"] for b in body["policy_blocked"]] == ["reports/q1.py"]
+    # Content is unacknowledgeable under block, so the dialog offers no override —
+    # but the response is still confirmable, because the deps gate always is.
+    assert body["needs_confirm"] is True
+    assert body["guard_mode"] == "block"
+    # Only the two scanner guards mint tokens; a policy block carries none.
+    assert body["guard_findings"][0]["token"] and body["sweep_findings"][0]["token"]
+    assert "token" not in body["policy_blocked"][0]
+
+
+def test_hub_propose_never_installs_the_propose_only_gate(monkeypatch, tmp_path):
+    # It is the road that rule points at; firing there would strand those files entirely.
+    # The other two guards DO run on propose — they are about what the bytes are.
+    import json as _json
+
+    from mooring.hub.routes import sync as sync_routes
+
+    cfg, ws = _mk(tmp_path, "notebooks/a.py")
+    (ws / "reports").mkdir()
+    (ws / "reports" / "q1.py").write_text(NOTEBOOK, encoding="utf-8")
+    (ws / "mooring.toml").write_text(
+        '[policy]\npropose_only = ["reports/**"]\n', encoding="utf-8"
+    )
+    hub = _hub(tmp_path, monkeypatch)
+    seen: dict = {}
+
+    def _sync_op_body(name, op):
+        op()
+        return {"lines": [], "summary": ""}, 200
+
+    def _run(guard_fn):
+        seen["report"] = guard_fn("reports/q1.py", NOTEBOOK.encode())
+        seen["lock"] = guard_fn("uv.lock", LOCK.encode())
+
+    monkeypatch.setattr(hub, "_sync_op_body", _sync_op_body)
+    response = sync_routes._guarded_sync_op(hub, "propose", {}, _run, direct=False)
+    body = _json.loads(response.body)
+
+    assert seen["report"] == []  # the propose-only gate is absent
+    assert seen["lock"], "...but the dependency gate still guards a propose"
+    assert body["policy_blocked"] == []
+    assert [f["path"] for f in body["sweep_findings"]] == ["uv.lock"]

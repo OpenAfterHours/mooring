@@ -246,6 +246,10 @@ class AppConfig:
         return self.ai.code_index
 
     @property
+    def ai_notebook_catalog(self) -> bool:
+        return self.ai.notebook_catalog
+
+    @property
     def ai_traceback_guard(self) -> bool:
         return self.ai.traceback_guard
 

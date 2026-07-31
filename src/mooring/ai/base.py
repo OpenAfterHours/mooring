@@ -78,6 +78,7 @@ class AIProvider(Protocol):
         dictionary=None,
         semantic_models=None,
         helpers=None,
+        catalog=None,
         read_only: bool = False,
         run_investigation=None,
         pii: "PiiConfig | None" = None,
@@ -89,7 +90,10 @@ class AIProvider(Protocol):
         ``dictionary`` (a parsed index) enables the value-free dictionary tools;
         ``semantic_models`` (pre-parsed :class:`mooring.pbip_model.SemanticModel`
         objects, already gated by config + the synced per-model opt-out) enables
-        the Power BI model tools. ``pii`` is the whole
+        the Power BI model tools; ``catalog`` (a parsed
+        :class:`mooring.ai.notebookindex.Catalog`, already gated by config and
+        stripped of the team's AI-disabled notebooks) enables the repo-wide
+        notebook-catalog tools. ``pii`` is the whole
         :class:`~mooring.ai_config.PiiConfig`, passed as one object so a guard
         field can't be silently dropped in transit; None disables the guard.
         ``read_only`` builds the session with NO propose/edit tool (an investigate

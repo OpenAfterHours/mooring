@@ -41,23 +41,33 @@ const GuardFmt = (function () {
     return out;
   }
 
-  // Whether a response should open the confirm dialog at all, and whether the
-  // "Push anyway" button may be offered (never in block mode). `guard_mode` is
-  // the mode that applies to THIS response: the server sends "warn" when only
-  // the dependency gate fired, because that gate warns about a broken notebook
-  // rather than something that must not leave the machine — a content policy
-  // must not silently become a wall around lock files.
+  // One row per file the TEAM POLICY withheld from a direct push (propose-only
+  // paths). These carry no token and have no override — Propose is the road.
+  function policyRows(data) {
+    return ((data && data.policy_blocked) || []).map((b) => `${b.path} — ${b.reason}`);
+  }
+
+  // Whether a response should open the confirm dialog at all — ANY of the three
+  // guards firing is worth showing — and whether "Push anyway" may be offered.
+  //
+  // The override rules differ per guard and the server has already folded them
+  // into `needs_confirm` ("something here can be acknowledged": content in warn
+  // mode, or deps in any mode; never a policy block). `guard_mode` is the mode
+  // that APPLIES to this response: the server sends "warn" when no content
+  // finding fired, because a content policy has nothing to say about a lock file
+  // or a propose-only path and must not silently wall either off.
   function needsDialog(data) {
     if (!data) return false;
     const content = (data.guard_findings || []).length;
     const deps = (data.sweep_findings || []).length;
-    return !!(content || deps);
+    const blocked = (data.policy_blocked || []).length;
+    return !!(content || deps || blocked);
   }
   function canOverride(data) {
     return !!(data && data.needs_confirm) && data.guard_mode !== "block";
   }
 
-  return { rows, depsRows, allTokens, needsDialog, canOverride };
+  return { rows, depsRows, policyRows, allTokens, needsDialog, canOverride };
 })();
 
 if (typeof window !== "undefined") window.GuardFmt = GuardFmt;

@@ -64,14 +64,18 @@ const FilesTree = (function () {
   }
 
   // Whether a file row matches a free-text catalog query. Space-separated terms are
-  // ANDed; each must appear (case-insensitively) in the file's path, its harvested
-  // title, or any of its tags. An empty query matches everything. Pure — used to filter
-  // the listing client-side so an analyst can find a notebook in a big repo.
+  // ANDed; each must appear (case-insensitively) in the file's path, its harvested title,
+  // any of its tags, or its `terms` — the notebook's value-free CONTENT index (what it
+  // says it does, what it imports, the inputs/checks/SQL tables its source declares),
+  // sent per row by the hub. That last list is what turns the box from a filename filter
+  // into "which notebook produces the month-end number?". An empty query matches
+  // everything. Pure — all client-side, so searching a big repo costs no round-trip.
   function matches(file, query) {
     const q = String(query == null ? "" : query).trim().toLowerCase();
     if (!q) return true;
     const hay = [file.path, file.title]
       .concat(Array.isArray(file.tags) ? file.tags : [])
+      .concat(Array.isArray(file.terms) ? file.terms : [])
       .filter(Boolean)
       .join(" ")
       .toLowerCase();

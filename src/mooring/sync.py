@@ -1019,11 +1019,14 @@ def push(
     sleep=time.sleep,
     guard_fn=None,
 ) -> SyncResult:
-    """``guard_fn(rel_path, data) -> list[str]`` (optional) sees the exact bytes
-    about to upload; a non-empty return (value-free finding descriptions)
-    WITHHOLDS the file with a result line — never silently. Passed in rather
-    than imported (the ``snapshot_fn`` idiom), so the sync core stays free of
-    the scanners; see :mod:`mooring.pushguard`."""
+    """``guard_fn(rel_path, data) -> list[str]`` (optional) sees EVERY candidate
+    before it leaves: the exact bytes about to upload, or ``data=None`` for a
+    DELETION (which publishes no bytes but is still a write to the shared
+    branch). A non-empty return (value-free finding descriptions) WITHHOLDS the
+    candidate with a result line — never silently. Passed in rather than
+    imported (the ``snapshot_fn`` idiom), so the sync core stays free of the
+    scanners; see :mod:`mooring.pushguard` (content rules, which answer ``[]``
+    to a deletion) and :mod:`mooring.policy` (path rules, which do not)."""
     prep = _prepare(client, cfg)
     workspace, mft, report = prep.workspace, prep.mft, prep.report
     result = SyncResult()
@@ -1105,6 +1108,15 @@ def _push_candidate(
     base = review_tree.get(f.path) if in_review else f.base_sha
     dest = " → review branch (PR)" if in_review else ""
     if f.state is FileState.DELETED_LOCAL:
+        # A DELETION is a direct write to the shared branch too, so it goes through
+        # the same gate — with ``data=None`` for "no bytes leave here". A content
+        # scanner answers [] to that (nothing is published); a PATH rule still
+        # fires, which is the point: destroying a review-gated file is the
+        # direction that most needs review, and it used to be the one way round.
+        if guard_fn is not None:
+            findings = guard_fn(f.path, None)
+            if findings:
+                return _withhold(f, findings, result)
         response = _push_delete(client, mft, f, target, base, in_review, dest, message, result)
         if response is not None and not in_review and recall_log is not None:
             recall_log[f.path] = {"prev": f.base_sha, "new": None}
@@ -1352,6 +1364,13 @@ def propose(
             sleep(throttle)  # contents-API writes trip secondary rate limits if rapid
         base = review_tree.get(f.path)
         if f.state is FileState.DELETED_LOCAL:
+            # Gated like the content branch, with data=None (no bytes leave). Keeps
+            # push and propose symmetric, so a rule can never be true of one and
+            # silently false of the other.
+            findings = guard_fn(f.path, None) if guard_fn is not None else []
+            if findings:
+                _withhold(f, findings, result)
+                continue
             if base:
                 client.delete_file(
                     f.path,
