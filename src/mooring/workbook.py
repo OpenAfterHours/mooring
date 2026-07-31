@@ -16,10 +16,18 @@ Unlike the checks / inputs runtimes this one writes real data VALUES — that is
 product — so the sync exclusion of ``.mooring`` is the whole safety story, and the
 runtime re-checks the target against that directory before writing.
 
-mooring never opens the workbook itself: it has no Excel reader and will not grow
-one (see the no-base-dependency note in the runtime). It learns what happened from
-the value-free receipt under ``.mooring/workbooks/`` — the sheet NAMES, the
-workbook's path, and a mooring-authored failure reason.
+mooring never READS the workbook: it has no Excel reader and will not grow one (see
+the no-base-dependency note in the runtime). It learns what happened from the
+value-free receipt under ``.mooring/workbooks/`` — the sheet NAMES, the workbook's
+path, and a mooring-authored failure reason.
+
+It does, however, WRITE one part of it. :func:`stamp_provenance` replaces the
+workbook's ``Provenance`` sheet after the run, by hand, with ``zipfile`` and a
+few lines of XML — because the notebook is the party being vouched for and must not
+author the record that vouches for it. The facts used to travel to the kernel in
+environment variables, and a cell that rewrote ``os.environ`` could claim any repo
+and commit it liked. The HTML delivery has always stamped its footer from mooring's
+side after the render; this is the same rule, paid for in a little XML.
 
 The mooring-side module is ``workbook`` while the notebook-side name is
 ``mooring_deliver``: the analyst's import should match the Deliver action they
@@ -34,7 +42,14 @@ carries no path to marimo / the Copilot SDK / spaCy (locked by the
 from __future__ import annotations
 
 import json
+import os
+import posixpath
+import re
+import zipfile
+from collections.abc import Sequence
 from pathlib import Path
+from xml.etree import ElementTree
+from xml.sax.saxutils import escape
 
 from mooring.paths import safe_write_bytes
 
@@ -42,21 +57,31 @@ STATE_DIR = ".mooring"
 PYLIB_DIRNAME = "pylib"
 WORKBOOKS_DIRNAME = "workbooks"
 
-# The environment mooring's own run hands the kernel: where to put the workbook, and
-# the provenance facts only mooring knows (the manifest lives on this side). Absent
-# for an interactive run, and then the runtime claims no origin at all. Kept here
-# beside the installer so both halves of the contract are read in one place — the
-# runtime is standalone and cannot import these names.
+# The sheet mooring owns. The runtime writes a placeholder under this exact name (and
+# reserves it, so an analyst's own "Provenance" table is the one renamed) and
+# stamp_provenance finds it by name afterwards.
+PROVENANCE_SHEET = "Provenance"
+
+# The whole environment mooring's own run hands the kernel: where to put the workbook,
+# and which notebook the receipt belongs to. Deliberately NOT the provenance facts —
+# see stamp_provenance. Kept here beside the installer so both halves of the contract
+# are read in one place; the runtime is standalone and cannot import these names.
 ENV_TARGET = "MOORING_DELIVER_XLSX"
-ENV_ORIGIN = "MOORING_DELIVER_ORIGIN"
-ENV_LINK = "MOORING_DELIVER_LINK"
 ENV_NOTEBOOK = "MOORING_DELIVER_NOTEBOOK"
-ENV_DAY = "MOORING_DELIVER_DAY"
 
 # The packaged payload (this file's sibling) and the importable name it is written
 # out as in the notebook kernel.
 _RUNTIME_SRC = "_workbook_runtime.py"
 _MODULE_NAME = "mooring_deliver.py"
+
+# The three OOXML namespaces needed to walk from a sheet NAME to the zip entry holding
+# it: the sheet list in xl/workbook.xml carries a relationship id, which xl/_rels/
+# workbook.xml.rels resolves to a part name.
+_MAIN_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+_REL_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+_PKG_REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
+
+_CONTROL_CHARS = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f]")
 
 
 def pylib_dir(workspace: Path | str) -> Path:
@@ -114,7 +139,13 @@ def install_runtime(workspace: Path | str) -> None:
 
 
 def read_receipt(workspace: Path | str, rel_posix: str) -> dict:
-    """``{workbook, sheets, reason, updated}`` for one notebook's last delivery.
+    """``{workbook, sheets, failures, reason, utc_normalised, updated}`` for one
+    notebook's last delivery.
+
+    ``workbook`` is the path the run actually WROTE — empty when it wrote nothing, which
+    is what lets a caller tell "this run produced the file at that path" from "a file
+    happens to be there". ``failures`` lists every table that did not make it, so a
+    partial workbook can be refused rather than forwarded.
 
     Empty when there is no receipt, so a caller can treat "nothing recorded" and
     "recorded nothing" the same way. Best-effort: an unreadable / corrupt / foreign
@@ -128,12 +159,152 @@ def read_receipt(workspace: Path | str, rel_posix: str) -> dict:
     if not isinstance(data, dict) or data.get("notebook") != rel_posix:
         return {}
     sheets = data.get("sheets")
+    failures = data.get("failures")
     return {
         "workbook": data.get("workbook") if isinstance(data.get("workbook"), str) else "",
         "sheets": [s for s in sheets if isinstance(s, str)] if isinstance(sheets, list) else [],
+        "failures": _failures(failures),
         "reason": data.get("reason") if isinstance(data.get("reason"), str) else "",
+        "utc_normalised": bool(data.get("utc_normalised")),
         "updated": data.get("updated") if isinstance(data.get("updated"), str) else "",
     }
+
+
+def _failures(raw) -> list[dict]:
+    """The recorded per-table failures, normalised to ``{sheet, reason}`` strings. A
+    malformed entry is kept as an unnamed failure rather than dropped: it still means a
+    table did not make it, and forgetting that is how a partial workbook ships."""
+    if not isinstance(raw, list):
+        return []
+    out = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            out.append({"sheet": "", "reason": ""})
+            continue
+        sheet = entry.get("sheet")
+        reason = entry.get("reason")
+        out.append(
+            {
+                "sheet": sheet if isinstance(sheet, str) else "",
+                "reason": reason if isinstance(reason, str) else "",
+            }
+        )
+    return out
+
+
+class StampError(Exception):
+    """The provenance record could not be written. ``str(exc)`` is the reason. Fatal to
+    a delivery: an unstamped workbook still carries whatever the notebook put on that
+    sheet, and shipping an unverified claim is worse than shipping nothing."""
+
+
+def stamp_provenance(path: Path, rows: Sequence[tuple[str, str]]) -> None:
+    """Replace the workbook's ``Provenance`` sheet with mooring's own record.
+
+    THE anti-forgery step. The notebook wrote this workbook, so anything it put on that
+    sheet is a claim by the party being vouched for — in review, a cell that rewrote
+    ``os.environ`` produced a sheet claiming a repo and commit that mooring had
+    reported as never pushed. This overwrites the sheet afterwards, from
+    :func:`mooring.app.deliver.provenance`, and it is the LAST write to the file.
+
+    Done with ``zipfile`` and a few lines of XML rather than an Excel library, because
+    mooring adds no dependency for this feature — an ``.xlsx`` is a zip of XML parts,
+    and one part is replaced by name. The rows are written as inline strings, so the
+    new sheet depends on nothing else in the workbook. (Entries the old sheet had in
+    ``sharedStrings.xml`` are simply left unreferenced; Excel treats the counts there
+    as hints and rewrites them on save.)
+
+    Raises :class:`StampError` and leaves the workbook untouched if anything is off —
+    a missing or duplicated ``Provenance`` sheet included, since either means the
+    notebook has been doing something to the file that mooring did not ask for."""
+    try:
+        with zipfile.ZipFile(path) as book:
+            infos = book.infolist()
+            entries = {info.filename: book.read(info.filename) for info in infos}
+    except (OSError, ValueError, zipfile.BadZipFile) as exc:
+        raise StampError(f"the workbook could not be read back: {exc}") from exc
+
+    part = _provenance_part(entries)
+    entries[part] = _sheet_xml([("Field", "Value"), *rows])
+
+    tmp = path.with_name(path.name + ".stamp.tmp")
+    try:
+        with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as out:
+            for info in infos:
+                out.writestr(_fresh_entry(info), entries[info.filename])
+        with zipfile.ZipFile(tmp) as check:
+            if check.namelist() != [info.filename for info in infos]:
+                raise StampError("the stamped workbook lost a part")
+        os.replace(tmp, path)
+    except (OSError, ValueError, zipfile.BadZipFile) as exc:
+        _unlink(tmp)
+        raise StampError(f"the provenance record could not be written: {exc}") from exc
+    except StampError:
+        _unlink(tmp)
+        raise
+
+
+def _provenance_part(entries: dict[str, bytes]) -> str:
+    """The zip entry holding the ``Provenance`` sheet: sheet name -> relationship id
+    (``xl/workbook.xml``) -> part name (``xl/_rels/workbook.xml.rels``)."""
+    try:
+        book = ElementTree.fromstring(entries["xl/workbook.xml"])
+        rels = ElementTree.fromstring(entries["xl/_rels/workbook.xml.rels"])
+    except (KeyError, ElementTree.ParseError) as exc:
+        raise StampError(f"the workbook is not a readable .xlsx: {exc}") from exc
+    ids = [
+        sheet.get(f"{{{_REL_NS}}}id")
+        for sheet in book.iter(f"{{{_MAIN_NS}}}sheet")
+        if sheet.get("name") == PROVENANCE_SHEET
+    ]
+    if len(ids) != 1 or not ids[0]:
+        raise StampError(f"the workbook has no single {PROVENANCE_SHEET} sheet")
+    for rel in rels.iter(f"{{{_PKG_REL_NS}}}Relationship"):
+        if rel.get("Id") != ids[0]:
+            continue
+        target = (rel.get("Target") or "").replace("\\", "/")
+        part = target.lstrip("/") if target.startswith("/") else posixpath.normpath("xl/" + target)
+        if part in entries:
+            return part
+        break
+    raise StampError(f"the {PROVENANCE_SHEET} sheet could not be located in the workbook")
+
+
+def _fresh_entry(info: zipfile.ZipInfo) -> zipfile.ZipInfo:
+    """A new zip entry carrying only the attributes worth preserving. Re-using the
+    original ``ZipInfo`` would carry its ``flag_bits`` across too — including the
+    data-descriptor bit, which ``writestr`` does not clear and which would then
+    describe a record we are not writing."""
+    fresh = zipfile.ZipInfo(info.filename, info.date_time)
+    fresh.compress_type = info.compress_type
+    fresh.external_attr = info.external_attr
+    fresh.internal_attr = info.internal_attr
+    fresh.create_system = info.create_system
+    return fresh
+
+
+def _sheet_xml(rows: Sequence[tuple[str, str]]) -> bytes:
+    """A minimal two-column worksheet part. Inline strings (``t="inlineStr"``) so the
+    sheet is self-contained — nothing to keep in step with ``sharedStrings.xml``."""
+    body = []
+    for index, cells in enumerate(rows, start=1):
+        line = "".join(
+            f'<c r="{column}{index}" t="inlineStr"><is><t xml:space="preserve">'
+            f"{escape(_CONTROL_CHARS.sub('', str(value)))}</t></is></c>"
+            for column, value in zip(("A", "B"), cells)
+        )
+        body.append(f'<row r="{index}">{line}</row>')
+    return (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        f'<worksheet xmlns="{_MAIN_NS}"><sheetData>{"".join(body)}</sheetData></worksheet>'
+    ).encode("utf-8")
+
+
+def _unlink(path: Path) -> None:
+    try:
+        path.unlink()
+    except OSError:
+        pass
 
 
 def clear_receipt(workspace: Path | str, rel_posix: str) -> None:

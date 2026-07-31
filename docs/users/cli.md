@@ -178,8 +178,10 @@ branch, so the changes can be reviewed as a pull request (see
   HTML embeds the values but lives in `.mooring`, which never syncs — attach it to
   email/Teams yourself. See [Delivering a result](daily-workflow.md#delivering-a-result-for-a-stakeholder).
   `--excel` delivers an `.xlsx` instead: one sheet per table the notebook named with
-  `import mooring_deliver`, plus a **Provenance** sheet. The workbook is written by
-  the notebook's own environment, so the repo needs an Excel writer
+  `import mooring_deliver`, plus a **Provenance** sheet mooring stamps after the run.
+  It is all-or-nothing — a table that could not be written fails the command and names
+  the lost sheet, rather than delivering a workbook missing one. The workbook is
+  written by the notebook's own environment, so the repo needs an Excel writer
   (`mooring deps add openpyxl`); without one the run still completes and the command
   says what to add. See
   [Delivering it as an Excel workbook](daily-workflow.md#delivering-it-as-an-excel-workbook).

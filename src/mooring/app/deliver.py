@@ -136,36 +136,39 @@ def deliver_excel(cfg: Config, rel_path: str) -> DeliverResult:
 
     The workbook is written by the NOTEBOOK, not by mooring: the injected
     ``mooring_deliver`` helper (:mod:`mooring.workbook`) writes it from the kernel using
-    whichever Excel engine the repo's own environment has. mooring supplies the target
-    path and the provenance facts only it knows (they travel as environment variables —
-    the kernel cannot read the manifest) and afterwards reads the value-free receipt to
-    learn what was delivered. It never opens the workbook: it has no Excel reader, and
-    the whole point of the design is that it does not need one.
+    whichever Excel engine the repo's own environment has. mooring supplies only the
+    target path, reads back the value-free receipt to learn what the run did, and then
+    stamps the provenance sheet itself. It never READS the workbook: it has no Excel
+    reader, and the whole point of the design is that it does not need one.
 
-    Refuses on a run that did not complete cleanly — a failed cell means the numbers may
-    be wrong, and a wrong workbook forwarded to a stakeholder is the worst outcome this
-    feature has. Raises :class:`DeliverError` for a non-notebook target, a failed run, or
-    a notebook that named no tables, and ``ValueError`` / ``FileNotFoundError`` (from
-    :func:`notebooks.ws_file`) for a bad path."""
+    Four things have to hold before this hands anything over, because every one of them
+    is a way to ship a wrong number in a board pack:
+
+    1. the run completed cleanly — a failed cell means the numbers may be wrong;
+    2. the receipt records no failed table — a workbook quietly missing a sheet looks
+       exactly like a complete one once forwarded;
+    3. the receipt says THIS run wrote the file at THIS path — a file merely existing
+       there is the previous delivery, which is what an ``os.replace`` blocked by the
+       analyst's own open Excel window leaves behind;
+    4. mooring's provenance replaced the notebook's placeholder.
+
+    Raises :class:`DeliverError` when any of them fails, and ``ValueError`` /
+    ``FileNotFoundError`` (from :func:`notebooks.ws_file`) for a bad path."""
     workspace = cfg.workspace()
     _ensure_notebook(workspace, rel_path)
     rel_posix = rel_path.replace("\\", "/")
 
     out_path = outbox_target(workspace, rel_posix, ext=".xlsx")
-    origin, link, short = provenance(cfg, rel_posix, workspace)
     # Clear both sides BEFORE the run, so what is found afterwards can only be this
     # run's. Otherwise a run that writes nothing would happily "deliver" yesterday's
     # workbook — the same staleness trap the runtime's reset() guards against.
     had_previous = _clear(out_path)
     workbook.clear_receipt(workspace, rel_posix)
 
-    env_extra = {
-        workbook.ENV_TARGET: str(out_path),
-        workbook.ENV_NOTEBOOK: rel_posix,
-        workbook.ENV_ORIGIN: origin,
-        workbook.ENV_LINK: link,
-        workbook.ENV_DAY: f"{datetime.now():%Y-%m-%d}",
-    }
+    # The kernel is told WHERE to write and WHICH notebook it is, and nothing else. The
+    # provenance facts deliberately do not travel this way: a cell can rewrite
+    # os.environ, and then the notebook would be authoring its own vouching record.
+    env_extra = {workbook.ENV_TARGET: str(out_path), workbook.ENV_NOTEBOOK: rel_posix}
     render = workbook.render_target(workspace, rel_posix)
     try:
         outcome = notebook_run.run(
@@ -182,8 +185,23 @@ def deliver_excel(cfg: Config, rel_path: str) -> DeliverResult:
         raise DeliverError(_failed_run(outcome))
 
     receipt = workbook.read_receipt(workspace, rel_posix)
-    if not out_path.is_file():
+    failures = receipt.get("failures") or []
+    if failures:
+        _clear(out_path)
+        raise DeliverError(_partial(failures))
+    if not _run_wrote(receipt, workspace, out_path):
         raise DeliverError(_no_workbook(receipt, had_previous))
+
+    origin, link, short = provenance(cfg, rel_posix, workspace)
+    rows = _provenance_rows(origin, link, rel_posix, receipt)
+    try:
+        workbook.stamp_provenance(out_path, rows)
+    except workbook.StampError as exc:
+        # Without mooring's stamp the sheet still holds whatever the notebook put there.
+        # Shipping an unverified claim is worse than shipping nothing.
+        _clear(out_path)
+        raise DeliverError(f"The workbook's provenance could not be recorded: {exc}") from exc
+
     out_rel = out_path.relative_to(workspace).as_posix()
     activity.record(workspace, "deliver", path=rel_posix, out=out_rel)
     return DeliverResult(
@@ -195,6 +213,45 @@ def deliver_excel(cfg: Config, rel_path: str) -> DeliverResult:
     )
 
 
+def _run_wrote(receipt: dict, workspace: Path, out_path: Path) -> bool:
+    """Whether the run itself wrote the workbook now sitting at ``out_path``.
+
+    "A file is there" is NOT the same claim and was the difference between delivering
+    today's numbers and yesterday's: when the analyst has the previous workbook open,
+    the kernel's final ``os.replace`` fails with a sharing violation and the old file
+    survives, with the same name and the same date stamp. The receipt is written only
+    on a completed write, and it names the path — so both are checked."""
+    written = (receipt.get("workbook") or "").strip()
+    if not written or not out_path.is_file():
+        return False
+    try:
+        return (workspace / written).resolve() == out_path.resolve()
+    except OSError:
+        return False
+
+
+def _provenance_rows(origin: str, link: str, rel_posix: str, receipt: dict) -> list[tuple[str, str]]:
+    """The rows mooring stamps onto the Provenance sheet — the workbook's counterpart to
+    the HTML footer, built from the same :func:`provenance` call, so a never-pushed
+    notebook gets no commit and no link here either."""
+    rows = [
+        ("Generated by", "mooring"),
+        ("Source", origin),
+        ("Notebook", rel_posix),
+        ("Date", f"{datetime.now():%Y-%m-%d}"),
+    ]
+    if link:
+        rows.append(("View on GitHub", link))
+    sheets = receipt.get("sheets") or []
+    if sheets:
+        rows.append(("Sheets", ", ".join(sheets)))
+    if receipt.get("utc_normalised"):
+        # A timestamp column whose zone changed is undiscoverable by the reader, so the
+        # workbook says so itself rather than leaving it to the docs.
+        rows.append(("Timestamps", "UTC (timezone-aware values were normalised)"))
+    return rows
+
+
 def _clear(out_path: Path) -> bool:
     """Remove a previous workbook at ``out_path``; True if one was there."""
     try:
@@ -202,6 +259,20 @@ def _clear(out_path: Path) -> bool:
         return True
     except OSError:
         return False
+
+
+def _partial(failures: list[dict]) -> str:
+    """Why a delivery with a lost table is refused outright. Names the sheets (the
+    analyst's own labels) and the recorded reason, both mooring-authored strings."""
+    named = [f["sheet"] for f in failures if f.get("sheet")]
+    which = ", ".join(named) if named else f"{len(failures)} table(s)"
+    reason = next((f["reason"] for f in failures if f.get("reason")), "")
+    tail = f" ({reason})" if reason else ""
+    return (
+        f"The workbook was not delivered: {which} could not be written{tail}. "
+        "A workbook missing a sheet looks complete once it is forwarded, so mooring "
+        "delivers all of it or none of it."
+    )
 
 
 def _failed_run(outcome: notebook_run.RunOutcome) -> str:

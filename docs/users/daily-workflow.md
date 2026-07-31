@@ -117,14 +117,39 @@ plus a **Provenance** sheet carrying the same repo / commit / notebook / date /
 list of dicts, or a `{column: values}` mapping; naming the same sheet twice
 replaces it, so re-running a cell is safe.
 
+!!! warning "It's all of the workbook or none of it"
+
+    If any table can't be written, mooring **refuses the whole delivery** and tells
+    you which sheet was lost — it never hands over a workbook that is quietly
+    missing one. A run with a failed cell is refused for the same reason. Half the
+    numbers looks exactly like all of them once somebody forwards it.
+
 The workbook is written by **your notebook's own environment**, not by mooring, so
-it needs an Excel writer among the repo's packages. If none is installed you get a
-message saying exactly that — add one for the team with `mooring deps add openpyxl`
-(or `xlsxwriter`) and deliver again. Nothing breaks in the meantime: the run
-finishes normally, you just get no workbook.
+it needs an Excel writer among the repo's packages (`xlsxwriter` or `openpyxl` —
+polars' `write_excel` and pandas' `to_excel` need one of the same two). If none is
+installed you get a message saying exactly that: add one for the team with
+`mooring deps add openpyxl` and deliver again. Nothing breaks in the meantime —
+the run finishes normally, you just get no workbook.
+
+#### What mooring changes on the way into Excel
+
+Excel can't hold everything Python can, and the two writer packages disagree about
+what to do. Mooring settles it once, so the same notebook gives the same workbook
+whichever package your repo has:
+
+| Your value | In the workbook | Why |
+| --- | --- | --- |
+| Text starting with `=` `+` `-` `@` | the text, exactly | otherwise Excel treats it as a **live formula** — `=1+1` would reach your reader as `2`, and a value from an upstream free-text field could run something |
+| `NaN`, `inf`, `-inf` | `NaN`, `Infinity`, `-Infinity` | one writer leaves these **blank** (so a broken ratio reads as "no data" and sums as zero); the other refuses the file |
+| A number over 15 significant digits | the exact digits, as text | Excel rounds past 15, and a rounded account number breaks the join your reader does next |
+| A timezone-aware timestamp | the same instant **in UTC** | Excel has no timezones; keeping the local wall clock would land one instant on different *dates*. The Provenance sheet says when this happened |
+| Text over 32,767 characters | cut, ending `…[truncated by mooring]` | Excel's cell limit, marked so a cut memo can't read as a whole one |
 
 Like the HTML, the workbook lands in `.mooring/outbox/` and **never syncs** — and
-this one is nothing but your data, so that exclusion is doing real work.
+this one is nothing but your data, so that exclusion is doing real work. The
+Provenance sheet is written by mooring *after* your notebook has finished, so it
+records where the numbers actually came from rather than what the notebook says
+they did.
 
 ## Checking your numbers tie out
 
