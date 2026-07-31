@@ -179,6 +179,7 @@ source_modules =
     mooring.inputs
     mooring.connections
     mooring.schedule
+    mooring.params
     mooring.config
     mooring.config_store
     mooring.ai_config

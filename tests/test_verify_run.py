@@ -38,7 +38,7 @@ def _fake_export(returncode, stderr="", *, produce=True, before=None):
     environment failure where marimo never starts), and return the given exit code.
     ``before`` runs first, to simulate an edit landing mid-run."""
 
-    def _run(cmd, cwd, env, timeout):
+    def _run(cmd, cwd, env, timeout, cancel=None):
         if before is not None:
             before()
         if produce:
@@ -175,7 +175,7 @@ def test_refuses_a_plain_module(tmp_path):
 def test_timeout_surfaces_verify_error_and_cleans_up(tmp_path, monkeypatch):
     cfg, ws = _mk(tmp_path)
 
-    def _slow(cmd, cwd, env, timeout):
+    def _slow(cmd, cwd, env, timeout, cancel=None):
         raise subprocess.TimeoutExpired(cmd, 1)
 
     monkeypatch.setattr(notebook_run, "_exec", _slow)
@@ -189,7 +189,7 @@ def test_launch_oserror_surfaces_verify_error(tmp_path, monkeypatch):
     # it must become a clean VerifyError, not an unhandled 500/traceback.
     cfg, ws = _mk(tmp_path)
 
-    def _boom(cmd, cwd, env, timeout):
+    def _boom(cmd, cwd, env, timeout, cancel=None):
         raise PermissionError("access denied")
 
     monkeypatch.setattr(notebook_run, "_exec", _boom)

@@ -53,6 +53,8 @@ mooring schedule rm | pause | resume notebooks/board.py
 mooring schedule background enable | disable | status
 mooring refresh notebooks/board.py [--no-pull] [--deliver] [--json]
 mooring refresh --due [--json]
+mooring run notebooks/board.py --for region=EMEA,APAC,AMER [--no-deliver] [--json]
+mooring run notebooks/board.py --for month=2026-01..2026-06
 mooring ai status
 mooring ai login [--host HOST]
 mooring ai dictionary check [--repo ALIAS]
@@ -239,6 +241,52 @@ local copy).
     `mooring refresh --json` is non-interactive and has stable exit codes precisely so a team
     that already runs an orchestrator can call it from a task. mooring deliberately does not
     embed one — see the [roadmap plan](../developers/roadmap/scheduled-refresh.md#why-not-an-orchestrator).
+
+### `run`
+
+Run the same notebook repeatedly — once per region, entity or month — and save **one artifact
+per value** into your local outbox. This is the month-end "same pack, six times" loop, minus
+the editing. See [Running one notebook for each value](daily-workflow.md#running-one-notebook-for-each-value).
+
+```bash
+mooring run notebooks/board.py --for region=EMEA,APAC,AMER
+mooring run notebooks/board.py --for month=2026-01..2026-06
+```
+
+- `--for NAME=VALUES` (required) — the parameter and its values, comma-separated. An item may
+  be a range: whole numbers (`1..4`) or calendar months (`2026-01..2026-06`). Anything else is
+  taken literally, so `--for entity="ACME,Globex"` needs no special syntax.
+- `--no-deliver` — run each value and report, without writing artifacts.
+- `--json` — machine-readable output, including a per-value outcome.
+
+The notebook reads its value with the injected `mooring_params` helper:
+
+```python
+import mooring_params
+
+region = mooring_params.get("region", "EMEA")   # the default is required
+```
+
+**The default is what keeps the notebook normal.** With no parameter supplied — opening it in
+the editor, `mooring verify`, a scheduled refresh — `get` returns the default and the notebook
+behaves exactly as it did before. `mooring run` will refuse a notebook that never reads the
+parameter you named, because running it once per value would write differently-named
+artifacts holding identical numbers.
+
+Values run **one at a time**, and one failing value never stops the others — each is reported
+separately. `Ctrl+C` genuinely stops the run: the marimo process tree is killed and every
+value that never ran is listed as such.
+
+Exit codes (stable, for scripting): **0** every value ran clean · **1** at least one value
+failed · **4** stopped part-way, so the pack is incomplete.
+
+!!! warning "`run` is attended; it is not a schedule"
+
+    `mooring run` needs you watching — it is not something to put on a cadence. A schedule's
+    promise is one notebook, one receipt, one artifact whose staleness is arithmetic; N
+    artifacts on a cadence is a different promise about retention that mooring has not made.
+    A fan-out and a scheduled refresh also share one workspace lock, so they can never run
+    over each other.
 
 ### `connections` — share a DB connection shape, keep the secret local
 

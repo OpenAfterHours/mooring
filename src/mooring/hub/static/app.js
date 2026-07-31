@@ -445,6 +445,131 @@ function verifyAction(path) {
     "Verifying… this re-runs the whole notebook (can take a minute).");
 }
 
+// -- parameterised runs ------------------------------------------------------
+// "Run this notebook once per region / entity / month." Attended: the analyst watches it
+// go, value by value, and can stop it. Values run ONE AT A TIME, so the card shows exactly
+// one "running…" row and everything else is queued or reported.
+//
+// Progress is polled rather than streamed. A fan-out changes state at most once per
+// notebook run (tens of seconds), so a 1s poll on loopback carries the same information an
+// SSE stream would, with no broadcaster to keep correct.
+let paramsPoll = null;
+let paramsPath = "";
+
+function paramsAction(path) {
+  paramsPath = path;
+  $("params-path").textContent = path;
+  $("params-for").value = "";
+  $("params-deliver").checked = true;
+  $("params-table").classList.add("hidden");
+  $("params-banner").classList.add("hidden");
+  $("params-card").classList.remove("hidden");
+  renderParamsPreview();
+  $("params-card").scrollIntoView({ behavior: "smooth", block: "nearest" });
+  $("params-for").focus();
+}
+
+// "Runs 3 times: EMEA, APAC, AMER" — the last cheap moment to notice a typo before
+// committing the machine to N notebook runs. The SERVER re-validates everything.
+function renderParamsPreview() {
+  const spec = ParamsFmt.previewValues($("params-for").value);
+  const el = $("params-preview");
+  if (!spec.name || !spec.values.length) {
+    el.textContent = "Give a parameter and its values, e.g. region=EMEA,APAC,AMER or month=2026-01..2026-06.";
+    return;
+  }
+  const shown = spec.values.slice(0, 8).join(", ");
+  const more = spec.values.length > 8 ? `, … (${spec.values.length} in total)` : "";
+  el.textContent = `Runs ${spec.values.length} time(s), one at a time — ${spec.name} = ${shown}${more}.`;
+}
+
+async function startParamsRun() {
+  if (!paramsPath) return;
+  showError("");
+  const data = await api("/api/run/start", {
+    path: paramsPath,
+    for: $("params-for").value,
+    deliver: $("params-deliver").checked,
+  });
+  if (data.error) {
+    showError(data.error);
+    return;
+  }
+  renderParamsRun(data.run);
+  startParamsPolling();
+}
+
+function startParamsPolling() {
+  stopParamsPolling();
+  paramsPoll = setInterval(async () => {
+    const data = await api("/api/run/state");
+    const run = data && data.run;
+    if (!run) return stopParamsPolling();
+    renderParamsRun(run);
+    // The run keeps its handle after finishing (so a reload can still read the report),
+    // so polling stops on `done` rather than on the handle disappearing.
+    if (run.done) {
+      stopParamsPolling();
+      refresh(); // artifacts landed in .mooring/outbox; re-read the file list
+    }
+  }, 1000);
+}
+
+function stopParamsPolling() {
+  if (paramsPoll) clearInterval(paramsPoll);
+  paramsPoll = null;
+}
+
+async function cancelParamsRun() {
+  const data = await api("/api/run/cancel", {});
+  if (data.error) showError(data.error);
+  else if (data.run) renderParamsRun(data.run);
+}
+
+function renderParamsRun(snap) {
+  if (!snap) return;
+  $("params-card").classList.remove("hidden");
+  $("params-path").textContent = snap.notebook || paramsPath;
+  const banner = $("params-banner");
+  banner.textContent = ParamsFmt.summary(snap);
+  banner.classList.remove("hidden");
+  // The banner turns red/amber for a partial pack: "2 of 3 ran clean" must never look
+  // like the calm end of a successful run.
+  const tone = ParamsFmt.tone(snap);
+  banner.classList.toggle("notice-error", tone === "bad" || tone === "warn");
+  // Start is unavailable while a run is in flight; Cancel appears only then.
+  $("params-start").disabled = !snap.done;
+  $("params-cancel").classList.toggle("hidden", !!snap.done);
+  $("params-cancel").disabled = !!snap.cancelling;
+
+  const table = $("params-table");
+  table.classList.remove("hidden");
+  const body = table.querySelector("tbody");
+  body.textContent = "";
+  for (const row of ParamsFmt.rows(snap)) {
+    const tr = document.createElement("tr");
+    const value = document.createElement("td");
+    value.className = "path";
+    value.textContent = row.value;
+    const state = document.createElement("td");
+    const badge = document.createElement("span");
+    badge.className = `badge ${row.state.tone}`;
+    badge.textContent = row.state.text;
+    state.appendChild(badge);
+    const detail = document.createElement("td");
+    detail.className = "muted";
+    detail.textContent = row.detail;
+    tr.append(value, state, detail);
+    body.appendChild(tr);
+  }
+}
+
+function closeParamsCard() {
+  stopParamsPolling();
+  paramsPath = "";
+  $("params-card").classList.add("hidden");
+}
+
 // -- scheduled refresh -------------------------------------------------------
 // The board that makes a stale refresh impossible to miss. lastSchedules is the last
 // /api/schedules payload, kept so a background poll can re-render without refetching and
@@ -1139,6 +1264,13 @@ function fileActions(file, opts) {
   // step. Notebooks only; the badge auto-clears when the file is edited.
   if (isNotebook && file.has_local) {
     actions.push(["Verify runs", () => verifyAction(file.path)]);
+  }
+  // Run this notebook once per region / entity / month, with one artifact per value —
+  // the month-end "same pack, six times" loop. Attended: you watch it and can stop it.
+  // The server refuses a notebook that never reads the parameter, since that would write
+  // differently-named artifacts holding identical numbers.
+  if (isNotebook && file.has_local) {
+    actions.push(["Run for each…", () => paramsAction(file.path)]);
   }
   // Schedule a recurring refresh (pull → run → report). Only offered on a notebook that
   // has run clean — the server enforces that too (a 409), but offering it on an unverified
@@ -2688,6 +2820,10 @@ $("schedule-cancel").addEventListener("click", () => {
   renderSchedules(); // the card hides itself again when there are no schedules to show
 });
 $("schedule-cadence").addEventListener("change", syncScheduleDayVisibility);
+$("params-start").addEventListener("click", startParamsRun);
+$("params-cancel").addEventListener("click", cancelParamsRun);
+$("params-close").addEventListener("click", closeParamsCard);
+$("params-for").addEventListener("input", renderParamsPreview);
 $("btn-pull").addEventListener("click", async () => {
   const data = await action("/api/pull", {});
   // The pull response carries the digest of what just landed, computed against

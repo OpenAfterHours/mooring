@@ -501,6 +501,53 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     refresh_cmd.add_argument("--repo", default=None, metavar="ALIAS", help=_REPO_ARG_HELP)
 
+    # Deliberately its OWN command rather than a `refresh --for` flag. `refresh` is bound to
+    # the schedule model — it pulls, it records against a cadence, its exit codes describe a
+    # cadence's states, and its whole point is that it can happen unattended. A fan-out has
+    # no cadence, does not pull, is watched, and produces N artifacts; putting it behind the
+    # same verb would also invite `schedule add --for`, which is a promise about retention
+    # and freshness that has deliberately NOT been made.
+    run_cmd = sub.add_parser(
+        "run",
+        help="run a notebook once per parameter value and save one artifact per value",
+        description=(
+            "Run one notebook repeatedly — once per region, entity or month — and write one "
+            "HTML artifact per value into the local .mooring/outbox. Runs sequentially with "
+            "you watching; Ctrl+C stops it. Never pushes and never pulls. The notebook reads "
+            "its value with `mooring_params.get(\"region\", \"EMEA\")`, so it still runs "
+            "exactly as it does today when you open or verify it. Exit codes: 0 every value "
+            "ran clean, 1 at least one value failed, 4 stopped part-way (an incomplete pack)."
+        ),
+    )
+    run_cmd.add_argument("path", help="workspace-relative notebook path to run")
+    run_cmd.add_argument(
+        "--for",
+        dest="for_spec",
+        required=True,
+        metavar="NAME=VALUES",
+        help=(
+            "the parameter and its values, e.g. region=EMEA,APAC,AMER or "
+            "month=2026-01..2026-06 (ranges: whole numbers or calendar months)"
+        ),
+    )
+    run_cmd.add_argument(
+        "--deliver",
+        dest="deliver",
+        action="store_true",
+        default=None,
+        help="save an HTML artifact per value (the default)",
+    )
+    run_cmd.add_argument(
+        "--no-deliver",
+        dest="deliver",
+        action="store_false",
+        help="just run each value and report; write no artifacts",
+    )
+    run_cmd.add_argument(
+        "--json", action="store_true", help="emit machine-readable JSON (for a wrapper script)"
+    )
+    run_cmd.add_argument("--repo", default=None, metavar="ALIAS", help=_REPO_ARG_HELP)
+
     ai = sub.add_parser("ai", help="AI copilot: sign in to Copilot and check status")
     ai_sub = ai.add_subparsers(dest="ai_command", required=True)
     ai_sub.add_parser("status", help="show the AI provider's sign-in status")
@@ -1698,6 +1745,80 @@ def _refresh_exit_code(results: list) -> int:
     if schedule.DEGRADED in outcomes:
         return 4
     return 0
+
+
+def cmd_run(cfg: config.Config, args: argparse.Namespace) -> int:
+    """``mooring run <path> --for NAME=VALUES`` — the attended fan-out.
+
+    Ctrl+C is a real cancel, not a half-killed kernel: it sets the same event the hub's
+    Cancel button sets, so the in-flight marimo process TREE is torn down and the values
+    still queued are reported as not run. The partial result is then printed exactly like a
+    completed one — an interrupted pack must never look finished."""
+    import dataclasses
+    import json as _json
+    import threading
+
+    from mooring import params
+    from mooring.app import param_runs, refresh
+
+    try:
+        spec = params.parse_spec(args.for_spec)
+    except params.ParamError as exc:
+        sys.exit(str(exc))
+
+    cancel = threading.Event()
+    quiet = bool(args.json)
+    if not quiet:
+        print(f"Running {args.path} for {spec.describe()} ({len(spec)} value(s), one at a time).")
+
+    def _progress(event: dict) -> None:
+        if quiet:
+            return
+        if event["kind"] == "running":
+            print(f"[{event['index']}/{event['total']}] {event['value']}… ", end="", flush=True)
+        elif event["kind"] == "value":
+            print(param_runs.describe_run(param_runs.ValueRun(**event["run"])))
+
+    try:
+        result = param_runs.fan_out(
+            cfg,
+            args.path,
+            spec,
+            do_deliver=args.deliver is not False,
+            on_event=_progress,
+            cancel=cancel,
+        )
+    except KeyboardInterrupt:
+        # The fan-out runs on THIS thread, so Ctrl+C lands here rather than in the loop.
+        # Nothing is left running: the runner's own kill already tore the tree down.
+        cancel.set()
+        sys.exit("Cancelled. Some values may not have run — check .mooring/outbox.")
+    except (ValueError, FileNotFoundError, param_runs.FanOutRefused, refresh.RefreshBusy) as exc:
+        if args.json:
+            print(_json.dumps({"error": str(exc), "runs": []}))
+        sys.exit(str(exc))
+
+    if args.json:
+        print(
+            _json.dumps(
+                {
+                    "notebook": result.notebook,
+                    "param": result.param,
+                    "values": list(result.values),
+                    "complete": result.complete,
+                    "cancelled": result.cancelled,
+                    "runs": [dataclasses.asdict(run) for run in result.runs],
+                },
+                indent=2,
+            )
+        )
+    else:
+        print(param_runs.describe_result(result))
+        if result.artifacts:
+            print("Artifacts (local only, in .mooring/outbox — never pushed):")
+            for rel in result.artifacts:
+                print(f"  {rel}")
+    return param_runs.exit_code(result)
 
 
 def cmd_checks(cfg: config.Config, args: argparse.Namespace) -> int:
@@ -2949,6 +3070,8 @@ def _dispatch(
         return cmd_schedule(app_cfg, cfg, args)
     if command == "refresh":
         return cmd_refresh(cfg, args)
+    if command == "run":
+        return cmd_run(cfg, args)
     if command == "checks":
         return cmd_checks(cfg, args)
     if command == "inputs":

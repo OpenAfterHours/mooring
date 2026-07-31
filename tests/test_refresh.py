@@ -68,7 +68,7 @@ def _fake_exec(returncode=0, stderr="", *, produce=True, during=None):
     """Stand in for `notebook_run._exec`. ``during`` runs while the notebook is "executing",
     which is how a test plants the receipts a real run's mooring_checks cell would write."""
 
-    def _run(cmd, cwd, env, timeout):
+    def _run(cmd, cwd, env, timeout, cancel=None):
         if during is not None:
             during()
         if produce:

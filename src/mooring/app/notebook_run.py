@@ -1,9 +1,10 @@
 """The ONE hardened way to execute a notebook headlessly and learn only value-free facts.
 
-Both callers that run a whole notebook — the attended **Verify** (:mod:`mooring.app.verify_run`)
-and the **scheduled refresh** (:mod:`mooring.app.refresh`) — sit on this. The four rules below
-are subtle, were hard-won in verify, and are exactly the kind a second caller would have been
-tempted to copy and get subtly wrong:
+Every caller that runs a whole notebook — the attended **Verify** (:mod:`mooring.app.verify_run`),
+the **scheduled refresh** (:mod:`mooring.app.refresh`), and the attended **parameterised run**
+(:mod:`mooring.app.param_runs`) — sits on this. The four rules below are subtle, were hard-won
+in verify, and are exactly the kind a second caller would have been tempted to copy and get
+subtly wrong:
 
 1. **The render is value-bearing; its lifetime is managed here.** ``marimo export html``
    captures cell OUTPUTS, so the file it writes embeds real data. It is written only into a
@@ -21,14 +22,22 @@ tempted to copy and get subtly wrong:
    failure (a stale ``uv.lock``, an unresolvable dependency) and must not badge a good notebook
    red; that is raised as :class:`RunError` rather than reported as a failing run.
 
+**Cancel rides rule 2, it does not get its own mechanism.** ``cancel`` is an ordinary
+:class:`threading.Event` a caller may fire from another thread; a watchdog turns it into the
+SAME ``taskkill /T`` process-tree kill the timeout path uses, so a cancelled run cannot leave
+a live marimo kernel behind to re-write the value-bearing render after cleanup. Cancelling
+therefore has exactly the safety properties a timeout has, by construction.
+
 Nothing here reaches the AI copilot, and nothing here writes outside the path it is given.
 """
 
 from __future__ import annotations
 
 import contextlib
+import os
 import subprocess
 import sys
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -42,11 +51,23 @@ RUN_TIMEOUT = 300
 # counted and the text is never read.
 _FAIL_MARKER = "MarimoExceptionRaisedError"
 
+# How often the cancel watchdog wakes while a run is in flight. Short enough that "Cancel"
+# feels immediate, long enough to cost nothing over a run measured in minutes.
+_CANCEL_POLL_S = 0.25
+
 
 class RunError(Exception):
     """The notebook could not be RUN at all (renderer missing, timed out, environment broken).
     ``str(exc)`` is the user-facing reason. A notebook that RUNS but has a failing cell is NOT
     an error — that is a completed run with ``ok`` False."""
+
+
+class RunCancelled(RunError):
+    """The caller fired its cancel event and the process tree was killed.
+
+    A subclass of :class:`RunError` on purpose: a caller that does not pass a cancel event can
+    never see this, and one that predates cancellation still handles it safely (as "could not
+    run") rather than letting it escape as an unhandled exception."""
 
 
 @dataclass(frozen=True)
@@ -68,6 +89,8 @@ def run(
     keep_on_success: bool,
     include_code: bool = False,
     timeout: int = RUN_TIMEOUT,
+    env_extra: dict[str, str] | None = None,
+    cancel: threading.Event | None = None,
 ) -> RunOutcome:
     """Execute ``rel_posix`` top to bottom, rendering to ``out_path``.
 
@@ -76,18 +99,28 @@ def run(
     ``keep_on_success`` — so a caller that wants the artifact gets it only when there is a
     real one to get, and a caller that wants only the receipt never leaves values on disk.
 
+    ``env_extra`` overlays environment variables onto the run (the channel a parameterised
+    run hands its value to the kernel on — see :mod:`mooring.params`). It never changes the
+    COMMAND, so both launch backends behave identically. ``cancel`` is an event another
+    thread may set to stop the run; it becomes the same process-tree kill the timeout uses
+    and raises :class:`RunCancelled`.
+
     Raises :class:`RunError` when the notebook could not be run at all."""
     editor.ensure_runtime_config(workspace)
     cmd, env = editor.export_html_command(
         workspace, rel_posix, out_path, include_code=include_code
     )
+    if env_extra:
+        # export_html_command returns None to mean "inherit", so materialise the parent
+        # environment before overlaying rather than handing marimo a two-variable env.
+        env = {**(env if env is not None else os.environ), **env_extra}
     produced = False
     proc: subprocess.CompletedProcess | None = None
     try:
         out_path.parent.mkdir(parents=True, exist_ok=True)
         # Clear any stale render so `produced` reflects THIS run only.
         _unlink(out_path)
-        proc = _exec(cmd, str(workspace), env, timeout)
+        proc = _exec(cmd, str(workspace), env, timeout, cancel)
         produced = out_path.is_file()  # marimo writes the render iff it actually ran
     except OSError as exc:  # marimo/uv absent, a locked/read-only dir, a bad executable
         _unlink(out_path)
@@ -97,6 +130,13 @@ def run(
         # re-create the render after this unlink.
         _unlink(out_path)
         raise RunError("The run timed out — the notebook took too long to run.") from exc
+
+    if cancel is not None and cancel.is_set():
+        # The tree is already dead (the watchdog killed it), so nothing can re-create the
+        # render after this unlink — the same guarantee the timeout path relies on. A
+        # half-rendered file must never be promoted to an artifact.
+        _unlink(out_path)
+        raise RunCancelled("Cancelled — the notebook run was stopped.")
 
     if not produced:
         # marimo never wrote its output: the environment/tooling failed BEFORE the notebook
@@ -129,9 +169,14 @@ def _count_failed_cells(proc: subprocess.CompletedProcess) -> int | None:
 
 
 def _exec(
-    cmd: list[str], cwd: str, env: dict[str, str] | None, timeout: int
+    cmd: list[str],
+    cwd: str,
+    env: dict[str, str] | None,
+    timeout: int,
+    cancel: threading.Event | None = None,
 ) -> subprocess.CompletedProcess:
-    """Run the export subprocess, killing the whole process TREE on timeout (rule 2)."""
+    """Run the export subprocess, killing the whole process TREE on timeout (rule 2) — and
+    on cancel, through the very same kill."""
     kwargs: dict = {}
     if sys.platform == "win32":
         # New process group so the tree kill (taskkill /T) can reach the marimo kernel.
@@ -139,6 +184,16 @@ def _exec(
     proc = subprocess.Popen(
         cmd, cwd=cwd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, **kwargs
     )
+    # A watchdog rather than a polling communicate(): the wait stays ONE blocking call with
+    # the original timeout semantics, and cancelling simply kills the tree out from under
+    # it, after which communicate returns on its own. Nothing about rules 1-4 moves.
+    finished = threading.Event()
+    watchdog: threading.Thread | None = None
+    if cancel is not None:
+        watchdog = threading.Thread(
+            target=_watch_cancel, args=(proc, cancel, finished), daemon=True
+        )
+        watchdog.start()
     try:
         stdout, stderr = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
@@ -146,7 +201,22 @@ def _exec(
         with contextlib.suppress(OSError, ValueError):
             proc.communicate(timeout=10)  # reap the killed tree
         raise
+    finally:
+        finished.set()
+        if watchdog is not None:
+            watchdog.join(timeout=5)
     return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
+
+
+def _watch_cancel(
+    proc: subprocess.Popen, cancel: threading.Event, finished: threading.Event
+) -> None:
+    """Turn a set cancel event into the process-TREE kill, until the run finishes."""
+    while not finished.is_set():
+        if cancel.wait(_CANCEL_POLL_S):
+            with contextlib.suppress(OSError, ValueError):
+                _kill_tree(proc)
+            return
 
 
 def _kill_tree(proc: subprocess.Popen) -> None:
