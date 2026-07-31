@@ -158,6 +158,17 @@ async def api_whatsnew_detail(request: Request) -> JSONResponse:
     return JSONResponse({"path": rel, **body})
 
 
+def _findings_payload(collected: dict) -> list[dict]:
+    return [
+        {
+            "path": path,
+            "token": info["token"],
+            "findings": [{"line": f.line, "kind": f.kind} for f in info["findings"]],
+        }
+        for path, info in sorted(collected.items())
+    ]
+
+
 def _guarded_sync_op(hub, name: str, data: dict, run) -> JSONResponse:
     """Run push/propose behind the push guard's warn-and-confirm flow.
 
@@ -168,27 +179,31 @@ def _guarded_sync_op(hub, name: str, data: dict, run) -> JSONResponse:
     findings to the exact bytes, so a changed file or a new finding is never
     covered by an old confirm. In block mode ([guard] push = "block" in the
     synced mooring.toml) tokens are refused — the pragma/fix is the only way.
+
+    A SECOND guard rides the same seam: the dependency-change gate, which asks
+    the last verify sweep whether an outgoing ``uv.lock`` still runs the team's
+    notebooks (mooring.sweep). Its findings travel in their own
+    ``sweep_findings`` list with their own tokens — it always WARNS, never
+    blocks, so the content policy's block mode must not swallow it.
     """
-    mode = workspace_config.guard_mode(hub.cfg.workspace())
+    workspace = hub.cfg.workspace()
+    mode = workspace_config.guard_mode(workspace)
     confirmed = frozenset(str(t) for t in (data.get("confirm_tokens") or []))
-    if mode == "block":
-        confirmed = frozenset()
-    guard_fn, collected = pushguard.make_guard(confirmed)
-    body, status = hub._sync_op_body(name, lambda: run(guard_fn))
-    if status == 200 and collected:
+    content_ok = frozenset() if mode == "block" else confirmed
+    content_fn, collected = pushguard.make_guard(content_ok)
+    lock_fn, lock_collected = pushguard.make_lock_guard(workspace, confirmed)
+    body, status = hub._sync_op_body(name, lambda: run(pushguard.combine(content_fn, lock_fn)))
+    if status == 200 and (collected or lock_collected):
         telemetry.log_event("push_guard", findings=sum(
-            len(info["findings"]) for info in collected.values()
+            len(info["findings"]) for info in (*collected.values(), *lock_collected.values())
         ))
-        body["needs_confirm"] = mode != "block"
-        body["guard_mode"] = mode
-        body["guard_findings"] = [
-            {
-                "path": path,
-                "token": info["token"],
-                "findings": [{"line": f.line, "kind": f.kind} for f in info["findings"]],
-            }
-            for path, info in sorted(collected.items())
-        ]
+        # Overridable unless CONTENT was flagged under a block policy — the deps gate is
+        # always acknowledgeable, so a deps-only response reports the mode that actually
+        # applies to it ("warn") rather than the team's content policy.
+        body["needs_confirm"] = mode != "block" or not collected
+        body["guard_mode"] = mode if collected else "warn"
+        body["guard_findings"] = _findings_payload(collected)
+        body["sweep_findings"] = _findings_payload(lock_collected)
         status = 409
     return JSONResponse(body, status_code=status)
 

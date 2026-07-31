@@ -19,6 +19,13 @@ adapters build the guard with :func:`make_guard` and surface withheld files
 with a warn-and-confirm flow. Like the detectors themselves this is
 **defence in depth, never a guarantee** — a clean scan does not mean a file
 is value-free (see docs/admins/ai-privacy.md).
+
+The same seam now carries a second, non-content gate: :func:`make_lock_guard`
+questions a ``uv.lock`` change against the workspace's last verify sweep (see
+:mod:`mooring.sweep`). It is a separate guard with its own tokens because it
+warns unconditionally — a team's ``[guard] push = "block"`` policy is about
+sensitive content and must not turn a broken-notebook warning into a wall.
+:func:`combine` runs both behind the one ``guard_fn`` sync expects.
 """
 
 from __future__ import annotations
@@ -27,6 +34,7 @@ import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 
+from mooring import sweep
 from mooring.ai import pii, secrets
 
 # A reviewed false positive can be retired by putting this marker on the line —
@@ -165,3 +173,65 @@ def make_guard(allowed_tokens: frozenset[str] | set[str] = frozenset()):
         return describe(findings)
 
     return guard_fn, collected
+
+
+def lock_findings(workspace, rel_path: str, data: bytes) -> list[Finding]:
+    """The dependency-change gate's findings for one outgoing file, as ``Finding``\\ s —
+    the scan half of :func:`make_lock_guard`, exposed so an adapter's
+    ``--acknowledge-findings`` path can still SHOW what it is letting through."""
+    return [
+        Finding(line=line, kind=kind)
+        for line, kind in sweep.dependency_findings(workspace, rel_path, data)
+    ]
+
+
+def make_lock_guard(workspace, allowed_tokens: frozenset[str] | set[str] = frozenset()):
+    """Build a ``guard_fn`` for the DEPENDENCY-CHANGE gate — the second thing worth
+    stopping at the push seam.
+
+    The content scanners above ask "do these bytes look sensitive?". This asks a question
+    about the same bytes that no scan can answer: ``uv.lock`` is the one file whose push
+    changes what *every* teammate's notebooks run against, and nothing else checks that the
+    repo still runs afterwards. The verdict comes from the stored verify sweep
+    (:func:`mooring.sweep.dependency_findings`), which only counts when it was taken
+    against these exact lock bytes.
+
+    Same shape as :func:`make_guard` — a ``(guard_fn, collected)`` pair whose token binds
+    the exact bytes to the exact findings, so a sweep that has since broken one more
+    notebook produces a different token and a stale "push anyway" stops matching.
+    Deliberately a SEPARATE guard rather than an extra detector inside ``make_guard``:
+    the team's ``[guard] push = "block"`` policy is about sensitive CONTENT, and must not
+    silently become "you may never push a lock file that breaks something" — this gate
+    warns and is always acknowledgeable. Compose the two with :func:`combine`.
+    """
+    collected: dict[str, dict] = {}
+
+    def guard_fn(rel_path: str, data: bytes) -> list[str]:
+        findings = lock_findings(workspace, rel_path, data)
+        if not findings:
+            return []
+        token = file_token(rel_path, data, findings)
+        if token in allowed_tokens:
+            return []
+        collected[rel_path] = {"findings": findings, "token": token}
+        # The kind alone: unlike a content finding there is no line to point at, so
+        # "line 1: …" would be noise in the withheld line.
+        return [f.kind for f in findings]
+
+    return guard_fn, collected
+
+
+def combine(*guards):
+    """One ``guard_fn`` running several in order, concatenating their findings.
+
+    Each guard keeps its own ``collected`` map (and so its own confirm tokens), which is
+    what lets the content guard and the dependency gate carry different override policies
+    while ``sync.push`` still sees the single callable it expects."""
+
+    def guard_fn(rel_path: str, data: bytes) -> list[str]:
+        out: list[str] = []
+        for guard in guards:
+            out.extend(guard(rel_path, data))
+        return out
+
+    return guard_fn

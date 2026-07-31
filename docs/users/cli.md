@@ -39,8 +39,10 @@ mooring open reports/sales.pbip
 mooring new sales-analysis
 mooring delete notebooks/sales.py [-y]
 mooring rollback notebooks/sales.py [-y] [--conflicts]
+mooring verify notebooks/sales.py
+mooring verify --all [--resume] [-y]
 mooring init
-mooring deps add polars "scipy>=1.11"
+mooring deps add polars "scipy>=1.11" [--sweep | --no-sweep]
 mooring deps remove polars
 mooring deps list
 mooring deps lock
@@ -181,6 +183,14 @@ branch, so the changes can be reviewed as a pull request (see
   trust receipt (a boolean, never a value) that badges the notebook's row in the hub
   and clears itself when you edit the file. See
   [Verifying a notebook runs](daily-workflow.md#verifying-a-notebook-runs).
+- `verify --all` — the **sweep**: run *every* notebook in the workspace, one at a time,
+  and summarise (`12 notebooks: 10 ran clean, 1 failed, 1 could not run.`). Says how many
+  it is about to run before it starts (`-y` skips the prompt), prints a line per
+  notebook, and exits non-zero if anything is not runnable. A failing notebook never
+  stops the sweep, and each one records the same badge a single `verify` does.
+  `--resume` skips notebooks whose badge is still valid, so a sweep you stopped halfway
+  is cheap to finish. `verify --clear` (no path) forgets the summary along with the
+  badges. See [Checking that everything still runs](daily-workflow.md#checking-that-everything-still-runs).
 - `checks` — list the tie-out / data-quality check results recorded per notebook
   by `import mooring_checks` calls (value-free: names and pass/fail counts only).
   See [Checking your numbers tie out](daily-workflow.md#checking-your-numbers-tie-out).
@@ -275,6 +285,19 @@ declared package isn't in it.
 - `deps lock` — refresh `uv.lock` from `pyproject.toml`.
 
 `deps add`/`remove`/`lock` need [uv](https://docs.astral.sh/uv/) installed.
+
+**The check on a lock change.** A rewritten `uv.lock` changes the environment for
+*everyone*, so when one of those three commands actually moves the lock, mooring says how
+many notebooks run against it and offers to check them — `verify --all` under the covers.
+`--sweep` runs it without asking, `--no-sweep` skips the offer.
+
+Push then makes the result visible before the change leaves your machine: an unchecked or
+known-broken `uv.lock` is **withheld** with a value-free reason (*"this dependency change
+breaks 3 notebooks"*) while the rest of the push goes. It warns, it never blocks —
+`push --acknowledge-findings` sends it anyway and prints exactly what you let through. The
+check is tied to the exact lock bytes it ran against, so an older sweep never vouches for
+a lock it never saw. See
+[Changing the team's packages](daily-workflow.md#changing-the-teams-packages).
 
 ### `build-requirements`
 

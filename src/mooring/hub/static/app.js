@@ -172,31 +172,39 @@ async function action(path, body, refreshAfter = true, status = "") {
 function showGuardDialog(data, apiPath, body) {
   const dialog = $("guard-dialog");
   const findings = data.guard_findings || [];
-  const files = findings.length;
-  $("guard-message").textContent =
-    `${files} file(s) were NOT ${apiPath.includes("propose") ? "proposed" : "pushed"} — ` +
-    "they contain something that looks sensitive:";
+  const depsRows = GuardFmt.depsRows(data);
+  const verb = apiPath.includes("propose") ? "proposed" : "pushed";
+  // Two guards can fire on one push. Lead with the dependency gate when it is the
+  // only one: "this lock change breaks 3 notebooks" is a different question from
+  // "this file looks sensitive", and blurring them wastes both warnings.
+  $("guard-message").textContent = findings.length
+    ? `${findings.length} file(s) were NOT ${verb} — they contain something that ` +
+      "looks sensitive:"
+    : `A dependency change was NOT ${verb}:`;
   const list = $("guard-findings");
   list.innerHTML = "";
-  for (const row of GuardFmt.rows(findings)) {
+  for (const row of GuardFmt.rows(findings).concat(depsRows)) {
     const li = document.createElement("li");
     li.textContent = row;
     list.appendChild(li);
   }
   const override = GuardFmt.canOverride(data);
-  $("guard-hint").textContent = override
+  $("guard-hint").textContent = !override
+    ? "Your team's policy blocks pushing flagged files ([guard] push = \"block\"). " +
+      "Remove the flagged content, or add a “mooring: push-ok” comment on a " +
+      "reviewed false-positive line, then push again."
+    : findings.length
     ? "Remove the flagged content, or add a “mooring: push-ok” comment on a " +
       "reviewed false-positive line. Pushing anyway publishes it to everyone " +
       "with access to the repo."
-    : "Your team's policy blocks pushing flagged files ([guard] push = \"block\"). " +
-      "Remove the flagged content, or add a “mooring: push-ok” comment on a " +
-      "reviewed false-positive line, then push again.";
+    : "Use “Check all notebooks run” to see what these dependencies do to the " +
+      "repo. Pushing anyway changes the environment for everyone on the team.";
   const anyway = $("guard-anyway");
   anyway.classList.toggle("hidden", !override);
   anyway.onclick = () => {
     dialog.close();
     const confirmed = Object.assign({}, body, {
-      confirm_tokens: GuardFmt.allTokens(findings),
+      confirm_tokens: GuardFmt.allTokens(data),
     });
     action(apiPath, confirmed).then((data) => {
       if (!data || data.error || data.needs_confirm) return;
@@ -443,6 +451,82 @@ function deliverAction(path) {
 function verifyAction(path) {
   return action("/api/verify", { path }, true,
     "Verifying… this re-runs the whole notebook (can take a minute).");
+}
+
+// -- the catalog-wide sweep --------------------------------------------------
+// "Check all run" = Verify, for every notebook in the workspace, one at a time. It
+// EXECUTES each notebook, so the cost is stated before anything starts, progress is
+// visible while it runs, and Cancel is reachable throughout — which is why this does
+// NOT go through action() (that disables the whole surface for the duration of one
+// request). The start POST returns immediately and the client polls.
+let sweepPoll = null;
+
+async function sweepAction() {
+  if (busy || sweepPoll) return;
+  let total = 0;
+  try {
+    const plan = await (await fetch("/api/sweep/plan")).json();
+    total = plan.total || 0;
+  } catch {
+    showError("Couldn't work out how many notebooks to check.");
+    return;
+  }
+  if (!total) {
+    showError("No notebooks to check.");
+    return;
+  }
+  const noun = total === 1 ? "notebook" : "notebooks";
+  const ok = window.confirm(
+    `This runs ${total} ${noun} on this machine, one at a time, and can take a while.\n\n` +
+      "It records the same “ran clean” badge as Verify — and proves each notebook RUNS, " +
+      "not that its numbers are right.\n\nStart?"
+  );
+  if (!ok) return;
+  const started = await api("/api/sweep", {});
+  if (started.error) {
+    showError(started.error);
+    return;
+  }
+  showSweepProgress({ running: true, done: 0, total });
+  sweepPoll = setInterval(pollSweep, 1500);
+}
+
+function showSweepProgress(state) {
+  const box = $("sweep-progress");
+  const running = !!state.running;
+  box.classList.toggle("hidden", !running);
+  if (running) {
+    $("sweep-progress-text").textContent =
+      `Checking notebooks… ${state.done || 0} of ${state.total || 0} run. ` +
+      "You can keep working; this runs one notebook at a time.";
+  }
+}
+
+async function pollSweep() {
+  let state;
+  try {
+    state = await (await fetch("/api/sweep")).json();
+  } catch {
+    return; // a transient poll failure must not kill a running sweep
+  }
+  showSweepProgress(state);
+  if (state.running) return;
+  clearInterval(sweepPoll);
+  sweepPoll = null;
+  $("sweep-progress").classList.add("hidden");
+  if (state.error) {
+    showError(state.error);
+    return;
+  }
+  if (!state.finished) return;
+  showLog(state); // lines + summary + the "it ran, not that it's right" warning
+  await refresh(); // the swept receipts badge the rows exactly like a hand Verify
+}
+
+function cancelSweep() {
+  $("sweep-progress-text").textContent =
+    "Stopping after the notebook that's running now…";
+  api("/api/sweep/cancel", {}).catch(() => {});
 }
 
 // -- scheduled refresh -------------------------------------------------------
@@ -2738,6 +2822,8 @@ $("btn-new").addEventListener("click", () => {
   );
   if (name) action("/api/new", { name });
 });
+$("btn-sweep").addEventListener("click", sweepAction);
+$("btn-sweep-cancel").addEventListener("click", cancelSweep);
 // Batch build opens the workspace-level page in its own (reused) tab, beside the hub.
 $("btn-batch").addEventListener("click", () => {
   window.open("/ai/batch", "mooringBatch");

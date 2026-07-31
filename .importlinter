@@ -51,6 +51,7 @@ forbidden_modules =
     mooring.editor
     mooring.pyproject_env
     mooring.schema
+    mooring.sweep
     mooring.ai
     mooring.app
     mooring.hub
@@ -176,6 +177,7 @@ source_modules =
     mooring.activity
     mooring.checks
     mooring.verify
+    mooring.sweep
     mooring.inputs
     mooring.connections
     mooring.schedule

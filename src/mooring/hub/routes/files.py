@@ -11,6 +11,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from mooring import celldiff, gitsha, manifest, notebook_template, reveal, sync, telemetry, trash
+from mooring.app.sweep_service import SweepBusy
 from mooring.github import AuthFailed, GitHubError, NotFound
 
 
@@ -179,6 +180,50 @@ def _verify(hub, rel_path: str) -> JSONResponse:
     return JSONResponse(
         {"path": rel_path, "ok": result.passed, "lines": [verify_run.describe_result(result)]}
     )
+
+
+async def api_sweep_plan(request: Request) -> JSONResponse:
+    """What a sweep would cost: how many notebooks it would run.
+
+    Asked BEFORE anything starts, because a sweep executes every notebook end to end and
+    "this runs 14 notebooks" is the difference between an informed wait and an app that
+    looks hung. Read-only; enumerating re-reads the workspace's .py files, so it stays off
+    the event loop and off the /api/state hot path (the /api/discover posture)."""
+    hub = request.app.state.hub
+
+    def _plan() -> JSONResponse:
+        from mooring.app import sweep_run
+
+        return JSONResponse({"total": len(sweep_run.plan(hub.cfg))})
+
+    return await run_in_threadpool(_plan)
+
+
+async def api_sweep(request: Request) -> JSONResponse:
+    """Start a sweep (POST) or read its progress (GET).
+
+    Deliberately NOT one blocking call: the hub disables its toolbar for the duration of a
+    request, so a sweep run that way would show no progress and leave no reachable Cancel
+    on an operation that can take many minutes. The worker thread lives in
+    :class:`mooring.app.sweep_service.SweepService`; this handler is pure transport.
+
+    Each notebook records the ordinary verify receipt, so a swept row badges exactly as a
+    hand-verified one does — and clears on the next edit."""
+    hub = request.app.state.hub
+    if request.method == "GET":
+        return JSONResponse(hub.sweep.snapshot())
+    data = await request.json() if await request.body() else {}
+    try:
+        return JSONResponse(hub.sweep.start(hub.cfg, resume=bool(data.get("resume"))))
+    except SweepBusy as exc:
+        return JSONResponse({"error": str(exc)}, status_code=409)
+
+
+async def api_sweep_cancel(request: Request) -> JSONResponse:
+    """Stop the running sweep at the next notebook boundary. The notebook already
+    executing is bounded by the runner's own timeout + process-tree kill."""
+    request.app.state.hub.sweep.cancel()
+    return JSONResponse({"cancelled": True})
 
 
 async def api_delete(request: Request) -> JSONResponse:

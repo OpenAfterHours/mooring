@@ -52,6 +52,11 @@ class VerifyResult:
     passed: bool
     cells_failed: int | None  # value-free count of failed cells, or None if unknown
     ran_at: str
+    # The content SHA the receipt was keyed to — i.e. the bytes that actually ran, hashed
+    # BEFORE the run. Returned so an aggregate over many runs (mooring.sweep) can inherit
+    # the same auto-clear rule instead of re-hashing afterwards and keying a claim to bytes
+    # the run never executed. Trailing + defaulted: existing positional construction stands.
+    sha: str = ""
 
 
 def verify_notebook(cfg: Config, rel_path: str) -> VerifyResult:
@@ -85,6 +90,7 @@ def verify_notebook(cfg: Config, rel_path: str) -> VerifyResult:
         passed=outcome.ok,
         cells_failed=outcome.cells_failed,
         ran_at=ran_at,
+        sha=sha,
     )
 
 

@@ -47,6 +47,7 @@ from mooring.app import notebooks as nb_ops
 from mooring.app.apply import ApplyGuard
 from mooring.app.batch_service import BatchService
 from mooring.app.chat_service import ChatService
+from mooring.app.sweep_service import SweepService
 from mooring.editor import EditorServer, bind_or_free
 from mooring.github import GitHubClient, GitHubError, Unreachable, blob_url
 from mooring.hub import settings_schema
@@ -101,6 +102,9 @@ class Hub:
         # The batch application service: the run registry (+ reap/abort/cancel)
         # around the pure ai.batch.BatchPlanner (app/batch_service.py).
         self.batch = BatchService()
+        # The catalog-wide verify sweep, run on a worker thread so the browser can watch
+        # its progress and reach a Cancel button (app/sweep_service.py).
+        self.sweep = SweepService()
         # One AI provider reused across opens, so the provider's auth (45s TTL) and
         # model-list (300s TTL) caches actually hit instead of being rebuilt — and
         # thrown away — on every chat-open / models request. Keyed on the config that
@@ -165,6 +169,9 @@ class Hub:
         # In-flight batches are bound to the old workspace too — cancel them (their
         # un-reviewed proposals are lost; the UI warns not to switch repos mid-batch).
         self.batch.abort_all()
+        # ...and so is a running sweep: it holds the OLD workspace's refresh lock and
+        # would keep writing receipts there while the UI shows another repo.
+        self.sweep.cancel()
         # The provider is shaped by [ai] provider/model — a reload may change them,
         # so drop the cached one (rebuilt lazily on next use).
         with self._provider_lock:
@@ -298,6 +305,7 @@ class Hub:
     def shutdown(self) -> None:
         self.chat.close_all()
         self.batch.abort_all()
+        self.sweep.cancel()
         for editor in self.editors.values():
             # Suppress per editor (mirrors _close_all_chats): one editor failing to
             # die must not leak the others' marimo trees or skip the lifespan's
@@ -1089,6 +1097,9 @@ def create_app(hub: Hub) -> Starlette:
             Route("/api/reveal", files.api_reveal, methods=["POST"]),
             Route("/api/deliver", files.api_deliver, methods=["POST"]),
             Route("/api/verify", files.api_verify, methods=["POST"]),
+            Route("/api/sweep", files.api_sweep, methods=["GET", "POST"]),
+            Route("/api/sweep/plan", files.api_sweep_plan),
+            Route("/api/sweep/cancel", files.api_sweep_cancel, methods=["POST"]),
             Route("/api/delete", files.api_delete, methods=["POST"]),
             Route("/api/rollback", files.api_rollback, methods=["POST"]),
             Route("/api/undo", files.api_undo, methods=["POST"]),
