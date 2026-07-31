@@ -334,6 +334,16 @@ def _probe_policy(cfg: config.Config) -> ProbeResult:
             "The shared mooring.toml could not be parsed, so NO team policy is in force.",
             "Fix the shared mooring.toml (it is a synced team file — coordinate before editing).",
         )
+    if pol.vanished:
+        # The one weakening the tighten-only rule cannot prevent: deleting the
+        # block. Silence here would make removal the easy attack (see policy.load
+        # for what the local breadcrumb does and does not assume).
+        return ProbeResult(
+            "policy", "Team policy", WARN,
+            "This repo HAD a team policy and no longer does — the [policy] block was removed.",
+            "Check the repo's history for who removed it (`mooring policy show`); "
+            "restore it with `mooring policy set …` if that was not intended.",
+        )
     if not pol.in_force and not pol.ignored:
         return ProbeResult("policy", "Team policy", PASS, "No [policy] block — nothing enforced.")
     parts = []

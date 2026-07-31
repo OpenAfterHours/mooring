@@ -156,7 +156,14 @@ def _match_cells(
     indices). Exact source at the same position first (stability when the same
     code appears twice), then exact source anywhere (a moved cell keeps its
     identity), then the best remaining counterpart at >= the similarity
-    threshold. Whatever stays unpaired is the caller's unmatched/added/removed."""
+    threshold. Whatever stays unpaired is the caller's unmatched/added/removed.
+
+    LOAD-BEARING BEYOND DISPLAY: ``app/conflict_merge.py`` reuses this (and
+    :func:`_unified`) to decide which cell a conflict merge WRITES, so a pairing
+    this gets wrong no longer just mislabels a panel — it can put the wrong cell
+    on disk. That caller wraps every unpaired-on-both-sides case in its own
+    checks and refuses rather than guessing; keep this function's contract
+    ("never claim a match below the threshold") exactly as strict."""
     pair: dict[int, int] = {}
     used: set[int] = set()
     for j, code in enumerate(local_codes):  # pass 1: same position, same source

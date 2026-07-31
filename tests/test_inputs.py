@@ -45,14 +45,19 @@ def _load_payload(ws):
     return mod
 
 
-def _call(mi, nb, df, name, path=None):
+def _call(mi, nb, df, name, path=None, fn="fingerprint"):
     """Fingerprint from a fake notebook cell: marimo sets ``__file__`` to the notebook."""
     g = {"mi": mi, "df": df, "__file__": str(nb)}
     if path is not None:
-        exec(f"r = mi.fingerprint(df, {name!r}, path={str(path)!r})", g)
+        exec(f"r = mi.{fn}(df, {name!r}, path={str(path)!r})", g)
     else:
-        exec(f"r = mi.fingerprint(df, {name!r})", g)
+        exec(f"r = mi.{fn}(df, {name!r})", g)
     return g["r"]
+
+
+def _out(mi, nb, df, name, path=None):
+    """The same, for the output side (``mi.output``)."""
+    return _call(mi, nb, df, name, path, fn="output")
 
 
 def test_install_runtime_writes_importable_stdlib_only_payload(tmp_path):
@@ -62,7 +67,7 @@ def test_install_runtime_writes_importable_stdlib_only_payload(tmp_path):
     payload = inputs.pylib_dir(ws) / "mooring_inputs.py"
     assert payload.is_file()
     src = payload.read_bytes()
-    assert b"def fingerprint" in src
+    assert b"def fingerprint" in src and b"def output" in src
     # Standalone: runs in the notebook kernel where mooring isn't installed — stdlib only.
     assert "mooring" not in _imported_roots(src)
     assert _imported_roots(src) <= {
@@ -97,10 +102,102 @@ def test_receipt_is_value_free(tmp_path):
     blob = json.dumps(receipt)
     assert SECRET not in blob  # THE guarantee: no data value reaches the receipt
     entry = receipt["inputs"]["d"]
-    assert set(entry) == {"path", "hashed", "sha", "rows", "cols", "schema", "changed", "ts"}
+    assert set(entry) == {"path", "rel", "hashed", "sha", "rows", "cols", "schema", "changed", "ts"}
     assert entry["rows"] == 2 and entry["cols"] == 2
     assert entry["schema"] == [["id", "Int64"], ["customer", "String"]]  # names + types only
     assert len(entry["sha"]) == 64  # a sha256 hex digest
+    assert entry["rel"] == "data/d.csv"  # workspace-relative: the lineage join key
+
+
+def test_output_receipt_is_value_free(tmp_path):
+    # The output side carries the SAME guarantee as the input side: a file full of the
+    # sentinel is hashed, shaped and schema'd, and none of it reaches the receipt.
+    ws = _ws(tmp_path)
+    mi = _load_payload(ws)
+    csv = ws / "data" / "out.csv"
+    csv.parent.mkdir()
+    csv.write_text(f"id,customer\n1,{SECRET}\n", "utf-8")
+    _out(mi, ws / "notebooks" / "recon.py", pl.read_csv(csv), "monthly", path=csv)
+
+    blob = (inputs.inputs_dir(ws) / "notebooks__recon.py.json").read_text("utf-8")
+    assert SECRET not in blob  # THE guarantee, on the write side too
+    entry = json.loads(blob)["outputs"]["monthly"]
+    assert set(entry) == {"path", "rel", "hashed", "sha", "rows", "cols", "schema", "changed", "ts"}
+    assert entry["rel"] == "data/out.csv"
+    assert entry["schema"] == [["id", "Int64"], ["customer", "String"]]
+    assert len(entry["sha"]) == 64
+
+
+def test_outputs_land_in_their_own_section_and_dont_collide_with_inputs(tmp_path):
+    # Same NAME on both sides must stay two entries: an "orders" a notebook reads and an
+    # "orders" it writes are different facts, and lineage reads them in opposite directions.
+    ws = _ws(tmp_path)
+    mi = _load_payload(ws)
+    nb = ws / "notebooks" / "recon.py"
+    src = ws / "in.csv"
+    dst = ws / "out.csv"
+    src.write_text("a\n1\n", "utf-8")
+    dst.write_text("a\n1\n2\n", "utf-8")
+    _call(mi, nb, pl.read_csv(src), "orders", path=src)
+    _out(mi, nb, pl.read_csv(dst), "orders", path=dst)
+    receipt = json.loads((inputs.inputs_dir(ws) / "notebooks__recon.py.json").read_text("utf-8"))
+    assert receipt["inputs"]["orders"]["rel"] == "in.csv"
+    assert receipt["outputs"]["orders"]["rel"] == "out.csv"
+
+
+def test_output_detects_new_same_and_changed(tmp_path):
+    # "Did my numbers move?" — the mirror of the input guard, usable the same way.
+    ws = _ws(tmp_path)
+    mi = _load_payload(ws)
+    nb = ws / "notebooks" / "recon.py"
+    csv = ws / "monthly.csv"
+    csv.write_text("a,b\n1,2\n", "utf-8")
+
+    r1 = _out(mi, nb, pl.read_csv(csv), "monthly", path=csv)
+    assert bool(r1) and not r1.seen_before and r1.kind == "output"
+    assert bool(_out(mi, nb, pl.read_csv(csv), "monthly", path=csv))  # SAME
+
+    csv.write_text("a,b\n1,2\n3,4\n", "utf-8")
+    r3 = _out(mi, nb, pl.read_csv(csv), "monthly", path=csv)
+    assert not bool(r3) and r3.changed  # CHANGED -> falsy
+    assert "output monthly" in repr(r3)  # the repr says which side it is
+
+
+def test_an_old_receipt_without_outputs_still_reads_and_survives_a_new_output(tmp_path):
+    # Backward compatibility, both directions: a receipt written by the previous runtime
+    # (no "outputs" section, no per-entry "rel") must read cleanly, AND recording an
+    # output into it must not drop the inputs already there.
+    ws = _ws(tmp_path)
+    mi = _load_payload(ws)
+    old = {
+        "notebook": "notebooks/recon.py",
+        "updated": "2026-01-01T00:00:00+00:00",
+        "inputs": {
+            "sales": {
+                "path": "data/sales.csv",
+                "hashed": True,
+                "sha": "a" * 64,
+                "rows": 3,
+                "cols": 2,
+                "schema": [["id", "Int64"], ["amount", "Float64"]],
+                "changed": False,
+                "ts": "2026-01-01T00:00:00+00:00",
+            }
+        },
+    }
+    receipt_file = inputs.inputs_dir(ws) / "notebooks__recon.py.json"
+    receipt_file.parent.mkdir(parents=True, exist_ok=True)
+    receipt_file.write_text(json.dumps(old), "utf-8")
+
+    result = inputs.read_results(ws)["notebooks/recon.py"]
+    assert result["total"] == 1 and result["changed"] == 0
+    assert result["outputs"] == 0 and result["outputs_changed"] == 0  # absent reads as none
+
+    _out(mi, ws / "notebooks" / "recon.py", pl.DataFrame({"x": [1]}), "monthly")
+    merged = json.loads(receipt_file.read_text("utf-8"))
+    assert merged["inputs"]["sales"]["sha"] == "a" * 64  # the old entry is untouched
+    assert set(merged["outputs"]) == {"monthly"}
+    assert inputs.read_results(ws)["notebooks/recon.py"]["total"] == 1
 
 
 def test_categorical_dtype_categories_do_not_leak(tmp_path):
@@ -217,14 +314,68 @@ def test_lazyframe_row_count_is_unknown_not_zero(tmp_path):
     assert e["schema"] == [["a", "Int64"], ["b", "String"]]
 
 
+def test_read_results_counts_outputs_alongside_inputs(tmp_path):
+    ws = _ws(tmp_path)
+    mi = _load_payload(ws)
+    nb = ws / "notebooks" / "recon.py"
+    out = ws / "monthly.csv"
+    out.write_text("a\n1\n", "utf-8")
+    _call(mi, nb, pl.DataFrame({"a": [1]}), "sales")
+    _out(mi, nb, pl.read_csv(out), "monthly", path=out)
+    res = inputs.read_results(ws)["notebooks/recon.py"]
+    assert res == {"total": 1, "changed": 0, "outputs": 1, "outputs_changed": 0, "updated": res["updated"]}
+
+    out.write_text("a\n1\n2\n", "utf-8")
+    _out(mi, nb, pl.read_csv(out), "monthly", path=out)
+    res = inputs.read_results(ws)["notebooks/recon.py"]
+    assert res["changed"] == 0 and res["outputs_changed"] == 1  # the two counts stay distinct
+
+
+def test_a_receipt_with_only_outputs_is_still_reported(tmp_path):
+    # A notebook that writes but reads nothing pinned still has something to say.
+    ws = _ws(tmp_path)
+    mi = _load_payload(ws)
+    _out(mi, ws / "notebooks" / "recon.py", pl.DataFrame({"a": [1]}), "monthly")
+    assert inputs.read_results(ws)["notebooks/recon.py"]["outputs"] == 1
+
+
 def test_reset_clears_this_notebooks_receipt(tmp_path):
     ws = _ws(tmp_path)
     mi = _load_payload(ws)
     nb = ws / "notebooks" / "recon.py"
     _call(mi, nb, pl.DataFrame({"a": [1]}), "x")
+    _out(mi, nb, pl.DataFrame({"a": [1]}), "y")
     g = {"mi": mi, "__file__": str(nb)}
     exec("mi.reset()", g)
     assert inputs.read_results(ws) == {}
+
+
+def test_reset_by_name_clears_that_name_on_both_sides(tmp_path):
+    # A dropped dataset must stop being claimed as a dependency, whichever side recorded
+    # it — otherwise lineage keeps asserting an edge the notebook no longer has.
+    ws = _ws(tmp_path)
+    mi = _load_payload(ws)
+    nb = ws / "notebooks" / "recon.py"
+    _call(mi, nb, pl.DataFrame({"a": [1]}), "gone")
+    _out(mi, nb, pl.DataFrame({"a": [1]}), "gone")
+    _out(mi, nb, pl.DataFrame({"a": [1]}), "kept")
+    g = {"mi": mi, "__file__": str(nb)}
+    exec("mi.reset('gone')", g)
+    receipt = json.loads((inputs.inputs_dir(ws) / "notebooks__recon.py.json").read_text("utf-8"))
+    assert receipt["inputs"] == {}
+    assert set(receipt["outputs"]) == {"kept"}
+
+
+def test_reset_survives_a_corrupt_receipt(tmp_path):
+    # Local state is best-effort: a hand-mangled receipt degrades to "nothing to clear",
+    # never to a traceback in the analyst's cell.
+    ws = _ws(tmp_path)
+    mi = _load_payload(ws)
+    receipt_file = inputs.inputs_dir(ws) / "notebooks__recon.py.json"
+    receipt_file.parent.mkdir(parents=True, exist_ok=True)
+    receipt_file.write_text(json.dumps(["not", "a", "receipt"]), "utf-8")
+    g = {"mi": mi, "__file__": str(ws / "notebooks" / "recon.py")}
+    exec("mi.reset('x')", g)  # must not raise
 
 
 def test_clear_all_and_one(tmp_path):
@@ -242,6 +393,7 @@ def test_clear_all_and_one(tmp_path):
 def test_copilot_guide_is_value_free_and_names_the_api():
     guide = inputs.copilot_guide()
     assert "mooring_inputs" in guide and "fingerprint" in guide
+    assert "mi.output(" in guide  # the copilot can author the write side too
     assert SECRET not in guide
 
 

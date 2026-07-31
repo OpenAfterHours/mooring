@@ -27,6 +27,7 @@ Nothing here reaches the AI copilot, and nothing here writes outside the path it
 from __future__ import annotations
 
 import contextlib
+import os
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -68,6 +69,7 @@ def run(
     keep_on_success: bool,
     include_code: bool = False,
     timeout: int = RUN_TIMEOUT,
+    env_extra: dict[str, str] | None = None,
 ) -> RunOutcome:
     """Execute ``rel_posix`` top to bottom, rendering to ``out_path``.
 
@@ -76,11 +78,19 @@ def run(
     ``keep_on_success`` — so a caller that wants the artifact gets it only when there is a
     real one to get, and a caller that wants only the receipt never leaves values on disk.
 
+    ``env_extra`` adds environment variables for the run — the one channel from mooring INTO
+    the kernel, used by the Excel delivery to name its target and pass the provenance facts
+    only mooring knows (see :mod:`mooring.workbook`). It layers over the launch environment
+    rather than replacing it, so the uv/frozen backend choice is untouched.
+
     Raises :class:`RunError` when the notebook could not be run at all."""
     editor.ensure_runtime_config(workspace)
     cmd, env = editor.export_html_command(
         workspace, rel_posix, out_path, include_code=include_code
     )
+    if env_extra:
+        # env is None when the launch inherits ours, so materialise it before layering.
+        env = {**(os.environ if env is None else env), **env_extra}
     produced = False
     proc: subprocess.CompletedProcess | None = None
     try:

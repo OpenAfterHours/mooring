@@ -17,7 +17,7 @@ What a policy can say
     min_version   = "0.4.29"                  # warn loudly below this
     push_guard    = "block"                   # escalate the secret/PII push guard
     propose_only  = ["reports/**", "data/**"] # never a DIRECT push — Propose only
-    ai_off        = ["hr/**", "*.private.py"] # the copilot is off for these paths
+    ai_off        = ["hr/**", "**/*.private.py"] # the copilot is off for these paths
 
     [policy.settings]
     "ai.pii.enabled" = true                   # force the local scan ON
@@ -42,11 +42,23 @@ compromised account, or a merged malicious PR can change it. So every rule is
 parsed defensively and INDEPENDENTLY: an unknown key, a wrong type, a malformed
 or escaping glob degrades to "that one rule is ignored" (recorded in
 :attr:`Policy.ignored`, which ``mooring policy show`` prints) — never to a crash,
-and never to a weakening. Globs are compiled by :func:`compile_glob`, which
-accepts only ``*``/``**``/``?`` (no character classes, so no pattern can produce
-an invalid or pathological regex) and routes every pattern through
-:func:`mooring.workspace_config.safe_folder` first, so an absolute path or a
-``..`` escape can never reach the filesystem or the matcher.
+and never to a weakening. Concretely, and each of these was a real hole found by
+review, because "defensive" is a claim that has to be cashed:
+
+* **Availability is a security property here.** This module is called from
+  ``cli.main``, ``Hub.__init__``, ``guard_mode`` and the AI gate, so anything
+  that raises takes the whole app out — and the audience has no git with which
+  to pull the fix. Every attacker-sized axis is capped (patterns, pattern
+  length, segments, ``[policy.settings]`` NESTING, and the count of recorded
+  reasons), and :func:`parse` / :func:`load` are wrapped so nothing escapes.
+* **Globs never compile to a regex.** ``*a*a*a…`` is catastrophic backtracking
+  and a count cap does not bound it (six wildcards, 100-character filename,
+  15 seconds). Matching uses the linear :func:`_match_run` /
+  :func:`_match_segments` instead, which cannot backtrack for ANY pattern —
+  load-bearing because :meth:`Glob.matches` runs per notebook row on every hub
+  refresh. Only ``*``/``**``/``?`` are special (a ``[`` is a literal), and every
+  pattern goes through :func:`mooring.workspace_config.safe_folder` first, so an
+  absolute path or a ``..`` escape can never reach the filesystem or the matcher.
 
 **3. Nothing changes for a repo without a ``[policy]`` block.** Every rule is
 absent-by-default and every composition is a no-op on the empty policy, so an
@@ -54,6 +66,10 @@ existing repo behaves byte-for-byte as before. ``[ai] disabled_notebooks`` and
 ``[guard] push`` are FOLDED IN, not replaced: they keep their own readers in
 ``workspace_config`` and this module unions/maxes on top, so an old repo (and an
 old admin's muscle memory) keeps working while new repos get the general form.
+
+The one weakening this design cannot prevent is DELETING the block, so
+:func:`load` remembers locally that a policy was seen and reports its
+disappearance (``vanished``) — see that function for what the record assumes.
 
 Layer: L1, beside ``config`` — it reads ``workspace_config`` (stdlib-pure) and
 tightens a ``config.AppConfig``. It imports nothing from the domain, ``ai/``, or
@@ -64,6 +80,8 @@ the active config (the ``merge_extra_folders`` idiom) and compose
 
 from __future__ import annotations
 
+import contextlib
+import json
 import re
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field, replace
@@ -92,12 +110,25 @@ _RULE_KEYS = {
     RULE_AI_OFF: "ai_off",
 }
 
-# Glob limits. Deliberately small: these bound the matcher's work on hostile
-# input, and no legitimate policy needs more.
+# Hard limits on hostile input. Every axis an attacker controls is capped, because
+# each uncapped one is a denial of service against a team that cannot `git pull` the
+# fix: a wedged mooring is a wedged repo. No legitimate policy needs more.
 MAX_PATTERNS = 200
 MAX_PATTERN_LEN = 200
 MAX_PATTERN_SEGMENTS = 20
-MAX_DOUBLESTAR = 2  # two "**" is quadratic; more could be made to backtrack
+MAX_DOUBLESTAR = 2  # more than two says nothing extra once ** spans whole segments
+# NOTE on matching cost: the wildcard bound is ALGORITHMIC, not a count cap. Globs
+# are matched by _match_run/_match_segments (a non-backtracking linear matcher),
+# not by a compiled regex, so no pattern — however many wildcards — can be made to
+# backtrack. A count cap was tried and is not a bound: six wildcards already took
+# 15 s on a 100-character filename.
+# Nesting depth of [policy.settings]. tomllib itself parses arbitrarily nested
+# tables happily; it is our own recursive walk that dies, and a RecursionError out
+# of load() takes the CLI, the hub, guard_mode and the AI gate with it.
+MAX_SETTINGS_DEPTH = 8
+# Reasons kept in Policy.ignored. Unbounded, this is the one field an attacker can
+# inflate freely — 200k junk keys became a 35 MB /api/settings payload.
+MAX_IGNORED = 50
 
 
 @dataclass(frozen=True)
@@ -134,6 +165,10 @@ KNOBS: tuple[Knob, ...] = (
     Knob("ai.traceback_guard", ("ai", "traceback_guard"), True, "traceback sanitising"),
     Knob("ai.context", ("ai", "context"), False, "team context files"),
     Knob("ai.code_index", ("ai", "code_index"), False, "the team code library"),
+    Knob(
+        "ai.notebook_catalog", ("ai", "notebook_catalog"), False,
+        "the repo-wide notebook catalog",
+    ),
     Knob("ai.live_schema", ("ai", "live_schema"), False, "live kernel schema reads"),
     Knob("ai.semantic_model", ("ai", "semantic_model"), False, "Power BI semantic-model reads"),
     Knob("ai.batch.enabled", ("ai", "batch", "enabled"), False, "unattended batch builds"),
@@ -143,24 +178,18 @@ KNOB_BY_KEY: dict[str, Knob] = {k.key: k for k in KNOBS}
 
 # -- globs ---------------------------------------------------------------------
 # A tiny, total glob language: "*" (within one path segment), "**" (any number of
-# segments), "?" (one character). Character classes are NOT supported — "[" is
-# escaped like any other literal — which is what makes compilation total: there
-# is no pattern a hostile mooring.toml can write that fails to compile or that
-# backtracks badly. Matching is case-INSENSITIVE on purpose: on Windows the same
-# file answers to "Reports/x.py" and "reports/x.py", and for a restriction rule
-# matching MORE is the safe direction.
+# segments), "?" (one character). Character classes are NOT supported — "[" is a
+# literal — and matching is done by a hand-written LINEAR matcher rather than a
+# compiled regex, so there is no pattern a hostile mooring.toml can write that
+# fails to compile or that backtracks. Matching is case-INSENSITIVE on purpose: on
+# Windows the same file answers to "Reports/x.py" and "reports/x.py", and for a
+# restriction rule matching MORE is the safe direction.
 
 
 def _collapse(pattern: str) -> str:
-    """Fold runs of ``*`` and repeated ``**`` segments to their single form.
+    """Fold runs of ``*`` and repeated ``**`` segments to their single form, so a
+    pattern has ONE spelling (``"***"`` is ``**``, ``"a**b"`` is ``a*b``)."""
 
-    Load-bearing, not tidiness: ``"***"`` would otherwise translate to three
-    ADJACENT ``[^/]*`` groups, and adjacent quantifiers over the same character
-    class are the classic catastrophic-backtracking shape — a two-line denial of
-    service anyone with repo write could commit. Collapsing means the translator
-    can never emit adjacent same-language quantifiers within a segment, and at
-    most :data:`MAX_DOUBLESTAR` across segments.
-    """
     def one(seg: str) -> str:
         if seg and set(seg) == {"*"}:  # an all-stars segment is "*" or "**", never more
             return "*" if len(seg) == 1 else "**"
@@ -175,21 +204,67 @@ def _collapse(pattern: str) -> str:
     return "/".join(out)
 
 
-def _translate(pattern: str) -> str:
-    segs = pattern.split("/")
-    out: list[str] = []
-    for index, seg in enumerate(segs):
-        last = index == len(segs) - 1
-        if seg == "**":
-            # Non-final: swallow zero or more whole segments (the following
-            # segment supplies its own text). Final: swallow the rest, if any.
-            out.append(r"(?:[^/]+(?:/[^/]+)*)?" if last else r"(?:[^/]+/)*")
+def _match_run(pat: str, text: str) -> bool:
+    """Glob one path SEGMENT: ``*`` any run of characters, ``?`` exactly one.
+
+    Written out rather than compiled to a regex, because a regex is the wrong
+    tool here and dangerously so. ``"*a*a*a*a*a*aZ.py"`` translates to six
+    unbounded quantifiers separated by literals, which is the catastrophic
+    backtracking shape: measured at 15 s for a 100-character filename, and
+    :meth:`Glob.matches` runs per notebook row on every hub refresh — so ONE
+    committed pattern would hang every teammate's file list, push and scan.
+    Capping the number of wildcards does not fix it (six is already fatal); only
+    a non-backtracking matcher does.
+
+    This is the classic linear glob algorithm: advance both cursors, and on a
+    mismatch rewind to just after the last ``*`` and give it one more character.
+    Worst case O(len(pat) x len(text)), never exponential, for ANY pattern.
+    """
+    p = t = 0
+    star = -1
+    resume = 0
+    while t < len(text):
+        if p < len(pat) and (pat[p] == "?" or pat[p] == text[t]):
+            p += 1
+            t += 1
+        elif p < len(pat) and pat[p] == "*":
+            star = p
+            resume = t
+            p += 1
+        elif star >= 0:
+            resume += 1
+            t = resume
+            p = star + 1
         else:
-            body = "".join(
-                "[^/]*" if ch == "*" else "[^/]" if ch == "?" else re.escape(ch) for ch in seg
-            )
-            out.append(body if last else body + "/")
-    return "".join(out)
+            return False
+    while p < len(pat) and pat[p] == "*":
+        p += 1
+    return p == len(pat)
+
+
+def _match_segments(pats: tuple[str, ...], segs: tuple[str, ...]) -> bool:
+    """The same algorithm one level up, where ``**`` stands for any run of whole
+    segments — so the segment dimension is linear-time too."""
+    p = s = 0
+    star = -1
+    resume = 0
+    while s < len(segs):
+        if p < len(pats) and pats[p] != "**" and _match_run(pats[p], segs[s]):
+            p += 1
+            s += 1
+        elif p < len(pats) and pats[p] == "**":
+            star = p
+            resume = s
+            p += 1
+        elif star >= 0:
+            resume += 1
+            s = resume
+            p = star + 1
+        else:
+            return False
+    while p < len(pats) and pats[p] == "**":
+        p += 1
+    return p == len(pats)
 
 
 @dataclass(frozen=True)
@@ -200,29 +275,32 @@ class Glob:
     footgun on a rule whose whole job is to restrict)."""
 
     pattern: str
-    regex: re.Pattern[str]
+    segments: tuple[str, ...] = ()  # lower-cased; matching is case-insensitive
     prefix: str = ""
 
     def matches(self, rel: str) -> bool:
         norm = workspace_config.normalize_notebook(rel)
         if not norm:
             return False
-        if self.regex.fullmatch(norm):
+        lowered = norm.lower()
+        if _match_segments(self.segments, tuple(lowered.split("/"))):
             return True
-        return bool(self.prefix) and norm.lower().startswith(self.prefix.lower() + "/")
+        return bool(self.prefix) and lowered.startswith(self.prefix.lower() + "/")
 
 
 def compile_glob(pattern: object) -> Glob | None:
     """``pattern`` compiled, or ``None`` when it is unusable — a non-string, an
     empty/absolute/``..``-escaping path (via
     :func:`mooring.workspace_config.safe_folder`, the existing precedent), or one
-    past the size/complexity caps. Never raises: a bad pattern in a synced,
+    past the size caps. Never raises: a bad pattern in a synced,
     attacker-controlled file must drop that one rule, nothing more."""
     if not isinstance(pattern, str):
         return None
     raw = pattern.strip()
     if not raw or len(raw) > MAX_PATTERN_LEN:
         return None
+    if _CONTROL_RE.search(raw):
+        return None  # a control char (ESC, NUL) is never a path — and reaches a terminal
     # safe_folder is the existing precedent (see workspace_config): it strips
     # leading slashes to repo-relative and REFUSES an absolute path, a drive
     # letter, or a ".." escape — so no pattern can ever address anything outside
@@ -233,14 +311,13 @@ def compile_glob(pattern: object) -> Glob | None:
     segs = norm.split("/")
     if len(segs) > MAX_PATTERN_SEGMENTS or segs.count("**") > MAX_DOUBLESTAR:
         return None
-    # A "*" that is not a whole "**" segment must not span a separator; the
-    # translator enforces that. Wildcard-free patterns also cover their subtree.
+    # A wildcard-free pattern also covers its subtree (see Glob).
     prefix = norm if not any(ch in norm for ch in "*?") else ""
-    try:
-        regex = re.compile(_translate(norm), re.IGNORECASE)
-    except re.error:  # pragma: no cover - _translate only emits escaped literals
-        return None
-    return Glob(pattern=norm, regex=regex, prefix=prefix)
+    return Glob(
+        pattern=norm,
+        segments=tuple(s.lower() for s in segs),
+        prefix=prefix,
+    )
 
 
 @dataclass(frozen=True)
@@ -268,27 +345,45 @@ class GlobSet:
         return ""
 
 
-def _glob_set(raw: object, name: str, ignored: list[str]) -> GlobSet:
+def _glob_set(raw: object, name: str, ignored: _Ignored) -> GlobSet:
     if raw is None:
         return GlobSet()
     if isinstance(raw, str):  # tolerate a single bare string, like the rest of the file
         raw = [raw]
     if not isinstance(raw, (list, tuple)):
-        ignored.append(f"[policy] {name}: must be an array of path patterns — ignored")
+        ignored.add(f"[policy] {name}: must be an array of path patterns — ignored")
         return GlobSet()
+    entries = list(raw)
     out: list[Glob] = []
     seen: set[str] = set()
-    for entry in list(raw)[:MAX_PATTERNS]:
+    for entry in entries[:MAX_PATTERNS]:
         glob = compile_glob(entry)
         if glob is None:
-            ignored.append(f"[policy] {name}: {entry!r} is not a usable workspace pattern — ignored")
+            ignored.add(f"[policy] {name}: {entry!r} is not a usable workspace pattern — ignored")
             continue
         if glob.pattern not in seen:
             seen.add(glob.pattern)
             out.append(glob)
-    if len(list(raw)) > MAX_PATTERNS:
-        ignored.append(f"[policy] {name}: only the first {MAX_PATTERNS} patterns are used")
+    if len(entries) > MAX_PATTERNS:
+        ignored.add(f"[policy] {name}: only the first {MAX_PATTERNS} patterns are used")
     return GlobSet(tuple(out))
+
+
+_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
+_MAX_REASON_LEN = 300
+
+
+def _display_safe(text: str) -> str:
+    """A reason string safe to print to a terminal and to render in the hub.
+
+    Reasons quote the offending entry, which came from a synced file an attacker
+    may have written — so an ESC would otherwise reach an analyst's console
+    verbatim through ``mooring policy show``. Control characters are replaced and
+    the line is truncated. (Patterns themselves are rejected outright by
+    :func:`compile_glob` if they carry one; this covers the quoted-garbage path.)
+    """
+    clean = _CONTROL_RE.sub("?", str(text))
+    return clean if len(clean) <= _MAX_REASON_LEN else clean[:_MAX_REASON_LEN] + "…"
 
 
 # -- versions ------------------------------------------------------------------
@@ -311,6 +406,32 @@ def _version_tuple(text: object) -> tuple[int, ...] | None:
 # -- the policy ----------------------------------------------------------------
 
 
+class _Ignored:
+    """A BOUNDED collector for "this rule was dropped, and why".
+
+    Capped at :data:`MAX_IGNORED` because it is the one output an attacker sizes
+    directly: 200 000 junk keys in ``[policy.settings]`` otherwise became 200 001
+    lines and ~35 MB in every ``/api/settings`` response and every
+    ``mooring policy show``. Past the cap it records only that there were more —
+    which is all a human needs to know that the file is junk.
+    """
+
+    def __init__(self) -> None:
+        self._reasons: list[str] = []
+        self._dropped = 0
+
+    def add(self, reason: str) -> None:
+        if len(self._reasons) < MAX_IGNORED:
+            self._reasons.append(_display_safe(reason))
+        else:
+            self._dropped += 1
+
+    def as_tuple(self) -> tuple[str, ...]:
+        if not self._dropped:
+            return tuple(self._reasons)
+        return (*self._reasons, f"…and {self._dropped} more unusable policy entries")
+
+
 @dataclass(frozen=True)
 class Policy:
     """The parsed, sanitised ``[policy]`` block. Every field is inert by default,
@@ -328,6 +449,11 @@ class Policy:
     # True when mooring.toml exists but could not be parsed at all, so NO rule
     # could be read. Reported loudly (doctor, `policy show`); see the module doc.
     unreadable: bool = False
+    # True when this machine has SEEN a policy in force for this repo before and
+    # there is none now — a deletion is the one weakening an attacker who cannot
+    # loosen a rule can still perform. See :func:`load` and :mod:`mooring.policy`'s
+    # note on what the local record does and does not assume.
+    vanished: bool = False
 
     @property
     def in_force(self) -> bool:
@@ -373,9 +499,26 @@ def parse(data: Mapping | None) -> Policy:
     """Parse the ``[policy]`` table out of an already-loaded ``mooring.toml``.
 
     Defensive throughout and rule-independent: a bad entry never affects a good
-    one, and no input reaches ``eval``/``exec`` or the filesystem. Never raises.
+    one, and no input reaches ``eval``/``exec`` or the filesystem.
+
+    **Never raises** — and that is now enforced, not merely intended. The caller
+    is ``cli.main``, ``Hub.__init__``, ``guard_mode`` and the AI gate; an
+    exception escaping here takes all four out at once, and the audience has no
+    git with which to pull the fix. The individual rules are bounded (see the
+    caps at the top of the module) and the whole body is wrapped as a backstop:
+    an unforeseen input yields NO policy plus one recorded reason, which is
+    fail-open for availability and loud rather than silent.
     """
-    ignored: list[str] = []
+    ignored = _Ignored()
+    try:
+        return _parse(data, ignored)
+    except RecursionError:
+        return Policy(ignored=("[policy] is nested too deeply to read — the block is ignored",))
+    except Exception:  # noqa: BLE001  # nothing may escape; see the docstring
+        return Policy(ignored=("[policy] could not be read — the whole block is ignored",))
+
+
+def _parse(data: Mapping | None, ignored: _Ignored) -> Policy:
     raw = (data or {}).get("policy")
     if raw is None:
         return Policy()
@@ -385,12 +528,12 @@ def parse(data: Mapping | None) -> Policy:
     known = {"min_version", "push_guard", "propose_only", "ai_off", "settings"}
     for key in raw:
         if str(key) not in known:
-            ignored.append(f"[policy] {key!r}: unknown policy key — ignored")
+            ignored.add(f"[policy] {key!r}: unknown policy key — ignored")
 
     min_version = ""
     if "min_version" in raw:
         if _version_tuple(raw.get("min_version")) is None:
-            ignored.append("[policy] min_version: not a version like \"1.2.3\" — ignored")
+            ignored.add("[policy] min_version: not a version like \"1.2.3\" — ignored")
         else:
             min_version = str(raw["min_version"]).strip()
 
@@ -398,7 +541,7 @@ def parse(data: Mapping | None) -> Policy:
     if "push_guard" in raw:
         value = str(raw.get("push_guard", "")).strip().lower()
         if value not in GUARD_SCALE:
-            ignored.append(
+            ignored.add(
                 f"[policy] push_guard: {raw.get('push_guard')!r} is not one of "
                 f"{', '.join(GUARD_SCALE)} — ignored"
             )
@@ -413,67 +556,107 @@ def parse(data: Mapping | None) -> Policy:
         propose_only=_glob_set(raw.get("propose_only"), "propose_only", ignored),
         ai_off=_glob_set(raw.get("ai_off"), "ai_off", ignored),
         settings=_parse_settings(raw.get("settings"), ignored),
-        ignored=tuple(ignored),
+        ignored=ignored.as_tuple(),
     )
 
 
-def _flatten(table: Mapping, prefix: str = "") -> dict[str, object]:
+def _flatten(table: Mapping, prefix: str = "", depth: int = 0) -> dict[str, list[object]]:
     """``[policy.settings]`` as dotted keys, accepting BOTH TOML spellings: the
     quoted form (``"ai.pii.enabled" = true``, which tomllib keeps as one key) and
     the nested form (``[policy.settings.ai.pii] enabled = true``). An author who
-    writes either gets the same policy."""
-    out: dict[str, object] = {}
+    writes either gets the same policy.
+
+    Two things this must survive, both from attacker-controlled TOML:
+
+    * **Depth.** ``[policy.settings.k0.k1.…k1199]`` is 6 KB of valid TOML and used
+      to raise ``RecursionError`` out of :func:`load` — killing every CLI command,
+      hub startup, ``guard_mode`` and the AI gate at once, with no way to pull the
+      fix. Recursion stops at :data:`MAX_SETTINGS_DEPTH` and the subtree is dropped.
+    * **Collision.** Because both spellings map to one key, a second spelling could
+      otherwise SHADOW the first (``"ai.pii.enabled" = true`` then
+      ``[policy.settings.ai.pii] enabled = false`` used to yield no lock at all).
+      So each key collects EVERY value it was given, and the caller keeps the
+      lock if ANY of them asks for it — a duplicate can add a lock, never remove one.
+    """
+    out: dict[str, list[object]] = {}
+    if depth > MAX_SETTINGS_DEPTH:
+        return out
     for key, value in table.items():
         dotted = f"{prefix}{key}"
         if isinstance(value, Mapping):
-            out.update(_flatten(value, f"{dotted}."))
+            for sub, values in _flatten(value, f"{dotted}.", depth + 1).items():
+                out.setdefault(sub, []).extend(values)
         else:
-            out[dotted] = value
+            out.setdefault(dotted, []).append(value)
     return out
 
 
-def _parse_settings(raw: object, ignored: list[str]) -> dict[str, bool]:
-    """THE tighten-only composition, in nine lines.
+def _parse_settings(raw: object, ignored: _Ignored) -> dict[str, bool]:
+    """THE tighten-only composition.
 
     A ``[policy.settings]`` entry survives only when it names a governed knob AND
     equals that knob's single ``safe`` value. Every other input — an unknown key,
     a non-bool, or the permissive value — is dropped with a reason. There is no
     branch in which a policy makes a setting less restrictive.
+
+    A key given more than once (the two TOML spellings, see :func:`_flatten`) is
+    locked if ANY of its values asks for the lock: duplicates compose the same way
+    everything else here does, by tightening.
     """
     if raw is None:
         return {}
     if not isinstance(raw, Mapping):
-        ignored.append("[policy.settings] must be a table — ignored")
+        ignored.add("[policy.settings] must be a table — ignored")
         return {}
     out: dict[str, bool] = {}
-    for key, value in _flatten(raw).items():
+    for key, values in _flatten(raw).items():
         knob = KNOB_BY_KEY.get(key)
         if knob is None:
-            ignored.append(f"[policy.settings] {key!r}: not a policy-governed setting — ignored")
+            ignored.add(f"[policy.settings] {key!r}: not a policy-governed setting — ignored")
             continue
-        if not isinstance(value, bool):
-            ignored.append(f"[policy.settings] {key}: must be true or false — ignored")
-            continue
-        if value is not knob.safe:
-            ignored.append(
-                f"[policy.settings] {key} = {str(value).lower()}: policy may only make a "
-                f"setting stricter (here: {str(knob.safe).lower()}) — ignored"
-            )
-            continue
-        out[key] = knob.safe
+        for value in values:
+            if not isinstance(value, bool):
+                ignored.add(f"[policy.settings] {key}: must be true or false — ignored")
+            elif value is not knob.safe:
+                ignored.add(
+                    f"[policy.settings] {key} = {str(value).lower()}: policy may only make a "
+                    f"setting stricter (here: {str(knob.safe).lower()}) — ignored"
+                )
+            else:
+                out[key] = knob.safe  # one usable value is enough; a dup can't undo it
     return out
 
 
 def load(workspace: Path) -> Policy:
-    """The repo's policy, read from the synced ``mooring.toml``.
+    """The repo's policy, read from the synced ``mooring.toml``. Never raises.
 
-    Follows ``workspace_config``'s fail-open READ posture for an unparseable file
-    (a corrupt shared file must not wedge every teammate's hub), but says so:
-    ``unreadable`` is set, ``mooring policy show`` prints it, and
-    ``mooring doctor`` already FAILs on a mooring.toml that is not valid TOML.
-    A file that PARSES degrades per rule, never wholesale.
+    **Fail-open on read, loud about it.** Follows ``workspace_config``'s READ
+    posture for an unparseable file — a corrupt shared file must not wedge every
+    teammate's hub, and the audience has no git with which to recover — but says
+    so: ``unreadable`` is set, ``mooring policy show`` prints it, and
+    ``mooring doctor`` FAILs. A file that PARSES degrades per rule, never
+    wholesale.
+
+    **Trust on first use, for the one weakening left.** An attacker who cannot
+    make a rule looser can still DELETE the block, and an absent policy is
+    indistinguishable from a repo that never had one. So the first time a policy
+    is seen in force we record that fact locally (:func:`_seen_path`, under the
+    workspace's sync-excluded ``.mooring/``), and its later disappearance sets
+    ``vanished`` — which ``policy show`` and ``doctor`` report loudly.
+
+    What that record does and does NOT assume: it is a **local, unsigned
+    breadcrumb**, so it detects an accident or a remote attacker who only has
+    repo write — the threat this feature is about. It does not survive a fresh
+    clone/new machine (nothing was seen there yet), and it does not defend
+    against someone with write access to the analyst's own disk, who could delete
+    it as easily as the policy. Making it stronger needs a signature and a key to
+    check it against, which mooring has nowhere to put; a breadcrumb that turns a
+    silent removal into a visible one is the honest ceiling here.
     """
-    data = workspace_config.read_shared(workspace)
+    try:
+        data = workspace_config.read_shared(workspace)
+    except Exception:  # noqa: BLE001  # an unreadable dir/permission error is not fatal
+        data = None
     if data is None:
         return Policy(
             unreadable=True,
@@ -482,7 +665,56 @@ def load(workspace: Path) -> Policy:
                 "policy could be read. Fix the shared file (`mooring doctor`).",
             ),
         )
-    return parse(data)
+    pol = parse(data)
+    return _remember(workspace, pol)
+
+
+# The local breadcrumb: "a policy was in force here". Lives under .mooring/, which
+# never syncs, so it is this machine's memory and not something a repo write can set.
+_SEEN_NAME = "policy-seen.json"
+
+
+def _seen_path(workspace: Path) -> Path:
+    return Path(workspace) / ".mooring" / _SEEN_NAME
+
+
+def _remember(workspace: Path, pol: Policy) -> Policy:
+    """Record that a policy was seen in force, and flag its disappearance.
+
+    Best-effort throughout: every filesystem step is suppressed, because a
+    read-only or missing workspace must never turn "read the policy" into an
+    error (the availability rule that governs this whole module).
+    """
+    path = _seen_path(workspace)
+    seen_before = False
+    with contextlib.suppress(OSError, ValueError, json.JSONDecodeError):
+        if path.is_file():
+            seen_before = bool(json.loads(path.read_text("utf-8")).get("in_force"))
+    if pol.in_force:
+        if not seen_before:
+            with contextlib.suppress(OSError):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(json.dumps({"in_force": True}), "utf-8")
+        return pol
+    # No policy now. If this machine has seen one here before, that is a REMOVAL —
+    # the one weakening the tighten-only rule cannot prevent. Say so; do not clear
+    # the breadcrumb, or the warning would fire once and then go quiet.
+    #
+    # "Removed" means the block is GONE, not "present but every rule was rejected":
+    # a policy whose rules are all unusable is an editing mistake with its own,
+    # more actionable warning (Policy.ignored), and reporting it as a removal would
+    # bury that.
+    if seen_before and not pol.unreadable and not pol.ignored:
+        return replace(
+            pol,
+            vanished=True,
+            ignored=(
+                *pol.ignored,
+                "this repo HAD a team policy and no longer does — someone removed the "
+                "[policy] block. Check the repo's history before trusting the change.",
+            ),
+        )
+    return pol
 
 
 # -- composition with the local config -----------------------------------------
@@ -573,10 +805,15 @@ def make_propose_gate(pol: Policy):
     adapters' messaging. Crucially there is **no token and no acknowledge flag**:
     unlike a push-guard finding, a propose-only block has no override — the road
     is Propose. ``propose`` itself never installs this gate; that is the point.
+
+    This is a PATH rule, so it fires for a DELETION too (``data is None``).
+    Deleting a review-gated file is a direct write to the shared branch and the
+    change that most needs review; gating the upload but not the delete would
+    have left exactly one way round the rule.
     """
     blocked: dict[str, str] = {}
 
-    def gate_fn(rel_path: str, _data: bytes) -> list[str]:
+    def gate_fn(rel_path: str, _data: bytes | None) -> list[str]:
         pattern = pol.propose_only.matching(rel_path)
         if not pattern:
             return []
@@ -597,7 +834,7 @@ def compose_guards(*fns):
     if not active:
         return None
 
-    def guard_fn(rel_path: str, data: bytes) -> list[str]:
+    def guard_fn(rel_path: str, data: bytes | None) -> list[str]:
         out: list[str] = []
         for fn in active:
             out.extend(fn(rel_path, data))
@@ -615,6 +852,8 @@ def describe(pol: Policy, *, current_version: str = "", local_guard: str = "warn
     lines: list[str] = []
     if pol.unreadable:
         lines.append("  ! the shared mooring.toml could not be parsed — no policy is in force")
+    elif pol.vanished:
+        lines.append("  ! this repo HAD a policy and no longer does — see below")
     elif not pol.in_force:
         lines.append(
             "  (nothing is enforced by policy — every rule below was ignored)"
@@ -703,6 +942,26 @@ def set_rule(workspace: Path, rule: str, values: Iterable[str]) -> str:
         workspace_config.set_policy_setting(workspace, key, knob.safe)
         return f"Policy: {key} = {str(knob.safe).lower()} — locked for everyone on this repo."
     raise ValueError(f"Unknown policy rule {rule!r}. Known: {', '.join(RULES)}.")
+
+
+def unmatched_patterns(pol: Policy, paths: Iterable[str]) -> list[str]:
+    """Policy patterns that match NONE of ``paths`` — the silent-hole check.
+
+    For a rule whose whole job is to restrict, matching nothing while looking
+    right is the dangerous direction, and the natural spellings get it wrong:
+    ``*.private.py`` matches only repo-ROOT files (``hr/x.private.py`` is not
+    matched — ``**/*.private.py`` is what an admin means), and
+    ``propose_only = ["reports/Sales"]`` covers neither ``reports/Sales.pbip``
+    nor ``reports/Sales.SemanticModel/**``. Advisory only: a pattern may
+    legitimately match nothing yet (a folder no one has created), so this warns
+    and never drops the rule.
+    """
+    known = [workspace_config.normalize_notebook(p) for p in paths]
+    out: list[str] = []
+    for glob in (*pol.propose_only.globs, *pol.ai_off.globs):
+        if not any(glob.matches(p) for p in known) and glob.pattern not in out:
+            out.append(glob.pattern)
+    return out
 
 
 def unset_rule(workspace: Path, rule: str, values: Iterable[str] = ()) -> str:

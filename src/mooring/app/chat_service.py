@@ -21,7 +21,7 @@ import contextlib
 import threading
 from pathlib import Path
 
-from mooring import checks, inputs, policy, workspace_config
+from mooring import checks, datasets, inputs, policy, workbook, workspace_config
 from mooring.app import notebooks
 
 
@@ -112,7 +112,8 @@ class ChatService:
         dataset_rel: str,
         folders: tuple[str, ...] = (),
     ):
-        """Return ``(system_context, dictionary_index, pii_banner, live_text, models)``.
+        """Return ``(system_context, dictionary_index, pii_banner, live_text, models,
+        code_index, catalog)``.
 
         The value-free core is the dataset SCHEMA + notebook SOURCE. When the
         opt-in context feature is on, it also folds in the team instructions and
@@ -271,6 +272,56 @@ class ChatService:
             )
             helpers_text = locality.helper_seed_text(hmods, hreasons, hmore)
 
+        # The repo-wide notebook catalog: every marimo notebook reduced (by ast, never
+        # executed and never from a .mooring receipt) to its H1 title + declared
+        # inputs/checks/imports/SQL tables. It rides as the 7th tuple element and reaches
+        # the model ONLY through the on-demand catalog tools — nothing enters the system
+        # context, because a listing scales with the repo and would be paid on every turn
+        # even when the analyst never asks "has someone built this?". Opt-in (the H1 title
+        # is authored prose, so this belongs in the same tier as context/code_index).
+        #
+        # `and folders` mirrors the code library's gate, and does real work here: the batch
+        # planner's build_context deliberately passes NO folders (see hub/server.py) because
+        # its [:2] slice discards everything past the dictionary — without this, every batch
+        # job would re-parse the whole repo to build an index nobody reads.
+        #
+        # The team's per-notebook AI opt-out is applied HERE: a notebook the team fenced off
+        # must not become searchable metadata either. Note the snapshot semantics — the
+        # catalog is built once per chat-open, so a notebook fenced off mid-session stays
+        # searchable until the chat is reopened (the semantic-model tools behave the same).
+        catalog = None
+        if app_cfg.ai_notebook_catalog and folders:
+            from mooring.ai import notebookindex
+            from mooring.ai.notebookindex import prosescan
+
+            # The title is the one authored-prose slot, and this is the egressing path, so
+            # give it the operator's FULL scanner (NER name pass included) rather than the
+            # structured-only default the local hub listing uses.
+            title_scan = prosescan.scan_title
+            if app_cfg.ai_pii:
+                cat_backend = ner.resolve_backend(app_cfg.ai_pii_name_backend)
+                title_scan = prosescan.make_scanner(
+                    names=app_cfg.ai_pii_names,
+                    labels=app_cfg.ai_pii_name_labels,
+                    threshold=app_cfg.ai_pii_name_threshold,
+                    model=ner.model_for(
+                        cat_backend,
+                        app_cfg.ai_pii_name_model,
+                        app_cfg.ai_pii_name_revision,
+                        app_cfg.ai_pii_name_variant,
+                    ),
+                    backend=cat_backend,
+                )
+            # The per-notebook opt-out AND the policy's ai_off globs (policy.ai_gate
+            # unions them), so a path an admin fenced off never enters the repo-wide
+            # catalog the copilot can search — the widest AI surface there is.
+            catalog = notebookindex.load_catalog(
+                workspace,
+                tuple(folders),
+                exclude_fn=policy.ai_gate(workspace),
+                scan=title_scan,
+            )
+
         context = egress.build_system_context(
             schema_text=schema_text,
             notebook_source=source,
@@ -287,14 +338,30 @@ class ChatService:
             # Likewise, let it author marimo SQL (mo.sql / DuckDB) cells — authored code
             # the model never sees the result of, so no new egress channel either.
             sql_help=tools.sql_cell_guide(),
-            # And author value-free input fingerprints (mooring_inputs) on request — a
-            # hash/shape/schema receipt, never a value, so no new egress channel.
+            # And author value-free input/output fingerprints (mooring_inputs) on request
+            # — a hash/shape/schema receipt, never a value, so no new egress channel. The
+            # guide DESCRIBES the API; the receipts themselves (and the lineage graph
+            # derived from them) are never read into the model's context.
             inputs_help=inputs.copilot_guide(),
+            # And author the Excel-delivery cell (mooring_deliver) on request — sheet
+            # names and frames it can already see in the source, so no new channel either.
+            workbook_help=workbook.copilot_guide(),
             # The team's value-free connection SHAPES (names + fields, never the secret),
             # so the copilot can write connection code that references them.
             connections_help=workspace_config.connections_hint(workspace),
+            # The team's dataset POINTERS — names + file formats only, so the copilot can
+            # write `md.path("sales")` wiring without ever learning where the file lives.
+            datasets_help=datasets.copilot_guide(workspace),
         )
-        return context, (index if has_dict else DictionaryIndex()), pii_banner, live_text, models, code_index
+        return (
+            context,
+            (index if has_dict else DictionaryIndex()),
+            pii_banner,
+            live_text,
+            models,
+            code_index,
+            catalog,
+        )
 
     # -- live-kernel schema pipeline ---------------------------------------------
 

@@ -184,7 +184,10 @@ source_modules =
     mooring.checks
     mooring.verify
     mooring.inputs
+    mooring.lineage
     mooring.connections
+    mooring.datasets
+    mooring.workbook
     mooring.schedule
     mooring.config
     mooring.config_store
@@ -230,6 +233,7 @@ source_modules =
     mooring.ai.investigate
     mooring.ai.locality
     mooring.ai.ner
+    mooring.ai.notebookindex
     mooring.ai.openai_provider
     mooring.ai.openai_session
     mooring.ai.pii

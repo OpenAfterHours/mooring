@@ -343,6 +343,59 @@ def read_cells_checked(source: str) -> list[tuple[int, str]]:
     return [(i, cell.code) for i, cell in enumerate(ir.cells)]
 
 
+def read_notebook_frame(source: str) -> tuple[str, dict]:
+    """Everything about a notebook that is NOT a cell: its header text (the leading
+    comment block — a PEP 723 ``# /// script`` dependency pin lives here) and the
+    ``marimo.App(...)`` options (width, app_title, css_file, …). PURE.
+
+    A caller that rebuilds a notebook from cells must decide what happens to this
+    frame explicitly; reading it back is how they compare two notebooks' frames.
+    Raises like :func:`read_cells`.
+    """
+    _require_marimo_floor()
+    _, MarimoConvert = _codegen_api()
+    ir = _parse_ir(MarimoConvert, source)
+    header = getattr(ir.header, "value", "") or ""
+    options = dict(getattr(ir.app, "options", None) or {})
+    return header, options
+
+
+def compose_notebook(frame_source: str, picks) -> str:
+    """Build notebook ``.py`` source from ``frame_source``'s frame (see
+    :func:`read_notebook_frame`) and cells taken WHOLE from other notebooks. PURE.
+
+    ``picks`` is an iterable of ``(notebook source, cell index)``. Each picked cell
+    is carried over as the IR object it is, so it keeps its own name and its
+    ``@app.cell(...)`` options — a cell the author deliberately marked
+    ``disabled=True`` or ``hide_code=True`` must not silently lose that just because
+    it came from the other side of a merge. (:func:`apply_cell_patch`'s
+    ``replace_all`` cannot express this: it takes code strings, so a cell that is not
+    byte-identical to one already in the target notebook is emitted with default
+    name and options.)
+
+    Raises :class:`MarimoTooOld`, :class:`MarimoTransportError`, or ``ValueError``
+    (an unparseable source, an out-of-range pick, no cells, or a result that would
+    not parse).
+    """
+    _require_marimo_floor()
+    codegen, MarimoConvert = _codegen_api()
+    ir = _parse_ir(MarimoConvert, frame_source)
+    parsed: dict[str, list] = {}
+    chosen = []
+    for source, index in picks:
+        cells = parsed.get(source)
+        if cells is None:
+            cells = list(_parse_ir(MarimoConvert, source).cells)
+            parsed[source] = cells
+        if not 0 <= index < len(cells):
+            raise ValueError(f"cell {index} does not exist in that notebook")
+        chosen.append(cells[index])
+    if not chosen:
+        raise ValueError("a notebook must have at least one cell")
+    ir.cells[:] = chosen
+    return _finish(codegen, MarimoConvert, ir)
+
+
 def apply_cell_patch(source: str, ops) -> str:
     """Apply a list of :class:`CellOp` to notebook ``.py`` ``source``, returning the
     new source. PURE — no file IO; the private marimo IR object never escapes here.

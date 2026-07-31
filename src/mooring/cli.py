@@ -196,6 +196,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="render a notebook to a shareable HTML snapshot (code hidden) in the local outbox",
     )
     deliver_cmd.add_argument("path", help="workspace-relative notebook path to deliver")
+    deliver_cmd.add_argument(
+        "--excel",
+        action="store_true",
+        help="deliver an .xlsx workbook of the tables the notebook named with "
+        "`import mooring_deliver` instead of the HTML snapshot",
+    )
 
     verify_cmd = sub.add_parser(
         "verify",
@@ -209,6 +215,21 @@ def _build_parser() -> argparse.ArgumentParser:
         default=False,
         metavar="PATH",
         help="clear recorded verify receipts (all, or just one notebook path) instead of running",
+    )
+
+    catalog_cmd = sub.add_parser(
+        "catalog",
+        help="search every notebook in the workspace by name, title, or what it does",
+    )
+    catalog_cmd.add_argument(
+        "query",
+        nargs="*",
+        help="terms to search for (all must match); omit to list the whole catalog",
+    )
+    catalog_cmd.add_argument(
+        "--full",
+        action="store_true",
+        help="show each match in full (inputs, checks, SQL tables) instead of one line each",
     )
 
     checks_cmd = sub.add_parser(
@@ -226,7 +247,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     inputs_cmd = sub.add_parser(
         "inputs",
-        help="show the value-free input fingerprints (content hash + shape + schema) per notebook",
+        help="show the value-free input/output fingerprints (hash + shape + schema) per notebook",
     )
     inputs_cmd.add_argument(
         "--clear",
@@ -235,6 +256,16 @@ def _build_parser() -> argparse.ArgumentParser:
         default=False,
         metavar="PATH",
         help="clear recorded input fingerprints (all, or just one notebook path)",
+    )
+
+    lineage_cmd = sub.add_parser(
+        "lineage",
+        help="show which notebooks read and write each data file, and what a change would hit",
+    )
+    lineage_cmd.add_argument(
+        "path",
+        nargs="?",
+        help="a data file — show what reads it and what is recorded downstream of a change",
     )
 
     delete_cmd = sub.add_parser(
@@ -414,6 +445,33 @@ def _build_parser() -> argparse.ArgumentParser:
     conn_sub.add_parser(
         "check", help="scan the synced connection definitions for anything secret-shaped"
     )
+
+    ds_cmd = sub.add_parser(
+        "datasets",
+        help="point at data files too big to sync; each machine can redirect them locally",
+    )
+    ds_sub = ds_cmd.add_subparsers(dest="datasets_command", required=True)
+    ds_sub.add_parser("list", help="the defined datasets, where each resolves here, and if it's there")
+    ds_add = ds_sub.add_parser(
+        "add", help="define/update a pointer, e.g. add sales kind=share path=//fs/finance/sales.parquet"
+    )
+    ds_add.add_argument("name", help="a dataset name (e.g. sales)")
+    ds_add.add_argument(
+        "fields", nargs="+", metavar="field=value", help="kind= plus path=/url= (NO credentials)"
+    )
+    ds_rm = ds_sub.add_parser("rm", help="remove a dataset pointer")
+    ds_rm.add_argument("name", help="the dataset name to remove")
+    ds_local = ds_sub.add_parser(
+        "set-local", help="point a dataset somewhere else on THIS machine (never synced)"
+    )
+    ds_local.add_argument("name", help="the dataset name")
+    ds_local.add_argument(
+        "location", nargs="?", default=None, help="the file/UNC path it lives at here"
+    )
+    ds_local.add_argument(
+        "--clear", action="store_true", help="remove this machine's redirect instead of setting it"
+    )
+    ds_sub.add_parser("check", help="scan the synced dataset pointers for anything credential-shaped")
 
     sched_cmd = sub.add_parser(
         "schedule", help="refresh a notebook on a cadence (local to this machine)"
@@ -967,7 +1025,7 @@ def _push_guard_fn(cfg: config.Config, acknowledge: bool, *, direct: bool = True
     if acknowledge and mode != "block":
         acknowledged: dict = {}
 
-        def allow_fn(rel_path: str, data: bytes) -> list[str]:
+        def allow_fn(rel_path: str, data: bytes | None) -> list[str]:
             findings = pushguard.scan_text(rel_path, data)
             if findings:
                 acknowledged[rel_path] = {"findings": findings}
@@ -1099,6 +1157,24 @@ def cmd_policy(cfg: config.Config, args: argparse.Namespace) -> int:
         print(f"Team policy for {where} (synced mooring.toml [policy]):")
         for line in policy_mod.describe(pol, current_version=__version__, local_guard=local):
             print(line)
+        # A pattern that matches nothing looks right and protects nobody — the
+        # commonest way a policy is silently useless (`*.private.py` covers only
+        # repo-ROOT files; `**/*.private.py` is what people mean).
+        local = sorted(
+            p.relative_to(workspace).as_posix()
+            for p in workspace.rglob("*")
+            if p.is_file() and ".mooring" not in p.parts
+        ) if workspace.is_dir() else []
+        idle = policy_mod.unmatched_patterns(pol, local) if local else []
+        if idle:
+            print("\n  Patterns that match nothing in this workspace right now:")
+            for pattern in idle:
+                print(f"    {pattern}")
+            print(
+                "  A pattern matching nothing protects nobody. Remember `*` stays inside one\n"
+                "  folder — use `**/*.private.py` for every folder, and `reports/Sales*` to\n"
+                "  cover reports/Sales.pbip AND reports/Sales.SemanticModel/."
+            )
         if pol.settings:
             print(
                 "\nA locked setting cannot be made weaker on this machine — the Settings page "
@@ -1464,6 +1540,129 @@ def _connections_check(ws) -> int:
     return 1
 
 
+def cmd_datasets(cfg: config.Config, args: argparse.Namespace) -> int:
+    from mooring import datasets, workspace_config
+
+    ws = cfg.workspace()
+    sub = args.datasets_command
+    if sub == "list":
+        defined = workspace_config.datasets(ws)
+        if not defined:
+            print("No datasets defined. Point at one that's too big to sync, e.g.:")
+            print("  mooring datasets add sales kind=share path=//fileserver/finance/sales.parquet")
+            return 0
+        for name in sorted(defined):
+            found = datasets.resolve(ws, name)
+            where = {"env": "env var", "local": "local redirect", "cache": "cached download"}.get(
+                found.source, "team pointer"
+            )
+            state = "present" if found.exists else "MISSING"
+            print(f"{name}: {found.path or '(no location)'}  [{where}; {state}]")
+        return 0
+    if sub == "add":
+        from mooring.ai import secrets as ai_secrets
+
+        fields: dict = {}
+        for item in args.fields:
+            if "=" not in item:
+                sys.exit(f"Bad field {item!r} — use field=value (e.g. kind=share).")
+            key, value = item.split("=", 1)
+            fields[key.strip()] = _coerce_field(value)
+        # Defence in depth over set_dataset's own guard (the connections `add` reasoning):
+        # the richer ai.secrets scanner catches a high-entropy credential embedded in a
+        # location that the field-name / URL-parameter floor would miss. Value-free: names only.
+        leaky = sorted(
+            k for k, v in fields.items() if isinstance(v, str) and ai_secrets.has_secrets(v)
+        )
+        if leaky:
+            sys.exit(
+                f"These field values look like credentials: {', '.join(leaky)}. A dataset "
+                "pointer carries only a location — keep the credential off the synced file."
+            )
+        try:
+            workspace_config.set_dataset(ws, args.name, fields)
+        except ValueError as exc:
+            sys.exit(str(exc))
+        name = workspace_config.normalize_dataset_name(args.name)
+        telemetry.log_event("datasets", action="add")  # value-free: just the action
+        print(f"Defined dataset '{name}'. Push mooring.toml to share the pointer with the team.")
+        print(f'In a notebook: import mooring_datasets as md; md.path("{name}")')
+        found = datasets.resolve(ws, name)
+        if not found.exists and found.source != "cache":
+            print(f"Heads up: nothing at {found.path} on this machine yet.")
+        return 0
+    if sub == "rm":
+        removed = workspace_config.remove_dataset(ws, args.name)
+        print("Removed the dataset pointer." if removed else "No such dataset.")
+        return 0
+    if sub == "set-local":
+        name = workspace_config.normalize_dataset_name(args.name)
+        if not name:
+            sys.exit(
+                f"{args.name!r} is not a usable dataset name — it must be a bare token "
+                "(letters, digits, dot, underscore, hyphen)."
+            )
+        if args.clear:
+            cleared = datasets.clear_local_override(ws, name)
+            print("Cleared this machine's redirect." if cleared else "No redirect to clear.")
+            return 0
+        if not args.location:
+            sys.exit(
+                f"Where does '{name}' live on this machine? "
+                f'e.g. mooring datasets set-local {name} "D:/finance/sales.parquet"'
+            )
+        path = datasets.set_local_override(ws, name, args.location)
+        telemetry.log_event("datasets", action="set_local")  # value-free: the action only
+        print(
+            f"'{name}' now resolves to {datasets.local_path(ws, args.location)} on this machine "
+            f"({path.relative_to(ws).as_posix()} is under .mooring, which never syncs)."
+        )
+        if not Path(datasets.local_path(ws, args.location)).is_file():
+            print("Heads up: there's no file there yet.")
+        return 0
+    if sub == "check":
+        return _datasets_check(ws)
+    return 0
+
+
+def _datasets_check(ws) -> int:
+    """Pre-flight scan of the SYNCED dataset pointers for anything credential-shaped — a
+    hand-added secret field, a pre-signed/SAS URL, or a credential embedded in a location.
+    Value-free output; this just surfaces earlier what the read side already drops."""
+    from mooring.ai import secrets as ai_secrets
+
+    raw = workspace_config.datasets_raw(ws)
+    problems: list[str] = []
+    for name in sorted(raw):
+        if not workspace_config.normalize_dataset_name(name):
+            # A name is a folder component under .mooring — an escaping one is dropped on
+            # read, but say so, or the pointer just silently doesn't exist.
+            problems.append(f"{name!r}: not a usable dataset name (it must be a bare token)")
+            continue
+        for field, value in raw[name].items():
+            if workspace_config.is_secret_field(field):
+                problems.append(f"{name}.{field}: field name looks like a credential")
+            elif workspace_config.location_looks_secret(value):
+                problems.append(
+                    f"{name}.{field}: a URL with a query string, fragment or embedded "
+                    "credentials — that is where a pre-signed/SAS link keeps its key"
+                )
+            else:
+                for finding in ai_secrets.scan(str(value)):
+                    problems.append(f"{name}.{field}: {finding.kind}")
+    if not problems:
+        print("No credentials found in the dataset pointers.")
+        return 0
+    print("Found unusable or credential-shaped content in mooring.toml [datasets]:")
+    for line in problems:
+        print(f"  {line}")
+    print(
+        "A pointer carries only a location. Mount or sign in to the source on each machine, "
+        "then: mooring datasets set-local <name> <path>"
+    )
+    return 1
+
+
 def cmd_new(cfg: config.Config, name: str) -> int:
     from mooring import notebook_template
 
@@ -1505,15 +1704,21 @@ def cmd_duplicate(cfg: config.Config, rel_path: str) -> int:
     return cmd_open(cfg, new_rel)
 
 
-def cmd_deliver(cfg: config.Config, rel_path: str) -> int:
+def cmd_deliver(cfg: config.Config, rel_path: str, excel: bool = False) -> int:
     from mooring.app import deliver
 
     try:
-        result = deliver.deliver_html(cfg, rel_path)
+        if excel:
+            result = deliver.deliver_excel(cfg, rel_path)
+        else:
+            result = deliver.deliver_html(cfg, rel_path)
     except (ValueError, FileNotFoundError, deliver.DeliverError) as exc:
         sys.exit(str(exc))
-    telemetry.log_event("deliver")  # value-free: no path, just that a deliver ran
+    # value-free: which last mile ran, never a path
+    telemetry.log_event("deliver", kind="xlsx" if excel else "html")
     print(f"Delivered {result.notebook_rel} -> {result.out_rel}")
+    if result.sheets:
+        print(f"Sheets: {', '.join(result.sheets)} (+ Provenance)")
     print(
         "It's local only (in .mooring/outbox) and never pushed — attach it to "
         "email/Teams yourself."
@@ -1816,6 +2021,53 @@ def _refresh_exit_code(results: list) -> int:
     return 0
 
 
+def cmd_catalog(app_cfg: config.AppConfig, cfg: config.Config, args: argparse.Namespace) -> int:
+    """Search (or list) the repo-wide notebook catalog — "has someone already built this?"
+
+    Runs entirely offline off the local workspace: it parses each notebook with ``ast``,
+    never executes one and never opens a ``.mooring`` receipt. Doubles as the preview of
+    exactly what the copilot's catalog tools can see, the ``mooring ai model check``
+    idiom, so a team can inspect the surface before trusting it.
+    """
+    from mooring.ai import notebookindex
+
+    workspace = cfg.workspace()
+    # Apply the SAME AI opt-out the chat path applies — the per-notebook list UNIONED
+    # with the policy's ai_off globs — so this really is a preview of what the copilot
+    # can see rather than a superset of it.
+    catalog = notebookindex.load_catalog(
+        workspace, tuple(cfg.folders), exclude_fn=policy_mod.ai_gate(workspace)
+    )
+    if catalog.excluded:
+        print(f"Excluded (AI off for them): {', '.join(catalog.excluded)}\n")
+    if catalog.is_empty():
+        print(
+            "No notebooks found. They must live under a synced folder or at the repo root "
+            "(both sync by default) and be marimo notebooks."
+        )
+        return 0
+    query = " ".join(args.query or [])
+    hits = catalog.search(query, limit=50) if query else catalog.list_notebooks()
+    if not hits:
+        print(f"No notebooks match {query!r}. ({len(catalog.notebooks)} in the catalog.)")
+        return 1
+    if args.full:
+        print("\n\n".join(notebookindex.render_notebook(nb) for nb in hits))
+    else:
+        print(notebookindex.render_lines(hits))
+    broken = [r for r in catalog.reports if r.error]
+    if broken:
+        print(f"\n{len(broken)} file(s) could not be parsed and were skipped:")
+        for r in broken:
+            print(f"  {r.path}: {r.error}")
+    if not app_cfg.ai_notebook_catalog:
+        print(
+            "\nNote: [ai] notebook_catalog is OFF - the copilot cannot search this "
+            "(the hub's own search box still can)."
+        )
+    return 0
+
+
 def cmd_checks(cfg: config.Config, args: argparse.Namespace) -> int:
     from mooring import checks
 
@@ -1854,17 +2106,95 @@ def cmd_inputs(cfg: config.Config, args: argparse.Namespace) -> int:
     results = inputs.read_results(cfg.workspace())
     if not results:
         print(
-            "No input fingerprints yet. In a notebook cell: import mooring_inputs as mi; "
-            'mi.fingerprint(df, "sales", path="data/sales.csv").'
+            "No fingerprints yet. In a notebook cell: import mooring_inputs as mi; "
+            'mi.fingerprint(df, "sales", path="data/sales.csv") for an input, '
+            'mi.output(df, "monthly", path="data/monthly.csv") for a file you write.'
         )
         return 0
     for rel in sorted(results):
         result = results[rel]
-        mark = "ok    " if result["changed"] == 0 else "CHANGED"
-        if result["changed"]:
-            print(f"{mark} {rel}: {result['changed']} of {result['total']} input(s) changed")
+        total = result["total"] + result["outputs"]
+        changed = result["changed"] + result["outputs_changed"]
+        pinned = f"{result['total']} input(s)"
+        if result["outputs"]:
+            pinned += f" + {result['outputs']} output(s)"
+        if changed:
+            print(f"CHANGED {rel}: {changed} of {total} fingerprint(s) changed ({pinned})")
         else:
-            print(f"{mark} {rel}: {result['total']} input(s) pinned, unchanged")
+            print(f"ok      {rel}: {pinned} pinned, unchanged")
+    return 0
+
+
+def cmd_lineage(cfg: config.Config, args: argparse.Namespace) -> int:
+    """``mooring lineage [path]`` — the recorded read/write graph, or one file's impact.
+
+    The coverage caveat is printed UNCONDITIONALLY, most of all when there is nothing to
+    show: "nothing reads this" is the one answer here a user could act on dangerously, so
+    it never appears without the sentence saying what the graph cannot see."""
+    from mooring import lineage
+
+    graph = lineage.build(cfg.workspace())
+    path = getattr(args, "path", None)
+
+    def _dated(notebook: str) -> str:
+        """A notebook with WHEN it last confirmed its edges. An entry is only removed by
+        ``mi.reset()``, so a notebook that stopped reading a file keeps asserting it did
+        until it next runs — the date is what lets a reader tell a live dependency from
+        a fossil, and it is never printed without one."""
+        stamp = graph.confirmed.get(notebook, "")
+        if not stamp:
+            return f"{notebook} (never dated)"
+        marker = ", not confirmed since" if lineage.is_stale(stamp) else ""
+        return f"{notebook} ({stamp[:10]}{marker})"
+
+    if not path:
+        for dataset in sorted(graph.display.values()):
+            print(dataset)
+            written = lineage.writers(graph, dataset)
+            read = lineage.readers(graph, dataset)
+            if written:
+                print(f"    written by  {', '.join(_dated(nb) for nb in written)}")
+            if read:
+                print(f"    read by     {', '.join(_dated(nb) for nb in read)}")
+        if not graph.display and graph.notebooks:
+            # Fingerprints exist but none names a file — say WHY nothing joined rather
+            # than printing an empty list that reads as "no dependencies".
+            print("No file paths recorded — a fingerprint only joins when you pass path=.")
+        print()
+        print(lineage.coverage_note(graph))
+        return 0
+
+    rel = str(path).replace("\\", "/")
+    read = lineage.readers(graph, rel)
+    written = lineage.writers(graph, rel)
+    print(rel)
+    if read:
+        print(f"  Recorded readers ({len(read)}) — change this and they are affected:")
+        for notebook in read:
+            print(f"    {_dated(notebook)}")
+    if written:
+        print(f"  Recorded writers ({len(written)}):")
+        for notebook in written:
+            print(f"    {_dated(notebook)}")
+    if not read and not written:
+        print("  Nothing recorded reads or writes this.")
+    # The transitive tail only: the direct readers are already listed above, so this
+    # block earns its space only when the chain actually runs further than one hop.
+    impact = lineage.downstream(graph, rel)
+    onward = [nb for nb in impact.notebooks if nb not in read]
+    if onward or impact.datasets:
+        print("  Further downstream (through the files those notebooks write):")
+        for notebook in onward:
+            print(f"    {_dated(notebook)}")
+        for dataset in impact.datasets:
+            print(f"    {dataset}")
+    source = lineage.upstream(graph, rel)
+    if source.datasets:
+        print("  Built from:")
+        for dataset in source.datasets:
+            print(f"    {dataset}")
+    print()
+    print(lineage.coverage_note(graph))
     return 0
 
 
@@ -3058,17 +3388,21 @@ def _dispatch(
     if command == "duplicate":
         return cmd_duplicate(cfg, args.path)
     if command == "deliver":
-        return cmd_deliver(cfg, args.path)
+        return cmd_deliver(cfg, args.path, excel=getattr(args, "excel", False))
     if command == "verify":
         return cmd_verify(cfg, args)
     if command == "schedule":
         return cmd_schedule(app_cfg, cfg, args)
     if command == "refresh":
         return cmd_refresh(cfg, args)
+    if command == "catalog":
+        return cmd_catalog(app_cfg, cfg, args)
     if command == "checks":
         return cmd_checks(cfg, args)
     if command == "inputs":
         return cmd_inputs(cfg, args)
+    if command == "lineage":
+        return cmd_lineage(cfg, args)
     if command == "init":
         return cmd_init(cfg)
     if command == "deps":
@@ -3077,6 +3411,8 @@ def _dispatch(
         return cmd_policy(cfg, args)
     if command == "connections":
         return cmd_connections(cfg, args)
+    if command == "datasets":
+        return cmd_datasets(cfg, args)
     if command == "shadow":
         return cmd_shadow(cfg, args)
     if command == "build-requirements":

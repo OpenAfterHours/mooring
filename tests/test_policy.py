@@ -177,6 +177,58 @@ def test_a_rooted_pattern_becomes_repo_relative_never_an_escape():
         assert not glob.matches("etc/passwd")
 
 
+def test_an_alternating_star_pattern_cannot_hang_the_matcher():
+    """_collapse folds ADJACENT stars, but "*a*a*a…" keeps them apart with a
+    literal and is the same catastrophic shape as a regex (measured: SIX wildcards
+    took 15 s on a 100-character filename). Glob.matches runs per notebook row on
+    every hub refresh, so one committed pattern would hang every teammate's file
+    list, push and scan. The bound is the non-backtracking matcher, not a count
+    cap — so these all still COMPILE, and still answer instantly."""
+    import time
+
+    for pattern in (
+        "*a" * 40 + "Z.py",
+        "reports/" + "*e" * 45 + "Z.py",
+        "*" * 60 + "Z.py",
+        "?a*" * 30 + "Z.py",
+    ):
+        glob = policy.compile_glob(pattern)
+        assert glob is not None, pattern
+        start = time.perf_counter()
+        assert not glob.matches("a" * 400 + ".py")
+        elapsed = time.perf_counter() - start
+        assert elapsed < 1.0, f"{pattern!r} took {elapsed:.2f}s"
+
+
+def test_the_matcher_agrees_with_the_obvious_semantics():
+    """A hand-written matcher earns a table of cases."""
+    cases = [
+        ("*", "a.py", True),
+        ("*", "sub/a.py", False),
+        ("*.py", "a.py", True),
+        ("*.py", "a.txt", False),
+        ("**", "a/b/c.py", True),
+        ("**/*.py", "a/b/c.py", True),
+        ("**/*.py", "c.py", True),
+        ("a/**/b.py", "a/b.py", True),
+        ("a/**/b.py", "a/x/y/b.py", True),
+        ("a/**/b.py", "z/b.py", False),
+        ("a?c.py", "abc.py", True),
+        ("a?c.py", "ac.py", False),
+        ("a?c.py", "abbc.py", False),
+        ("reports/*", "reports/a.py", True),
+        ("reports/*", "reports/x/a.py", False),
+        ("*a*b*", "xaybz", True),
+        ("*a*b*", "xbya", False),
+        ("[weird].py", "[weird].py", True),  # "[" is a literal, not a class
+        ("[weird].py", "w.py", False),
+    ]
+    for pattern, path, want in cases:
+        glob = policy.compile_glob(pattern)
+        assert glob is not None, pattern
+        assert glob.matches(path) is want, f"{pattern!r} vs {path!r}"
+
+
 def test_a_star_run_cannot_be_turned_into_a_backtracking_bomb():
     """``"***"`` would translate to adjacent ``[^/]*`` groups — the classic
     catastrophic-backtracking shape, and a two-line DoS for anyone with repo
@@ -224,6 +276,66 @@ def test_escaping_or_pathological_globs_are_dropped():
     glob = policy.compile_glob("reports/[weird].py")
     assert glob is not None and glob.matches("reports/[weird].py")
     assert not glob.matches("reports/w.py")
+
+
+def test_a_deeply_nested_settings_table_cannot_brick_the_app(tmp_path):
+    """~6 KB of valid TOML used to raise RecursionError out of load() — killing
+    every CLI command, hub startup, guard_mode and the AI gate at once, on a
+    machine with no git to pull the fix with. The nesting cap plus the never-raise
+    backstop are what make `parse`'s "Never raises" true rather than aspirational."""
+    import sys
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    depth = sys.getrecursionlimit() * 2
+    header = "[policy.settings." + ".".join(f"k{i}" for i in range(depth)) + "]\nx = true\n"
+    (workspace / "mooring.toml").write_text(header, "utf-8")
+
+    pol = policy.load(workspace)  # must not raise
+    assert pol.settings == {}
+    assert policy.guard_mode(workspace) == "warn"
+    assert policy.ai_gate(workspace)("notebooks/a.py") is False
+    assert policy.tighten(config.AppConfig(), pol) == config.AppConfig()
+    # A legitimate policy BESIDE the bomb still applies — one rule, not the file.
+    (workspace / "mooring.toml").write_text(
+        '[policy]\npush_guard = "block"\n' + header, "utf-8"
+    )
+    assert policy.load(workspace).guard_mode("warn") == "block"
+
+
+def test_parse_never_raises_on_anything(tmp_path):
+    """The backstop, exercised directly: whatever comes out of a TOML parser (or a
+    hand-built mapping that misbehaves), parse returns a Policy."""
+
+    class Hostile(dict):
+        def items(self):  # a mapping that explodes mid-iteration
+            raise RuntimeError("boom")
+
+    for data in (None, {}, {"policy": Hostile(a=1)}, {"policy": {"settings": Hostile()}}):
+        pol = policy.parse(data)
+        assert isinstance(pol, policy.Policy)
+        assert pol.settings == {}
+    assert policy.parse({"policy": Hostile(a=1)}).ignored  # and says so
+
+
+def test_ignored_reasons_are_bounded(tmp_path):
+    """Policy.ignored is the one output an attacker sizes directly (200k junk keys
+    -> ~35 MB into every /api/settings payload and `policy show`)."""
+    junk = {f"junk{i}": True for i in range(5000)}
+    pol = policy.parse({"policy": {"settings": junk}})
+    assert pol.settings == {}
+    assert len(pol.ignored) <= policy.MAX_IGNORED + 1
+    assert "more unusable policy entries" in pol.ignored[-1]
+
+
+def test_a_control_character_never_reaches_a_terminal(tmp_path):
+    """An ANSI escape in a synced pattern would otherwise be printed verbatim by
+    `mooring policy show` on the analyst's console."""
+    assert policy.compile_glob("reports/\x1b[31mred") is None
+    pol = policy.parse({"policy": {"ai_off": ["reports/\x1b[2Jboom"]}})
+    assert pol.ai_off.patterns == ()
+    rendered = "\n".join(policy.describe(pol)) + "\n".join(pol.ignored)
+    assert "\x1b" not in rendered and "\x00" not in rendered
 
 
 def test_unparseable_shared_file_is_loud_not_silent(tmp_path):
@@ -347,6 +459,72 @@ def test_a_policy_block_is_never_acknowledgeable(cfg):
     sync.push(client, cfg, throttle=0, guard_fn=combined)
     assert "reports/q1.py" not in client.tree
     assert blocked
+
+
+def test_deleting_a_propose_only_file_is_blocked_too(cfg):
+    """DESTRUCTION is the direction that most needs review, and it was the one way
+    round the rule: sync called guard_fn only on the content branch, so
+    `rm reports/q1.py && mooring push` removed a review-gated file from the shared
+    branch with no gate, no finding and exit 0."""
+    write_shared(cfg, '[policy]\npropose_only = ["reports/**"]\n')
+    write_local(cfg, "reports/q1.py", "x = 1\n")
+    write_local(cfg, "notebooks/free.py", "y = 2\n")
+    client = FakeClient()
+    sync.push(client, cfg, throttle=0)  # get both onto the branch first
+    assert "reports/q1.py" in client.tree
+
+    (cfg.workspace() / "reports" / "q1.py").unlink()
+    (cfg.workspace() / "notebooks" / "free.py").unlink()
+    pol = policy.load(cfg.workspace())
+    gate_fn, blocked = policy.make_propose_gate(pol)
+    result = sync.push(client, cfg, throttle=0, guard_fn=gate_fn)
+
+    assert "reports/q1.py" in client.tree  # the deletion was WITHHELD
+    assert "notebooks/free.py" not in client.tree  # an unguarded deletion still goes
+    assert [p for p, _ in result.withheld] == ["reports/q1.py"]
+    assert "reports/q1.py" in blocked
+
+
+def test_deleting_a_propose_only_file_is_blocked_on_propose_symmetrically(cfg):
+    """push and propose must agree: a rule true of one and silently false of the
+    other is worse than no rule. (propose does not install the gate in the app —
+    this pins that the SEAM reaches the deletion branch on both sides.)"""
+    write_shared(cfg, '[policy]\npropose_only = ["reports/**"]\n')
+    write_local(cfg, "reports/q1.py", "x = 1\n")
+    client = FakeClient()
+    sync.push(client, cfg, throttle=0)
+    (cfg.workspace() / "reports" / "q1.py").unlink()
+
+    seen: list[tuple[str, object]] = []
+
+    def gate(rel, data):
+        seen.append((rel, data))
+        return ["nope"] if rel.startswith("reports/") else []
+
+    result = sync.propose(client, cfg, throttle=0, guard_fn=gate)
+    assert ("reports/q1.py", None) in seen  # the deletion reached the gate, data=None
+    assert [p for p, _ in result.withheld] == ["reports/q1.py"]
+
+
+def test_the_content_scanner_is_clean_for_a_deletion(cfg):
+    """The other half of the seam change: a deletion publishes no bytes, so the
+    CONTENT guard must answer [] — pushing a deletion must not suddenly start
+    tripping the secret scanner."""
+    from mooring import pushguard
+
+    assert pushguard.scan_text("notebooks/a.py", None) == []
+    guard_fn, collected = pushguard.make_guard()
+    assert guard_fn("notebooks/a.py", None) == []
+    assert collected == {}
+
+    write_local(cfg, "notebooks/a.py", "token = 'x'\n")
+    client = FakeClient()
+    sync.push(client, cfg, throttle=0)
+    (cfg.workspace() / "notebooks" / "a.py").unlink()
+    guard_fn, collected = pushguard.make_guard()
+    sync.push(client, cfg, throttle=0, guard_fn=guard_fn)
+    assert "notebooks/a.py" not in client.tree  # the deletion went through
+    assert collected == {}
 
 
 def test_compose_guards_runs_every_gate():
@@ -480,6 +658,209 @@ def test_nested_and_quoted_settings_spellings_both_parse():
     assert quoted.settings == nested.settings == {"ai.pii.enabled": True}
 
 
+def test_a_second_spelling_cannot_shadow_a_lock():
+    """Both spellings map to one key, so a duplicate used to LAST-WIN and silently
+    delete the admin's lock. Duplicates compose like everything else here: by
+    tightening — one usable value is enough, whichever order they arrive in."""
+    both = policy.parse(
+        tomllib.loads(
+            '[policy.settings]\n"ai.pii.enabled" = true\n'
+            "[policy.settings.ai.pii]\nenabled = false\n"
+        )
+    )
+    assert both.settings == {"ai.pii.enabled": True}
+    assert both.ignored  # the loosening half is still reported
+    reversed_order = policy.parse(
+        tomllib.loads(
+            "[policy.settings.ai.pii]\nenabled = false\n"
+            '[policy.settings]\n"ai.pii.enabled" = true\n'
+        )
+    )
+    assert reversed_order.settings == {"ai.pii.enabled": True}
+
+
+# -- deleting the policy is the one weakening left (trust on first use) ---------
+
+
+def test_removing_the_policy_block_is_loud(tmp_path):
+    """An attacker who cannot loosen a rule can still DELETE it, and an absent
+    policy is indistinguishable from a repo that never had one. The local
+    breadcrumb turns a silent removal into a visible one."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    (workspace / "mooring.toml").write_text('[policy]\npush_guard = "block"\n', "utf-8")
+    assert policy.load(workspace).in_force is True  # seen once — remembered
+
+    (workspace / "mooring.toml").unlink()
+    gone = policy.load(workspace)
+    assert gone.vanished is True
+    assert any("no longer does" in r for r in gone.ignored)
+    assert "no longer does" in "\n".join(policy.describe(gone))
+    # It keeps warning: the breadcrumb is not cleared by reporting it once.
+    assert policy.load(workspace).vanished is True
+
+    from mooring import doctor
+
+    cfg = config.Config(owner="acme", repo="nbs", workspace_path=str(workspace))
+    assert doctor._probe_policy(cfg).status == doctor.WARN
+
+    # Restoring a policy clears the alarm.
+    (workspace / "mooring.toml").write_text('[policy]\npush_guard = "block"\n', "utf-8")
+    assert policy.load(workspace).vanished is False
+
+
+def test_a_repo_that_never_had_a_policy_stays_quiet(tmp_path):
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    assert policy.load(workspace).vanished is False
+    (workspace / "mooring.toml").write_text('[ai]\ndisabled_notebooks = []\n', "utf-8")
+    assert policy.load(workspace).vanished is False
+
+
+def test_a_corrupt_file_is_not_reported_as_a_removal(tmp_path):
+    """Corruption stays fail-OPEN (availability: a bad shared file must not wedge
+    the team) but is reported as corruption, which has a different fix."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    (workspace / "mooring.toml").write_text('[policy]\npush_guard = "block"\n', "utf-8")
+    policy.load(workspace)
+    (workspace / "mooring.toml").write_text("[broken", "utf-8")
+    pol = policy.load(workspace)
+    assert pol.unreadable is True and pol.vanished is False
+
+
+def test_all_unusable_rules_reads_as_a_mistake_not_a_removal(tmp_path):
+    """A policy whose rules are all rejected is an editing mistake with its own,
+    more actionable warning — reporting it as a removal would bury that."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    (workspace / "mooring.toml").write_text('[policy]\npush_guard = "block"\n', "utf-8")
+    policy.load(workspace)
+    (workspace / "mooring.toml").write_text('[policy]\nai_off = ["../escape"]\n', "utf-8")
+    pol = policy.load(workspace)
+    assert pol.vanished is False and pol.ignored
+
+
+def test_the_breadcrumb_never_makes_reading_the_policy_fail(tmp_path):
+    """Best-effort throughout: a read-only or missing workspace must not turn
+    "read the policy" into an error."""
+    missing = tmp_path / "not-here"
+    assert policy.load(missing) == policy.Policy()
+    # A .mooring that is a FILE, so mkdir/write both fail.
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    (workspace / ".mooring").write_text("not a directory", "utf-8")
+    (workspace / "mooring.toml").write_text('[policy]\npush_guard = "block"\n', "utf-8")
+    assert policy.load(workspace).guard_mode("warn") == "block"
+
+
+# -- the repo-wide notebook catalog (the widest AI surface) --------------------
+
+
+_CATALOG_NB = (
+    "import marimo\n\napp = marimo.App()\n\n"
+    "@app.cell\ndef _():\n"
+    "    import marimo as mo\n"
+    '    mo.md("""# Payroll Recon""")\n'
+    "    return\n"
+)
+
+
+def test_ai_off_globs_fence_the_catalog_at_the_real_call_site(tmp_path, monkeypatch):
+    """Through ChatService.build_context, not the loader directly: this is the
+    seam that actually feeds the model, and it is where the wiring was missing —
+    the catalog landed on master applying only [ai] disabled_notebooks, so
+    `ai_off = ["hr/**"]` silently failed to fence HR noteboots out of the
+    repo-wide index. A loader-level test would not have caught that."""
+    from mooring import config, paths
+    from mooring.app.chat_service import ChatService
+
+    monkeypatch.setattr(paths, "user_config_dir", lambda: tmp_path / "appdata")
+    monkeypatch.setenv("MOORING_AI_NOTEBOOK_CATALOG", "1")
+    ws = tmp_path / "ws"
+    (ws / "hr").mkdir(parents=True)
+    (ws / "hr" / "pay.py").write_text(_CATALOG_NB, "utf-8")
+    (ws / "open.py").write_text(_CATALOG_NB.replace("Payroll", "Open"), "utf-8")
+    (ws / "nb.py").write_text("import marimo\n\napp = marimo.App()\n", "utf-8")
+    app_cfg = config.load_app_config()
+
+    catalog = ChatService().build_context(app_cfg, ws, "nb.py", "", folders=("", "hr"))[6]
+    assert catalog.get("hr/pay.py") is not None  # no policy yet — it IS indexed
+
+    (ws / "mooring.toml").write_text('[policy]\nai_off = ["hr/**"]\n', "utf-8")
+    catalog = ChatService().build_context(app_cfg, ws, "nb.py", "", folders=("", "hr"))[6]
+    assert catalog.get("hr/pay.py") is None
+    assert catalog.search("payroll") == []
+    assert catalog.get("open.py") is not None  # everything else still indexed
+
+
+def test_ai_off_globs_fence_the_cli_catalog_preview(tmp_path, monkeypatch, capsys):
+    """`mooring catalog` is documented as the PREVIEW of what the copilot can
+    see, so it must apply the same gate or it is a superset of it."""
+    ws = tmp_path / "ws"
+    (ws / "hr").mkdir(parents=True)
+    (ws / "hr" / "pay.py").write_text(_CATALOG_NB, "utf-8")
+    (ws / "open.py").write_text(_CATALOG_NB.replace("Payroll", "Open"), "utf-8")
+    (ws / "mooring.toml").write_text(
+        '[sync]\nfolders = ["hr"]\n[policy]\nai_off = ["hr/**"]\n', "utf-8"
+    )
+    _run_cli(["catalog"], tmp_path, monkeypatch, ws)
+    out = capsys.readouterr().out
+    listing = out.split("Excluded (AI off for them): hr/pay.py")[-1]
+    assert "hr/pay.py" not in listing  # not in the catalog listing itself
+    assert "Excluded (AI off for them): hr/pay.py" in out  # but named, not vanished
+    assert "open.py" in listing
+
+
+def test_ai_off_globs_fence_the_notebook_catalog(tmp_path):
+    """The loader's own contract, under the predicate."""
+    from mooring.ai import notebookindex
+
+    workspace = tmp_path / "ws"
+    (workspace / "hr").mkdir(parents=True)
+    (workspace / "notebooks").mkdir()
+    body = "import marimo\n\napp = marimo.App()\n"
+    (workspace / "hr" / "pay.py").write_text(body, "utf-8")
+    (workspace / "notebooks" / "sales.py").write_text(body, "utf-8")
+    (workspace / "mooring.toml").write_text('[policy]\nai_off = ["hr/**"]\n', "utf-8")
+
+    catalog = notebookindex.load_catalog(
+        workspace, ("hr", "notebooks"), exclude_fn=policy.ai_gate(workspace)
+    )
+    paths = [nb.path for nb in catalog.notebooks]
+    assert "notebooks/sales.py" in paths
+    assert "hr/pay.py" not in paths
+    assert catalog.excluded == ("hr/pay.py",)
+
+
+def test_the_catalog_exclusion_fails_closed(tmp_path):
+    """A predicate that blows up must keep the notebook OUT, never wave it in."""
+    from mooring.ai import notebookindex
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    (workspace / "a.py").write_text("import marimo\n\napp = marimo.App()\n", "utf-8")
+
+    def boom(_rel):
+        raise RuntimeError("scanner exploded")
+
+    catalog = notebookindex.load_catalog(workspace, (), exclude_fn=boom)
+    assert catalog.notebooks == ()
+    assert catalog.excluded == ("a.py",)
+
+
+def test_the_catalog_knob_is_policy_governed():
+    """Master added ai.notebook_catalog as a weakening opt-in; an admin must be
+    able to pin it off like every other AI surface."""
+    knob = policy.KNOB_BY_KEY["ai.notebook_catalog"]
+    assert knob.safe is False
+    pol = policy.parse(tomllib.loads('[policy.settings]\n"ai.notebook_catalog" = false\n'))
+    app_cfg = policy.tighten(
+        policy._set_path(config.AppConfig(), knob.path, True), pol
+    )
+    assert app_cfg.ai_notebook_catalog is False
+
+
 def test_describe_is_value_free_and_names_the_ignored_rules():
     pol = policy.parse(
         tomllib.loads(
@@ -572,15 +953,88 @@ def test_a_locked_setting_can_still_be_moved_towards_the_safe_value(hub_client):
 
 
 def test_the_hub_actually_runs_with_the_tightened_config(hub_client):
-    """Not just the display: Hub.app_cfg is folded at every assignment, so a
-    config.toml that says otherwise cannot re-open the setting."""
+    """Not just the display: Hub.app_cfg folds the policy, so a config.toml that
+    says otherwise cannot re-open the setting.
+
+    Uses ai.live_schema, whose default is TRUE — a knob whose default already
+    equals the safe value proves nothing (the first version of this test asserted
+    ai.context is False, which holds with the policy deleted and with the fold
+    removed). And the config is driven through the real load_app_config, not a
+    hand-built AppConfig, so the whole read path is exercised.
+    """
     _client, _hub, workspace, build = hub_client
     from mooring import config_store
 
-    config_store.set_value("ai.context", True)
-    (workspace / "mooring.toml").write_text('[policy.settings]\n"ai.context" = false\n', "utf-8")
-    assert config.load_app_config().ai_context is True  # the local file says true
-    assert build().app_cfg.ai_context is False  # the app runs with false
+    assert config.load_app_config().ai_live_schema is True  # the permissive default
+    hub = build()
+    assert hub.app_cfg.ai_live_schema is True  # ...and no policy changes nothing
+
+    (workspace / "mooring.toml").write_text(
+        '[policy.settings]\n"ai.live_schema" = false\n', "utf-8"
+    )
+    assert config.load_app_config().ai_live_schema is True  # per-machine config unmoved
+    assert build().app_cfg.ai_live_schema is False  # but the app runs with false
+    # ...and an explicit local opt-IN loses to the policy just the same.
+    config_store.set_value("ai.live_schema", True)
+    assert config.load_app_config().ai_live_schema is True
+    assert build().app_cfg.ai_live_schema is False
+
+
+def test_the_cli_runs_with_the_tightened_config(tmp_path, monkeypatch):
+    """The CLI's half of the same fold — pinned through cli.main's real path, so
+    dropping the fold fails here rather than passing quietly."""
+    from mooring import cli, paths
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    (workspace / "mooring.toml").write_text(
+        '[policy.settings]\n"ai.live_schema" = false\n', "utf-8"
+    )
+    monkeypatch.setattr(paths, "user_config_dir", lambda: tmp_path / "appdata")
+    monkeypatch.setenv("MOORING_WORKSPACE", str(workspace))
+    monkeypatch.setenv("MOORING_OWNER", "acme")
+    monkeypatch.setenv("MOORING_REPO", "nbs")
+    for var in ("MOORING_AI_LIVE_SCHEMA", "MOORING_TOKEN", "MOORING_GITHUB_HOST"):
+        monkeypatch.delenv(var, raising=False)
+
+    seen = {}
+    # cmd_selftest is one of the commands _dispatch hands the app_cfg to, so this
+    # observes exactly what a real command would run with.
+    monkeypatch.setattr(cli, "cmd_selftest", lambda app_cfg, cfg: seen.setdefault(
+        "live_schema", app_cfg.ai_live_schema
+    ) or 0)
+    cli.main(["selftest"])
+    assert seen["live_schema"] is False
+
+
+def test_a_policy_that_lands_mid_session_takes_effect(hub_client):
+    """The pull case: a teammate's policy arrives while the hub is running. The
+    fold happens on READ, so it cannot be missed by a route that forgets to
+    re-load the config — which is exactly what the pull route did."""
+    _client, hub, workspace, _build = hub_client
+    assert hub.app_cfg.ai_live_schema is True
+    # No reload(), no settings write — just the file appearing, as a pull leaves it.
+    (workspace / "mooring.toml").write_text(
+        '[policy.settings]\n"ai.live_schema" = false\n"ai.enabled" = false\n', "utf-8"
+    )
+    assert hub.app_cfg.ai_live_schema is False
+    assert hub.app_cfg.ai_enabled is False
+    # And it lifts again when the policy goes away (the file is the only source).
+    (workspace / "mooring.toml").unlink()
+    assert hub.app_cfg.ai_live_schema is True
+
+
+def test_a_locked_row_never_renders_the_forbidden_value(hub_client):
+    """The honesty invariant: a row marked locked must SHOW the pinned value. It
+    used to render `locked: true` beside the permissive value a mid-session
+    policy had not been folded into."""
+    client, _hub, workspace, _build = hub_client
+    (workspace / "mooring.toml").write_text(
+        '[policy.settings]\n"ai.live_schema" = false\n', "utf-8"
+    )
+    rows = {r["key"]: r for r in client.get("/api/settings").json()["editable"]}
+    assert rows["ai.live_schema"]["locked"] is True
+    assert rows["ai.live_schema"]["value"] is False
 
 
 def test_no_policy_leaves_the_settings_payload_exactly_as_before(hub_client):

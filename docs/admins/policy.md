@@ -19,7 +19,7 @@ diffable in the repo's history, and every mooring that syncs the repo enforces i
 min_version  = "0.4.29"
 push_guard   = "block"
 propose_only = ["reports/**", "data/**"]
-ai_off       = ["hr/**", "*.private.py"]
+ai_off       = ["hr/**", "**/*.private.py"]
 
 [policy.settings]
 "ai.pii.enabled" = true
@@ -87,6 +87,41 @@ Team policy for acme/nbs (synced mooring.toml [policy]):
 protects nobody, and believing you are covered when you are not is the failure
 worth surfacing.
 
+A corrupt `mooring.toml` is reported (`doctor` **fails**) but does **not** stop
+mooring working: a shared file that could wedge every teammate's app would be a
+worse weapon than any policy it could carry, and this audience has no git with
+which to pull the fix. Availability wins, loudly.
+
+## Removing the policy is the one weakening left
+
+Nothing in the file can make a rule looser — but someone with repo write can
+still **delete the block**, and an absent policy looks exactly like a repo that
+never had one. So each machine remembers locally (under the sync-excluded
+`.mooring/`) that it once saw a policy in force here, and reports the
+disappearance:
+
+```console
+$ mooring policy show
+  ! this repo HAD a policy and no longer does — see below
+  ignored: this repo HAD a team policy and no longer does — someone removed the
+           [policy] block. Check the repo's history before trusting the change.
+```
+
+`mooring doctor` warns for the same reason, and keeps warning until a policy is
+back.
+
+!!! note "What that record is, and is not"
+
+    It is a **local, unsigned breadcrumb**. It catches an accident, or a remote
+    attacker who only has repo write — the threat this whole feature is about.
+    It does **not** survive onto a fresh machine (nothing has been seen there
+    yet), and it does not defend against someone who can already write to the
+    analyst's own disk, since they could delete the breadcrumb as easily as the
+    policy. Making it stronger needs a signature and somewhere trustworthy to
+    keep the key, which mooring does not have. Turning a silent removal into a
+    visible one is the honest ceiling; pair it with branch protection on the
+    `mooring.toml` path if the repo warrants it.
+
 Path patterns are routed through the same sanitiser the rest of the synced file
 uses: an absolute path, a drive letter, or a `..` escape is refused outright, so
 a pattern can never address anything outside the workspace. Patterns are only
@@ -131,9 +166,14 @@ propose_only = ["reports/**", "data/**"]
 
 A matching file can never be pushed **directly** to the shared branch. It is
 withheld at the push seam itself — the same mechanism the secret scanner uses —
-so the bytes never reach GitHub, and no second code path in the app can get round
-it. **Propose** is the road: `mooring propose` (or the hub's Propose button)
-sends the same file to a personal review branch and opens a pull request.
+so the bytes never reach GitHub. **Propose** is the road: `mooring propose` (or
+the hub's Propose button) sends the same file to a personal review branch and
+opens a pull request.
+
+**Deleting** a matching file is blocked the same way. A deletion is a direct
+write to the shared branch too, and destroying a review-gated file is the change
+that most needs review — so it goes through the same gate, and must also go via
+Propose.
 
 Unlike a scanner finding, a propose-only block has **no override**: there is no
 confirm token, and `--acknowledge-findings` does not clear it.
@@ -142,7 +182,7 @@ confirm token, and `--acknowledge-findings` does not clear it.
 
 ```toml
 [policy]
-ai_off = ["hr/**", "*.private.py"]
+ai_off = ["hr/**", "**/*.private.py"]
 ```
 
 The glob generalisation of the per-notebook `[ai] disabled_notebooks` opt-out.
@@ -170,6 +210,7 @@ mid-session takes effect immediately.
 | `ai.traceback_guard` | `true` | Pasted tracebacks are always sanitised. |
 | `ai.context` | `false` | Team context files are never sent. |
 | `ai.code_index` | `false` | The team code library is never sent. |
+| `ai.notebook_catalog` | `false` | No repo-wide notebook catalog. |
 | `ai.live_schema` | `false` | No live kernel schema reads. |
 | `ai.semantic_model` | `false` | No Power BI semantic-model reads. |
 | `ai.batch.enabled` | `false` | No unattended batch builds. |
@@ -214,6 +255,20 @@ no *local* way to relax it.
 are not supported (a `[` is a literal). Matching is case-insensitive, and a
 pattern with no wildcard also covers everything beneath it (`ai_off = ["hr"]`
 covers `hr/pay.py`).
+
+!!! warning "A pattern that matches nothing looks right and protects nobody"
+
+    `*` stays inside **one** folder, which is the usual way a rule silently
+    covers less than intended:
+
+    | You probably meant | Write |
+    |---|---|
+    | every `*.private.py`, at any depth | `**/*.private.py` (not `*.private.py`, which is repo-root only) |
+    | a Power BI report and its model | `reports/Sales*` (not `reports/Sales`, which matches neither `reports/Sales.pbip` nor `reports/Sales.SemanticModel/`) |
+    | everything under a folder | `hr/**`, or just `hr` |
+
+    `mooring policy show` lists any pattern matching nothing in your workspace
+    right now, so run it after authoring a rule.
 
 ## Upgrading an existing repo
 

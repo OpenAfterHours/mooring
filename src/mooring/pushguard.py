@@ -91,14 +91,19 @@ def _looks_like_data_export(text: str, suffix: str) -> int:
     return rows
 
 
-def scan_text(rel_path: str, data: bytes) -> list[Finding]:
+def scan_text(rel_path: str, data: bytes | None) -> list[Finding]:
     """Value-free findings for one outgoing file (empty when clean or binary).
 
     Runs the secret + structured-PII detectors over text-like files, drops any
     finding whose line carries the ``mooring: push-ok`` pragma, and adds the
     raw-data heuristic for tabular files. Read-only: never modifies ``data``.
+
+    ``data is None`` marks a DELETION (sync now offers every candidate to the
+    guard, not only the ones that upload bytes). This guard is a CONTENT guard,
+    so a deletion is clean by construction — it publishes nothing. The path
+    rules that DO care about a deletion live in :mod:`mooring.policy`.
     """
-    if not _is_text(rel_path):
+    if data is None or not _is_text(rel_path):
         return []
     text = data.decode("utf-8", "replace")
     findings: list[Finding] = []
@@ -124,13 +129,13 @@ def scan_text(rel_path: str, data: bytes) -> list[Finding]:
     return findings
 
 
-def file_token(rel_path: str, data: bytes, findings: list[Finding]) -> str:
+def file_token(rel_path: str, data: bytes | None, findings: list[Finding]) -> str:
     """A stateless per-file confirm token binding the exact findings set to the
     exact bytes: a confirmed token stops matching the moment the file changes or
     a new finding appears, so an old confirm can never cover new exposure."""
     h = hashlib.sha256()
     h.update(rel_path.encode("utf-8"))
-    h.update(hashlib.sha256(data).digest())
+    h.update(hashlib.sha256(data if data is not None else b"").digest())
     for f in sorted(findings, key=lambda x: (x.line, x.kind)):
         h.update(f"{f.line}:{f.kind}".encode())
     return h.hexdigest()[:16]
@@ -154,7 +159,7 @@ def make_guard(allowed_tokens: frozenset[str] | set[str] = frozenset()):
     """
     collected: dict[str, dict] = {}
 
-    def guard_fn(rel_path: str, data: bytes) -> list[str]:
+    def guard_fn(rel_path: str, data: bytes | None) -> list[str]:
         findings = scan_text(rel_path, data)
         if not findings:
             return []

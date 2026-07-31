@@ -46,12 +46,16 @@ EXPECTED_ROUTES = {
     ("/api/push", ("POST",), "api_push"),
     ("/api/propose", ("POST",), "api_propose"),
     ("/api/resolve", ("POST",), "api_resolve"),
+    # Cell-level conflict merge: plan, then write the merged notebook (local only).
+    ("/api/resolve/cells", ("POST",), "api_resolve_cells"),
+    ("/api/resolve/cells/apply", ("POST",), "api_resolve_cells_apply"),
     ("/api/recall", ("POST",), "api_recall"),  # push guard's "recall last push"
     ("/api/new", ("POST",), "api_new"),
     ("/api/duplicate", ("POST",), "api_duplicate"),  # the fearless personal draft copy
     ("/api/open", ("POST",), "api_open"),
     ("/api/reveal", ("POST",), "api_reveal"),
     ("/api/deliver", ("POST",), "api_deliver"),  # render a notebook to the local outbox
+    ("/api/deliver/excel", ("POST",), "api_deliver_excel"),  # ...as a .xlsx for Excel readers
     ("/api/verify", ("POST",), "api_verify"),  # smoke-run a notebook -> value-free trust badge
     ("/api/delete", ("POST",), "api_delete"),
     ("/api/rollback", ("POST",), "api_rollback"),

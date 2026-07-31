@@ -444,6 +444,15 @@ function deliverAction(path) {
     "Rendering… this re-runs the whole notebook (can take a minute).");
 }
 
+// Deliver as Excel: the same last mile for a stakeholder who works in Excel rather
+// than reading a chart. Runs the notebook and collects the tables it named with
+// `import mooring_deliver` into one .xlsx in the same never-synced outbox. Not opened
+// for preview — Excel locks an open workbook, which would block the next delivery.
+function deliverExcelAction(path) {
+  return action("/api/deliver/excel", { path }, false,
+    "Building the workbook… this re-runs the whole notebook (can take a minute).");
+}
+
 // Verify: smoke-run this notebook once on your machine and record whether it ran clean
 // (the trust badge). Runs in the real environment; nothing is committed and no value
 // leaves the machine — the receipt is a boolean keyed to the file's content, so the
@@ -686,12 +695,25 @@ function proposeAction(paths, count) {
   });
 }
 
+// The recorded-lineage clause for a row that is about to be destroyed, looked up from the
+// last /api/state rows so every destructive confirm can carry it without a new argument.
+// "" when nothing is recorded — a dialog must never gain a reassuring "nothing depends on
+// this", which is a claim lineage cannot make.
+function impactClause(path) {
+  const file = lastFiles.find((f) => f.path === path);
+  return file ? LineageFmt.impactWarning(file.lineage) : "";
+}
+
 function deleteAction(path, kind) {
   const name = path.split("/").pop();
   const what = kind === "project" ? `the Power BI project ${name}` : name;
+  // Delete is strictly more destructive than Pull — it removes the local file and, once
+  // pushed, removes it for the whole team — so the row that badges "3 notebooks read
+  // this" must not offer a bare confirm that says nothing about them.
   const ok = confirm(
     `Delete ${what} from your workspace?\n\n` +
-    "This removes the local file(s). Push or Propose afterwards to remove it from the team repo."
+    "This removes the local file(s). Push or Propose afterwards to remove it from the " +
+    "team repo." + impactClause(path)
   );
   if (ok) action("/api/delete", { path });
 }
@@ -712,7 +734,8 @@ function revertAction(path, state) {
     `Discard your changes to ${name} and restore the last synced version?` +
     (undoable
       ? "\n\nYour current version is saved locally, so you can Undo this."
-      : "\n\nThis cannot be undone.")
+      : "\n\nThis cannot be undone.") +
+    impactClause(path)
   );
   if (!ok) return;
   // Register the Undo affordance only once the revert succeeds AND the server returns
@@ -779,7 +802,7 @@ async function restoreVersion(path, sha, asCopy) {
       "Your current bytes are saved first, so this is undoable. The restored " +
       "file stays LOCAL until you push it — and pushing a version older than " +
       "your last pull replaces newer team work on purpose. Old code may also " +
-      "not run under the repo's current packages."
+      "not run under the repo's current packages." + impactClause(path)
     );
     if (!ok) return;
   }
@@ -917,6 +940,127 @@ $("review-close").addEventListener("click", () => {
   $("review-card").classList.add("hidden");
   reviewPath = null;
 });
+
+// -- merge cell by cell (the per-cell conflict resolution) -------------------
+// The fourth resolution for a conflicted NOTEBOOK, offered beside the three
+// whole-file ones (which stay exactly as they were, and are the only option
+// when this refuses). Two calls: a read-only plan, then the write. The plan's
+// three SHAs ride back with the write so the server can refuse (409) if your
+// copy or the team's moved while you were deciding.
+
+let mergePath = null;
+let mergePlan = null;
+let mergeChoices = {};
+
+async function mergeAction(path) {
+  const data = await api("/api/resolve/cells", { path });
+  if (data.error) {
+    // "unavailable" is a designed answer, not a failure: this conflict can't be
+    // merged per cell (not a notebook, restructured, no shared version), so say
+    // why and leave the row's three whole-file resolutions to do the job.
+    return showError(
+      data.unavailable
+        ? `${data.error} Use one of the other resolutions on ${path}.`
+        : data.error,
+    );
+  }
+  mergePath = path;
+  mergePlan = data;
+  mergeChoices = {};
+  renderMerge();
+}
+
+function renderMerge() {
+  const card = $("merge-card");
+  card.classList.remove("hidden");
+  $("merge-title").textContent = `Merge cell by cell — ${mergePath}`;
+  $("merge-summary").textContent = MergeFmt.summary(mergePlan);
+  const frame = MergeFmt.frameNote(mergePlan);
+  $("merge-frame").textContent = frame;
+  $("merge-frame").classList.toggle("hidden", !frame);
+  const box = $("merge-cells");
+  box.textContent = ""; // clear children — cell diffs are untrusted, plain text only
+  for (const block of MergeFmt.buildBlocks(mergePlan)) {
+    const cell = document.createElement("div");
+    cell.className = block.status === "choice" ? "merge-cell merge-choice" : "merge-cell";
+    const label = document.createElement("div");
+    label.className = "merge-cell-label";
+    label.textContent = block.label;
+    cell.appendChild(label);
+    if (block.options.length) cell.appendChild(mergeOptions(block));
+    if (block.diff) {
+      const pre = document.createElement("pre");
+      pre.className = "merge-cell-diff";
+      pre.textContent = block.diff;
+      cell.appendChild(pre);
+    }
+    box.appendChild(cell);
+  }
+  updateMergeReady();
+  card.scrollIntoView({ block: "nearest" });
+}
+
+// One radio group per contested cell, named by the cell id so the browser
+// enforces "at most one side wins" for us. Nothing is checked initially.
+function mergeOptions(block) {
+  const row = document.createElement("div");
+  row.className = "merge-options";
+  for (const option of block.options) {
+    const label = document.createElement("label");
+    const input = document.createElement("input");
+    input.type = "radio";
+    input.name = `merge-${block.id}`;
+    input.value = option.value;
+    input.checked = mergeChoices[block.id] === option.value;
+    input.addEventListener("change", () => {
+      mergeChoices[block.id] = option.value;
+      updateMergeReady();
+    });
+    const text = document.createElement("span");
+    text.textContent = option.label;
+    label.append(input, text);
+    row.appendChild(label);
+  }
+  return row;
+}
+
+// The write button stays disabled until every contested cell has a side. The
+// count of what's left is the whole instruction, so it lives on the button.
+function updateMergeReady() {
+  const left = MergeFmt.unresolved(mergePlan, mergeChoices).length;
+  const button = $("merge-apply");
+  button.disabled = left > 0;
+  button.textContent = left
+    ? `Choose ${left} more cell${left === 1 ? "" : "s"}`
+    : "Write the merged notebook";
+}
+
+function mergeApply() {
+  if (!mergePath || !MergeFmt.ready(mergePlan, mergeChoices)) return;
+  const body = {
+    path: mergePath,
+    choices: mergeChoices,
+    base_sha: mergePlan.base_sha,
+    local_sha: mergePlan.local_sha,
+    remote_sha: mergePlan.remote_sha,
+  };
+  // Through action() so the busy cue, the log card, and the trash Undo toast
+  // (the merge's safety net) all work exactly as they do for pull/resolve.
+  action("/api/resolve/cells/apply", body, true, "Merging cells…").then((data) => {
+    if (!data || data.error) return;
+    closeMerge();
+  });
+}
+
+function closeMerge() {
+  $("merge-card").classList.add("hidden");
+  mergePath = null;
+  mergePlan = null;
+  mergeChoices = {};
+}
+
+$("merge-apply").addEventListener("click", mergeApply);
+$("merge-close").addEventListener("click", closeMerge);
 
 // -- what's new (the pull digest) + the per-file watch set -------------------
 // The digest answers "who changed what since MY last sync" (server-computed
@@ -1100,6 +1244,15 @@ function fileActions(file, opts) {
   // "Discard my changes" (ditto), and "History…" all need the team repo. A
   // conflicted row keeps its badge: the cached remote still classifies it.
   if (file.state === "conflict" && !offlineMode) {
+    // "Merge cell by cell…" leads: on a notebook it is the only resolution that
+    // keeps BOTH sides' work in one file, and it usually asks nothing (a cell
+    // only one of you touched merges itself). Offered on any notebook row —
+    // whether this particular conflict is mergeable is a server answer, and it
+    // says why and points back here when it isn't. The three whole-file
+    // resolutions below are unchanged and remain the fallback.
+    if (isNotebook && file.has_local) {
+      actions.push(["Merge cell by cell…", () => mergeAction(file.path)]);
+    }
     actions.push(
       ["Use remote", () => action("/api/resolve", { path: file.path, strategy: "theirs" })],
       ["Keep both", () => action("/api/resolve", { path: file.path, strategy: "keep-both" })],
@@ -1141,6 +1294,10 @@ function fileActions(file, opts) {
   // the "hand it to a stakeholder" step. Notebooks only; the output never syncs.
   if (isNotebook && file.has_local) {
     actions.push(["Deliver", () => deliverAction(file.path)]);
+    // The Excel variant sits right beside it: same step, different last mile. Always
+    // offered — whether the notebook named any tables is only knowable by running it,
+    // and the server explains what to add when it named none.
+    actions.push(["Deliver as Excel", () => deliverExcelAction(file.path)]);
   }
   // Verify: smoke-run the notebook on this machine and badge the row with whether it
   // ran clean (a value-free trust receipt). The "does this still run before I share it?"
@@ -1326,17 +1483,43 @@ function inputsBadge(inp) {
   const span = document.createElement("span");
   const changed = inp.changed || 0;
   const total = inp.total || 0;
-  if (changed > 0) {
+  const outputs = inp.outputs || 0;
+  const outputsChanged = inp.outputs_changed || 0;
+  const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+  // An output that moved is the same alarm as an input that moved — the numbers this
+  // notebook PUBLISHES are no longer the ones it published last run — so either goes amber.
+  if (changed > 0 || outputsChanged > 0) {
+    const bits = [];
+    if (changed) bits.push(plural(changed, "input"));
+    if (outputsChanged) bits.push(plural(outputsChanged, "output"));
     span.className = "badge inputs-changed";
-    span.textContent = `⚠ ${changed} input${changed === 1 ? "" : "s"} changed`;
-    span.title = `${changed} of ${total} pinned input(s) changed since the last run ` +
-      "(content, row count, or schema) — check the numbers still hold. Value-free and local.";
+    span.textContent = `⚠ ${bits.join(" + ")} changed`;
+    span.title = `Of this notebook's ${total} pinned input(s) and ${outputs} recorded ` +
+      `output(s), ${changed + outputsChanged} changed since the last run (content, row ` +
+      "count, or schema) — check the numbers still hold. Value-free and local.";
   } else {
+    const bits = [];
+    if (total) bits.push(`${plural(total, "input")} pinned`);
+    if (outputs) bits.push(plural(outputs, "output"));
     span.className = "badge inputs-ok";
-    span.textContent = `⛓ ${total} input${total === 1 ? "" : "s"} pinned`;
-    span.title = `${total} input(s) fingerprinted (content hash + shape + schema), unchanged ` +
-      "since the last run. Value-free and never pushed.";
+    span.textContent = `⛓ ${bits.join(", ")}`;
+    span.title = `${total} input(s) and ${outputs} output(s) fingerprinted (content hash + ` +
+      "shape + schema), unchanged since the last run. Value-free and never pushed.";
   }
+  return span;
+}
+
+// "3 notebooks read this" for a file others depend on, derived from the value-free
+// mooring_inputs receipts (one notebook's recorded output path = another's input path).
+// The wording — which is entirely positive claims, each dated — lives in LineageFmt so it
+// can be unit-tested; a null there means the payload supports no claim, so no badge.
+function lineageBadge(lin) {
+  const parts = LineageFmt.badge(lin);
+  if (!parts) return null;
+  const span = document.createElement("span");
+  span.className = lin.stale ? "badge lineage stale" : "badge lineage";
+  span.textContent = parts.text;
+  span.title = parts.title;
   return span;
 }
 
@@ -1354,7 +1537,15 @@ function buildFileRow(file, opts) {
   // The trust badge from a Verify run (present only while it matches the file's SHA).
   if (file.verified) extras.push(" ", verifiedBadge(file.verified));
   // The input-fingerprint badge: N inputs pinned, amber if one changed since last run.
-  if (file.inputs && file.inputs.total) extras.push(" ", inputsBadge(file.inputs));
+  if (file.inputs && (file.inputs.total || file.inputs.outputs)) {
+    extras.push(" ", inputsBadge(file.inputs));
+  }
+  // Recorded lineage: who else reads this file. Present only when there IS a reader
+  // or writer — the row never claims a file is unused.
+  if (file.lineage) {
+    const lin = lineageBadge(file.lineage);
+    if (lin) extras.push(" ", lin);
+  }
   // A watched file with a teammate change waiting gets its promotion badge —
   // quiet otherwise (watching an in-sync file must not add row noise).
   if (watchedPaths.has(file.path) && PULL_STATES.has(file.state)) {
@@ -2696,7 +2887,28 @@ $("schedule-cancel").addEventListener("click", () => {
   renderSchedules(); // the card hides itself again when there are no schedules to show
 });
 $("schedule-cadence").addEventListener("change", syncScheduleDayVisibility);
+// A pull REPLACES local files. When one of them is a dataset other notebooks are
+// recorded as reading (or generating), say so BEFORE it lands, instead of leaving the
+// analyst to discover it a week later in a number that moved. Advisory, never blocking:
+// pulling the team's work is right almost every time, and lineage under-reports by
+// construction — so this informs the choice, claims only what is recorded, and DATES
+// each claim so a six-month-old one cannot masquerade as current. Scoped to the toolbar
+// Pull, the unaimed bulk action; the per-row stale dialog already names the one file it
+// is about, and a second modal there is noise.
+function confirmPullImpact() {
+  const hits = LineageFmt.pullImpact(lastFiles);
+  if (!hits.length) return true;
+  return confirm(
+    "This pull changes files other notebooks depend on:\n\n" +
+    hits.map(LineageFmt.impactLine).join("\n") +
+    "\n\nRe-run those notebooks afterwards to see what moved. (Lineage only sees " +
+    "notebooks that record their inputs, so there may be more.)\n\n" +
+    "OK pulls anyway; Cancel leaves your copies alone."
+  );
+}
+
 $("btn-pull").addEventListener("click", async () => {
+  if (!confirmPullImpact()) return;
   const data = await action("/api/pull", {});
   // The pull response carries the digest of what just landed, computed against
   // the PRE-pull horizon — so a pull is never a black box. States shown are the
