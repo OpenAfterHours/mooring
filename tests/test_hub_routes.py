@@ -57,6 +57,10 @@ EXPECTED_ROUTES = {
     ("/api/deliver", ("POST",), "api_deliver"),  # render a notebook to the local outbox
     ("/api/deliver/excel", ("POST",), "api_deliver_excel"),  # ...as a .xlsx for Excel readers
     ("/api/verify", ("POST",), "api_verify"),  # smoke-run a notebook -> value-free trust badge
+    # The catalog-wide sweep: what it would cost, start/poll, and a reachable cancel.
+    ("/api/sweep/plan", ("GET",), "api_sweep_plan"),
+    ("/api/sweep", ("GET", "POST"), "api_sweep"),
+    ("/api/sweep/cancel", ("POST",), "api_sweep_cancel"),
     ("/api/delete", ("POST",), "api_delete"),
     ("/api/rollback", ("POST",), "api_rollback"),
     ("/api/undo", ("POST",), "api_undo"),

@@ -205,6 +205,9 @@
         <button id="btn-propose" title="Upload changes to a review branch and open a pull request on GitHub">&#8599; Propose</button>
         <button id="btn-recall" class="hidden" title="Undo your last push on GitHub (writes the previous versions back; history keeps the pushed commit)">&#8617; Recall push</button>
         <button id="btn-new">+ New notebook</button>
+        <!-- No check-glyph: a ✓ on the label reads as "everything is fine" before the
+             check has run, and this is the surface that must not overclaim. -->
+        <button id="btn-sweep" title="Run every notebook once on this machine and report which still run (slow — one notebook at a time)">Check all notebooks run&hellip;</button>
         <button id="btn-batch" class="hidden" title="Build several notebooks at once from a list of briefs (the AI copilot proposes each; you review and apply)">&#9889; Batch build&hellip;</button>
       </div>
       <input id="file-search" class="file-search hidden" type="search"
@@ -219,6 +222,14 @@
       <div id="adopt-banner" class="notice notice-adopt hidden"></div>
       <div id="freshness-banner" class="notice notice-fresh hidden" role="status"></div>
       <div id="summary" class="muted files-summary"></div>
+      <!-- The sweep's live progress. Deliberately OUTSIDE the busy-disabled toolbar
+           (and setBusy exempts the button): a check that runs every notebook takes many
+           minutes, so Cancel has to be reachable throughout — app.js polls /api/sweep
+           rather than blocking on it, and re-attaches to a running check after a reload. -->
+      <div id="sweep-progress" class="notice notice-fresh hidden" role="status">
+        <span id="sweep-progress-text"></span>
+        <button id="btn-sweep-cancel" class="small">Cancel</button>
+      </div>
       <!-- Per-user AI context subscription: when the repo offers context folders and this
            machine has AI + [ai] context on, pick which offered folders THIS copilot reads
            (the synced offer stays the ceiling). Rendered by renderContextSubscription. -->

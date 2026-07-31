@@ -10,6 +10,7 @@ import subprocess
 import sys
 from collections.abc import Mapping
 from pathlib import Path
+from typing import NamedTuple
 
 from mooring import (
     __version__,
@@ -209,6 +210,20 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     verify_cmd.add_argument("path", nargs="?", help="workspace-relative notebook path to verify")
     verify_cmd.add_argument(
+        "--all",
+        dest="all_notebooks",
+        action="store_true",
+        help="sweep: run EVERY notebook in the workspace, one at a time, and summarise",
+    )
+    verify_cmd.add_argument(
+        "--resume",
+        action="store_true",
+        help="with --all: skip notebooks whose verify badge is still valid (finish a sweep)",
+    )
+    verify_cmd.add_argument(
+        "-y", "--yes", action="store_true", help="with --all: don't ask before starting"
+    )
+    verify_cmd.add_argument(
         "--clear",
         nargs="?",
         const=True,
@@ -350,7 +365,24 @@ def _build_parser() -> argparse.ArgumentParser:
     deps_rm = deps_sub.add_parser("remove", help="remove packages from the repo and re-lock")
     deps_rm.add_argument("packages", nargs="+", help="packages to remove")
     deps_sub.add_parser("list", help="list declared packages and whether each is available")
-    deps_sub.add_parser("lock", help="refresh uv.lock from pyproject.toml")
+    deps_lock = deps_sub.add_parser("lock", help="refresh uv.lock from pyproject.toml")
+    # A lock change is the one edit that lands on EVERY teammate at once, so each
+    # lock-writing sub-command offers the sweep that checks the repo still runs.
+    for _deps_cmd in (deps_add, deps_rm, deps_lock):
+        _sweep_grp = _deps_cmd.add_mutually_exclusive_group()
+        _sweep_grp.add_argument(
+            "--sweep",
+            dest="sweep",
+            action="store_true",
+            default=None,
+            help="afterwards, run every notebook against the new lock (no prompt)",
+        )
+        _sweep_grp.add_argument(
+            "--no-sweep",
+            dest="sweep",
+            action="store_false",
+            help="don't offer to check the notebooks still run",
+        )
 
     build_reqs = sub.add_parser(
         "build-requirements",
@@ -1045,42 +1077,121 @@ def cmd_pull(cfg: config.Config, theirs: bool, keep_both: bool) -> int:
     return 0 if not result.skipped_conflicts else 1
 
 
-def _push_guard_fn(cfg: config.Config, acknowledge: bool, *, direct: bool = True):
-    """The push guard for a CLI push/propose. Returns
-    ``(guard_fn, collected, mode, acknowledged, blocked)``.
+class _PushGuards(NamedTuple):
+    """The THREE guards on one push, each with its own ledger and its own override rule.
 
-    ``--acknowledge-findings`` does NOT turn the scan off: the guard still runs
-    and everything it would have flagged is collected into ``acknowledged`` and
-    printed after the push — so the user sees exactly what they let out AT PUSH
-    TIME, and a finding that appeared since the first run can't ride out unseen
-    (the hub's token flow gets the same guarantee by binding tokens to bytes).
-    In block mode ([guard] push = "block", or [policy] push_guard) the flag is
-    refused entirely.
-
-    ``direct`` marks a write to the SHARED branch (push / resolve --push-copy), the
-    only case where the policy's propose-only globs apply. That gate is composed
-    OUTSIDE the acknowledge shortcut on purpose: ``--acknowledge-findings`` covers
-    scanner findings, never a policy block, which has no override at all.
+    Seven loose tuple slots was a bug farm, and the names are load-bearing because the
+    rules genuinely differ: ``collected`` is acknowledgeable only in warn mode,
+    ``lock_collected`` in any mode, ``blocked`` never.
     """
-    from mooring import pushguard
 
-    pol = policy_mod.load(cfg.workspace())
-    mode = pol.guard_mode(workspace_config.guard_mode(cfg.workspace()))
-    gate_fn, blocked = (
-        policy_mod.make_propose_gate(pol) if direct else (None, {})
-    )
+    guard_fn: object
+    collected: dict  # content findings withheld (tokened; warn mode only)
+    lock_collected: dict  # dependency findings withheld (tokened; any mode)
+    blocked: dict  # policy propose-only blocks (NO token, no override)
+    mode: str
+    acknowledged: dict  # content findings let through by --acknowledge-findings
+    lock_acknowledged: dict  # dependency findings let through, worded separately
+
+    @property
+    def withheld_any(self) -> bool:
+        """Whether ANY guard held something back — the exit-code question."""
+        return bool(self.collected or self.lock_collected or self.blocked)
+
+
+def _push_guard_fn(
+    cfg: config.Config, acknowledge: bool, *, direct: bool = True
+) -> _PushGuards:
+    """Build the composed ``guard_fn`` for a CLI push/propose, and the ledgers behind it.
+
+    Three guards ride the one seam sync offers, they answer three different questions,
+    and so they keep three different override rules:
+
+    * **content** (secrets/PII) — acknowledgeable in warn mode; ``[guard] push = "block"``
+      (or ``[policy] push_guard``) refuses the flag entirely.
+    * **dependency change** — ALWAYS acknowledgeable, block mode included. It warns that a
+      ``uv.lock`` breaks the team's notebooks, which is not a thing that must not leave
+      the machine; a content policy must not quietly become a wall around lock files.
+    * **policy propose-only** — never acknowledgeable, and there is no token to offer.
+      Composed OUTSIDE the acknowledge shortcut on purpose, and only when ``direct`` (a
+      write to the SHARED branch): ``propose`` must never install it, or the review-gated
+      paths would have no road at all.
+
+    ``--acknowledge-findings`` does NOT turn either scanner off: both still run and
+    everything they would have flagged is recorded and printed after the push — so the
+    user sees exactly what they let out AT PUSH TIME, and a finding that appeared since
+    the first run can't ride out unseen (the hub's token flow gets the same guarantee by
+    binding tokens to bytes and, for the deps gate, to the sweep result).
+    """
+    from mooring import pushguard, sweep
+
+    workspace = cfg.workspace()
+    pol = policy_mod.load(workspace)
+    mode = pol.guard_mode(workspace_config.guard_mode(workspace))
+    gate_fn, blocked = policy_mod.make_propose_gate(pol) if direct else (None, {})
+    # TWO acknowledgement ledgers, printed in their own words. A content finding is
+    # "you published something sensitive"; a dependency finding is "you changed what the
+    # team runs on". Merging them made the latter print in the former's vocabulary
+    # ("now visible to everyone", plus a meaningless line number).
+    acknowledged: dict = {}
+    lock_acknowledged: dict = {}
+
+    def _note(ledger: dict, rel_path: str, findings: list) -> None:
+        if findings:
+            ledger.setdefault(rel_path, {"findings": []})["findings"].extend(findings)
+
     if acknowledge and mode != "block":
-        acknowledged: dict = {}
+        collected: dict = {}
 
-        def allow_fn(rel_path: str, data: bytes | None) -> list[str]:
-            findings = pushguard.scan_text(rel_path, data)
-            if findings:
-                acknowledged[rel_path] = {"findings": findings}
+        def content_fn(rel_path: str, data: bytes | None) -> list[str]:
+            _note(acknowledged, rel_path, pushguard.scan_text(rel_path, data))
             return []
+    else:
+        content_fn, collected = pushguard.make_guard()
 
-        return policy_mod.compose_guards(allow_fn, gate_fn), {}, mode, acknowledged, blocked
-    guard_fn, collected = pushguard.make_guard()
-    return policy_mod.compose_guards(guard_fn, gate_fn), collected, mode, {}, blocked
+    notebooks_fn = _sweep_notebooks_fn(cfg)
+    if acknowledge:
+        lock_collected: dict = {}
+
+        def lock_fn(rel_path: str, data: bytes | None) -> list[str]:
+            if sweep.is_lock(rel_path):  # never walk the workspace for an ordinary file
+                _note(
+                    lock_acknowledged,
+                    rel_path,
+                    pushguard.lock_findings(workspace, rel_path, data, notebooks_fn()),
+                )
+            return []
+    else:
+        lock_fn, lock_collected = pushguard.make_lock_guard(
+            workspace, notebooks_fn=notebooks_fn
+        )
+
+    return _PushGuards(
+        guard_fn=policy_mod.compose_guards(content_fn, lock_fn, gate_fn),
+        collected=collected,
+        lock_collected=lock_collected,
+        blocked=blocked,
+        mode=mode,
+        acknowledged=acknowledged,
+        lock_acknowledged=lock_acknowledged,
+    )
+
+
+def _sweep_notebooks_fn(cfg: config.Config):
+    """A lazy "what notebooks exist right now" for the dependency gate — so it can tell a
+    fully-checked repo from one that has grown a notebook since the last sweep. Lazy
+    because enumerating costs a workspace walk and only a ``uv.lock`` in the push needs
+    it; the walk is memoised in case both guards ask."""
+    cache: list = []
+
+    def _notebooks() -> list[str]:
+        if not cache:
+            from mooring.app import sweep_run
+
+            cache.append(sweep_run.plan(cfg))
+        return cache[0]
+
+    return _notebooks
 
 
 def _print_policy_blocked(blocked: dict) -> None:
@@ -1113,6 +1224,19 @@ def _print_guard_findings(collected: dict, mode: str, verb: str) -> None:
         )
 
 
+def _print_lock_findings(collected: dict, verb: str) -> None:
+    """The dependency gate's warn-and-confirm text: what the sweep says, then the two
+    ways forward. Never a wall — the change is one flag away from going."""
+    past = "pushed" if verb == "push" else "proposed"
+    for path, info in sorted(collected.items()):
+        for f in info["findings"]:
+            print(f"\n{path} was NOT {past} — {f.kind}.")
+    print(
+        "Run `mooring verify --all` to check every notebook against these dependencies,\n"
+        f"or re-run with --acknowledge-findings to {verb} anyway."
+    )
+
+
 def _print_acknowledged(acknowledged: dict) -> None:
     total = sum(len(info["findings"]) for info in acknowledged.values())
     print(f"\nPushed with {total} acknowledged finding(s) — now visible to everyone:")
@@ -1121,33 +1245,38 @@ def _print_acknowledged(acknowledged: dict) -> None:
             print(f"  {path}:{f.line}  {f.kind}")
 
 
+def _print_lock_acknowledged(acknowledged: dict, verb: str) -> None:
+    """The deps gate's own acknowledgement wording. A dependency change is not an
+    exposure — "now visible to everyone" (and a line number) would be the wrong story."""
+    past = "Pushed" if verb == "push" else "Proposed"
+    for path, info in sorted(acknowledged.items()):
+        for f in info["findings"]:
+            print(f"\n{past} {path} anyway — {f.kind}.")
+    print("The whole team's notebooks now run against these dependencies.")
+
+
 def cmd_push(
     cfg: config.Config, only_paths: list[str], message: str | None, acknowledge: bool = False
 ) -> int:
     from mooring import sync
 
-    guard_fn, collected, mode, acknowledged, blocked = _push_guard_fn(cfg, acknowledge)
+    g = _push_guard_fn(cfg, acknowledge)
     _print_policy_version_warning(cfg)
     result = sync.push(
-        _client(cfg), cfg, paths=only_paths or None, message=message, guard_fn=guard_fn
+        _client(cfg), cfg, paths=only_paths or None, message=message, guard_fn=g.guard_fn
     )
     telemetry.log_event(
         "push",
         pushed=result.pushed,
         conflicts=len(result.blocked_conflicts),
         lines=len(result.lines),
-        withheld=len(collected),
-        policy_blocked=len(blocked),
+        withheld=len(g.collected) + len(g.lock_collected),
+        policy_blocked=len(g.blocked),
     )
     _record_activity(cfg, "push", result)
     _print_sync_result(result)
-    if collected:
-        _print_guard_findings(collected, mode, "push")
-    if blocked:
-        _print_policy_blocked(blocked)
-    if acknowledged:
-        _print_acknowledged(acknowledged)
-    return 0 if not (result.blocked_conflicts or collected or blocked) else 1
+    _print_withheld(g, "push")
+    return 0 if not (result.blocked_conflicts or g.withheld_any) else 1
 
 
 def cmd_propose(
@@ -1157,25 +1286,39 @@ def cmd_propose(
 
     # direct=False: propose is exactly the road a propose-only policy points at,
     # so that gate must never fire here (it would leave those files unreachable).
-    guard_fn, collected, mode, acknowledged, _ = _push_guard_fn(cfg, acknowledge, direct=False)
+    # The content and dependency guards DO run — both are about what the bytes are,
+    # not about which branch they land on.
+    g = _push_guard_fn(cfg, acknowledge, direct=False)
     _print_policy_version_warning(cfg)
     result = sync.propose(
-        _client(cfg), cfg, paths=only_paths or None, message=message, guard_fn=guard_fn
+        _client(cfg), cfg, paths=only_paths or None, message=message, guard_fn=g.guard_fn
     )
     telemetry.log_event(
         "propose",
         proposed=result.proposed,
         conflicts=len(result.blocked_conflicts),
         review_branch=bool(result.review_branch),
-        withheld=len(collected),
+        withheld=len(g.collected) + len(g.lock_collected),
     )
     _record_activity(cfg, "propose", result)
     _print_sync_result(result)
-    if collected:
-        _print_guard_findings(collected, mode, "propose")
-    if acknowledged:
-        _print_acknowledged(acknowledged)
-    return 0 if not (result.blocked_conflicts or collected) else 1
+    _print_withheld(g, "propose")
+    return 0 if not (result.blocked_conflicts or g.withheld_any) else 1
+
+
+def _print_withheld(g: _PushGuards, verb: str) -> None:
+    """Report all three guards, each in its own words — the one place the CLI renders
+    a guarded push, so a new guard can never be added to the seam and forgotten here."""
+    if g.collected:
+        _print_guard_findings(g.collected, g.mode, verb)
+    if g.lock_collected:
+        _print_lock_findings(g.lock_collected, verb)
+    if g.blocked:
+        _print_policy_blocked(g.blocked)
+    if g.acknowledged:
+        _print_acknowledged(g.acknowledged)
+    if g.lock_acknowledged:
+        _print_lock_acknowledged(g.lock_acknowledged, verb)
 
 
 def _print_policy_version_warning(cfg: config.Config) -> None:
@@ -1774,7 +1917,7 @@ def cmd_deliver(cfg: config.Config, rel_path: str, excel: bool = False) -> int:
 
 
 def cmd_verify(cfg: config.Config, args: argparse.Namespace) -> int:
-    from mooring import verify
+    from mooring import sweep, verify
     from mooring.app import verify_run
 
     clear = getattr(args, "clear", False)
@@ -1784,8 +1927,16 @@ def cmd_verify(cfg: config.Config, args: argparse.Namespace) -> int:
         # this is the rarer "forget it entirely" case, mirroring `mooring checks --clear`.
         rel = clear if isinstance(clear, str) else (args.path or None)
         removed = verify.clear(cfg.workspace(), rel)
+        # Clearing a badge must take that notebook out of the AGGREGATE too, or
+        # "2 ran clean" keeps standing over a receipt the user just asked to forget.
+        # `rel is None` clears the whole report; a path drops just its item.
+        sweep.clear(cfg.workspace(), rel)
         print(f"Cleared {removed} verify receipt(s)." if removed else "No verify receipts to clear.")
         return 0
+    if getattr(args, "all_notebooks", False):
+        if args.path:
+            sys.exit("Give a notebook path or --all, not both.")
+        return _verify_sweep(cfg, args)
     if not args.path:
         sys.exit("Give a notebook path to verify (or `--clear` to reset recorded results).")
     try:
@@ -1797,6 +1948,47 @@ def cmd_verify(cfg: config.Config, args: argparse.Namespace) -> int:
     if not result.passed:
         print("(The badge clears automatically when you edit the notebook.)")
     return 0 if result.passed else 1
+
+
+def _verify_sweep(cfg: config.Config, args: argparse.Namespace) -> int:
+    """`mooring verify --all` — run every notebook in the workspace, one at a time.
+
+    A sweep is expensive (it EXECUTES each notebook), so the cost is stated before
+    anything starts and the summary is deliberately modest about what a green sweep
+    proves. Exit code 1 when anything is not runnable, so CI/scripts can gate on it."""
+    from mooring import sweep
+    from mooring.app import sweep_run
+
+    targets = sweep_run.plan(cfg)
+    if not targets:
+        print("No notebooks to check.")
+        return 0
+    print(sweep_run.describe_cost(cfg, len(targets)))
+    if args.resume:
+        # A resume that cannot be honoured must SAY so: silently running everything is
+        # merely slow, but silently skipping on a stale basis would be a false green.
+        skippable, why = sweep_run.resume_scope(cfg)
+        if why:
+            print(f"Nothing to resume — {why}; running all of them.")
+        else:
+            print(f"Resuming: {len(skippable)} already checked against these dependencies.")
+    if not args.yes and sys.stdin.isatty():
+        if input("Start? [Y/n] ").strip().lower() in ("n", "no"):
+            print("Cancelled.")
+            return 0
+
+    def _progress(done: int, total: int, item) -> None:
+        print(f"  [{done}/{total}] {sweep_run.describe_item(item)}")
+
+    try:
+        report = sweep_run.sweep_workspace(
+            cfg, rels=targets, skip_verified=args.resume, on_progress=_progress
+        )
+    except sweep_run.RunBusy as exc:
+        sys.exit(str(exc))
+    print(sweep.headline(report))
+    print(f"({sweep.HONESTY_NOTE})")
+    return 1 if report.broken else 0
 
 
 def cmd_schedule(
@@ -2350,8 +2542,14 @@ def cmd_init(cfg: config.Config) -> int:
 
 
 def cmd_deps(cfg: config.Config, args: argparse.Namespace) -> int:
+    from mooring import sweep
+
     workspace = cfg.workspace()
     command = args.deps_command
+    # The lock as it stood BEFORE the command, so the offer below fires only when the
+    # resolution actually moved — `deps add` of a package that was already pinned changes
+    # nothing for the team and should not cost anyone a sweep.
+    lock_before = sweep.lock_fingerprint(workspace)
     if command == "list":
         status = pyproject_env.dep_status(workspace)
         if not status:
@@ -2384,7 +2582,44 @@ def cmd_deps(cfg: config.Config, args: argparse.Namespace) -> int:
     except subprocess.CalledProcessError as exc:
         sys.exit(f"uv {command} failed (exit {exc.returncode}).")
     telemetry.log_event("deps", action=command)
+    _offer_sweep_after_deps(cfg, args, lock_before)
     return 0
+
+
+def _offer_sweep_after_deps(
+    cfg: config.Config, args: argparse.Namespace, lock_before: str
+) -> None:
+    """A lock change lands on the WHOLE TEAM — offer to check the repo still runs.
+
+    This is the gate's first half: the moment the environment moves is the cheapest
+    moment to find out what it broke, and `mooring deps` is the only place that moment
+    is observable. It never blocks — declining just leaves the push guard to say the
+    change was not checked (see :func:`mooring.sweep.dependency_findings`)."""
+    from mooring import sweep
+    from mooring.app import sweep_run
+
+    workspace = cfg.workspace()
+    if sweep.lock_fingerprint(workspace) == lock_before:
+        return  # nothing resolved differently — nobody's environment moved
+    targets = sweep_run.plan(cfg)
+    if not targets:
+        return
+    noun = "notebook" if len(targets) == 1 else "notebooks"
+    print(f"\n{pyproject_env.LOCK_NAME} changed — {len(targets)} {noun} run against it.")
+    want = getattr(args, "sweep", None)
+    if want is None:
+        minutes = sweep_run.estimate_minutes(cfg, len(targets))
+        cost = f", roughly {minutes} min" if minutes else ", one at a time"
+        want = sys.stdin.isatty() and input(
+            f"Check they still run? (runs {len(targets)} {noun}{cost}) [Y/n] "
+        ).strip().lower() not in ("n", "no")
+    if not want:
+        print(
+            f"Not checked. Run `mooring verify --all` before you push — otherwise "
+            f"{pyproject_env.LOCK_NAME} goes to the team unchecked."
+        )
+        return
+    _verify_sweep(cfg, argparse.Namespace(path=None, resume=False, yes=True))
 
 
 def cmd_build_requirements(cfg: config.Config, output: str | None) -> int:

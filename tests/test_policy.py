@@ -1121,15 +1121,20 @@ def test_cli_push_composes_the_gate_but_propose_does_not(tmp_path):
     (workspace / "mooring.toml").write_text('[policy]\npropose_only = ["reports/**"]\n', "utf-8")
     cfg = config.Config(owner="acme", repo="nbs", workspace_path=str(workspace))
 
-    guard_fn, _c, mode, _a, blocked = cli._push_guard_fn(cfg, acknowledge=False)
+    # _push_guard_fn returns a named _PushGuards now that a THIRD guard (the dependency
+    # gate) rides the same seam; every assertion below is unchanged.
+    g = cli._push_guard_fn(cfg, acknowledge=False)
+    guard_fn, mode, blocked = g.guard_fn, g.mode, g.blocked
     assert guard_fn("reports/q1.py", b"x = 1") != []
     assert blocked and mode == "warn"
 
-    ack_fn, _c, _m, _a, ack_blocked = cli._push_guard_fn(cfg, acknowledge=True)
+    ack = cli._push_guard_fn(cfg, acknowledge=True)
+    ack_fn, ack_blocked = ack.guard_fn, ack.blocked
     assert ack_fn("reports/q1.py", b"x = 1") != []  # acknowledging cannot clear it
     assert ack_blocked
 
-    prop_fn, _c, _m, _a, prop_blocked = cli._push_guard_fn(cfg, acknowledge=False, direct=False)
+    prop = cli._push_guard_fn(cfg, acknowledge=False, direct=False)
+    prop_fn, prop_blocked = prop.guard_fn, prop.blocked
     assert (prop_fn("reports/q1.py", b"x = 1") if prop_fn else []) == []
     assert prop_blocked == {}
 
@@ -1143,7 +1148,8 @@ def test_cli_push_guard_mode_is_the_policy_raised_one(tmp_path):
     cfg = config.Config(owner="acme", repo="nbs", workspace_path=str(workspace))
     # In block mode --acknowledge-findings is refused entirely (the scanner guard,
     # not the permissive allow_fn, comes back).
-    _fn, collected, mode, acknowledged, _b = cli._push_guard_fn(cfg, acknowledge=True)
+    g = cli._push_guard_fn(cfg, acknowledge=True)
+    collected, mode, acknowledged = g.collected, g.mode, g.acknowledged
     assert mode == "block"
     assert acknowledged == {} and collected == {}
 

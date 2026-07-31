@@ -118,7 +118,11 @@ function showLog(data) {
 
 function setBusy(value) {
   busy = value;
-  document.querySelectorAll("button, select").forEach((b) => (b.disabled = value));
+  // #btn-sweep-cancel is exempt: a sweep runs for minutes OUTSIDE the busy lock, and any
+  // unrelated in-flight action (a Pull) would otherwise grey out the only way to stop it.
+  document.querySelectorAll("button, select").forEach((b) => {
+    if (b.id !== "btn-sweep-cancel") b.disabled = value;
+  });
   // A visible "working" cue for the whole surface. The toolbar is disabled while
   // an action is in flight, but that greying is faint — .busy adds a progress
   // cursor (+ a subtle dim, in CSS) so even a fast op looks like it did something.
@@ -172,39 +176,57 @@ async function action(path, body, refreshAfter = true, status = "") {
 function showGuardDialog(data, apiPath, body) {
   const dialog = $("guard-dialog");
   const findings = data.guard_findings || [];
+  const depsRows = GuardFmt.depsRows(data);
   const policyRows = GuardFmt.policyRows(data);
   const files = findings.length + policyRows.length;
   const verb = apiPath.includes("propose") ? "proposed" : "pushed";
+  // Three guards can fire on one push, and they ask three different questions.
+  // Lead with whichever is actually present rather than blurring them: "this lock
+  // change breaks 3 notebooks" and "this file looks sensitive" are not the same
+  // warning, and running them together wastes both.
   $("guard-message").textContent = findings.length
     ? `${files} file(s) were NOT ${verb} — they contain something that looks sensitive:`
-    : `${files} file(s) were NOT ${verb} — your team's policy doesn't allow a direct push:`;
+    : policyRows.length
+    ? `${files} file(s) were NOT ${verb} — your team's policy doesn't allow a direct push:`
+    : `A dependency change was NOT ${verb}:`;
   const list = $("guard-findings");
   list.innerHTML = "";
-  for (const row of GuardFmt.rows(findings).concat(policyRows)) {
+  for (const row of GuardFmt.rows(findings).concat(depsRows, policyRows)) {
     const li = document.createElement("li");
     li.textContent = row;
     list.appendChild(li);
   }
   const override = GuardFmt.canOverride(data);
-  const policyNote = policyRows.length
-    ? " Files listed as propose-only can’t be pushed directly at all — send them " +
-      "for review with Propose."
-    : "";
-  $("guard-hint").textContent = (override
+  // Each guard has its own remedy, so each contributes its own sentence — never drop
+  // one because another fired. Block mode replaces the CONTENT sentence only.
+  const contentHint = override
     ? "Remove the flagged content, or add a “mooring: push-ok” comment on a " +
       "reviewed false-positive line. Pushing anyway publishes it to everyone " +
       "with access to the repo."
-    : findings.length
-    ? "Your team's policy blocks pushing flagged files ([guard] push = \"block\"). " +
+    : "Your team's policy blocks pushing flagged files ([guard] push = \"block\"). " +
       "Remove the flagged content, or add a “mooring: push-ok” comment on a " +
-      "reviewed false-positive line, then push again."
-    : "Your team's policy allows these paths to change only through review.") + policyNote;
+      "reviewed false-positive line, then push again.";
+  const depsHint =
+    "Use “Check all notebooks run” to see what these dependencies do to the " +
+    "repo. Pushing anyway changes the environment for everyone on the team." +
+    // In block mode with a content finding there is no button at all, and the deps
+    // warning would otherwise look unactionable. Say what to do about it.
+    (override ? "" : " (Fix the flagged content first — then this can be pushed anyway.)");
+  const policyHint = findings.length
+    ? "Files listed as propose-only can’t be pushed directly at all — send them " +
+      "for review with Propose."
+    : "Your team's policy allows these paths to change only through review — use Propose.";
+  const hints = [];
+  if (findings.length) hints.push(contentHint);
+  if (depsRows.length) hints.push(depsHint);
+  if (policyRows.length) hints.push(policyHint);
+  $("guard-hint").textContent = hints.join(" ");
   const anyway = $("guard-anyway");
   anyway.classList.toggle("hidden", !override);
   anyway.onclick = () => {
     dialog.close();
     const confirmed = Object.assign({}, body, {
-      confirm_tokens: GuardFmt.allTokens(findings),
+      confirm_tokens: GuardFmt.allTokens(data),
     });
     action(apiPath, confirmed).then((data) => {
       if (!data || data.error || data.needs_confirm) return;
@@ -460,6 +482,104 @@ function deliverExcelAction(path) {
 function verifyAction(path) {
   return action("/api/verify", { path }, true,
     "Verifying… this re-runs the whole notebook (can take a minute).");
+}
+
+// -- the catalog-wide sweep --------------------------------------------------
+// "Check all notebooks run" = Verify, for every notebook in the workspace, one at a time. It
+// EXECUTES each notebook, so the cost is stated before anything starts, progress is
+// visible while it runs, and Cancel is reachable throughout — which is why this does
+// NOT go through action() (that disables the whole surface for the duration of one
+// request). The start POST returns immediately and the client polls.
+let sweepPoll = null;
+
+async function sweepAction() {
+  if (busy || sweepPoll) return;
+  let plan;
+  try {
+    plan = await (await fetch("/api/sweep/plan")).json();
+  } catch {
+    showError("Couldn't work out how many notebooks to check.");
+    return;
+  }
+  const total = plan.total || 0;
+  if (!total) {
+    showError("No notebooks to check.");
+    return;
+  }
+  // The server words the cost (and prices it from the last check's median run time), so
+  // the hub and the CLI can never quote a different number for the same work.
+  const ok = window.confirm(
+    `${plan.cost}\n\n` +
+      "It records the same “ran clean” badge as Verify — and proves each notebook RUNS, " +
+      "not that its numbers are right.\n\nStart?"
+  );
+  if (!ok) return;
+  const started = await api("/api/sweep", {});
+  if (started.error) {
+    showError(started.error);
+    return;
+  }
+  sweepTotal = total;
+  watchSweep({ running: true, done: 0, total });
+}
+
+// A sweep outlives the page: it runs on a server thread for minutes, so a reload (or a
+// tab reopened from the checklist) must find it again rather than leaving the progress
+// box hidden and Cancel unreachable for the rest of the run.
+let sweepTotal = 0;
+async function resumeSweepWatch() {
+  let state;
+  try {
+    state = await (await fetch("/api/sweep")).json();
+  } catch {
+    return;
+  }
+  if (state.running) watchSweep(state);
+}
+
+function watchSweep(state) {
+  showSweepProgress(state);
+  if (!sweepPoll) sweepPoll = setInterval(pollSweep, 1500);
+}
+
+function showSweepProgress(state) {
+  const box = $("sweep-progress");
+  const running = !!state.running;
+  box.classList.toggle("hidden", !running);
+  if (running) {
+    // `total` is 0 until the worker's first progress tick; fall back to the count this
+    // tab already fetched so the line never reads "0 of 0".
+    const total = state.total || sweepTotal || 0;
+    $("sweep-progress-text").textContent =
+      `Checking notebooks… ${state.done || 0} of ${total} run. ` +
+      "You can keep working; this runs one notebook at a time.";
+  }
+}
+
+async function pollSweep() {
+  let state;
+  try {
+    state = await (await fetch("/api/sweep")).json();
+  } catch {
+    return; // a transient poll failure must not kill a running sweep
+  }
+  showSweepProgress(state);
+  if (state.running) return;
+  clearInterval(sweepPoll);
+  sweepPoll = null;
+  $("sweep-progress").classList.add("hidden");
+  if (state.error) {
+    showError(state.error);
+    return;
+  }
+  if (!state.finished) return;
+  showLog(state); // lines + summary + the "it ran, not that it's right" warning
+  await refresh(); // the swept receipts badge the rows exactly like a hand Verify
+}
+
+function cancelSweep() {
+  $("sweep-progress-text").textContent = "Stopping — the notebook running now is stopped too…";
+  api("/api/sweep/cancel", {}).catch(() => {});
 }
 
 // -- parameterised runs ------------------------------------------------------
@@ -3094,6 +3214,8 @@ $("btn-new").addEventListener("click", () => {
   );
   if (name) action("/api/new", { name });
 });
+$("btn-sweep").addEventListener("click", sweepAction);
+$("btn-sweep-cancel").addEventListener("click", cancelSweep);
 // Batch build opens the workspace-level page in its own (reused) tab, beside the hub.
 $("btn-batch").addEventListener("click", () => {
   window.open("/ai/batch", "mooringBatch");
@@ -3220,3 +3342,5 @@ document.addEventListener("visibilitychange", maybeFocusRefresh);
 setInterval(renderFreshnessBanner, 60_000);
 
 refresh();
+// Re-attach to a sweep already running on the server (a reload mid-check).
+resumeSweepWatch();

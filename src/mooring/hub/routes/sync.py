@@ -16,6 +16,7 @@ from mooring import auth, celldiff, manifest, policy, pushguard, sync, telemetry
 from mooring import workspace_config
 from mooring.app import conflict_merge
 from mooring.app import notebooks as nb_ops
+from mooring.app import sweep_run as nb_sweep
 from mooring.github import GitHubError, Unreachable
 from mooring.hub.routes.files import _resolve_within
 
@@ -159,9 +160,21 @@ async def api_whatsnew_detail(request: Request) -> JSONResponse:
     return JSONResponse({"path": rel, **body})
 
 
+def _findings_payload(collected: dict) -> list[dict]:
+    return [
+        {
+            "path": path,
+            "token": info["token"],
+            "findings": [{"line": f.line, "kind": f.kind} for f in info["findings"]],
+        }
+        for path, info in sorted(collected.items())
+    ]
+
+
 def _guarded_sync_op(hub, name: str, data: dict, run, *, direct: bool = True) -> JSONResponse:
-    """Run push/propose behind the push guard's warn-and-confirm flow, plus the
-    team policy's propose-only gate.
+    """Run push/propose behind the warn-and-confirm flow for all THREE guards on
+    the sync seam: the content scanners, the dependency-change gate, and the team
+    policy's propose-only gate.
 
     Every outgoing candidate is scanned (mooring.pushguard) via sync's injected
     ``guard_fn``; flagged files are WITHHELD (clean ones still go), and the
@@ -171,40 +184,55 @@ def _guarded_sync_op(hub, name: str, data: dict, run, *, direct: bool = True) ->
     covered by an old confirm. In block mode ([guard] push = "block", or the
     policy's own floor) tokens are refused — the pragma/fix is the only way.
 
-    ``direct`` marks a write to the SHARED branch (push, and resolve's PUSH_COPY);
-    only then is the policy's propose-only gate composed in. Its blocks come back
-    as ``policy_blocked`` with NO token: a propose-only path has no override at
-    all, and the withhold happens at the same sync seam as the scanner's, so no
-    second code path can push those bytes without passing it.
+    The three guards' OVERRIDE RULES differ deliberately, and the response has to
+    carry all three faithfully:
+
+    * ``guard_findings`` — content. Acknowledgeable in warn mode only.
+    * ``sweep_findings`` — the dependency-change gate, asking the last verify
+      sweep whether an outgoing ``uv.lock`` still runs the team's notebooks
+      (mooring.sweep). ALWAYS acknowledgeable: it warns about broken notebooks,
+      not about bytes that must not leave, so the content policy's block mode
+      must not swallow it.
+    * ``policy_blocked`` — the propose-only gate, with NO token at all. A
+      propose-only path has no override; the road is Propose. Composed only when
+      ``direct`` (a write to the SHARED branch — push, and resolve's PUSH_COPY),
+      and at the same sync seam as the scanners, so no second code path can push
+      those bytes without passing it.
+
+    ``needs_confirm`` therefore means "something here CAN be acknowledged": content
+    in warn mode, or deps in any mode — and never because of a policy block.
     """
     workspace = hub.cfg.workspace()
     pol = policy.load(workspace)
     mode = pol.guard_mode(workspace_config.guard_mode(workspace))
     confirmed = frozenset(str(t) for t in (data.get("confirm_tokens") or []))
-    if mode == "block":
-        confirmed = frozenset()
-    guard_fn, collected = pushguard.make_guard(confirmed)
+    # Block mode zeroes the CONTENT tokens only. The deps gate keeps its own set:
+    # a policy about sensitive content must not become a wall around lock files.
+    content_ok = frozenset() if mode == "block" else confirmed
+    content_fn, collected = pushguard.make_guard(content_ok)
+    lock_fn, lock_collected = pushguard.make_lock_guard(
+        workspace, confirmed, notebooks_fn=lambda: nb_sweep.plan(hub.cfg)
+    )
     gate_fn, blocked = policy.make_propose_gate(pol) if direct else (None, {})
-    combined = policy.compose_guards(guard_fn, gate_fn)
+    combined = policy.compose_guards(content_fn, lock_fn, gate_fn)
     body, status = hub._sync_op_body(name, lambda: run(combined))
-    if status == 200 and (collected or blocked):
+    if status == 200 and (collected or lock_collected or blocked):
         telemetry.log_event(
             "push_guard",
-            findings=sum(len(info["findings"]) for info in collected.values()),
+            findings=sum(
+                len(info["findings"])
+                for info in (*collected.values(), *lock_collected.values())
+            ),
             policy_blocked=len(blocked),
         )
-        # Only scanner findings are acknowledgeable; a policy block never is, so a
-        # response carrying one must not offer "Push anyway" for it.
-        body["needs_confirm"] = bool(collected) and mode != "block"
-        body["guard_mode"] = mode
-        body["guard_findings"] = [
-            {
-                "path": path,
-                "token": info["token"],
-                "findings": [{"line": f.line, "kind": f.kind} for f in info["findings"]],
-            }
-            for path, info in sorted(collected.items())
-        ]
+        content_ack = bool(collected) and mode != "block"
+        body["needs_confirm"] = content_ack or bool(lock_collected)
+        # The mode that APPLIES to this response: with no content finding, block mode
+        # is not what is being reported, and saying "block" would hide the deps
+        # gate's override behind a policy that has nothing to say about it.
+        body["guard_mode"] = mode if collected else "warn"
+        body["guard_findings"] = _findings_payload(collected)
+        body["sweep_findings"] = _findings_payload(lock_collected)
         body["policy_blocked"] = [
             {"path": path, "reason": reason} for path, reason in sorted(blocked.items())
         ]

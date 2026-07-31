@@ -34,6 +34,7 @@ page that opens when you run the app). The same actions are available from the
 | **New notebook** | Create a fresh marimo notebook from a template and open it. A bare name lands in `notebooks/`; type a path (e.g. `packages/finance/notebooks/sales`) to place it in a sub-folder — mooring registers that folder so it syncs for the team. |
 | **Deliver** | Render a notebook to a **self-contained HTML snapshot** (code hidden) you can email a stakeholder who won't open marimo. See [Delivering a result](#delivering-a-result-for-a-stakeholder). |
 | **Verify runs** | Smoke-run the notebook once on your machine and badge the row with whether it **ran clean** — the "does this still run before I share it?" check. See [Verifying a notebook runs](#verifying-a-notebook-runs). |
+| **Check all notebooks run** | The same check for **every** notebook in the workspace, one at a time, with a summary of what still runs. Slow, and cancellable. See [Checking that everything still runs](#checking-that-everything-still-runs). |
 | **Run for each…** | Run this notebook **once per region / entity / month** and save one snapshot per value — the month-end "same pack, six times" loop. See [Running one notebook for each value](#running-one-notebook-for-each-value). |
 | **Schedule refresh…** | Re-run a notebook on a cadence (pull → run → report), so you stop having to remember. Appears once the notebook has verified clean. See [Refreshing a notebook on a schedule](#refreshing-a-notebook-on-a-schedule). |
 | **Push** | Upload your changed files to the team repo — **one commit per file**. Blocked for any file that's in conflict. |
@@ -222,6 +223,81 @@ its number, **Verify** it.
     correct — for that, tie your numbers out with
     [`mooring_checks`](#checking-your-numbers-tie-out) and review the logic with the
     copilot's [Review logic](ai-copilot.md#review-my-logic).
+
+## Checking that *everything* still runs
+
+Verify asks about one notebook. **Check all notebooks run** asks about the whole repo — useful
+after you change a shared package, before a month-end, or when you inherit somebody's
+folder and want to know what you're walking into.
+
+Click **Check all notebooks run…** in the toolbar (or run
+[`mooring verify --all`](cli.md#deliver-verify-checks-inputs)). Mooring tells you how
+many notebooks it is about to run, then runs them **one at a time** on your machine and
+reports:
+
+> `12 notebooks: 10 ran clean, 1 failed, 1 could not run.`
+
+* **ran clean** — it executed top to bottom.
+* **failed** — it ran, but a cell errored. Open it to see which.
+* **could not run** — it never started, usually because the environment is broken (a
+  package the lock file no longer provides). That's not the notebook's fault, so it
+  doesn't get a red badge — but it does mean nobody can use it right now.
+
+A broken notebook never stops the sweep, and each notebook records exactly the same
+**✓ ran clean** badge a hand Verify does — so the rows badge as normal, and each badge
+still clears itself the moment you edit that file. `--resume` finishes a run you stopped
+halfway: it skips only the notebooks the **last check** ran clean, and only while nothing
+about the environment has moved since — change the packages, or edit one of them, and
+resume quietly runs the lot rather than inheriting an answer that no longer applies.
+
+!!! info "It's slow, and you can stop it"
+
+    Every notebook is executed for real, in sequence — minutes, not seconds. Progress
+    shows while it runs, and **Cancel** stops the notebook that's running right now, not
+    just the next one. Anything it never got to is reported as *skipped*, never quietly
+    counted as fine. Once it's checked one repo it can tell you roughly how long the next
+    check will take.
+
+!!! warning "The summary ages the same way a badge does"
+
+    "10 ran clean" is a claim about the exact notebooks that ran. Edit one and it drops
+    out of the count (`1 edited since (no longer covered)`) instead of sitting there
+    vouching for code nobody ran. And as with a single Verify: it proves each notebook
+    **ran**, not that its numbers are right.
+
+## Changing the team's packages
+
+`mooring deps add`/`remove`/`lock` rewrites `uv.lock`, which is the environment
+**everybody's** notebooks run in. It's the easiest way for one person to break the whole
+team, so mooring puts two things in the way:
+
+1. **Straight after the change**, it offers to check: *"uv.lock changed — 12 notebooks
+   run against it. Check they still run?"* That's the sweep above, and it's the cheapest
+   moment to find out what moved.
+2. **Before the change is pushed**, the result is shown: pushing an unchecked or
+   known-broken `uv.lock` stops with *"this dependency change breaks 3 notebooks — push
+   anyway?"*. The lock is held back; everything else in the push still goes.
+
+It **warns, it doesn't block** — "Push anyway" (or `--acknowledge-findings`) always
+gets you through, deliberately, so the decision is yours and it's on the record. That
+holds even where your team has set `[policy] push_guard = "block"`: that policy is about
+files containing something *sensitive*, and it never becomes a wall around a lock file.
+
+!!! info "Why a green Verify badge isn't enough here"
+
+    A badge is tied to the *notebook's* contents, not to `uv.lock`. Change the packages
+    and every badge stays green over an environment nothing has been run against. So the
+    check is tied to the exact lock file it was run against — swap the lock and mooring
+    asks again rather than trusting a check that never saw it. (That's also why
+    `--resume` won't skip across a package change.)
+
+!!! warning "It only sees the lock file"
+
+    The check is tied to `uv.lock`, because that's the environment mooring itself manages
+    and shares. It can't see a `uv sync --extra`, a virtualenv you edited by hand, or a
+    `pyproject.toml` change you never re-locked — those all move what your notebooks
+    actually run on while the check stays green. If you changed the environment some
+    other way, run **Check all notebooks run** yourself.
 
 ## Running one notebook for each value
 
