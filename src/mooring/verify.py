@@ -43,13 +43,21 @@ def _slug(rel_posix: str) -> str:
     return rel_posix.replace("_", "_u").replace("/", "__")
 
 
-def render_target(workspace: Path | str, rel_posix: str) -> Path:
+def render_target(workspace: Path | str, rel_posix: str, *, variant: str = "") -> Path:
     """The throwaway ``.html`` path a verify run renders into before deleting it.
 
     Kept in the sync-excluded verify dir (never a synced location — the render embeds
     data values) and named per-notebook so repeated runs reuse one temp file rather
-    than accumulating."""
-    return verify_dir(workspace) / f"{_slug(rel_posix)}.html"
+    than accumulating.
+
+    ``variant`` makes the path per-RUN as well as per-notebook, which a parameterised run
+    (:mod:`mooring.app.param_runs`) passes. Without it, every value of a fan-out renders to
+    one shared path, and anything else rendering the same notebook at the same moment could
+    have ITS output promoted as a value's artifact — a file labelled EMEA holding numbers
+    from a run that was never parameterised at all. Defence in depth behind the workspace run
+    lock: the lock stops the concurrency, this stops the mix-up if it ever happens anyway."""
+    tag = f"-{variant}" if variant else ""
+    return verify_dir(workspace) / f"{_slug(rel_posix)}{tag}.html"
 
 
 def record(

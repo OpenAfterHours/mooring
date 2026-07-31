@@ -33,7 +33,7 @@ from pathlib import Path
 
 import requests
 
-from mooring import __version__, auth, config, githost, manifest, pyproject_env, runtime
+from mooring import __version__, auth, config, githost, manifest, policy, pyproject_env, runtime
 from mooring.github import AuthFailed, GitHubClient, NotFound, RateLimited, Unreachable
 
 PASS, WARN, FAIL, UNKNOWN = "pass", "warn", "fail", "unknown"
@@ -318,10 +318,66 @@ def _probe_schedules(cfg: config.Config) -> ProbeResult:
     )
 
 
+def _probe_policy(cfg: config.Config) -> ProbeResult:
+    """The team's admin policy (synced ``mooring.toml`` ``[policy]``): what is in
+    force, and — the part an admin actually needs — which rules were IGNORED.
+
+    A policy rule that silently does nothing (a typo'd key, a glob that escapes
+    the workspace, an entry that tried to LOOSEN a setting and was therefore
+    dropped) is the failure mode worth surfacing: the admin believes the team is
+    covered when it is not. Value-free: rule names and counts, never a data value.
+    """
+    pol = policy.load(cfg.workspace())
+    if pol.unreadable:
+        return ProbeResult(
+            "policy", "Team policy", FAIL,
+            "The shared mooring.toml could not be parsed, so NO team policy is in force.",
+            "Fix the shared mooring.toml (it is a synced team file — coordinate before editing).",
+        )
+    if pol.vanished:
+        # The one weakening the tighten-only rule cannot prevent: deleting the
+        # block. Silence here would make removal the easy attack (see policy.load
+        # for what the local breadcrumb does and does not assume).
+        return ProbeResult(
+            "policy", "Team policy", WARN,
+            "This repo HAD a team policy and no longer does — the [policy] block was removed.",
+            "Check the repo's history for who removed it (`mooring policy show`); "
+            "restore it with `mooring policy set …` if that was not intended.",
+        )
+    if not pol.in_force and not pol.ignored:
+        return ProbeResult("policy", "Team policy", PASS, "No [policy] block — nothing enforced.")
+    parts = []
+    if pol.min_version:
+        parts.append(f"min version {pol.min_version}")
+    if pol.push_guard:
+        parts.append(f"push guard {pol.push_guard}")
+    if pol.propose_only:
+        parts.append(f"{len(pol.propose_only.globs)} propose-only pattern(s)")
+    if pol.ai_off:
+        parts.append(f"{len(pol.ai_off.globs)} AI-off pattern(s)")
+    if pol.settings:
+        parts.append(f"{len(pol.settings)} locked setting(s)")
+    detail = ("In force: " + ", ".join(parts) + ".") if parts else "Nothing is enforced."
+    shortfall = pol.version_shortfall(__version__)
+    if pol.ignored:
+        return ProbeResult(
+            "policy", "Team policy", WARN,
+            f"{detail} {len(pol.ignored)} policy rule(s) were IGNORED as unusable.",
+            "Run `mooring policy show` — an ignored rule protects nobody.",
+        )
+    if shortfall:
+        return ProbeResult(
+            "policy", "Team policy", WARN, f"{detail} {shortfall}",
+            "Update mooring to the version your team asks for.",
+        )
+    return ProbeResult("policy", "Team policy", PASS, detail)
+
+
 _PROBES: tuple[Callable[[config.Config], ProbeResult], ...] = (
     _probe_python,
     _probe_runtime_imports,
     _probe_config_files,
+    _probe_policy,
     _probe_github_reach,
     _probe_github_auth,
     _probe_deps_lock,

@@ -179,12 +179,13 @@ paths or contents).
 ### `[ai]` — the copilot
 
 The `[ai]` / `[ai.pii]` settings are documented where their privacy story lives:
-[Why the copilot can't see your data](ai-privacy.md). Two knobs worth naming here
+[Why the copilot can't see your data](ai-privacy.md). Three knobs worth naming here
 because they gate what the copilot may *read*:
 
 | Key | Default | Meaning |
 |-----|---------|---------|
 | `semantic_model` | `true` | Let the copilot read a synced **Power BI semantic model** (a PBIP's TMDL): tables, columns, relationships, and measure DAX — authored code, never data. Partition/source M expressions and annotations are dropped at parse time (the table `.tmdl` is read; those parts are never captured); RLS role and translation files are never even opened. Env override: `MOORING_AI_SEMANTIC_MODEL`. Preview with `mooring ai model check`. See [the semantic model](ai-privacy.md#power-bi-semantic-model). |
+| `notebook_catalog` | `false` | **Opt-in.** Let the copilot search **every notebook in the repo** — each one's `# H1` title, its imports, and the inputs/checks/SQL tables its *source declares* — so it can point at work a teammate already did. Never another notebook's code, a markdown paragraph, a cell output, or a `.mooring/` run receipt; a notebook in `disabled_notebooks` is left out. Off by default because it widens the assistant's view from the one open notebook to the whole repo, and the title is authored prose. The hub's own search box uses the same index locally and is not gated by this. Env override: `MOORING_AI_NOTEBOOK_CATALOG`. Preview with `mooring catalog`. See [the notebook catalog](ai-privacy.md#notebook-catalog). |
 | `live_schema` | `true` | Read dataframe schemas (names + types only) live from the running kernel. See [live dataframe schemas](ai-privacy.md#live-dataframe-schemas-data-outside-the-workspace). |
 
 ### `[guard]` — in the synced `mooring.toml`, not here
@@ -207,6 +208,35 @@ comment — visible in the diff, per finding. There is deliberately no global of
 switch. `mooring scan` runs the same scan without pushing, and `mooring recall`
 / the hub's **Recall push** undoes the last push on the branch head (the pushed
 commit remains in git history — a leaked secret must still be rotated).
+
+### `[policy]` — in the synced `mooring.toml`, not here
+
+`[guard] push` above and the per-notebook `[ai] disabled_notebooks` opt-out are
+both one-off examples of the same idea: a rule that travels with the repo and
+that **this client enforces**, because mooring is the only road into the shared
+repo for an analyst with no git. `[policy]` is the general form:
+
+```toml
+[policy]
+min_version  = "0.4.29"                     # warn loudly below this
+push_guard   = "block"                      # escalate the push guard
+propose_only = ["reports/**"]               # no direct push — Propose only
+ai_off       = ["hr/**"]                    # the copilot is off for these
+
+[policy.settings]
+"ai.pii.enabled" = true                     # cannot be turned off locally
+"ai.context"     = false
+```
+
+The load-bearing rule is that **policy can only ever be more restrictive than
+local config, never less** — including more restrictive than an environment
+variable. A synced file can never weaken a teammate's own safety settings, and a
+malformed rule is ignored rather than obeyed.
+
+Author it with `mooring policy set` / `unset` (which write the synced file, so
+they take a push), inspect it with `mooring policy show`, and see the full
+reference — every rule, the exact tighten-only semantics, and what it does *not*
+cover — on **[Team policy](policy.md)**.
 
 ### `[workspace]`
 

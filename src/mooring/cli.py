@@ -10,6 +10,7 @@ import subprocess
 import sys
 from collections.abc import Mapping
 from pathlib import Path
+from typing import NamedTuple
 
 from mooring import (
     __version__,
@@ -22,6 +23,7 @@ from mooring import (
     telemetry,
     workspace_config,
 )
+from mooring import policy as policy_mod  # `policy` is a common local name below
 
 # SELFTEST_PACKAGES, workspace_hint and legacy_workspace_hint now live in
 # mooring.runtime — a neutral module below both presentation adapters, so the web
@@ -195,6 +197,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="render a notebook to a shareable HTML snapshot (code hidden) in the local outbox",
     )
     deliver_cmd.add_argument("path", help="workspace-relative notebook path to deliver")
+    deliver_cmd.add_argument(
+        "--excel",
+        action="store_true",
+        help="deliver an .xlsx workbook of the tables the notebook named with "
+        "`import mooring_deliver` instead of the HTML snapshot",
+    )
 
     verify_cmd = sub.add_parser(
         "verify",
@@ -202,12 +210,41 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     verify_cmd.add_argument("path", nargs="?", help="workspace-relative notebook path to verify")
     verify_cmd.add_argument(
+        "--all",
+        dest="all_notebooks",
+        action="store_true",
+        help="sweep: run EVERY notebook in the workspace, one at a time, and summarise",
+    )
+    verify_cmd.add_argument(
+        "--resume",
+        action="store_true",
+        help="with --all: skip notebooks whose verify badge is still valid (finish a sweep)",
+    )
+    verify_cmd.add_argument(
+        "-y", "--yes", action="store_true", help="with --all: don't ask before starting"
+    )
+    verify_cmd.add_argument(
         "--clear",
         nargs="?",
         const=True,
         default=False,
         metavar="PATH",
         help="clear recorded verify receipts (all, or just one notebook path) instead of running",
+    )
+
+    catalog_cmd = sub.add_parser(
+        "catalog",
+        help="search every notebook in the workspace by name, title, or what it does",
+    )
+    catalog_cmd.add_argument(
+        "query",
+        nargs="*",
+        help="terms to search for (all must match); omit to list the whole catalog",
+    )
+    catalog_cmd.add_argument(
+        "--full",
+        action="store_true",
+        help="show each match in full (inputs, checks, SQL tables) instead of one line each",
     )
 
     checks_cmd = sub.add_parser(
@@ -225,7 +262,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     inputs_cmd = sub.add_parser(
         "inputs",
-        help="show the value-free input fingerprints (content hash + shape + schema) per notebook",
+        help="show the value-free input/output fingerprints (hash + shape + schema) per notebook",
     )
     inputs_cmd.add_argument(
         "--clear",
@@ -234,6 +271,16 @@ def _build_parser() -> argparse.ArgumentParser:
         default=False,
         metavar="PATH",
         help="clear recorded input fingerprints (all, or just one notebook path)",
+    )
+
+    lineage_cmd = sub.add_parser(
+        "lineage",
+        help="show which notebooks read and write each data file, and what a change would hit",
+    )
+    lineage_cmd.add_argument(
+        "path",
+        nargs="?",
+        help="a data file — show what reads it and what is recorded downstream of a change",
     )
 
     delete_cmd = sub.add_parser(
@@ -318,7 +365,24 @@ def _build_parser() -> argparse.ArgumentParser:
     deps_rm = deps_sub.add_parser("remove", help="remove packages from the repo and re-lock")
     deps_rm.add_argument("packages", nargs="+", help="packages to remove")
     deps_sub.add_parser("list", help="list declared packages and whether each is available")
-    deps_sub.add_parser("lock", help="refresh uv.lock from pyproject.toml")
+    deps_lock = deps_sub.add_parser("lock", help="refresh uv.lock from pyproject.toml")
+    # A lock change is the one edit that lands on EVERY teammate at once, so each
+    # lock-writing sub-command offers the sweep that checks the repo still runs.
+    for _deps_cmd in (deps_add, deps_rm, deps_lock):
+        _sweep_grp = _deps_cmd.add_mutually_exclusive_group()
+        _sweep_grp.add_argument(
+            "--sweep",
+            dest="sweep",
+            action="store_true",
+            default=None,
+            help="afterwards, run every notebook against the new lock (no prompt)",
+        )
+        _sweep_grp.add_argument(
+            "--no-sweep",
+            dest="sweep",
+            action="store_false",
+            help="don't offer to check the notebooks still run",
+        )
 
     build_reqs = sub.add_parser(
         "build-requirements",
@@ -367,6 +431,24 @@ def _build_parser() -> argparse.ArgumentParser:
     shadow_unignore.add_argument("path", help="workspace-relative notebook path")
     shadow_unignore.add_argument("--repo", default=None, metavar="ALIAS", help=_REPO_ARG_HELP)
 
+    policy_cmd = sub.add_parser(
+        "policy", help="the team's admin policy in the synced mooring.toml (client-enforced)"
+    )
+    policy_sub = policy_cmd.add_subparsers(dest="policy_command", required=True)
+    policy_show = policy_sub.add_parser("show", help="what policy is in force, and why")
+    policy_set = policy_sub.add_parser(
+        "set", help="author a policy rule (writes the SYNCED mooring.toml — push to share it)"
+    )
+    policy_set.add_argument("rule", choices=list(policy_mod.RULES), help="which rule to set")
+    policy_set.add_argument("values", nargs="+", metavar="VALUE", help="the rule's value(s)")
+    policy_unset = policy_sub.add_parser("unset", help="remove a policy rule (relaxes the policy)")
+    policy_unset.add_argument("rule", choices=list(policy_mod.RULES), help="which rule to remove")
+    policy_unset.add_argument(
+        "values", nargs="*", metavar="VALUE", help="for 'setting': the setting key"
+    )
+    for cmd in (policy_show, policy_set, policy_unset):
+        cmd.add_argument("--repo", default=None, metavar="ALIAS", help=_REPO_ARG_HELP)
+
     conn_cmd = sub.add_parser(
         "connections",
         help="define value-free DB connection shapes (synced); the secret stays local",
@@ -395,6 +477,33 @@ def _build_parser() -> argparse.ArgumentParser:
     conn_sub.add_parser(
         "check", help="scan the synced connection definitions for anything secret-shaped"
     )
+
+    ds_cmd = sub.add_parser(
+        "datasets",
+        help="point at data files too big to sync; each machine can redirect them locally",
+    )
+    ds_sub = ds_cmd.add_subparsers(dest="datasets_command", required=True)
+    ds_sub.add_parser("list", help="the defined datasets, where each resolves here, and if it's there")
+    ds_add = ds_sub.add_parser(
+        "add", help="define/update a pointer, e.g. add sales kind=share path=//fs/finance/sales.parquet"
+    )
+    ds_add.add_argument("name", help="a dataset name (e.g. sales)")
+    ds_add.add_argument(
+        "fields", nargs="+", metavar="field=value", help="kind= plus path=/url= (NO credentials)"
+    )
+    ds_rm = ds_sub.add_parser("rm", help="remove a dataset pointer")
+    ds_rm.add_argument("name", help="the dataset name to remove")
+    ds_local = ds_sub.add_parser(
+        "set-local", help="point a dataset somewhere else on THIS machine (never synced)"
+    )
+    ds_local.add_argument("name", help="the dataset name")
+    ds_local.add_argument(
+        "location", nargs="?", default=None, help="the file/UNC path it lives at here"
+    )
+    ds_local.add_argument(
+        "--clear", action="store_true", help="remove this machine's redirect instead of setting it"
+    )
+    ds_sub.add_parser("check", help="scan the synced dataset pointers for anything credential-shaped")
 
     sched_cmd = sub.add_parser(
         "schedule", help="refresh a notebook on a cadence (local to this machine)"
@@ -500,6 +609,53 @@ def _build_parser() -> argparse.ArgumentParser:
         help="stay resident and refresh what's due on a timer (what the sign-in agent runs)",
     )
     refresh_cmd.add_argument("--repo", default=None, metavar="ALIAS", help=_REPO_ARG_HELP)
+
+    # Deliberately its OWN command rather than a `refresh --for` flag. `refresh` is bound to
+    # the schedule model — it pulls, it records against a cadence, its exit codes describe a
+    # cadence's states, and its whole point is that it can happen unattended. A fan-out has
+    # no cadence, does not pull, is watched, and produces N artifacts; putting it behind the
+    # same verb would also invite `schedule add --for`, which is a promise about retention
+    # and freshness that has deliberately NOT been made.
+    run_cmd = sub.add_parser(
+        "run",
+        help="run a notebook once per parameter value and save one artifact per value",
+        description=(
+            "Run one notebook repeatedly — once per region, entity or month — and write one "
+            "HTML artifact per value into the local .mooring/outbox. Runs sequentially with "
+            "you watching; Ctrl+C stops it. Never pushes and never pulls. The notebook reads "
+            "its value with `mooring_params.get(\"region\", \"EMEA\")`, so it still runs "
+            "exactly as it does today when you open or verify it. Exit codes: 0 every value "
+            "ran clean, 1 at least one value failed, 4 stopped part-way (an incomplete pack)."
+        ),
+    )
+    run_cmd.add_argument("path", help="workspace-relative notebook path to run")
+    run_cmd.add_argument(
+        "--for",
+        dest="for_spec",
+        required=True,
+        metavar="NAME=VALUES",
+        help=(
+            "the parameter and its values, e.g. region=EMEA,APAC,AMER or "
+            "month=2026-01..2026-06 (ranges: whole numbers or calendar months)"
+        ),
+    )
+    run_cmd.add_argument(
+        "--deliver",
+        dest="deliver",
+        action="store_true",
+        default=None,
+        help="save an HTML artifact per value (the default)",
+    )
+    run_cmd.add_argument(
+        "--no-deliver",
+        dest="deliver",
+        action="store_false",
+        help="just run each value and report; write no artifacts",
+    )
+    run_cmd.add_argument(
+        "--json", action="store_true", help="emit machine-readable JSON (for a wrapper script)"
+    )
+    run_cmd.add_argument("--repo", default=None, metavar="ALIAS", help=_REPO_ARG_HELP)
 
     ai = sub.add_parser("ai", help="AI copilot: sign in to Copilot and check status")
     ai_sub = ai.add_subparsers(dest="ai_command", required=True)
@@ -921,31 +1077,133 @@ def cmd_pull(cfg: config.Config, theirs: bool, keep_both: bool) -> int:
     return 0 if not result.skipped_conflicts else 1
 
 
-def _push_guard_fn(cfg: config.Config, acknowledge: bool):
-    """The push guard for a CLI push/propose. Returns
-    ``(guard_fn, collected, mode, acknowledged)``.
+class _PushGuards(NamedTuple):
+    """The THREE guards on one push, each with its own ledger and its own override rule.
 
-    ``--acknowledge-findings`` does NOT turn the scan off: the guard still runs
-    and everything it would have flagged is collected into ``acknowledged`` and
-    printed after the push — so the user sees exactly what they let out AT PUSH
-    TIME, and a finding that appeared since the first run can't ride out unseen
-    (the hub's token flow gets the same guarantee by binding tokens to bytes).
-    In block mode ([guard] push = "block") the flag is refused entirely."""
-    from mooring import pushguard
+    Seven loose tuple slots was a bug farm, and the names are load-bearing because the
+    rules genuinely differ: ``collected`` is acknowledgeable only in warn mode,
+    ``lock_collected`` in any mode, ``blocked`` never.
+    """
 
-    mode = workspace_config.guard_mode(cfg.workspace())
+    guard_fn: object
+    collected: dict  # content findings withheld (tokened; warn mode only)
+    lock_collected: dict  # dependency findings withheld (tokened; any mode)
+    blocked: dict  # policy propose-only blocks (NO token, no override)
+    mode: str
+    acknowledged: dict  # content findings let through by --acknowledge-findings
+    lock_acknowledged: dict  # dependency findings let through, worded separately
+
+    @property
+    def withheld_any(self) -> bool:
+        """Whether ANY guard held something back — the exit-code question."""
+        return bool(self.collected or self.lock_collected or self.blocked)
+
+
+def _push_guard_fn(
+    cfg: config.Config, acknowledge: bool, *, direct: bool = True
+) -> _PushGuards:
+    """Build the composed ``guard_fn`` for a CLI push/propose, and the ledgers behind it.
+
+    Three guards ride the one seam sync offers, they answer three different questions,
+    and so they keep three different override rules:
+
+    * **content** (secrets/PII) — acknowledgeable in warn mode; ``[guard] push = "block"``
+      (or ``[policy] push_guard``) refuses the flag entirely.
+    * **dependency change** — ALWAYS acknowledgeable, block mode included. It warns that a
+      ``uv.lock`` breaks the team's notebooks, which is not a thing that must not leave
+      the machine; a content policy must not quietly become a wall around lock files.
+    * **policy propose-only** — never acknowledgeable, and there is no token to offer.
+      Composed OUTSIDE the acknowledge shortcut on purpose, and only when ``direct`` (a
+      write to the SHARED branch): ``propose`` must never install it, or the review-gated
+      paths would have no road at all.
+
+    ``--acknowledge-findings`` does NOT turn either scanner off: both still run and
+    everything they would have flagged is recorded and printed after the push — so the
+    user sees exactly what they let out AT PUSH TIME, and a finding that appeared since
+    the first run can't ride out unseen (the hub's token flow gets the same guarantee by
+    binding tokens to bytes and, for the deps gate, to the sweep result).
+    """
+    from mooring import pushguard, sweep
+
+    workspace = cfg.workspace()
+    pol = policy_mod.load(workspace)
+    mode = pol.guard_mode(workspace_config.guard_mode(workspace))
+    gate_fn, blocked = policy_mod.make_propose_gate(pol) if direct else (None, {})
+    # TWO acknowledgement ledgers, printed in their own words. A content finding is
+    # "you published something sensitive"; a dependency finding is "you changed what the
+    # team runs on". Merging them made the latter print in the former's vocabulary
+    # ("now visible to everyone", plus a meaningless line number).
+    acknowledged: dict = {}
+    lock_acknowledged: dict = {}
+
+    def _note(ledger: dict, rel_path: str, findings: list) -> None:
+        if findings:
+            ledger.setdefault(rel_path, {"findings": []})["findings"].extend(findings)
+
     if acknowledge and mode != "block":
-        acknowledged: dict = {}
+        collected: dict = {}
 
-        def allow_fn(rel_path: str, data: bytes) -> list[str]:
-            findings = pushguard.scan_text(rel_path, data)
-            if findings:
-                acknowledged[rel_path] = {"findings": findings}
+        def content_fn(rel_path: str, data: bytes | None) -> list[str]:
+            _note(acknowledged, rel_path, pushguard.scan_text(rel_path, data))
             return []
+    else:
+        content_fn, collected = pushguard.make_guard()
 
-        return allow_fn, {}, mode, acknowledged
-    guard_fn, collected = pushguard.make_guard()
-    return guard_fn, collected, mode, {}
+    notebooks_fn = _sweep_notebooks_fn(cfg)
+    if acknowledge:
+        lock_collected: dict = {}
+
+        def lock_fn(rel_path: str, data: bytes | None) -> list[str]:
+            if sweep.is_lock(rel_path):  # never walk the workspace for an ordinary file
+                _note(
+                    lock_acknowledged,
+                    rel_path,
+                    pushguard.lock_findings(workspace, rel_path, data, notebooks_fn()),
+                )
+            return []
+    else:
+        lock_fn, lock_collected = pushguard.make_lock_guard(
+            workspace, notebooks_fn=notebooks_fn
+        )
+
+    return _PushGuards(
+        guard_fn=policy_mod.compose_guards(content_fn, lock_fn, gate_fn),
+        collected=collected,
+        lock_collected=lock_collected,
+        blocked=blocked,
+        mode=mode,
+        acknowledged=acknowledged,
+        lock_acknowledged=lock_acknowledged,
+    )
+
+
+def _sweep_notebooks_fn(cfg: config.Config):
+    """A lazy "what notebooks exist right now" for the dependency gate — so it can tell a
+    fully-checked repo from one that has grown a notebook since the last sweep. Lazy
+    because enumerating costs a workspace walk and only a ``uv.lock`` in the push needs
+    it; the walk is memoised in case both guards ask."""
+    cache: list = []
+
+    def _notebooks() -> list[str]:
+        if not cache:
+            from mooring.app import sweep_run
+
+            cache.append(sweep_run.plan(cfg))
+        return cache[0]
+
+    return _notebooks
+
+
+def _print_policy_blocked(blocked: dict) -> None:
+    """Files the team's propose-only policy withheld from a DIRECT push. There is
+    no acknowledge flag for these — Propose is the road."""
+    print(f"\n{len(blocked)} file(s) withheld by your team's policy — direct push isn't allowed:")
+    for path, reason in sorted(blocked.items()):
+        print(f"  {path}  ({reason})")
+    print(
+        "Send them for review instead: `mooring propose`. "
+        "(Policy lives in the synced mooring.toml — see `mooring policy show`.)"
+    )
 
 
 def _print_guard_findings(collected: dict, mode: str, verb: str) -> None:
@@ -966,6 +1224,19 @@ def _print_guard_findings(collected: dict, mode: str, verb: str) -> None:
         )
 
 
+def _print_lock_findings(collected: dict, verb: str) -> None:
+    """The dependency gate's warn-and-confirm text: what the sweep says, then the two
+    ways forward. Never a wall — the change is one flag away from going."""
+    past = "pushed" if verb == "push" else "proposed"
+    for path, info in sorted(collected.items()):
+        for f in info["findings"]:
+            print(f"\n{path} was NOT {past} — {f.kind}.")
+    print(
+        "Run `mooring verify --all` to check every notebook against these dependencies,\n"
+        f"or re-run with --acknowledge-findings to {verb} anyway."
+    )
+
+
 def _print_acknowledged(acknowledged: dict) -> None:
     total = sum(len(info["findings"]) for info in acknowledged.values())
     print(f"\nPushed with {total} acknowledged finding(s) — now visible to everyone:")
@@ -974,29 +1245,38 @@ def _print_acknowledged(acknowledged: dict) -> None:
             print(f"  {path}:{f.line}  {f.kind}")
 
 
+def _print_lock_acknowledged(acknowledged: dict, verb: str) -> None:
+    """The deps gate's own acknowledgement wording. A dependency change is not an
+    exposure — "now visible to everyone" (and a line number) would be the wrong story."""
+    past = "Pushed" if verb == "push" else "Proposed"
+    for path, info in sorted(acknowledged.items()):
+        for f in info["findings"]:
+            print(f"\n{past} {path} anyway — {f.kind}.")
+    print("The whole team's notebooks now run against these dependencies.")
+
+
 def cmd_push(
     cfg: config.Config, only_paths: list[str], message: str | None, acknowledge: bool = False
 ) -> int:
     from mooring import sync
 
-    guard_fn, collected, mode, acknowledged = _push_guard_fn(cfg, acknowledge)
+    g = _push_guard_fn(cfg, acknowledge)
+    _print_policy_version_warning(cfg)
     result = sync.push(
-        _client(cfg), cfg, paths=only_paths or None, message=message, guard_fn=guard_fn
+        _client(cfg), cfg, paths=only_paths or None, message=message, guard_fn=g.guard_fn
     )
     telemetry.log_event(
         "push",
         pushed=result.pushed,
         conflicts=len(result.blocked_conflicts),
         lines=len(result.lines),
-        withheld=len(collected),
+        withheld=len(g.collected) + len(g.lock_collected),
+        policy_blocked=len(g.blocked),
     )
     _record_activity(cfg, "push", result)
     _print_sync_result(result)
-    if collected:
-        _print_guard_findings(collected, mode, "push")
-    if acknowledged:
-        _print_acknowledged(acknowledged)
-    return 0 if not (result.blocked_conflicts or collected) else 1
+    _print_withheld(g, "push")
+    return 0 if not (result.blocked_conflicts or g.withheld_any) else 1
 
 
 def cmd_propose(
@@ -1004,35 +1284,128 @@ def cmd_propose(
 ) -> int:
     from mooring import sync
 
-    guard_fn, collected, mode, acknowledged = _push_guard_fn(cfg, acknowledge)
+    # direct=False: propose is exactly the road a propose-only policy points at,
+    # so that gate must never fire here (it would leave those files unreachable).
+    # The content and dependency guards DO run — both are about what the bytes are,
+    # not about which branch they land on.
+    g = _push_guard_fn(cfg, acknowledge, direct=False)
+    _print_policy_version_warning(cfg)
     result = sync.propose(
-        _client(cfg), cfg, paths=only_paths or None, message=message, guard_fn=guard_fn
+        _client(cfg), cfg, paths=only_paths or None, message=message, guard_fn=g.guard_fn
     )
     telemetry.log_event(
         "propose",
         proposed=result.proposed,
         conflicts=len(result.blocked_conflicts),
         review_branch=bool(result.review_branch),
-        withheld=len(collected),
+        withheld=len(g.collected) + len(g.lock_collected),
     )
     _record_activity(cfg, "propose", result)
     _print_sync_result(result)
-    if collected:
-        _print_guard_findings(collected, mode, "propose")
-    if acknowledged:
-        _print_acknowledged(acknowledged)
-    return 0 if not (result.blocked_conflicts or collected) else 1
+    _print_withheld(g, "propose")
+    return 0 if not (result.blocked_conflicts or g.withheld_any) else 1
+
+
+def _print_withheld(g: _PushGuards, verb: str) -> None:
+    """Report all three guards, each in its own words — the one place the CLI renders
+    a guarded push, so a new guard can never be added to the seam and forgotten here."""
+    if g.collected:
+        _print_guard_findings(g.collected, g.mode, verb)
+    if g.lock_collected:
+        _print_lock_findings(g.lock_collected, verb)
+    if g.blocked:
+        _print_policy_blocked(g.blocked)
+    if g.acknowledged:
+        _print_acknowledged(g.acknowledged)
+    if g.lock_acknowledged:
+        _print_lock_acknowledged(g.lock_acknowledged, verb)
+
+
+def _print_policy_version_warning(cfg: config.Config) -> None:
+    """One loud line when this mooring is below the team's ``[policy] min_version``.
+
+    Advisory by design (see ``Policy.version_shortfall``): the floor never blocks,
+    because blocking would leave a repo with a typo'd floor unpushable — including
+    the push that fixes it."""
+    shortfall = policy_mod.load(cfg.workspace()).version_shortfall(__version__)
+    if shortfall:
+        print(f"\nwarning: {shortfall}\n")
+
+
+def cmd_policy(cfg: config.Config, args: argparse.Namespace) -> int:
+    """Show or author the team's admin policy (the synced ``mooring.toml``
+    ``[policy]`` block). ``set``/``unset`` write a SYNCED file, so the change
+    reaches teammates on the next push, like any other edit."""
+    import tomllib
+
+    workspace = cfg.workspace()
+    command = args.policy_command
+    if command == "show":
+        pol = policy_mod.load(workspace)
+        local = workspace_config.guard_mode(workspace)
+        where = cfg.repo_slug if (cfg.owner and cfg.repo) else workspace
+        print(f"Team policy for {where} (synced mooring.toml [policy]):")
+        for line in policy_mod.describe(pol, current_version=__version__, local_guard=local):
+            print(line)
+        # A pattern that matches nothing looks right and protects nobody — the
+        # commonest way a policy is silently useless (`*.private.py` covers only
+        # repo-ROOT files; `**/*.private.py` is what people mean).
+        local = sorted(
+            p.relative_to(workspace).as_posix()
+            for p in workspace.rglob("*")
+            if p.is_file() and ".mooring" not in p.parts
+        ) if workspace.is_dir() else []
+        idle = policy_mod.unmatched_patterns(pol, local) if local else []
+        if idle:
+            print("\n  Patterns that match nothing in this workspace right now:")
+            for pattern in idle:
+                print(f"    {pattern}")
+            print(
+                "  A pattern matching nothing protects nobody. Remember `*` stays inside one\n"
+                "  folder — use `**/*.private.py` for every folder, and `reports/Sales*` to\n"
+                "  cover reports/Sales.pbip AND reports/Sales.SemanticModel/."
+            )
+        if pol.settings:
+            print(
+                "\nA locked setting cannot be made weaker on this machine — the Settings page "
+                "shows it locked, and the effective config is tightened even if config.toml "
+                "disagrees. Policy can only ever be STRICTER than local config."
+            )
+        return 1 if pol.unreadable else 0
+
+    try:
+        if command == "set":
+            message = policy_mod.set_rule(workspace, args.rule, args.values)
+        else:
+            message = policy_mod.unset_rule(workspace, args.rule, args.values)
+    except ValueError as exc:
+        sys.exit(str(exc))
+    except tomllib.TOMLDecodeError as exc:
+        sys.exit(
+            f"{workspace_config.WORKSPACE_CONFIG_NAME} is not valid TOML ({exc}); "
+            "fix the shared file before editing the policy."
+        )
+    telemetry.log_event("policy", action=command, rule=args.rule)
+    print(message)
+    print("This edits the SYNCED mooring.toml — run `mooring push` to apply it for the team.")
+    return 0
 
 
 def cmd_scan(cfg: config.Config) -> int:
     """Run the push guard over the current push candidates without pushing —
-    the push-scoped sibling of `mooring ai pii check`."""
+    the push-scoped sibling of `mooring ai pii check`. Also names the candidates
+    the team's propose-only policy would withhold, so `scan` answers the whole
+    "what would happen if I pushed now?" question in one place."""
     from mooring import pushguard, sync
 
     report = sync.status(_client(cfg), cfg)
     workspace = cfg.workspace()
+    pol = policy_mod.load(workspace)
     findings_total = 0
+    propose_only: list[str] = []
     for f in report.by_state(*sync.PUSH_STATES):
+        if pol.propose_only.matches(f.path):
+            propose_only.append(f.path)
         target = workspace / f.path
         if not target.is_file():
             continue  # a deletion has no bytes to scan
@@ -1040,6 +1413,13 @@ def cmd_scan(cfg: config.Config) -> int:
         for finding in findings:
             print(f"  {f.path}:{finding.line}  {finding.kind}")
         findings_total += len(findings)
+    if propose_only:
+        print(
+            f"{len(propose_only)} file(s) your team's policy allows only through review "
+            "(`mooring propose`):"
+        )
+        for rel in sorted(propose_only):
+            print(f"  {rel}")
     if findings_total:
         print(
             f"{findings_total} finding(s). Fix them, or mark a reviewed false positive "
@@ -1047,7 +1427,9 @@ def cmd_scan(cfg: config.Config) -> int:
         )
         return 1
     print("No findings in the current push candidates.")
-    return 0
+    # A propose-only candidate is not a "finding" (nothing is wrong with the
+    # file), but a plain push WILL withhold it — so the exit code says so.
+    return 1 if propose_only else 0
 
 
 def cmd_recall(cfg: config.Config, assume_yes: bool) -> int:
@@ -1348,6 +1730,129 @@ def _connections_check(ws) -> int:
     return 1
 
 
+def cmd_datasets(cfg: config.Config, args: argparse.Namespace) -> int:
+    from mooring import datasets, workspace_config
+
+    ws = cfg.workspace()
+    sub = args.datasets_command
+    if sub == "list":
+        defined = workspace_config.datasets(ws)
+        if not defined:
+            print("No datasets defined. Point at one that's too big to sync, e.g.:")
+            print("  mooring datasets add sales kind=share path=//fileserver/finance/sales.parquet")
+            return 0
+        for name in sorted(defined):
+            found = datasets.resolve(ws, name)
+            where = {"env": "env var", "local": "local redirect", "cache": "cached download"}.get(
+                found.source, "team pointer"
+            )
+            state = "present" if found.exists else "MISSING"
+            print(f"{name}: {found.path or '(no location)'}  [{where}; {state}]")
+        return 0
+    if sub == "add":
+        from mooring.ai import secrets as ai_secrets
+
+        fields: dict = {}
+        for item in args.fields:
+            if "=" not in item:
+                sys.exit(f"Bad field {item!r} — use field=value (e.g. kind=share).")
+            key, value = item.split("=", 1)
+            fields[key.strip()] = _coerce_field(value)
+        # Defence in depth over set_dataset's own guard (the connections `add` reasoning):
+        # the richer ai.secrets scanner catches a high-entropy credential embedded in a
+        # location that the field-name / URL-parameter floor would miss. Value-free: names only.
+        leaky = sorted(
+            k for k, v in fields.items() if isinstance(v, str) and ai_secrets.has_secrets(v)
+        )
+        if leaky:
+            sys.exit(
+                f"These field values look like credentials: {', '.join(leaky)}. A dataset "
+                "pointer carries only a location — keep the credential off the synced file."
+            )
+        try:
+            workspace_config.set_dataset(ws, args.name, fields)
+        except ValueError as exc:
+            sys.exit(str(exc))
+        name = workspace_config.normalize_dataset_name(args.name)
+        telemetry.log_event("datasets", action="add")  # value-free: just the action
+        print(f"Defined dataset '{name}'. Push mooring.toml to share the pointer with the team.")
+        print(f'In a notebook: import mooring_datasets as md; md.path("{name}")')
+        found = datasets.resolve(ws, name)
+        if not found.exists and found.source != "cache":
+            print(f"Heads up: nothing at {found.path} on this machine yet.")
+        return 0
+    if sub == "rm":
+        removed = workspace_config.remove_dataset(ws, args.name)
+        print("Removed the dataset pointer." if removed else "No such dataset.")
+        return 0
+    if sub == "set-local":
+        name = workspace_config.normalize_dataset_name(args.name)
+        if not name:
+            sys.exit(
+                f"{args.name!r} is not a usable dataset name — it must be a bare token "
+                "(letters, digits, dot, underscore, hyphen)."
+            )
+        if args.clear:
+            cleared = datasets.clear_local_override(ws, name)
+            print("Cleared this machine's redirect." if cleared else "No redirect to clear.")
+            return 0
+        if not args.location:
+            sys.exit(
+                f"Where does '{name}' live on this machine? "
+                f'e.g. mooring datasets set-local {name} "D:/finance/sales.parquet"'
+            )
+        path = datasets.set_local_override(ws, name, args.location)
+        telemetry.log_event("datasets", action="set_local")  # value-free: the action only
+        print(
+            f"'{name}' now resolves to {datasets.local_path(ws, args.location)} on this machine "
+            f"({path.relative_to(ws).as_posix()} is under .mooring, which never syncs)."
+        )
+        if not Path(datasets.local_path(ws, args.location)).is_file():
+            print("Heads up: there's no file there yet.")
+        return 0
+    if sub == "check":
+        return _datasets_check(ws)
+    return 0
+
+
+def _datasets_check(ws) -> int:
+    """Pre-flight scan of the SYNCED dataset pointers for anything credential-shaped — a
+    hand-added secret field, a pre-signed/SAS URL, or a credential embedded in a location.
+    Value-free output; this just surfaces earlier what the read side already drops."""
+    from mooring.ai import secrets as ai_secrets
+
+    raw = workspace_config.datasets_raw(ws)
+    problems: list[str] = []
+    for name in sorted(raw):
+        if not workspace_config.normalize_dataset_name(name):
+            # A name is a folder component under .mooring — an escaping one is dropped on
+            # read, but say so, or the pointer just silently doesn't exist.
+            problems.append(f"{name!r}: not a usable dataset name (it must be a bare token)")
+            continue
+        for field, value in raw[name].items():
+            if workspace_config.is_secret_field(field):
+                problems.append(f"{name}.{field}: field name looks like a credential")
+            elif workspace_config.location_looks_secret(value):
+                problems.append(
+                    f"{name}.{field}: a URL with a query string, fragment or embedded "
+                    "credentials — that is where a pre-signed/SAS link keeps its key"
+                )
+            else:
+                for finding in ai_secrets.scan(str(value)):
+                    problems.append(f"{name}.{field}: {finding.kind}")
+    if not problems:
+        print("No credentials found in the dataset pointers.")
+        return 0
+    print("Found unusable or credential-shaped content in mooring.toml [datasets]:")
+    for line in problems:
+        print(f"  {line}")
+    print(
+        "A pointer carries only a location. Mount or sign in to the source on each machine, "
+        "then: mooring datasets set-local <name> <path>"
+    )
+    return 1
+
+
 def cmd_new(cfg: config.Config, name: str) -> int:
     from mooring import notebook_template
 
@@ -1389,15 +1894,21 @@ def cmd_duplicate(cfg: config.Config, rel_path: str) -> int:
     return cmd_open(cfg, new_rel)
 
 
-def cmd_deliver(cfg: config.Config, rel_path: str) -> int:
+def cmd_deliver(cfg: config.Config, rel_path: str, excel: bool = False) -> int:
     from mooring.app import deliver
 
     try:
-        result = deliver.deliver_html(cfg, rel_path)
+        if excel:
+            result = deliver.deliver_excel(cfg, rel_path)
+        else:
+            result = deliver.deliver_html(cfg, rel_path)
     except (ValueError, FileNotFoundError, deliver.DeliverError) as exc:
         sys.exit(str(exc))
-    telemetry.log_event("deliver")  # value-free: no path, just that a deliver ran
+    # value-free: which last mile ran, never a path
+    telemetry.log_event("deliver", kind="xlsx" if excel else "html")
     print(f"Delivered {result.notebook_rel} -> {result.out_rel}")
+    if result.sheets:
+        print(f"Sheets: {', '.join(result.sheets)} (+ Provenance)")
     print(
         "It's local only (in .mooring/outbox) and never pushed — attach it to "
         "email/Teams yourself."
@@ -1406,7 +1917,7 @@ def cmd_deliver(cfg: config.Config, rel_path: str) -> int:
 
 
 def cmd_verify(cfg: config.Config, args: argparse.Namespace) -> int:
-    from mooring import verify
+    from mooring import sweep, verify
     from mooring.app import verify_run
 
     clear = getattr(args, "clear", False)
@@ -1416,8 +1927,16 @@ def cmd_verify(cfg: config.Config, args: argparse.Namespace) -> int:
         # this is the rarer "forget it entirely" case, mirroring `mooring checks --clear`.
         rel = clear if isinstance(clear, str) else (args.path or None)
         removed = verify.clear(cfg.workspace(), rel)
+        # Clearing a badge must take that notebook out of the AGGREGATE too, or
+        # "2 ran clean" keeps standing over a receipt the user just asked to forget.
+        # `rel is None` clears the whole report; a path drops just its item.
+        sweep.clear(cfg.workspace(), rel)
         print(f"Cleared {removed} verify receipt(s)." if removed else "No verify receipts to clear.")
         return 0
+    if getattr(args, "all_notebooks", False):
+        if args.path:
+            sys.exit("Give a notebook path or --all, not both.")
+        return _verify_sweep(cfg, args)
     if not args.path:
         sys.exit("Give a notebook path to verify (or `--clear` to reset recorded results).")
     try:
@@ -1429,6 +1948,47 @@ def cmd_verify(cfg: config.Config, args: argparse.Namespace) -> int:
     if not result.passed:
         print("(The badge clears automatically when you edit the notebook.)")
     return 0 if result.passed else 1
+
+
+def _verify_sweep(cfg: config.Config, args: argparse.Namespace) -> int:
+    """`mooring verify --all` — run every notebook in the workspace, one at a time.
+
+    A sweep is expensive (it EXECUTES each notebook), so the cost is stated before
+    anything starts and the summary is deliberately modest about what a green sweep
+    proves. Exit code 1 when anything is not runnable, so CI/scripts can gate on it."""
+    from mooring import sweep
+    from mooring.app import sweep_run
+
+    targets = sweep_run.plan(cfg)
+    if not targets:
+        print("No notebooks to check.")
+        return 0
+    print(sweep_run.describe_cost(cfg, len(targets)))
+    if args.resume:
+        # A resume that cannot be honoured must SAY so: silently running everything is
+        # merely slow, but silently skipping on a stale basis would be a false green.
+        skippable, why = sweep_run.resume_scope(cfg)
+        if why:
+            print(f"Nothing to resume — {why}; running all of them.")
+        else:
+            print(f"Resuming: {len(skippable)} already checked against these dependencies.")
+    if not args.yes and sys.stdin.isatty():
+        if input("Start? [Y/n] ").strip().lower() in ("n", "no"):
+            print("Cancelled.")
+            return 0
+
+    def _progress(done: int, total: int, item) -> None:
+        print(f"  [{done}/{total}] {sweep_run.describe_item(item)}")
+
+    try:
+        report = sweep_run.sweep_workspace(
+            cfg, rels=targets, skip_verified=args.resume, on_progress=_progress
+        )
+    except sweep_run.RunBusy as exc:
+        sys.exit(str(exc))
+    print(sweep.headline(report))
+    print(f"({sweep.HONESTY_NOTE})")
+    return 1 if report.broken else 0
 
 
 def cmd_schedule(
@@ -1700,6 +2260,141 @@ def _refresh_exit_code(results: list) -> int:
     return 0
 
 
+def cmd_run(cfg: config.Config, args: argparse.Namespace) -> int:
+    """``mooring run <path> --for NAME=VALUES`` — the attended fan-out.
+
+    Ctrl+C is a real cancel, not a half-killed kernel. The console interrupt reaches mooring
+    but NOT marimo (the child deliberately runs in its own process group so it ignores the
+    keystroke), so the kill is done explicitly in :func:`notebook_run._exec`, which turns any
+    abnormal exit from the wait — timeout or interrupt — into the same process-tree kill.
+    The fan-out then reports the partial result exactly like a completed one, with the
+    unrun values named: an interrupted pack must never look finished, and must never leave
+    a value-bearing render behind."""
+    import dataclasses
+    import json as _json
+    import threading
+
+    from mooring import params
+    from mooring.app import notebook_run, param_runs
+
+    try:
+        spec = params.parse_spec(args.for_spec)
+    except params.ParamError as exc:
+        sys.exit(str(exc))
+
+    cancel = threading.Event()
+    quiet = bool(args.json)
+    if not quiet:
+        print(f"Running {args.path} for {spec.describe()} ({len(spec)} value(s), one at a time).")
+
+    def _progress(event: dict) -> None:
+        if quiet:
+            return
+        if event["kind"] == "running":
+            print(f"[{event['index']}/{event['total']}] {event['value']}… ", end="", flush=True)
+        elif event["kind"] == "value":
+            print(param_runs.describe_run(param_runs.ValueRun(**event["run"])))
+
+    try:
+        result = param_runs.fan_out(
+            cfg,
+            args.path,
+            spec,
+            do_deliver=args.deliver is not False,
+            on_event=_progress,
+            cancel=cancel,
+        )
+    except KeyboardInterrupt:
+        # A BACKSTOP only: the fan-out itself catches the interrupt per value and returns a
+        # normal partial result (with exit code 4), so this fires only for an interrupt
+        # landing outside a value's run. Nothing is left running either way — the runner
+        # kills the tree before unwinding.
+        cancel.set()
+        if args.json:
+            print(_json.dumps({"error": "cancelled", "cancelled": True, "runs": []}))
+        else:
+            print("\nCancelled. Some values did not run — the pack is INCOMPLETE.")
+        return 4
+    except (
+        ValueError,
+        FileNotFoundError,
+        param_runs.FanOutRefused,
+        notebook_run.RunBusy,
+    ) as exc:
+        if args.json:
+            print(_json.dumps({"error": str(exc), "runs": []}))
+        sys.exit(str(exc))
+
+    if args.json:
+        print(
+            _json.dumps(
+                {
+                    "notebook": result.notebook,
+                    "param": result.param,
+                    "values": list(result.values),
+                    "complete": result.complete,
+                    "cancelled": result.cancelled,
+                    "runs": [dataclasses.asdict(run) for run in result.runs],
+                },
+                indent=2,
+            )
+        )
+    else:
+        print(param_runs.describe_result(result))
+        if result.artifacts:
+            print("Artifacts (local only, in .mooring/outbox — never pushed):")
+            for rel in result.artifacts:
+                print(f"  {rel}")
+    return param_runs.exit_code(result)
+
+
+def cmd_catalog(app_cfg: config.AppConfig, cfg: config.Config, args: argparse.Namespace) -> int:
+    """Search (or list) the repo-wide notebook catalog — "has someone already built this?"
+
+    Runs entirely offline off the local workspace: it parses each notebook with ``ast``,
+    never executes one and never opens a ``.mooring`` receipt. Doubles as the preview of
+    exactly what the copilot's catalog tools can see, the ``mooring ai model check``
+    idiom, so a team can inspect the surface before trusting it.
+    """
+    from mooring.ai import notebookindex
+
+    workspace = cfg.workspace()
+    # Apply the SAME AI opt-out the chat path applies — the per-notebook list UNIONED
+    # with the policy's ai_off globs — so this really is a preview of what the copilot
+    # can see rather than a superset of it.
+    catalog = notebookindex.load_catalog(
+        workspace, tuple(cfg.folders), exclude_fn=policy_mod.ai_gate(workspace)
+    )
+    if catalog.excluded:
+        print(f"Excluded (AI off for them): {', '.join(catalog.excluded)}\n")
+    if catalog.is_empty():
+        print(
+            "No notebooks found. They must live under a synced folder or at the repo root "
+            "(both sync by default) and be marimo notebooks."
+        )
+        return 0
+    query = " ".join(args.query or [])
+    hits = catalog.search(query, limit=50) if query else catalog.list_notebooks()
+    if not hits:
+        print(f"No notebooks match {query!r}. ({len(catalog.notebooks)} in the catalog.)")
+        return 1
+    if args.full:
+        print("\n\n".join(notebookindex.render_notebook(nb) for nb in hits))
+    else:
+        print(notebookindex.render_lines(hits))
+    broken = [r for r in catalog.reports if r.error]
+    if broken:
+        print(f"\n{len(broken)} file(s) could not be parsed and were skipped:")
+        for r in broken:
+            print(f"  {r.path}: {r.error}")
+    if not app_cfg.ai_notebook_catalog:
+        print(
+            "\nNote: [ai] notebook_catalog is OFF - the copilot cannot search this "
+            "(the hub's own search box still can)."
+        )
+    return 0
+
+
 def cmd_checks(cfg: config.Config, args: argparse.Namespace) -> int:
     from mooring import checks
 
@@ -1738,17 +2433,95 @@ def cmd_inputs(cfg: config.Config, args: argparse.Namespace) -> int:
     results = inputs.read_results(cfg.workspace())
     if not results:
         print(
-            "No input fingerprints yet. In a notebook cell: import mooring_inputs as mi; "
-            'mi.fingerprint(df, "sales", path="data/sales.csv").'
+            "No fingerprints yet. In a notebook cell: import mooring_inputs as mi; "
+            'mi.fingerprint(df, "sales", path="data/sales.csv") for an input, '
+            'mi.output(df, "monthly", path="data/monthly.csv") for a file you write.'
         )
         return 0
     for rel in sorted(results):
         result = results[rel]
-        mark = "ok    " if result["changed"] == 0 else "CHANGED"
-        if result["changed"]:
-            print(f"{mark} {rel}: {result['changed']} of {result['total']} input(s) changed")
+        total = result["total"] + result["outputs"]
+        changed = result["changed"] + result["outputs_changed"]
+        pinned = f"{result['total']} input(s)"
+        if result["outputs"]:
+            pinned += f" + {result['outputs']} output(s)"
+        if changed:
+            print(f"CHANGED {rel}: {changed} of {total} fingerprint(s) changed ({pinned})")
         else:
-            print(f"{mark} {rel}: {result['total']} input(s) pinned, unchanged")
+            print(f"ok      {rel}: {pinned} pinned, unchanged")
+    return 0
+
+
+def cmd_lineage(cfg: config.Config, args: argparse.Namespace) -> int:
+    """``mooring lineage [path]`` — the recorded read/write graph, or one file's impact.
+
+    The coverage caveat is printed UNCONDITIONALLY, most of all when there is nothing to
+    show: "nothing reads this" is the one answer here a user could act on dangerously, so
+    it never appears without the sentence saying what the graph cannot see."""
+    from mooring import lineage
+
+    graph = lineage.build(cfg.workspace())
+    path = getattr(args, "path", None)
+
+    def _dated(notebook: str) -> str:
+        """A notebook with WHEN it last confirmed its edges. An entry is only removed by
+        ``mi.reset()``, so a notebook that stopped reading a file keeps asserting it did
+        until it next runs — the date is what lets a reader tell a live dependency from
+        a fossil, and it is never printed without one."""
+        stamp = graph.confirmed.get(notebook, "")
+        if not stamp:
+            return f"{notebook} (never dated)"
+        marker = ", not confirmed since" if lineage.is_stale(stamp) else ""
+        return f"{notebook} ({stamp[:10]}{marker})"
+
+    if not path:
+        for dataset in sorted(graph.display.values()):
+            print(dataset)
+            written = lineage.writers(graph, dataset)
+            read = lineage.readers(graph, dataset)
+            if written:
+                print(f"    written by  {', '.join(_dated(nb) for nb in written)}")
+            if read:
+                print(f"    read by     {', '.join(_dated(nb) for nb in read)}")
+        if not graph.display and graph.notebooks:
+            # Fingerprints exist but none names a file — say WHY nothing joined rather
+            # than printing an empty list that reads as "no dependencies".
+            print("No file paths recorded — a fingerprint only joins when you pass path=.")
+        print()
+        print(lineage.coverage_note(graph))
+        return 0
+
+    rel = str(path).replace("\\", "/")
+    read = lineage.readers(graph, rel)
+    written = lineage.writers(graph, rel)
+    print(rel)
+    if read:
+        print(f"  Recorded readers ({len(read)}) — change this and they are affected:")
+        for notebook in read:
+            print(f"    {_dated(notebook)}")
+    if written:
+        print(f"  Recorded writers ({len(written)}):")
+        for notebook in written:
+            print(f"    {_dated(notebook)}")
+    if not read and not written:
+        print("  Nothing recorded reads or writes this.")
+    # The transitive tail only: the direct readers are already listed above, so this
+    # block earns its space only when the chain actually runs further than one hop.
+    impact = lineage.downstream(graph, rel)
+    onward = [nb for nb in impact.notebooks if nb not in read]
+    if onward or impact.datasets:
+        print("  Further downstream (through the files those notebooks write):")
+        for notebook in onward:
+            print(f"    {_dated(notebook)}")
+        for dataset in impact.datasets:
+            print(f"    {dataset}")
+    source = lineage.upstream(graph, rel)
+    if source.datasets:
+        print("  Built from:")
+        for dataset in source.datasets:
+            print(f"    {dataset}")
+    print()
+    print(lineage.coverage_note(graph))
     return 0
 
 
@@ -1769,8 +2542,14 @@ def cmd_init(cfg: config.Config) -> int:
 
 
 def cmd_deps(cfg: config.Config, args: argparse.Namespace) -> int:
+    from mooring import sweep
+
     workspace = cfg.workspace()
     command = args.deps_command
+    # The lock as it stood BEFORE the command, so the offer below fires only when the
+    # resolution actually moved — `deps add` of a package that was already pinned changes
+    # nothing for the team and should not cost anyone a sweep.
+    lock_before = sweep.lock_fingerprint(workspace)
     if command == "list":
         status = pyproject_env.dep_status(workspace)
         if not status:
@@ -1803,7 +2582,44 @@ def cmd_deps(cfg: config.Config, args: argparse.Namespace) -> int:
     except subprocess.CalledProcessError as exc:
         sys.exit(f"uv {command} failed (exit {exc.returncode}).")
     telemetry.log_event("deps", action=command)
+    _offer_sweep_after_deps(cfg, args, lock_before)
     return 0
+
+
+def _offer_sweep_after_deps(
+    cfg: config.Config, args: argparse.Namespace, lock_before: str
+) -> None:
+    """A lock change lands on the WHOLE TEAM — offer to check the repo still runs.
+
+    This is the gate's first half: the moment the environment moves is the cheapest
+    moment to find out what it broke, and `mooring deps` is the only place that moment
+    is observable. It never blocks — declining just leaves the push guard to say the
+    change was not checked (see :func:`mooring.sweep.dependency_findings`)."""
+    from mooring import sweep
+    from mooring.app import sweep_run
+
+    workspace = cfg.workspace()
+    if sweep.lock_fingerprint(workspace) == lock_before:
+        return  # nothing resolved differently — nobody's environment moved
+    targets = sweep_run.plan(cfg)
+    if not targets:
+        return
+    noun = "notebook" if len(targets) == 1 else "notebooks"
+    print(f"\n{pyproject_env.LOCK_NAME} changed — {len(targets)} {noun} run against it.")
+    want = getattr(args, "sweep", None)
+    if want is None:
+        minutes = sweep_run.estimate_minutes(cfg, len(targets))
+        cost = f", roughly {minutes} min" if minutes else ", one at a time"
+        want = sys.stdin.isatty() and input(
+            f"Check they still run? (runs {len(targets)} {noun}{cost}) [Y/n] "
+        ).strip().lower() not in ("n", "no")
+    if not want:
+        print(
+            f"Not checked. Run `mooring verify --all` before you push — otherwise "
+            f"{pyproject_env.LOCK_NAME} goes to the team unchecked."
+        )
+        return
+    _verify_sweep(cfg, argparse.Namespace(path=None, resume=False, yes=True))
 
 
 def cmd_build_requirements(cfg: config.Config, output: str | None) -> int:
@@ -2942,23 +3758,33 @@ def _dispatch(
     if command == "duplicate":
         return cmd_duplicate(cfg, args.path)
     if command == "deliver":
-        return cmd_deliver(cfg, args.path)
+        return cmd_deliver(cfg, args.path, excel=getattr(args, "excel", False))
     if command == "verify":
         return cmd_verify(cfg, args)
     if command == "schedule":
         return cmd_schedule(app_cfg, cfg, args)
     if command == "refresh":
         return cmd_refresh(cfg, args)
+    if command == "run":
+        return cmd_run(cfg, args)
+    if command == "catalog":
+        return cmd_catalog(app_cfg, cfg, args)
     if command == "checks":
         return cmd_checks(cfg, args)
     if command == "inputs":
         return cmd_inputs(cfg, args)
+    if command == "lineage":
+        return cmd_lineage(cfg, args)
     if command == "init":
         return cmd_init(cfg)
     if command == "deps":
         return cmd_deps(cfg, args)
+    if command == "policy":
+        return cmd_policy(cfg, args)
     if command == "connections":
         return cmd_connections(cfg, args)
+    if command == "datasets":
+        return cmd_datasets(cfg, args)
     if command == "shadow":
         return cmd_shadow(cfg, args)
     if command == "build-requirements":
@@ -3006,6 +3832,12 @@ def main(argv: list[str] | None = None) -> int:
     folders = ctxdirs.sync_dirs(app_cfg, cfg.folders, cfg.workspace())
     if folders != cfg.folders:
         cfg = replace(cfg, folders=folders)
+
+    # Fold the repo's admin policy over the local config — the ONE place the CLI
+    # applies it, above the env layer, so a policy-pinned safety setting is what
+    # every command below actually runs with (mooring.policy: tighten-only, so
+    # this can never make anything less restrictive than config.toml already is).
+    app_cfg = policy_mod.tighten_app_config(app_cfg, cfg.workspace())
 
     telemetry.configure(
         app_cfg.log_endpoint,

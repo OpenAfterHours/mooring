@@ -64,6 +64,9 @@ nav = [
     { "Overview & checklist" = "admins/index.md" },
     { "GitHub setup" = "admins/github-setup.md" },
     { "Configuration" = "admins/configuration.md" },
+    # The synced, client-enforced [policy] block: the admin-facing half of
+    # "mooring is the only road into the repo".
+    { "Team policy" = "admins/policy.md" },
     # Frozen single-file builds are an advanced fallback for no-Python machines,
     # not the default path — demoted to the last admin item.
     { "Advanced: offline / frozen builds" = "admins/build-and-distribute.md" },

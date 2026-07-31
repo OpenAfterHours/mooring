@@ -11,6 +11,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from mooring import celldiff, gitsha, manifest, notebook_template, reveal, sync, telemetry, trash
+from mooring.app.sweep_service import SweepBusy
 from mooring.github import AuthFailed, GitHubError, NotFound
 
 
@@ -149,6 +150,53 @@ def _deliver(hub, rel_path: str) -> JSONResponse:
     )
 
 
+async def api_deliver_excel(request: Request) -> JSONResponse:
+    """Run a notebook and collect the tables it named into one ``.xlsx`` in the
+    sync-excluded ``.mooring/outbox``, then reveal it in the file manager.
+
+    The Excel last mile for the part of the audience that forwards numbers rather
+    than charts. Same shape as ``/api/deliver``: it EXECUTES the notebook and can be
+    slow, so it runs off the event loop; the workbook holds real values but lives
+    under ``.mooring/``, which :func:`mooring.sync.is_synced_path` excludes
+    structurally, so it can never ride a push. No channel here reaches the AI."""
+    hub = request.app.state.hub
+    data = await request.json()
+    rel_path = str(data.get("path", ""))
+    return await run_in_threadpool(_deliver_excel, hub, rel_path)
+
+
+def _deliver_excel(hub, rel_path: str) -> JSONResponse:
+    import contextlib
+
+    from mooring.app import deliver
+
+    try:
+        result = deliver.deliver_excel(hub.cfg, rel_path)
+    except (ValueError, FileNotFoundError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    except deliver.DeliverError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=502)
+    telemetry.log_event("deliver", kind="xlsx")
+    with contextlib.suppress(Exception):
+        reveal.reveal(result.out_path)  # best-effort: no-op off Windows
+    # Deliberately NOT opened for preview like the HTML: launching a .xlsx hands the
+    # file to Excel, which locks it and would block the next delivery's write.
+    name = result.out_rel.rsplit("/", 1)[-1]
+    sheets = ", ".join(result.sheets)
+    return JSONResponse(
+        {
+            "path": rel_path,
+            "out": result.out_rel,
+            "sheets": list(result.sheets),
+            "lines": [
+                f"Delivered {result.notebook_rel} → {name}" + (f" ({sheets})" if sheets else ""),
+                "Saved to .mooring/outbox (local only, never pushed) and revealed in "
+                "your file manager.",
+            ],
+        }
+    )
+
+
 async def api_verify(request: Request) -> JSONResponse:
     """Smoke-run a notebook locally and record a value-free trust receipt: did it run
     clean? The row then badges "✓ ran clean" (kept only while the file's SHA matches,
@@ -179,6 +227,58 @@ def _verify(hub, rel_path: str) -> JSONResponse:
     return JSONResponse(
         {"path": rel_path, "ok": result.passed, "lines": [verify_run.describe_result(result)]}
     )
+
+
+async def api_sweep_plan(request: Request) -> JSONResponse:
+    """What a sweep would cost: how many notebooks it would run.
+
+    Asked BEFORE anything starts, because a sweep executes every notebook end to end and
+    "this runs 14 notebooks" is the difference between an informed wait and an app that
+    looks hung. Read-only; enumerating re-reads the workspace's .py files, so it stays off
+    the event loop and off the /api/state hot path (the /api/discover posture)."""
+    hub = request.app.state.hub
+
+    def _plan() -> JSONResponse:
+        from mooring.app import sweep_run
+
+        total = len(sweep_run.plan(hub.cfg))
+        return JSONResponse({"total": total, "cost": sweep_run.describe_cost(hub.cfg, total)})
+
+    return await run_in_threadpool(_plan)
+
+
+async def api_sweep(request: Request) -> JSONResponse:
+    """Start a sweep (POST) or read its progress (GET).
+
+    Deliberately NOT one blocking call: the hub disables its toolbar for the duration of a
+    request, so a sweep run that way would show no progress and leave no reachable Cancel
+    on an operation that can take many minutes. The worker thread lives in
+    :class:`mooring.app.sweep_service.SweepService`; this handler is pure transport.
+
+    Each notebook records the ordinary verify receipt, so a swept row badges exactly as a
+    hand-verified one does — and clears on the next edit."""
+    hub = request.app.state.hub
+    if request.method == "GET":
+        return JSONResponse(hub.sweep.snapshot())
+    data = await request.json() if await request.body() else {}
+    resume = bool(data.get("resume"))
+
+    def _start() -> JSONResponse:
+        try:
+            return JSONResponse(hub.sweep.start(hub.cfg, resume=resume))
+        except SweepBusy as exc:
+            return JSONResponse({"error": str(exc)}, status_code=409)
+
+    # Off the event loop: start() itself is cheap now, but it reads the stored report and
+    # spawns a thread, and every other blocking hub call takes this route.
+    return await run_in_threadpool(_start)
+
+
+async def api_sweep_cancel(request: Request) -> JSONResponse:
+    """Stop the running sweep, killing the process tree of the notebook currently
+    executing — not merely declining to start the next one."""
+    request.app.state.hub.sweep.cancel()
+    return JSONResponse({"cancelled": True})
 
 
 async def api_delete(request: Request) -> JSONResponse:

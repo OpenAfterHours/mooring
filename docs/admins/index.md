@@ -41,6 +41,10 @@ never the data itself. See [Why it cannot see your data](ai-privacy.md).
       the team-context and PII-guard settings before turning it on for a
       sensitive-data team —
       [Secure AI copilot](ai-privacy.md) · [copilot guide](../users/ai-copilot.md)
+- [ ] **(Optional) Set a team policy** — pin the safety settings that must not be
+      switched off locally, make sensitive paths review-only, and escalate the
+      push guard. It rides the repo, and mooring enforces it on every machine —
+      [Team policy](policy.md)
 
 !!! tip "The four values you need from GitHub"
 

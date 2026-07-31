@@ -12,9 +12,11 @@ from collections import Counter
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from mooring import auth, celldiff, manifest, pushguard, sync, telemetry, whatsnew
+from mooring import auth, celldiff, manifest, policy, pushguard, sync, telemetry, whatsnew
 from mooring import workspace_config
+from mooring.app import conflict_merge
 from mooring.app import notebooks as nb_ops
+from mooring.app import sweep_run as nb_sweep
 from mooring.github import GitHubError, Unreachable
 from mooring.hub.routes.files import _resolve_within
 
@@ -158,36 +160,81 @@ async def api_whatsnew_detail(request: Request) -> JSONResponse:
     return JSONResponse({"path": rel, **body})
 
 
-def _guarded_sync_op(hub, name: str, data: dict, run) -> JSONResponse:
-    """Run push/propose behind the push guard's warn-and-confirm flow.
+def _findings_payload(collected: dict) -> list[dict]:
+    return [
+        {
+            "path": path,
+            "token": info["token"],
+            "findings": [{"line": f.line, "kind": f.kind} for f in info["findings"]],
+        }
+        for path, info in sorted(collected.items())
+    ]
+
+
+def _guarded_sync_op(hub, name: str, data: dict, run, *, direct: bool = True) -> JSONResponse:
+    """Run push/propose behind the warn-and-confirm flow for all THREE guards on
+    the sync seam: the content scanners, the dependency-change gate, and the team
+    policy's propose-only gate.
 
     Every outgoing candidate is scanned (mooring.pushguard) via sync's injected
     ``guard_fn``; flagged files are WITHHELD (clean ones still go), and the
     response upgrades to a 409 carrying value-free findings + per-file confirm
     tokens. "Push anyway" re-POSTs with those tokens: each token binds the exact
     findings to the exact bytes, so a changed file or a new finding is never
-    covered by an old confirm. In block mode ([guard] push = "block" in the
-    synced mooring.toml) tokens are refused — the pragma/fix is the only way.
+    covered by an old confirm. In block mode ([guard] push = "block", or the
+    policy's own floor) tokens are refused — the pragma/fix is the only way.
+
+    The three guards' OVERRIDE RULES differ deliberately, and the response has to
+    carry all three faithfully:
+
+    * ``guard_findings`` — content. Acknowledgeable in warn mode only.
+    * ``sweep_findings`` — the dependency-change gate, asking the last verify
+      sweep whether an outgoing ``uv.lock`` still runs the team's notebooks
+      (mooring.sweep). ALWAYS acknowledgeable: it warns about broken notebooks,
+      not about bytes that must not leave, so the content policy's block mode
+      must not swallow it.
+    * ``policy_blocked`` — the propose-only gate, with NO token at all. A
+      propose-only path has no override; the road is Propose. Composed only when
+      ``direct`` (a write to the SHARED branch — push, and resolve's PUSH_COPY),
+      and at the same sync seam as the scanners, so no second code path can push
+      those bytes without passing it.
+
+    ``needs_confirm`` therefore means "something here CAN be acknowledged": content
+    in warn mode, or deps in any mode — and never because of a policy block.
     """
-    mode = workspace_config.guard_mode(hub.cfg.workspace())
+    workspace = hub.cfg.workspace()
+    pol = policy.load(workspace)
+    mode = pol.guard_mode(workspace_config.guard_mode(workspace))
     confirmed = frozenset(str(t) for t in (data.get("confirm_tokens") or []))
-    if mode == "block":
-        confirmed = frozenset()
-    guard_fn, collected = pushguard.make_guard(confirmed)
-    body, status = hub._sync_op_body(name, lambda: run(guard_fn))
-    if status == 200 and collected:
-        telemetry.log_event("push_guard", findings=sum(
-            len(info["findings"]) for info in collected.values()
-        ))
-        body["needs_confirm"] = mode != "block"
-        body["guard_mode"] = mode
-        body["guard_findings"] = [
-            {
-                "path": path,
-                "token": info["token"],
-                "findings": [{"line": f.line, "kind": f.kind} for f in info["findings"]],
-            }
-            for path, info in sorted(collected.items())
+    # Block mode zeroes the CONTENT tokens only. The deps gate keeps its own set:
+    # a policy about sensitive content must not become a wall around lock files.
+    content_ok = frozenset() if mode == "block" else confirmed
+    content_fn, collected = pushguard.make_guard(content_ok)
+    lock_fn, lock_collected = pushguard.make_lock_guard(
+        workspace, confirmed, notebooks_fn=lambda: nb_sweep.plan(hub.cfg)
+    )
+    gate_fn, blocked = policy.make_propose_gate(pol) if direct else (None, {})
+    combined = policy.compose_guards(content_fn, lock_fn, gate_fn)
+    body, status = hub._sync_op_body(name, lambda: run(combined))
+    if status == 200 and (collected or lock_collected or blocked):
+        telemetry.log_event(
+            "push_guard",
+            findings=sum(
+                len(info["findings"])
+                for info in (*collected.values(), *lock_collected.values())
+            ),
+            policy_blocked=len(blocked),
+        )
+        content_ack = bool(collected) and mode != "block"
+        body["needs_confirm"] = content_ack or bool(lock_collected)
+        # The mode that APPLIES to this response: with no content finding, block mode
+        # is not what is being reported, and saying "block" would hide the deps
+        # gate's override behind a policy that has nothing to say about it.
+        body["guard_mode"] = mode if collected else "warn"
+        body["guard_findings"] = _findings_payload(collected)
+        body["sweep_findings"] = _findings_payload(lock_collected)
+        body["policy_blocked"] = [
+            {"path": path, "reason": reason} for path, reason in sorted(blocked.items())
         ]
         status = 409
     return JSONResponse(body, status_code=status)
@@ -218,11 +265,14 @@ async def api_propose(request: Request) -> JSONResponse:
     hub = request.app.state.hub
     data = await request.json() if await request.body() else {}
     paths_arg = data.get("paths") or None
+    # direct=False: propose is exactly the road a propose-only policy points at,
+    # so that gate must never fire here (it would strand those files entirely).
     return _guarded_sync_op(
         hub, "propose", data,
         lambda guard_fn: sync.propose(
             hub.client(), hub.cfg, paths=paths_arg, message=_note(data), guard_fn=guard_fn
         ),
+        direct=False,
     )
 
 
@@ -245,6 +295,95 @@ async def api_resolve(request: Request) -> JSONResponse:
         lambda guard_fn: sync.resolve(
             hub.client(), hub.cfg, data["path"], strategy, username, guard_fn=guard_fn
         ),
+    )
+
+
+def _merge_target(hub, data: dict) -> str:
+    """The conflicted file a cell-merge request names, validated against the
+    workspace (the /api/diff posture). Raises ``ValueError`` for a bad path."""
+    rel, _ = _resolve_within(hub.cfg.workspace(), str(data.get("path", "")))
+    return rel
+
+
+async def api_resolve_cells(request: Request) -> JSONResponse:
+    """Plan a per-cell resolution of one conflicted notebook (see
+    :mod:`mooring.app.conflict_merge`). Strictly read-only — it fetches the base and
+    remote blobs and reads the local file, and writes nothing.
+
+    A conflict that cannot be merged per cell answers 409 with ``unavailable``, which
+    the hub renders as a notice beside the three unchanged whole-file resolutions —
+    this endpoint only ever ADDS an option."""
+    hub = request.app.state.hub
+    data = await request.json()
+    try:
+        rel = _merge_target(hub, data)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    try:
+        # Two blob fetches plus three marimo parses: network + CPU, so off the
+        # event loop exactly like /api/diff.
+        merge_plan = await asyncio.to_thread(conflict_merge.plan, hub.client(), hub.cfg, rel)
+    except conflict_merge.MergeUnavailable as exc:
+        return JSONResponse({"error": str(exc), "unavailable": True}, status_code=409)
+    except (GitHubError, OSError) as exc:
+        # Type only: a NotFound message embeds the contents/<path> URL (the history
+        # endpoints' telemetry posture — paths never reach central telemetry).
+        telemetry.log_error(exc=type(exc)("cell merge plan failed"), op="resolve_cells")
+        return JSONResponse({"error": str(exc)}, status_code=502)
+    return JSONResponse(conflict_merge.plan_payload(merge_plan))
+
+
+async def api_resolve_cells_apply(request: Request) -> JSONResponse:
+    """Write the merged notebook for one conflicted file.
+
+    LOCAL ONLY: it never pushes. Afterwards the file is a normal modified file the
+    analyst publishes themselves, and its pre-merge bytes are in the local trash, so
+    the response's ``trashed`` drives the hub's existing Undo toast. The request
+    carries only per-cell decisions — the server recomputes the plan and refuses
+    (409) if any of the three sides moved since it was rendered, or 400s if the
+    request did not say which versions it was rendered against."""
+    hub = request.app.state.hub
+    data = await request.json()
+    try:
+        rel = _merge_target(hub, data)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    choices = {str(k): str(v) for k, v in (data.get("choices") or {}).items()}
+    # A missing sha is passed through as "" rather than defaulted or dropped: the
+    # engine treats a blank as a malformed request (400), so ONE place decides
+    # whether a merge may proceed and neither adapter can waive the check.
+    expect = {key: str(data.get(key) or "") for key in ("base_sha", "local_sha", "remote_sha")}
+    try:
+        outcome = await asyncio.to_thread(
+            conflict_merge.apply, hub.client(), hub.cfg, rel, choices, expect=expect
+        )
+    except conflict_merge.MergeStale as exc:
+        return JSONResponse({"error": str(exc), "stale": True}, status_code=409)
+    except conflict_merge.MergeUnavailable as exc:
+        return JSONResponse({"error": str(exc), "unavailable": True}, status_code=409)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    except (GitHubError, OSError) as exc:
+        telemetry.log_error(exc=type(exc)("cell merge failed"), op="resolve_cells_apply")
+        return JSONResponse({"error": str(exc)}, status_code=502)
+    # Counts only — the ledger and central telemetry never carry cell source.
+    telemetry.log_event(
+        "resolve_cells",
+        auto=outcome.auto_merged,
+        chosen=outcome.chosen_local + outcome.chosen_remote,
+    )
+    trashed = [{"path": p, "token": t} for p, t in outcome.trashed]
+    hub._activity("resolve-cells", path=rel, summary=outcome.summary(), trashed=trashed)
+    return JSONResponse(
+        {
+            "path": rel,
+            "lines": list(outcome.lines),
+            "summary": outcome.summary(),
+            "auto_merged": outcome.auto_merged,
+            "chosen_local": outcome.chosen_local,
+            "chosen_remote": outcome.chosen_remote,
+            "trashed": trashed,
+        }
     )
 
 

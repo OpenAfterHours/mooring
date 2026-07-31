@@ -1,19 +1,22 @@
-"""Install and read the value-free input-data fingerprints.
+"""Install and read the value-free input/output data fingerprints.
 
 mooring injects a stdlib-only helper module (``mooring_inputs``, the source in
 :mod:`mooring._inputs_runtime`) into ``<workspace>/.mooring/pylib/`` and puts that
 directory on the marimo kernel's import path (see
 :func:`mooring.editor.ensure_runtime_config`), so a notebook can
-``import mooring_inputs`` and pin the exact inputs a run read::
+``import mooring_inputs`` and pin exactly what a run read and wrote::
 
-    mi.fingerprint(sales_df, "sales", path="data/sales.csv")
+    mi.fingerprint(sales_df, "sales", path="data/sales.csv")   # read
+    mi.output(monthly_df, "monthly", path="data/monthly.csv")  # written
 
-Each call records a VALUE-FREE fingerprint — the input file's content HASH, its SHAPE
+Each call records a VALUE-FREE fingerprint — the file's content HASH, its SHAPE
 (row/column counts), and its SCHEMA (column names + dtypes) — under ``.mooring/inputs/``,
-and flags the input when it differs from the previous run. This extends mooring's
-three-way-SHA reproducibility story to the INPUT axis (code and environment are already
+and flags it when it differs from the previous run. This extends mooring's
+three-way-SHA reproducibility story to the DATA axis (code and environment are already
 pinned): it answers the auditor's "same inputs, same numbers?" without ever seeing a
-data value.
+data value. Because both sides are recorded, the same receipts also carry the workspace's
+lineage — see :mod:`mooring.lineage`, which joins one notebook's output path to another's
+input path.
 
 Everything here is value-free and stays in the sync-excluded ``.mooring`` dir: the
 receipts never ride a push and are never handed to the AI copilot. Lean-core leaf — it
@@ -31,6 +34,19 @@ from mooring.paths import safe_write_bytes
 STATE_DIR = ".mooring"
 PYLIB_DIRNAME = "pylib"
 INPUTS_DIRNAME = "inputs"
+
+# The receipt's two sections. Receipts written before outputs existed have only INPUTS_KEY,
+# so a missing OUTPUTS_KEY means "none recorded", never "malformed" — the format only grows.
+INPUTS_KEY = "inputs"
+OUTPUTS_KEY = "outputs"
+
+# What the runtime files a receipt under when it cannot tell which notebook called it
+# (outside marimo, or when frame detection fails). Every failed detection shares this ONE
+# bucket and overwrites the previous, so it names no notebook and counts as no notebook —
+# :mod:`mooring.lineage` excludes it rather than treat an unknown as a reader. Kept in
+# step by hand with the same literal in :mod:`mooring._inputs_runtime`, which is standalone
+# and cannot import this.
+UNKNOWN_NOTEBOOK = "_notebook"
 
 # The packaged payload (this file's sibling) and the importable name it is written out
 # as in the notebook kernel.
@@ -73,20 +89,20 @@ def install_runtime(workspace: Path | str) -> None:
         pass
 
 
-def read_results(workspace: Path | str) -> dict[str, dict]:
-    """Map notebook rel-path -> ``{total, changed, updated}`` from the
-    ``.mooring/inputs/*.json`` receipts.
+def read_receipts(workspace: Path | str) -> list[dict]:
+    """Every usable receipt under ``.mooring/inputs/``, normalised to
+    ``{"notebook": rel, "inputs": [entries], "outputs": [entries], "updated": str}``.
 
-    Value-free (input NAMES + counts only; the per-input hash/shape/schema stays in the
-    receipt). ``total`` = inputs fingerprinted; ``changed`` = how many differ from the
-    previous run. Best-effort: unreadable / foreign / corrupt files are skipped; a
-    receipt whose notebook no longer exists on disk is dropped (a stale badge for a
-    deleted file is worse than none); a malformed (non-dict) input entry is ignored."""
-    out: dict[str, dict] = {}
+    The single floor under :func:`read_results` and :mod:`mooring.lineage`, so the badge
+    and the lineage graph can never disagree about which receipts count. Best-effort:
+    unreadable / foreign / corrupt files are skipped; a receipt whose notebook no longer
+    exists on disk is DROPPED (a lineage edge or a badge for a deleted notebook is worse
+    than none); a malformed (non-dict) entry is ignored; a missing section reads as
+    empty, which is how a receipt written before outputs existed still reads cleanly."""
+    out: list[dict] = []
     ws = Path(workspace)
-    directory = inputs_dir(workspace)
     try:
-        files = sorted(directory.glob("*.json"))
+        files = sorted(inputs_dir(workspace).glob("*.json"))
     except OSError:
         return out
     for path in files:
@@ -97,22 +113,52 @@ def read_results(workspace: Path | str) -> dict[str, dict]:
         if not isinstance(data, dict):
             continue
         rel = data.get("notebook")
-        inputs = data.get("inputs")
-        if not isinstance(rel, str) or not isinstance(inputs, dict):
+        if not isinstance(rel, str) or not rel:
             continue
-        if rel != "_notebook" and not (ws / rel).is_file():
-            continue  # the notebook was deleted — don't badge a file that's gone
-        entries = [e for e in inputs.values() if isinstance(e, dict)]
-        total = len(entries)
-        if total == 0:
+        if rel != UNKNOWN_NOTEBOOK and not (ws / rel).is_file():
+            continue  # the notebook was deleted — don't badge (or route) a file that's gone
+        sections = {}
+        for key in (INPUTS_KEY, OUTPUTS_KEY):
+            bucket = data.get(key)
+            sections[key] = (
+                [e for e in bucket.values() if isinstance(e, dict)]
+                if isinstance(bucket, dict)
+                else []
+            )
+        if not sections[INPUTS_KEY] and not sections[OUTPUTS_KEY]:
             continue  # nothing well-formed to report
-        changed = sum(1 for entry in entries if entry.get("changed"))
-        out[rel] = {
-            "total": total,
-            "changed": changed,
-            "updated": data.get("updated", ""),
+        out.append({"notebook": rel, "updated": data.get("updated", ""), **sections})
+    return out
+
+
+def summarize(receipts: list[dict]) -> dict[str, dict]:
+    """Map notebook rel-path -> ``{total, changed, outputs, outputs_changed, updated}``.
+
+    Value-free (counts only; the per-entry hash/shape/schema stays in the receipt).
+    ``total``/``changed`` are the inputs fingerprinted and how many differ from the
+    previous run; ``outputs``/``outputs_changed`` are the same for what the notebook
+    wrote. The output counts are additive — a receipt with no outputs reports zero, so
+    an older receipt renders exactly as it did before.
+
+    Takes receipts rather than a workspace so a caller that ALSO builds the lineage graph
+    from them (the hub, on every /api/state poll) reads the directory once."""
+    out: dict[str, dict] = {}
+    for receipt in receipts:
+        entries = receipt[INPUTS_KEY]
+        produced = receipt[OUTPUTS_KEY]
+        out[receipt["notebook"]] = {
+            "total": len(entries),
+            "changed": sum(1 for entry in entries if entry.get("changed")),
+            "outputs": len(produced),
+            "outputs_changed": sum(1 for entry in produced if entry.get("changed")),
+            "updated": receipt["updated"],
         }
     return out
+
+
+def read_results(workspace: Path | str) -> dict[str, dict]:
+    """:func:`summarize` over every receipt in ``workspace`` — the one-shot form."""
+    return summarize(read_receipts(workspace))
 
 
 def clear(workspace: Path | str, rel: str | None = None) -> int:
@@ -147,13 +193,16 @@ def copilot_guide() -> str:
     tells the model the ``mooring_inputs`` API exists and how to call it, so it can
     propose a fingerprint cell from the schema it already sees."""
     return (
-        "INPUT FINGERPRINTS (value-free): the notebook can `import mooring_inputs as mi` to "
-        'pin its inputs for reproducibility — mi.fingerprint(df, "name", path="data/x.csv") '
-        "records the file's content hash + shape + column schema (never a value) and flags the "
-        "input if it changed since the last run. When asked to pin / fingerprint / track inputs "
-        "or check reproducibility, propose ONE cell that begins with `mi.reset()` (so a removed "
-        "input does not linger) and then fingerprints each input dataframe right after it is "
-        "loaded. ALWAYS pass path= to the source file — that is what gives the content guarantee; "
-        "without it only shape+schema are compared. Pick the name and path from the source, and "
-        "never request data values. Each call records only a value-free receipt."
+        "INPUT/OUTPUT FINGERPRINTS (value-free): the notebook can `import mooring_inputs as mi` to "
+        'pin what it reads and writes — mi.fingerprint(df, "name", path="data/x.csv") for an '
+        'INPUT and mi.output(df, "name", path="data/y.csv") for a file the notebook WRITES. Both '
+        "record the file's content hash + shape + column schema (never a value) and flag it if it "
+        "changed since the last run. When asked to pin / fingerprint / track inputs or outputs, or "
+        "to check reproducibility, propose ONE cell that begins with `mi.reset()` (so a removed "
+        "entry does not linger) and then fingerprints each input dataframe right after it is "
+        "loaded; put each mi.output(...) call AFTER the write that produces the file. ALWAYS pass "
+        "path= — that is what gives the content guarantee (without it only shape+schema are "
+        "compared) and, for an output, it is what lets mooring link this notebook to the one "
+        "downstream that reads the same file. Pick the name and path from the source, and never "
+        "request data values. Each call records only a value-free receipt."
     )
