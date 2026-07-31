@@ -303,6 +303,37 @@ def test_a_deeply_nested_settings_table_cannot_brick_the_app(tmp_path):
     assert policy.load(workspace).guard_mode("warn") == "block"
 
 
+def test_a_parser_that_REFUSES_deep_nesting_cannot_brick_the_app(monkeypatch, tmp_path):
+    """The same bomb, on a stricter parser — and the reason the test above is not enough.
+
+    Whether ``tomllib`` recurses until the stack gives out or refuses outright past its
+    own key-parts limit is a CPython PATCH-level detail. On a build with no limit the
+    test above parses 2000 parts happily and asserts nothing at all; on a build with one
+    the parser raises ``RecursionError`` and every unguarded reader dies. So the same
+    synced file was fatal on one teammate's Python and harmless on another's, and CI
+    could only see it if CI happened to run the stricter build.
+
+    Forcing the raise makes the guarantee version-independent. This is pinned on the
+    SHARED reader rather than on policy: ``policy.load`` wraps its own read, but
+    ``ai_gate`` and every other ``workspace_config`` consumer (sync folders, connections,
+    datasets, the AI context) call it directly, so the catch belongs underneath them all.
+    """
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    (workspace / "mooring.toml").write_text('[policy]\npush_guard = "block"\n', "utf-8")
+
+    def _refuses(_text):
+        raise RecursionError("TOML key has more than the allowed 1000 parts")
+
+    monkeypatch.setattr(workspace_config.tomllib, "loads", _refuses)
+
+    assert workspace_config.read_shared(workspace) is None  # "unparseable", not a crash
+    assert policy.load(workspace).unreadable is True  # ...and loudly so
+    assert policy.guard_mode(workspace) == "warn"
+    assert policy.ai_gate(workspace)("notebooks/a.py") is False
+    assert policy.tighten(config.AppConfig(), policy.load(workspace)) == config.AppConfig()
+
+
 def test_parse_never_raises_on_anything(tmp_path):
     """The backstop, exercised directly: whatever comes out of a TOML parser (or a
     hand-built mapping that misbehaves), parse returns a Policy."""

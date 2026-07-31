@@ -113,9 +113,14 @@ def _read_data(workspace: Path) -> dict:
         return {}
     try:
         return tomllib.loads(path.read_text("utf-8"))
-    except (OSError, tomllib.TOMLDecodeError, UnicodeDecodeError):
+    except (OSError, tomllib.TOMLDecodeError, UnicodeDecodeError, RecursionError):
         # UnicodeDecodeError: a non-UTF-8 file (UTF-16/BOM — a Windows hazard). Fail
         # open like a parse error so a bad encoding can't wedge the whole hub.
+        # RecursionError: deeply-nested tables. Whether tomllib recurses until the
+        # stack gives out or refuses past its own key-parts limit is a CPython
+        # PATCH-level detail, so the same synced file is parseable on one teammate's
+        # Python and fatal on another's — leaving it uncaught made a ~6 KB commit a
+        # remote kill switch for whoever happened to be on the stricter build.
         return {}
 
 
@@ -154,7 +159,9 @@ def read_shared(workspace: Path) -> dict | None:
         return {}
     try:
         return tomllib.loads(path.read_text("utf-8"))
-    except (OSError, tomllib.TOMLDecodeError, UnicodeDecodeError):
+    except (OSError, tomllib.TOMLDecodeError, UnicodeDecodeError, RecursionError):
+        # RecursionError == "this file is unparseable", which is exactly what None
+        # means here. See _read_data for why the version-dependence matters.
         return None
 
 
