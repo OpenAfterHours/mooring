@@ -47,8 +47,19 @@ to see individual files); everything else is one row per file.
 
     Each notebook shows its **title** — the first heading in its own first markdown
     cell — beneath its filename, so a file like `q3_recon_v2.py` is legible at a
-    glance. Use the **filter box** above the list to find one by filename or title.
-    Titles are read from the notebook's own text on your machine; nothing leaves it.
+    glance. The **search box** above the list matches a notebook's **content**, not
+    just its name: its heading, what it imports, the datasets it
+    [fingerprints](#fingerprinting-your-inputs), the
+    [checks](#checking-your-numbers-tie-out) it asserts, and the tables its SQL
+    queries. So searching `gl_ledger` finds the notebooks that read it, and `tieout`
+    finds the ones that reconcile — which is usually the real question ("has someone
+    already built this?").
+
+    It's all read from the notebooks' own code on your machine and matched in your
+    browser: nothing leaves your machine, and there's no round-trip as you type.
+    From the terminal, `mooring catalog <terms>` searches the same index. Your team
+    can also let the copilot search it — see
+    ["Has someone already built this?"](ai-copilot.md#has-someone-already-built-this).
 
 ## A typical session
 

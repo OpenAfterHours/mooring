@@ -223,6 +223,7 @@ source_modules =
     mooring.ai.investigate
     mooring.ai.locality
     mooring.ai.ner
+    mooring.ai.notebookindex
     mooring.ai.openai_provider
     mooring.ai.openai_session
     mooring.ai.pii

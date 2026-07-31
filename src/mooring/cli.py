@@ -210,6 +210,21 @@ def _build_parser() -> argparse.ArgumentParser:
         help="clear recorded verify receipts (all, or just one notebook path) instead of running",
     )
 
+    catalog_cmd = sub.add_parser(
+        "catalog",
+        help="search every notebook in the workspace by name, title, or what it does",
+    )
+    catalog_cmd.add_argument(
+        "query",
+        nargs="*",
+        help="terms to search for (all must match); omit to list the whole catalog",
+    )
+    catalog_cmd.add_argument(
+        "--full",
+        action="store_true",
+        help="show each match in full (inputs, checks, SQL tables) instead of one line each",
+    )
+
     checks_cmd = sub.add_parser(
         "checks",
         help="show the tie-out / data-quality check results recorded per notebook",
@@ -1710,6 +1725,51 @@ def _refresh_exit_code(results: list) -> int:
     return 0
 
 
+def cmd_catalog(app_cfg: config.AppConfig, cfg: config.Config, args: argparse.Namespace) -> int:
+    """Search (or list) the repo-wide notebook catalog — "has someone already built this?"
+
+    Runs entirely offline off the local workspace: it parses each notebook with ``ast``,
+    never executes one and never opens a ``.mooring`` receipt. Doubles as the preview of
+    exactly what the copilot's catalog tools can see, the ``mooring ai model check``
+    idiom, so a team can inspect the surface before trusting it.
+    """
+    from mooring.ai import notebookindex
+
+    workspace = cfg.workspace()
+    # Apply the SAME per-notebook AI opt-out the chat path applies, so this really is a
+    # preview of what the copilot can see rather than a superset of it.
+    ai_off = sorted(workspace_config.disabled_notebooks(workspace))
+    catalog = notebookindex.load_catalog(workspace, tuple(cfg.folders), exclude=ai_off)
+    if ai_off:
+        print(f"Excluded (AI off for them): {', '.join(ai_off)}\n")
+    if catalog.is_empty():
+        print(
+            "No notebooks found. They must live under a synced folder or at the repo root "
+            "(both sync by default) and be marimo notebooks."
+        )
+        return 0
+    query = " ".join(args.query or [])
+    hits = catalog.search(query, limit=50) if query else catalog.list_notebooks()
+    if not hits:
+        print(f"No notebooks match {query!r}. ({len(catalog.notebooks)} in the catalog.)")
+        return 1
+    if args.full:
+        print("\n\n".join(notebookindex.render_notebook(nb) for nb in hits))
+    else:
+        print(notebookindex.render_lines(hits))
+    broken = [r for r in catalog.reports if r.error]
+    if broken:
+        print(f"\n{len(broken)} file(s) could not be parsed and were skipped:")
+        for r in broken:
+            print(f"  {r.path}: {r.error}")
+    if not app_cfg.ai_notebook_catalog:
+        print(
+            "\nNote: [ai] notebook_catalog is OFF - the copilot cannot search this "
+            "(the hub's own search box still can)."
+        )
+    return 0
+
+
 def cmd_checks(cfg: config.Config, args: argparse.Namespace) -> int:
     from mooring import checks
 
@@ -3037,6 +3097,8 @@ def _dispatch(
         return cmd_schedule(app_cfg, cfg, args)
     if command == "refresh":
         return cmd_refresh(cfg, args)
+    if command == "catalog":
+        return cmd_catalog(app_cfg, cfg, args)
     if command == "checks":
         return cmd_checks(cfg, args)
     if command == "inputs":

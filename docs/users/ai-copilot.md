@@ -93,6 +93,50 @@ copilot about its schema straight away — see the
     numbers, so the rule still stands. See
     [the privacy page](../admins/ai-privacy.md#structured-pii-pre-flight-scan-opt-in-best-effort).
 
+## "Has someone already built this?" { #has-someone-already-built-this }
+
+In a repo of thirty notebooks, the expensive mistake isn't a bad line of code — it's
+rebuilding an analysis a teammate finished last quarter.
+
+**In the hub, you already have this.** The **search box** above the file list matches a
+notebook's *content*, not just its filename: type `gl_ledger` and the notebooks that read
+it surface; type `tieout` and the ones that reconcile do. It searches each notebook's
+heading, its imports, and the datasets/checks/SQL tables its code declares — all matched
+in your browser, so nothing leaves your machine. From the terminal, `mooring catalog
+<terms>` searches the same index.
+
+**Ask the copilot instead** — if your admin has turned the catalog on (it is **off by
+default**; see below):
+
+> *"Does anyone already reconcile the GL feed?"*
+> *"Which notebook produces the month-end number?"*
+> *"What reads `gl_ledger.parquet`?"*
+
+It will point you at the notebook — open that instead of starting over — or, when nothing
+matches, say so and propose the new cell.
+
+Three things it does **not** do, deliberately:
+
+- **It never reads another notebook's code.** Only the notebook you have open is
+  readable; for every other one it sees the catalog entry and nothing more.
+- **It never reads your markdown prose.** Only a `# heading` is taken from a markdown
+  cell — never the paragraph beneath it, because that is where people paste result
+  tables and account names.
+- **It never reads a run's results.** The inputs and checks it lists are the ones the
+  *source* declares, not what a run against real data actually saw — those receipts stay
+  on your machine and are never sent anywhere.
+
+A notebook you've [turned AI off for](#turn-ai-off-for-a-notebook) is left out of the
+catalog too, so fencing one off really does fence it off.
+
+!!! note "Turning it on is your admin's call"
+
+    The catalog widens what the assistant sees from the one notebook you have open to
+    every notebook in the repo, so it opts in: `[ai] notebook_catalog = true`, or the
+    **Settings ▸ AI copilot** toggle. Run `mooring catalog` first to see exactly what it
+    would expose. Full reasoning on
+    [the privacy page](../admins/ai-privacy.md#notebook-catalog).
+
 ## Explain this notebook
 
 Inherited a notebook — a leaver's month-end report, say — and need to know what

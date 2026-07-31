@@ -125,6 +125,21 @@ HELPER_TOOL_NAMES = [
     "mooring_search_helpers",
 ]
 
+# Added only when the workspace holds catalogued marimo notebooks (and the feature is on
+# — the caller applies the gate and drops the team's AI-disabled notebooks). Same shape as
+# the trios above: name lookups in the pre-parsed in-memory Catalog (never a caller path),
+# serving the value-free entries from mooring.ai.notebookindex — path, title, the scanned
+# first-markdown-cell summary, imports, and the inputs/checks/SQL tables the SOURCE
+# declares. Cell bodies, outputs, and .mooring/ receipts were never read, so no tool can
+# reach them. There is deliberately NO tool that returns another notebook's SOURCE: the
+# current notebook's is already in the system context, and serving a second one would be
+# a new, unreviewed egress of full authored code.
+CATALOG_TOOL_NAMES = [
+    "mooring_list_notebooks",
+    "mooring_search_notebooks",
+    "mooring_describe_notebook",
+]
+
 
 def _safe(workspace: Path, rel: str) -> Path:
     target = (workspace / rel).resolve()
@@ -181,6 +196,7 @@ def build_tool_specs(
     dictionary=None,
     semantic_models=None,
     code_index=None,
+    catalog=None,
     run_investigation: Callable[..., str] | None = None,
     emit_tool_progress: Callable[[str], None] | None = None,
     pii_enabled: bool = False,
@@ -195,10 +211,13 @@ def build_tool_specs(
     value-free dictionary tools are added. When ``semantic_models`` (pre-parsed
     :class:`mooring.pbip_model.SemanticModel` objects — the caller has already
     applied the config gate and the synced per-model opt-out) is non-empty, the
-    three model tools are added. When ``pii_enabled``, ``get_schema`` withholds any
-    column whose NAME is itself a PII value (a pivot/transpose on a PII key) — the
-    second, dynamic schema egress (besides the system context) that the agent can
-    reach at any time.
+    three model tools are added. When ``catalog`` (a
+    :class:`mooring.ai.notebookindex.Catalog` — the caller has already applied the
+    config gate and dropped the team's AI-disabled notebooks) is non-empty, the three
+    repo-wide notebook-catalog tools are added. When ``pii_enabled``, ``get_schema``
+    withholds any column whose NAME is itself a PII value (a pivot/transpose on a PII
+    key) — the second, dynamic schema egress (besides the system context) that the
+    agent can reach at any time.
 
     ``emit_proposal_patch`` (supplied by the real chat session) enables the
     edit/rewrite tools: each captures the target cell's current source as an
@@ -488,6 +507,47 @@ def build_tool_specs(
         if not hits:
             return _ok(f"No helpers match {query!r}.")
         out, _ = egress.scrub_text(codelib.render_modules(hits, max_methods=12))
+        return _ok(out)
+
+    # The notebook-catalog tools serve the PRE-PARSED repo-wide entries
+    # (mooring.ai.notebookindex): path, title, scanned summary, imports, and the inputs /
+    # checks / SQL tables the SOURCE declares. Lookups are by NAME in the in-memory
+    # Catalog — never a caller path, so a path-like argument that names no catalogued
+    # notebook simply finds nothing — and every rendered string still passes
+    # egress.scrub_text (defence in depth; the real value-blindness is the structural
+    # allowlist, since egress is only a checksum floor). No tool returns cell source.
+
+    def list_notebooks(_invocation):
+        from mooring.ai import notebookindex
+
+        assert catalog is not None  # catalog tools only registered when it is present
+        listing, _ = egress.scrub_text(notebookindex.render_listing(catalog))
+        return _ok(listing or "(the notebook catalog is empty)")
+
+    def search_notebooks(invocation):
+        from mooring.ai import notebookindex
+
+        query = str(_args(invocation).get("query", "")).strip()
+        if not query:
+            return _err("query required")
+        assert catalog is not None
+        hits = catalog.search(query, limit=8)
+        if not hits:
+            return _ok(f"No notebooks match {query!r}.")
+        out, _ = egress.scrub_text(notebookindex.render_notebooks(hits))
+        return _ok(out)
+
+    def describe_notebook(invocation):
+        from mooring.ai import notebookindex
+
+        name = str(_args(invocation).get("notebook", "")).strip()
+        if not name:
+            return _err("notebook required")
+        assert catalog is not None
+        entry = catalog.get(name)
+        if entry is None:
+            return _ok(f"No notebook named {name!r} in this workspace's catalog.")
+        out, _ = egress.scrub_text(notebookindex.render_notebook(entry))
         return _ok(out)
 
     # The semantic-model tools serve the PRE-PARSED allowlist skeleton (tables,
@@ -807,6 +867,61 @@ def build_tool_specs(
             ),
         ]
 
+    # Registered OUTSIDE the emit_proposal gate on purpose: these are read tools, so a
+    # read-only investigate sub-agent gets them too — "which notebook already does this?"
+    # is exactly the kind of independent sub-question a branch is spawned to answer.
+    if catalog is not None and not catalog.is_empty():
+        specs += [
+            ToolSpec(
+                "mooring_list_notebooks",
+                "List every marimo notebook in this workspace with its title and a count of "
+                "the inputs/checks it pins — the repo-wide catalog. Paths and titles only; "
+                "never a cell output or any data value.",
+                handler=list_notebooks,
+                parameters={"type": "object", "properties": {}},
+                skip_permission=True,  # serves the value-free in-memory catalog
+            ),
+            ToolSpec(
+                "mooring_search_notebooks",
+                "Search every notebook in this workspace by term — ALWAYS do this before "
+                "writing a new analysis, to find whether a teammate already built it (search "
+                "the metric, the dataset, or the table name). Matches titles, the notebooks' "
+                "own descriptions, their imports, and the inputs/checks/SQL tables their "
+                "source declares. Never a cell output or any data value.",
+                handler=search_notebooks,
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "terms to search for (all must match), e.g. 'month end recon'",
+                        }
+                    },
+                    "required": ["query"],
+                },
+                skip_permission=True,  # searches the value-free in-memory catalog
+            ),
+            ToolSpec(
+                "mooring_describe_notebook",
+                "Describe one catalogued notebook: its title, what it says it does, what it "
+                "imports, the inputs it fingerprints, the checks it asserts, and the SQL "
+                "tables it queries. Metadata only — it does NOT return that notebook's code "
+                "(only the currently open notebook's source is readable).",
+                handler=describe_notebook,
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "notebook": {
+                            "type": "string",
+                            "description": "a workspace-relative notebook path, file name, or title",
+                        }
+                    },
+                    "required": ["notebook"],
+                },
+                skip_permission=True,  # name lookup in-memory; never a path, never a value
+            ),
+        ]
+
     if models:
         _MODEL_ARG = {
             "type": "string",
@@ -956,6 +1071,7 @@ def build_tools(
     dictionary=None,
     semantic_models=None,
     code_index=None,
+    catalog=None,
     run_investigation: Callable[..., str] | None = None,
     emit_tool_progress: Callable[[str], None] | None = None,
     pii_enabled: bool = False,
@@ -986,6 +1102,7 @@ def build_tools(
         dictionary=dictionary,
         semantic_models=semantic_models,
         code_index=code_index,
+        catalog=catalog,
         run_investigation=run_investigation,
         emit_tool_progress=emit_tool_progress,
         pii_enabled=pii_enabled,
@@ -1033,6 +1150,7 @@ def build_openai_tools(
     dictionary=None,
     semantic_models=None,
     code_index=None,
+    catalog=None,
     run_investigation: Callable[..., str] | None = None,
     emit_tool_progress: Callable[[str], None] | None = None,
     pii_enabled: bool = False,
@@ -1062,6 +1180,7 @@ def build_openai_tools(
         dictionary=dictionary,
         semantic_models=semantic_models,
         code_index=code_index,
+        catalog=catalog,
         run_investigation=run_investigation,
         emit_tool_progress=emit_tool_progress,
         pii_enabled=pii_enabled,
