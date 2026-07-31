@@ -47,3 +47,31 @@ test("canOverride: warn mode yes, block mode never", () => {
   // Belt and braces: even a buggy needs_confirm never overrides block mode.
   assert.equal(GF.canOverride({ needs_confirm: true, guard_mode: "block" }), false);
 });
+
+// -- the team policy's propose-only blocks (no token, no override) ------------
+
+const BLOCKED = {
+  policy_blocked: [
+    { path: "reports/q1.py", reason: "direct push blocked by team policy (propose-only path): reports/**" },
+  ],
+};
+
+test("policyRows: one row per policy-blocked file", () => {
+  assert.deepEqual(GF.policyRows(BLOCKED), [
+    "reports/q1.py — direct push blocked by team policy (propose-only path): reports/**",
+  ]);
+  assert.deepEqual(GF.policyRows({}), []);
+  assert.deepEqual(GF.policyRows(null), []);
+});
+
+test("a policy block opens the dialog even with no scanner findings", () => {
+  assert.equal(GF.needsDialog(Object.assign({ guard_findings: [] }, BLOCKED)), true);
+});
+
+test("a policy block is never overridable", () => {
+  // The server sets needs_confirm=false when only the policy fired, so there is
+  // no "Push anyway" — and no token exists that could clear it.
+  const data = Object.assign({ guard_findings: [], needs_confirm: false, guard_mode: "warn" }, BLOCKED);
+  assert.equal(GF.canOverride(data), false);
+  assert.deepEqual(GF.allTokens(data.guard_findings), []);
+});

@@ -57,6 +57,18 @@ class SettingSpec:
     confirm: str = ""
 
 
+# Shown on a row the repo's admin policy has pinned, and returned as the 409
+# message when a write to one is refused. It says WHERE the lock came from and
+# which direction it can move — a locked row must never look like a broken
+# control, and "policy can only make a setting stricter" is the whole contract.
+# The lock itself is decided in mooring.policy (this module stays a pure leaf).
+POLICY_LOCK_NOTE = (
+    "Locked by your team's policy (the [policy] block in this repo's synced "
+    "mooring.toml). A policy can only make a setting stricter, never weaker — change "
+    "it with `mooring policy set/unset` and push, or ask whoever maintains the repo."
+)
+
+
 # Display order of the editable groups (the read-only admin block is separate).
 GROUPS: tuple[dict, ...] = (
     {"id": "appearance", "label": "Appearance"},

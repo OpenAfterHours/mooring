@@ -22,6 +22,7 @@ from mooring import (
     telemetry,
     workspace_config,
 )
+from mooring import policy as policy_mod  # `policy` is a common local name below
 
 # SELFTEST_PACKAGES, workspace_hint and legacy_workspace_hint now live in
 # mooring.runtime — a neutral module below both presentation adapters, so the web
@@ -366,6 +367,24 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     shadow_unignore.add_argument("path", help="workspace-relative notebook path")
     shadow_unignore.add_argument("--repo", default=None, metavar="ALIAS", help=_REPO_ARG_HELP)
+
+    policy_cmd = sub.add_parser(
+        "policy", help="the team's admin policy in the synced mooring.toml (client-enforced)"
+    )
+    policy_sub = policy_cmd.add_subparsers(dest="policy_command", required=True)
+    policy_show = policy_sub.add_parser("show", help="what policy is in force, and why")
+    policy_set = policy_sub.add_parser(
+        "set", help="author a policy rule (writes the SYNCED mooring.toml — push to share it)"
+    )
+    policy_set.add_argument("rule", choices=list(policy_mod.RULES), help="which rule to set")
+    policy_set.add_argument("values", nargs="+", metavar="VALUE", help="the rule's value(s)")
+    policy_unset = policy_sub.add_parser("unset", help="remove a policy rule (relaxes the policy)")
+    policy_unset.add_argument("rule", choices=list(policy_mod.RULES), help="which rule to remove")
+    policy_unset.add_argument(
+        "values", nargs="*", metavar="VALUE", help="for 'setting': the setting key"
+    )
+    for cmd in (policy_show, policy_set, policy_unset):
+        cmd.add_argument("--repo", default=None, metavar="ALIAS", help=_REPO_ARG_HELP)
 
     conn_cmd = sub.add_parser(
         "connections",
@@ -921,19 +940,30 @@ def cmd_pull(cfg: config.Config, theirs: bool, keep_both: bool) -> int:
     return 0 if not result.skipped_conflicts else 1
 
 
-def _push_guard_fn(cfg: config.Config, acknowledge: bool):
+def _push_guard_fn(cfg: config.Config, acknowledge: bool, *, direct: bool = True):
     """The push guard for a CLI push/propose. Returns
-    ``(guard_fn, collected, mode, acknowledged)``.
+    ``(guard_fn, collected, mode, acknowledged, blocked)``.
 
     ``--acknowledge-findings`` does NOT turn the scan off: the guard still runs
     and everything it would have flagged is collected into ``acknowledged`` and
     printed after the push — so the user sees exactly what they let out AT PUSH
     TIME, and a finding that appeared since the first run can't ride out unseen
     (the hub's token flow gets the same guarantee by binding tokens to bytes).
-    In block mode ([guard] push = "block") the flag is refused entirely."""
+    In block mode ([guard] push = "block", or [policy] push_guard) the flag is
+    refused entirely.
+
+    ``direct`` marks a write to the SHARED branch (push / resolve --push-copy), the
+    only case where the policy's propose-only globs apply. That gate is composed
+    OUTSIDE the acknowledge shortcut on purpose: ``--acknowledge-findings`` covers
+    scanner findings, never a policy block, which has no override at all.
+    """
     from mooring import pushguard
 
-    mode = workspace_config.guard_mode(cfg.workspace())
+    pol = policy_mod.load(cfg.workspace())
+    mode = pol.guard_mode(workspace_config.guard_mode(cfg.workspace()))
+    gate_fn, blocked = (
+        policy_mod.make_propose_gate(pol) if direct else (None, {})
+    )
     if acknowledge and mode != "block":
         acknowledged: dict = {}
 
@@ -943,9 +973,21 @@ def _push_guard_fn(cfg: config.Config, acknowledge: bool):
                 acknowledged[rel_path] = {"findings": findings}
             return []
 
-        return allow_fn, {}, mode, acknowledged
+        return policy_mod.compose_guards(allow_fn, gate_fn), {}, mode, acknowledged, blocked
     guard_fn, collected = pushguard.make_guard()
-    return guard_fn, collected, mode, {}
+    return policy_mod.compose_guards(guard_fn, gate_fn), collected, mode, {}, blocked
+
+
+def _print_policy_blocked(blocked: dict) -> None:
+    """Files the team's propose-only policy withheld from a DIRECT push. There is
+    no acknowledge flag for these — Propose is the road."""
+    print(f"\n{len(blocked)} file(s) withheld by your team's policy — direct push isn't allowed:")
+    for path, reason in sorted(blocked.items()):
+        print(f"  {path}  ({reason})")
+    print(
+        "Send them for review instead: `mooring propose`. "
+        "(Policy lives in the synced mooring.toml — see `mooring policy show`.)"
+    )
 
 
 def _print_guard_findings(collected: dict, mode: str, verb: str) -> None:
@@ -979,7 +1021,8 @@ def cmd_push(
 ) -> int:
     from mooring import sync
 
-    guard_fn, collected, mode, acknowledged = _push_guard_fn(cfg, acknowledge)
+    guard_fn, collected, mode, acknowledged, blocked = _push_guard_fn(cfg, acknowledge)
+    _print_policy_version_warning(cfg)
     result = sync.push(
         _client(cfg), cfg, paths=only_paths or None, message=message, guard_fn=guard_fn
     )
@@ -989,14 +1032,17 @@ def cmd_push(
         conflicts=len(result.blocked_conflicts),
         lines=len(result.lines),
         withheld=len(collected),
+        policy_blocked=len(blocked),
     )
     _record_activity(cfg, "push", result)
     _print_sync_result(result)
     if collected:
         _print_guard_findings(collected, mode, "push")
+    if blocked:
+        _print_policy_blocked(blocked)
     if acknowledged:
         _print_acknowledged(acknowledged)
-    return 0 if not (result.blocked_conflicts or collected) else 1
+    return 0 if not (result.blocked_conflicts or collected or blocked) else 1
 
 
 def cmd_propose(
@@ -1004,7 +1050,10 @@ def cmd_propose(
 ) -> int:
     from mooring import sync
 
-    guard_fn, collected, mode, acknowledged = _push_guard_fn(cfg, acknowledge)
+    # direct=False: propose is exactly the road a propose-only policy points at,
+    # so that gate must never fire here (it would leave those files unreachable).
+    guard_fn, collected, mode, acknowledged, _ = _push_guard_fn(cfg, acknowledge, direct=False)
+    _print_policy_version_warning(cfg)
     result = sync.propose(
         _client(cfg), cfg, paths=only_paths or None, message=message, guard_fn=guard_fn
     )
@@ -1024,15 +1073,73 @@ def cmd_propose(
     return 0 if not (result.blocked_conflicts or collected) else 1
 
 
+def _print_policy_version_warning(cfg: config.Config) -> None:
+    """One loud line when this mooring is below the team's ``[policy] min_version``.
+
+    Advisory by design (see ``Policy.version_shortfall``): the floor never blocks,
+    because blocking would leave a repo with a typo'd floor unpushable — including
+    the push that fixes it."""
+    shortfall = policy_mod.load(cfg.workspace()).version_shortfall(__version__)
+    if shortfall:
+        print(f"\nwarning: {shortfall}\n")
+
+
+def cmd_policy(cfg: config.Config, args: argparse.Namespace) -> int:
+    """Show or author the team's admin policy (the synced ``mooring.toml``
+    ``[policy]`` block). ``set``/``unset`` write a SYNCED file, so the change
+    reaches teammates on the next push, like any other edit."""
+    import tomllib
+
+    workspace = cfg.workspace()
+    command = args.policy_command
+    if command == "show":
+        pol = policy_mod.load(workspace)
+        local = workspace_config.guard_mode(workspace)
+        where = cfg.repo_slug if (cfg.owner and cfg.repo) else workspace
+        print(f"Team policy for {where} (synced mooring.toml [policy]):")
+        for line in policy_mod.describe(pol, current_version=__version__, local_guard=local):
+            print(line)
+        if pol.settings:
+            print(
+                "\nA locked setting cannot be made weaker on this machine — the Settings page "
+                "shows it locked, and the effective config is tightened even if config.toml "
+                "disagrees. Policy can only ever be STRICTER than local config."
+            )
+        return 1 if pol.unreadable else 0
+
+    try:
+        if command == "set":
+            message = policy_mod.set_rule(workspace, args.rule, args.values)
+        else:
+            message = policy_mod.unset_rule(workspace, args.rule, args.values)
+    except ValueError as exc:
+        sys.exit(str(exc))
+    except tomllib.TOMLDecodeError as exc:
+        sys.exit(
+            f"{workspace_config.WORKSPACE_CONFIG_NAME} is not valid TOML ({exc}); "
+            "fix the shared file before editing the policy."
+        )
+    telemetry.log_event("policy", action=command, rule=args.rule)
+    print(message)
+    print("This edits the SYNCED mooring.toml — run `mooring push` to apply it for the team.")
+    return 0
+
+
 def cmd_scan(cfg: config.Config) -> int:
     """Run the push guard over the current push candidates without pushing —
-    the push-scoped sibling of `mooring ai pii check`."""
+    the push-scoped sibling of `mooring ai pii check`. Also names the candidates
+    the team's propose-only policy would withhold, so `scan` answers the whole
+    "what would happen if I pushed now?" question in one place."""
     from mooring import pushguard, sync
 
     report = sync.status(_client(cfg), cfg)
     workspace = cfg.workspace()
+    pol = policy_mod.load(workspace)
     findings_total = 0
+    propose_only: list[str] = []
     for f in report.by_state(*sync.PUSH_STATES):
+        if pol.propose_only.matches(f.path):
+            propose_only.append(f.path)
         target = workspace / f.path
         if not target.is_file():
             continue  # a deletion has no bytes to scan
@@ -1040,6 +1147,13 @@ def cmd_scan(cfg: config.Config) -> int:
         for finding in findings:
             print(f"  {f.path}:{finding.line}  {finding.kind}")
         findings_total += len(findings)
+    if propose_only:
+        print(
+            f"{len(propose_only)} file(s) your team's policy allows only through review "
+            "(`mooring propose`):"
+        )
+        for rel in sorted(propose_only):
+            print(f"  {rel}")
     if findings_total:
         print(
             f"{findings_total} finding(s). Fix them, or mark a reviewed false positive "
@@ -1047,7 +1161,9 @@ def cmd_scan(cfg: config.Config) -> int:
         )
         return 1
     print("No findings in the current push candidates.")
-    return 0
+    # A propose-only candidate is not a "finding" (nothing is wrong with the
+    # file), but a plain push WILL withhold it — so the exit code says so.
+    return 1 if propose_only else 0
 
 
 def cmd_recall(cfg: config.Config, assume_yes: bool) -> int:
@@ -2957,6 +3073,8 @@ def _dispatch(
         return cmd_init(cfg)
     if command == "deps":
         return cmd_deps(cfg, args)
+    if command == "policy":
+        return cmd_policy(cfg, args)
     if command == "connections":
         return cmd_connections(cfg, args)
     if command == "shadow":
@@ -3006,6 +3124,12 @@ def main(argv: list[str] | None = None) -> int:
     folders = ctxdirs.sync_dirs(app_cfg, cfg.folders, cfg.workspace())
     if folders != cfg.folders:
         cfg = replace(cfg, folders=folders)
+
+    # Fold the repo's admin policy over the local config — the ONE place the CLI
+    # applies it, above the env layer, so a policy-pinned safety setting is what
+    # every command below actually runs with (mooring.policy: tighten-only, so
+    # this can never make anything less restrictive than config.toml already is).
+    app_cfg = policy_mod.tighten_app_config(app_cfg, cfg.workspace())
 
     telemetry.configure(
         app_cfg.log_endpoint,

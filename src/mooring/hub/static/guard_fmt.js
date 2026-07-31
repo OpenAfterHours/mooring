@@ -24,16 +24,26 @@ const GuardFmt = (function () {
     return (guardFindings || []).map((f) => f.token).filter(Boolean);
   }
 
+  // One row per file the TEAM POLICY withheld from a direct push (propose-only
+  // paths). These carry no token and have no override — Propose is the road.
+  function policyRows(data) {
+    return ((data && data.policy_blocked) || []).map((b) => `${b.path} — ${b.reason}`);
+  }
+
   // Whether a response should open the confirm dialog at all, and whether the
-  // "Push anyway" button may be offered (never in block mode).
+  // "Push anyway" button may be offered (never in block mode, and never for a
+  // policy block — needs_confirm is false server-side when only policy fired).
   function needsDialog(data) {
-    return !!(data && data.guard_findings && data.guard_findings.length);
+    if (!data) return false;
+    const findings = data.guard_findings || [];
+    const blocked = data.policy_blocked || [];
+    return !!(findings.length || blocked.length);
   }
   function canOverride(data) {
     return !!(data && data.needs_confirm) && data.guard_mode !== "block";
   }
 
-  return { rows, allTokens, needsDialog, canOverride };
+  return { rows, policyRows, allTokens, needsDialog, canOverride };
 })();
 
 if (typeof window !== "undefined") window.GuardFmt = GuardFmt;

@@ -21,6 +21,13 @@ It carries these — paths and policy tokens only, never a data value:
 - ``[guard] push`` — the push guard's team policy: ``"warn"`` (the default;
   findings need an explicit acknowledge) or ``"block"`` (findings must be fixed
   or pragma-suppressed — no override). See :mod:`mooring.pushguard`.
+- ``[policy]`` — the admin policy block the CLIENT enforces (a minimum version,
+  a push-guard floor, propose-only path globs, AI-off path globs, and pinned
+  safety settings). PARSING AND SEMANTICS LIVE IN :mod:`mooring.policy`, which
+  owns the tighten-only rule; this module only reads and writes the bytes
+  (:func:`read_shared`, :func:`set_policy_key`, :func:`set_policy_setting`).
+  ``[ai] disabled_notebooks`` and ``[guard] push`` above are the two settings it
+  generalises — both keep working and are folded in, never replaced.
 - ``[connections]`` — value-free database connection SHAPE (host/database/
   warehouse/role/…) that travels with the repo so the whole team (and the
   copilot) can reference it by name. A secret-shaped field is REFUSED on write —
@@ -127,6 +134,28 @@ def _write_data(workspace: Path, data: dict) -> None:
     tmp = path.with_suffix(".toml.tmp")
     tmp.write_text(tomli_w.dumps(data), "utf-8")
     os.replace(tmp, path)
+
+
+def read_shared(workspace: Path) -> dict | None:
+    """The parsed ``mooring.toml`` for a reader that needs SEVERAL sections at once.
+
+    ``{}`` when the file is absent, ``None`` when it exists but cannot be parsed
+    (the caller decides how loud to be — :func:`_read_data` fails open to ``{}``
+    for the per-section readers). One read, so a caller like :mod:`mooring.policy`
+    that consults ``[policy]`` and ``[ai]`` together doesn't parse the file twice.
+    """
+    path = config_path(workspace)
+    if not path.is_file():
+        return {}
+    try:
+        return tomllib.loads(path.read_text("utf-8"))
+    except (OSError, tomllib.TOMLDecodeError, UnicodeDecodeError):
+        return None
+
+
+def disabled_from(data: dict) -> set[str]:
+    """:func:`disabled_notebooks` from already-parsed data (see :func:`read_shared`)."""
+    return _disabled_list(data)
 
 
 def _disabled_list(data: dict) -> set[str]:
@@ -432,6 +461,60 @@ def guard_mode(workspace: Path) -> str:
         return "warn"
     value = str(guard.get("push", "warn")).strip().lower()
     return value if value == "block" else "warn"
+
+
+# -- admin policy block ---------------------------------------------------------
+# The BYTES of the [policy] table only: what the keys MEAN, which values are
+# acceptable, and the tighten-only rule all live in mooring.policy (which calls
+# these after validating). Kept here so every mooring.toml write goes through the
+# one audited idiom — strict read (never overwrite a corrupt shared file),
+# prune-empty, atomic replace, serialized by _WRITE_LOCK.
+
+
+def set_policy_key(workspace: Path, key: str, value: object | None) -> None:
+    """Set (or, with ``value=None``, clear) one key in the synced ``[policy]``
+    table, preserving every other key and section. An emptied ``[policy]`` table
+    is pruned, and a file left wholly empty is removed. Raises
+    ``tomllib.TOMLDecodeError`` on a corrupt file rather than overwriting it."""
+    _write_section(workspace, ("policy",), key, value)
+
+
+def set_policy_setting(workspace: Path, key: str, value: bool | None) -> None:
+    """Set/clear one entry in the synced ``[policy.settings]`` table. ``key`` is a
+    DOTTED setting key (``ai.pii.enabled``); ``tomli_w`` quotes it, and
+    ``mooring.policy`` reads both the quoted and the nested spelling back."""
+    _write_section(workspace, ("policy", "settings"), key, value)
+
+
+def _write_section(workspace: Path, section: tuple[str, ...], key: str, value: object | None):
+    """Write ``key`` into a (possibly nested) table, pruning empty tables upward."""
+    with _WRITE_LOCK:
+        data = _read_data_strict(workspace)
+        # Walk down, creating/repairing tables (a non-table on the path is replaced —
+        # it could not have been read as a table anyway).
+        tables: list[dict] = [data]
+        for name in section:
+            child = tables[-1].get(name)
+            if not isinstance(child, dict):
+                child = {}
+            tables.append(child)
+        leaf = tables[-1]
+        if value is None:
+            leaf.pop(key, None)
+        else:
+            leaf[key] = value
+        # Re-attach bottom-up, dropping any table left empty.
+        for name, parent, child in zip(
+            reversed(section), reversed(tables[:-1]), reversed(tables[1:])
+        ):
+            if child:
+                parent[name] = child
+            else:
+                parent.pop(name, None)
+        if data:
+            _write_data(workspace, data)
+        else:
+            config_path(workspace).unlink(missing_ok=True)
 
 
 # -- synced notebook folders --------------------------------------------------

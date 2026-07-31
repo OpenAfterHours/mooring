@@ -59,6 +59,13 @@ mooring ai dictionary check [--repo ALIAS]
 mooring ai pii check [--repo ALIAS] [--notebook REL]
 mooring ai pii model [--repo ALIAS]
 mooring ai pii doctor
+mooring policy show [--repo ALIAS]
+mooring policy set min-version 0.4.29 | push-guard block
+mooring policy set propose-only "reports/**" [more...]
+mooring policy set ai-off "hr/**" [more...]
+mooring policy set setting ai.pii.enabled true
+mooring policy unset min-version | push-guard | propose-only | ai-off
+mooring policy unset setting ai.pii.enabled
 mooring config set <key> <value...> | config get <key>
 mooring config unset <key> | config list | config path
 mooring selftest
@@ -255,6 +262,22 @@ while the **secret stays on each machine**. See
   `--stdin`); it lives under `.mooring`, which never syncs. `--clear` removes it.
 - `connections rm <name>` — remove a connection definition.
 - `connections check` — scan the synced definitions for anything secret-shaped.
+
+### `policy` — the team rules this client enforces
+
+Show or author the repo's admin policy: the `[policy]` block in the **synced**
+`mooring.toml`. It travels with the repo, and mooring enforces it on every
+machine — a policy can only ever make things *stricter* than your own settings,
+never weaker. Full reference: [Team policy](../admins/policy.md).
+
+- `policy show` — what is in force, and any rule that had to be ignored.
+- `policy set <rule> <value…>` — author one rule. Rules: `min-version`,
+  `push-guard` (`warn`/`block`), `propose-only` and `ai-off` (path patterns, the
+  list is replaced), and `setting <key> <true|false>`.
+- `policy unset <rule> [key]` — remove a rule.
+
+`set`/`unset` write a **synced** file, so the change reaches your team only after
+`mooring push`. Setting a rule that would loosen something is refused.
 
 ### `init` / `deps` — notebook dependencies
 

@@ -21,7 +21,7 @@ import contextlib
 import threading
 from pathlib import Path
 
-from mooring import checks, inputs, workspace_config
+from mooring import checks, inputs, policy, workspace_config
 from mooring.app import notebooks
 
 
@@ -87,7 +87,7 @@ class ChatService:
         open) because the notebook may be disabled mid-session from the hub or a
         teammate's sync."""
         target = self.target(sid)
-        if target and workspace_config.is_ai_disabled(Path(target[0]), target[1]):
+        if target and policy.ai_disabled(Path(target[0]), target[1]):
             self.close(sid)
             return True
         return False

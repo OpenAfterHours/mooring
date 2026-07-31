@@ -43,6 +43,7 @@ forbidden_modules =
     mooring.config_store
     mooring.auth
     mooring.github
+    mooring.policy
     mooring.sync
     mooring.manifest
     mooring.pbip
@@ -58,8 +59,13 @@ forbidden_modules =
     mooring.telemetry
 
 [importlinter:contract:identity-below-domain]
-name = L1 config/identity/runtime/ai_config does not depend on the domain, AI, or the adapters
+name = L1 config/identity/runtime/ai_config/policy does not depend on the domain, AI, or the adapters
 type = forbidden
+# mooring.policy is a source here, not just a name in the list: the admin policy
+# is enforced BY the domain and the adapters, so it must stay below them. It reads
+# the synced mooring.toml (workspace_config) and tightens a config.AppConfig, and
+# that is the whole of its dependency surface — anything more (sync, ai, a route)
+# would make the policy a participant in what it governs.
 source_modules =
     mooring.config
     mooring.config_store
@@ -67,6 +73,7 @@ source_modules =
     mooring.github
     mooring.runtime
     mooring.ai_config
+    mooring.policy
 forbidden_modules =
     mooring.sync
     mooring.manifest
@@ -182,6 +189,7 @@ source_modules =
     mooring.config
     mooring.config_store
     mooring.ai_config
+    mooring.policy
     mooring.auth
     mooring.github
     mooring.runtime
