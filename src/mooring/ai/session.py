@@ -94,6 +94,17 @@ _HELPER_TOOL_GUIDE = (
     "over re-implementing it; check here before writing a utility yourself."
 )
 
+_CATALOG_TOOL_GUIDE = (
+    "\n\nA repo-wide NOTEBOOK CATALOG is available (every notebook's title, description, "
+    "imports, declared inputs/checks, and SQL tables — never another notebook's code, its "
+    "outputs, or any data value):\n"
+    "- mooring_list_notebooks — every notebook with its title\n"
+    "- mooring_search_notebooks(query) — find notebooks by metric / dataset / table term\n"
+    "- mooring_describe_notebook(notebook) — one notebook's title, inputs, and checks.\n"
+    "Before proposing a NEW analysis, search the catalog: if a teammate already built it, "
+    "say so and point at that notebook instead of duplicating the work."
+)
+
 _MODEL_TOOL_GUIDE = (
     "\n\nA POWER BI SEMANTIC MODEL is available (tables, columns+types, "
     "relationships, and measure DAX — authored code, never any data value):\n"
@@ -119,6 +130,7 @@ class CopilotChatSession(ChatBroadcaster):
         dictionary=None,
         semantic_models=None,
         helpers=None,
+        catalog=None,
         read_only: bool = False,
         run_investigation=None,
         pii_enabled: bool = False,
@@ -158,6 +170,8 @@ class CopilotChatSession(ChatBroadcaster):
             guide += _DICT_TOOL_GUIDE
         if helpers is not None and not helpers.is_empty():
             guide += _HELPER_TOOL_GUIDE
+        if catalog is not None and not catalog.is_empty():
+            guide += _CATALOG_TOOL_GUIDE
         if semantic_models:
             guide += _MODEL_TOOL_GUIDE
         if self._run_investigation is not None:
@@ -168,6 +182,7 @@ class CopilotChatSession(ChatBroadcaster):
         self._notebook_rel = notebook_rel
         self._dictionary = dictionary
         self._helpers = helpers
+        self._catalog = catalog
         self._semantic_models = list(semantic_models or [])
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
@@ -293,6 +308,7 @@ class CopilotChatSession(ChatBroadcaster):
             dictionary=self._dictionary,
             semantic_models=self._semantic_models,
             code_index=self._helpers,
+            catalog=self._catalog,
             run_investigation=self._run_investigation,
             emit_tool_progress=self._emit_tool_progress,
             pii_enabled=self._pii_enabled,

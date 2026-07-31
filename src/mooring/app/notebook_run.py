@@ -41,7 +41,12 @@ import threading
 from dataclasses import dataclass
 from pathlib import Path
 
-from mooring import editor
+from mooring import editor, params
+
+# Environment variables mooring itself sets on a run (its "run channels"). They are SCRUBBED
+# from the inherited environment whenever the current run does not supply them — see
+# :func:`_child_env` for why inheriting one is a mislabelled-artifact bug.
+_RUN_CHANNELS = (params.ENV_VAR,)
 
 # marimo EXECUTES every cell, so bound the wait generously.
 RUN_TIMEOUT = 300
@@ -99,28 +104,35 @@ def run(
     ``keep_on_success`` — so a caller that wants the artifact gets it only when there is a
     real one to get, and a caller that wants only the receipt never leaves values on disk.
 
-    ``env_extra`` overlays environment variables onto the run (the channel a parameterised
-    run hands its value to the kernel on — see :mod:`mooring.params`). It never changes the
-    COMMAND, so both launch backends behave identically. ``cancel`` is an event another
-    thread may set to stop the run; it becomes the same process-tree kill the timeout uses
-    and raises :class:`RunCancelled`.
+    ``env_extra`` adds environment variables for the run — the one channel from mooring INTO
+    the kernel, used by the Excel delivery to name its target and pass the provenance facts
+    only mooring knows (see :mod:`mooring.workbook`), and by a parameterised run to hand the
+    kernel its value (see :mod:`mooring.params`). It layers over the launch environment
+    rather than replacing it, so the uv/frozen backend choice is untouched, and it never
+    changes the COMMAND, so both launch backends behave identically.
+
+    ``cancel`` is an event another thread may set to stop the run; it becomes the same
+    process-tree kill the timeout uses and raises :class:`RunCancelled`.
 
     Raises :class:`RunError` when the notebook could not be run at all."""
     editor.ensure_runtime_config(workspace)
     cmd, env = editor.export_html_command(
         workspace, rel_posix, out_path, include_code=include_code
     )
-    if env_extra:
-        # export_html_command returns None to mean "inherit", so materialise the parent
-        # environment before overlaying rather than handing marimo a two-variable env.
-        env = {**(env if env is not None else os.environ), **env_extra}
+    env = _child_env(env, env_extra)
     produced = False
     proc: subprocess.CompletedProcess | None = None
     try:
         out_path.parent.mkdir(parents=True, exist_ok=True)
         # Clear any stale render so `produced` reflects THIS run only.
         _unlink(out_path)
-        proc = _exec(cmd, str(workspace), env, timeout, cancel)
+        # Passed ONLY when there is one. A run nobody can cancel must reach the seam with
+        # exactly the arguments it reached it with before this feature existed — which is
+        # the strongest available form of "an unparameterised run is unchanged", and keeps
+        # the dozen `_exec` fakes across the suite honest characterizations rather than
+        # signatures that have to be chased every time this seam grows.
+        extra = {"cancel": cancel} if cancel is not None else {}
+        proc = _exec(cmd, str(workspace), env, timeout, **extra)
         produced = out_path.is_file()  # marimo writes the render iff it actually ran
     except OSError as exc:  # marimo/uv absent, a locked/read-only dir, a bad executable
         _unlink(out_path)
@@ -130,6 +142,15 @@ def run(
         # re-create the render after this unlink.
         _unlink(out_path)
         raise RunError("The run timed out — the notebook took too long to run.") from exc
+    except BaseException:
+        # Ctrl+C, or any other unwind. This clause is rule 1 applied to the ONE path that
+        # was missing it: a console Ctrl+C reaches mooring but NOT marimo (the child runs in
+        # its own process group precisely so it ignores the keystroke), so without _exec's
+        # matching kill the kernel would run on and re-write the value-bearing render after
+        # this unlink — with the workspace lock already released. _exec kills the tree before
+        # re-raising, so by the time we get here nothing can re-create the file.
+        _unlink(out_path)
+        raise
 
     if cancel is not None and cancel.is_set():
         # The tree is already dead (the watchdog killed it), so nothing can re-create the
@@ -168,15 +189,39 @@ def _count_failed_cells(proc: subprocess.CompletedProcess) -> int | None:
     return count or None
 
 
+def _child_env(env: dict[str, str] | None, env_extra: dict[str, str] | None) -> dict | None:
+    """The environment the kernel actually gets: the launch environment, plus ``env_extra``,
+    minus any stale RUN CHANNEL this run is not itself setting.
+
+    The scrub is the load-bearing half. ``MOORING_PARAMS`` is how a parameterised run tells
+    the notebook which value it is — so one left in mooring's OWN environment (exported in a
+    shell, or set for an earlier `mooring run`) would silently parameterise every ordinary
+    run after it: a scheduled refresh would write ``board-20260731.html``, with no value in
+    the name, holding APAC's numbers. A channel mooring owns must therefore be set by
+    mooring or not present at all — never inherited."""
+    base = os.environ if env is None else env
+    stale = [k for k in _RUN_CHANNELS if k not in (env_extra or {}) and k in base]
+    if not (env_extra or stale):
+        return env  # nothing to change; keep None meaning "inherit" exactly as before
+    merged = {**base, **(env_extra or {})}
+    for key in stale:
+        merged.pop(key, None)
+    return merged
+
+
 def _exec(
     cmd: list[str],
     cwd: str,
     env: dict[str, str] | None,
     timeout: int,
+    *,
     cancel: threading.Event | None = None,
 ) -> subprocess.CompletedProcess:
     """Run the export subprocess, killing the whole process TREE on timeout (rule 2) — and
-    on cancel, through the very same kill."""
+    on cancel or a Ctrl+C unwind, through the very same kill.
+
+    ``cancel`` is keyword-only: this seam is faked in a dozen tests, and a keyword-only
+    extension can be added without touching a single one of them."""
     kwargs: dict = {}
     if sys.platform == "win32":
         # New process group so the tree kill (taskkill /T) can reach the marimo kernel.
@@ -196,7 +241,13 @@ def _exec(
         watchdog.start()
     try:
         stdout, stderr = proc.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired:
+    except BaseException:
+        # EVERY abnormal exit from the wait kills the tree, not just the timeout. A console
+        # Ctrl+C is the case that made this a BaseException clause: CREATE_NEW_PROCESS_GROUP
+        # means the child never sees the keystroke, so a KeyboardInterrupt that merely
+        # unwound past here would leave the marimo kernel running — free to re-write the
+        # value-bearing render after the caller's cleanup and after the workspace lock was
+        # released. That is exactly what rules 1 and 2 exist to prevent.
         _kill_tree(proc)
         with contextlib.suppress(OSError, ValueError):
             proc.communicate(timeout=10)  # reap the killed tree

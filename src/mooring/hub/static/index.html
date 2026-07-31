@@ -208,8 +208,8 @@
         <button id="btn-batch" class="hidden" title="Build several notebooks at once from a list of briefs (the AI copilot proposes each; you review and apply)">&#9889; Batch build&hellip;</button>
       </div>
       <input id="file-search" class="file-search hidden" type="search"
-             placeholder="&#128269; Filter notebooks by name or title&hellip;"
-             aria-label="Filter notebooks by name or title" autocomplete="off">
+             placeholder="&#128269; Search notebooks by name, title, or content&hellip;"
+             aria-label="Search notebooks by name, title, or content" autocomplete="off">
       <!-- Status notices — one visual language (icon + coloured left rule) for the
            files-card alerts, most-urgent first: offline > open-proposal > adopt >
            freshness. Each is toggled independently by app.js. #summary below is the
@@ -378,6 +378,26 @@
       </div>
     </section>
 
+    <!-- Merge cell by cell: the per-cell resolution of ONE conflicted notebook.
+         A genuine three-way merge (last-synced / your copy / the team's), so a
+         cell only one of you touched is already merged and only the cells you
+         BOTH changed ask anything. Writing is local — the merged file becomes a
+         normal modified file you push yourself — and the pre-merge bytes go to
+         the trash first, so the Undo toast covers it. No option is preselected:
+         a default here would be exactly the silent loss this panel prevents. -->
+    <section id="merge-card" class="card hidden">
+      <h3 id="merge-title">Merge cell by cell</h3>
+      <div id="merge-summary" class="muted"></div>
+      <div id="merge-frame" class="muted hidden"></div>
+      <div id="merge-cells"></div>
+      <div class="toolbar">
+        <button id="merge-apply" class="primary small">Write the merged notebook</button>
+        <button id="merge-close" class="small">Close</button>
+      </div>
+      <div id="merge-hint" class="muted">Nothing is published — after merging, push
+        the file like any other change.</div>
+    </section>
+
     <!-- What's new: the pull digest — every synced file changed on the team
          branch since YOUR last sync (the manifest horizon), with who/when/why.
          Populated on demand from the toolbar button and automatically after a
@@ -450,9 +470,11 @@
   <script src="/static/chat_core.js"></script>
   <script src="/static/files_tree.js"></script>
   <script src="/static/freshness.js"></script>
+  <script src="/static/lineage_fmt.js"></script>
   <script src="/static/guard_fmt.js"></script>
   <script src="/static/history_fmt.js"></script>
   <script src="/static/diff_fmt.js"></script>
+  <script src="/static/merge_fmt.js"></script>
   <script src="/static/whatsnew_fmt.js"></script>
   <script src="/static/schedule_fmt.js"></script>
   <script src="/static/params_fmt.js"></script>

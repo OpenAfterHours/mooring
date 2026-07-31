@@ -48,8 +48,19 @@ to see individual files); everything else is one row per file.
 
     Each notebook shows its **title** — the first heading in its own first markdown
     cell — beneath its filename, so a file like `q3_recon_v2.py` is legible at a
-    glance. Use the **filter box** above the list to find one by filename or title.
-    Titles are read from the notebook's own text on your machine; nothing leaves it.
+    glance. The **search box** above the list matches a notebook's **content**, not
+    just its name: its heading, what it imports, the datasets it
+    [fingerprints](#fingerprinting-your-inputs), the
+    [checks](#checking-your-numbers-tie-out) it asserts, and the tables its SQL
+    queries. So searching `gl_ledger` finds the notebooks that read it, and `tieout`
+    finds the ones that reconcile — which is usually the real question ("has someone
+    already built this?").
+
+    It's all read from the notebooks' own code on your machine and matched in your
+    browser: nothing leaves your machine, and there's no round-trip as you type.
+    From the terminal, `mooring catalog <terms>` searches the same index. Your team
+    can also let the copilot search it — see
+    ["Has someone already built this?"](ai-copilot.md#has-someone-already-built-this).
 
 ## A typical session
 
@@ -97,6 +108,60 @@ that you can double-click or attach to an email or Teams message.
     `.mooring` folder, which **never syncs** — it can't ride a push or be shared
     by accident. Sending it to a stakeholder is a deliberate step you take
     yourself.
+
+### Delivering it as an Excel workbook
+
+Plenty of the people you send numbers to don't want a chart — they want the rows,
+in Excel, so they can pivot them. Name the tables that should go, in any cell:
+
+```python
+import mooring_deliver as md
+md.reset()                          # start fresh each run
+md.table(summary, "Summary")        # one sheet per call
+md.table(by_region, "By region")
+```
+
+Then choose **Deliver as Excel** on the notebook's **Actions ▾** menu (or
+[`mooring deliver <path> --excel`](cli.md)). Mooring runs the notebook and writes
+one `.xlsx` to the same local outbox, with your sheets in the order you named them
+plus a **Provenance** sheet carrying the same repo / commit / notebook / date /
+*View on GitHub* trail as the HTML footer. Pass a polars or pandas dataframe, a
+list of dicts, or a `{column: values}` mapping; naming the same sheet twice
+replaces it, so re-running a cell is safe.
+
+!!! warning "It's all of the workbook or none of it"
+
+    If any table can't be written, mooring **refuses the whole delivery** and tells
+    you which sheet was lost — it never hands over a workbook that is quietly
+    missing one. A run with a failed cell is refused for the same reason. Half the
+    numbers looks exactly like all of them once somebody forwards it.
+
+The workbook is written by **your notebook's own environment**, not by mooring, so
+it needs an Excel writer among the repo's packages (`xlsxwriter` or `openpyxl` —
+polars' `write_excel` and pandas' `to_excel` need one of the same two). If none is
+installed you get a message saying exactly that: add one for the team with
+`mooring deps add openpyxl` and deliver again. Nothing breaks in the meantime —
+the run finishes normally, you just get no workbook.
+
+#### What mooring changes on the way into Excel
+
+Excel can't hold everything Python can, and the two writer packages disagree about
+what to do. Mooring settles it once, so the same notebook gives the same workbook
+whichever package your repo has:
+
+| Your value | In the workbook | Why |
+| --- | --- | --- |
+| Text starting with `=` `+` `-` `@` | the text, exactly | otherwise Excel treats it as a **live formula** — `=1+1` would reach your reader as `2`, and a value from an upstream free-text field could run something |
+| `NaN`, `inf`, `-inf` | `NaN`, `Infinity`, `-Infinity` | one writer leaves these **blank** (so a broken ratio reads as "no data" and sums as zero); the other refuses the file |
+| A number over 15 significant digits | the exact digits, as text | Excel rounds past 15, and a rounded account number breaks the join your reader does next |
+| A timezone-aware timestamp | the same instant **in UTC** | Excel has no timezones; keeping the local wall clock would land one instant on different *dates*. The Provenance sheet says when this happened |
+| Text over 32,767 characters | cut, ending `…[truncated by mooring]` | Excel's cell limit, marked so a cut memo can't read as a whole one |
+
+Like the HTML, the workbook lands in `.mooring/outbox/` and **never syncs** — and
+this one is nothing but your data, so that exclusion is doing real work. The
+Provenance sheet is written by mooring *after* your notebook has finished, so it
+records where the numbers actually came from rather than what the notebook says
+they did.
 
 ## Checking your numbers tie out
 
@@ -311,18 +376,26 @@ sales = pl.read_csv("data/sales.csv")
 mi.fingerprint(sales, "sales", path="data/sales.csv")    # hash + shape + schema
 ```
 
+Record what the notebook **writes** the same way, with `mi.output(...)` after the write:
+
+```python
+monthly.write_csv("data/monthly.csv")
+mi.output(monthly, "monthly", path="data/monthly.csv")
+```
+
 Each call records a **value-free** fingerprint — the file's **content hash**, its
 **shape** (row/column counts), and its **schema** (column names + types), **never a data
-value** — and compares it to the previous run. If an input changed under you (different
+value** — and compares it to the previous run. If something changed under you (different
 content, more rows, a new column), the cell prints `[CHANGED] …` and the hub shows an
-amber **⚠ input changed** badge on the notebook's row; otherwise a green **⛓ N inputs
-pinned** badge. `mooring inputs` lists them from the terminal, and `mooring inputs --clear`
-resets them.
+amber **⚠ 1 input changed** badge on the notebook's row; otherwise a green **⛓ N inputs
+pinned** badge. An output that moved goes amber too — the numbers this notebook publishes
+are no longer the ones it published last run. `mooring inputs` lists them from the
+terminal, and `mooring inputs --clear` resets them.
 
-Always pass **`path=`** to the source file — that's what gives the *content* guarantee
-(the file hash catches a same-shape value change). Without a `path`, only the shape and
-schema are compared. Starting the cell with `mi.reset()` keeps the badge honest if you
-later rename or drop an input.
+Always pass **`path=`** to the file — that's what gives the *content* guarantee (the file
+hash catches a same-shape value change). Without a `path`, only the shape and schema are
+compared. Starting the cell with `mi.reset()` keeps the badge honest if you later rename
+or drop an input.
 
 Because `mi.fingerprint(...)` returns falsy when the input changed, you can even make it a
 guard:
@@ -343,6 +416,45 @@ assert mi.fingerprint(sales, "sales", path="data/sales.csv"), "sales.csv moved �
 
     Ask the copilot to *"fingerprint the inputs"* — it reads your schema and source (never
     your data) and proposes the `mooring_inputs` cell for you to review and apply.
+
+## "If I change this file, what breaks?"
+
+Once notebooks record both sides, mooring can join them: one notebook's `mi.output`
+**path** is another's `mi.fingerprint` **path**, and that is a dependency. You get the
+answer no notebook tool usually gives you — *who else is relying on this file?* — without
+anyone drawing a diagram.
+
+In the hub, a data file others depend on carries a **⇄ 3 notebooks read this** badge on
+its row; a file one of your notebooks *generates* is badged **⇄ generated by 1** so you
+know not to hand-edit it. And before anything destructive lands on such a file — **Pull**
+replacing or deleting it, **Delete**, **Discard my changes**, **Restore** — mooring names
+what depends on it first, so you can re-run those notebooks rather than find out later
+from a number that quietly moved.
+
+From the terminal, [`mooring lineage`](cli.md#lineage) lists every recorded file with its
+readers and writers, and `mooring lineage data/sales.csv` answers the impact question for
+one file — its direct readers, what is further downstream through the files *those*
+notebooks write, and what it is built from.
+
+Every claim comes with **the date it was recorded**, because a fingerprint sticks until
+the notebook that wrote it runs `mi.reset()` again. If you delete a `mi.fingerprint(...)`
+line and never re-run that notebook, the old dependency is still on file — so anything
+mooring hasn't seen re-confirmed for a month is shown greyed, dated, and marked *"not
+confirmed since"* rather than stated as current fact.
+
+!!! warning "It only knows what was recorded"
+
+    Lineage is derived **entirely** from `mooring_inputs` calls. A notebook that doesn't
+    make them — or a colleague's Excel refresh, or anything outside mooring — is invisible
+    to it. So treat every answer as a **floor**: *"3 notebooks read this"* is a fact, but
+    *"nothing recorded reads this"* is **not** evidence that a file is safe to change. It
+    only means nobody wrote it down.
+
+    mooring is built so it cannot accidentally tell you otherwise: a file with no recorded
+    reader gets **no badge at all** rather than a "0 readers" one, and the CLI prints the
+    caveat on every run. (It is also why mooring never infers dependencies by reading your
+    code — a guessed edge would make the whole graph un-trustable.)
+
 ## Connecting to a database
 
 Pulling from a warehouse (Snowflake, SQL Server, …)? mooring lets the team share the
@@ -389,6 +501,105 @@ wiring for you — but it never sees `c.secret`.
     local secret lives under `.mooring`, which **never syncs**. mooring does **not** install
     database drivers — your own environment supplies `snowflake-connector` / `pyodbc` / etc.
     (add them with `mooring deps add`).
+
+## Pointing at data too big to sync
+
+The 400 MB parquet your reports run off **can't** live in the repo — pushes refuse
+at 45 MB. So it sits on a network share, and its path ends up typed into somebody's
+cell, where nobody else can find it and IT can break it by remounting the drive.
+
+Give that location a **name** instead. Like a connection, the pointer travels with
+the repo while the file itself never does:
+
+```bash
+mooring datasets add sales kind=share path="//fileserver/finance/sales.parquet"
+mooring datasets add archive kind=https url="https://data.example.org/archive.csv"
+mooring datasets list          # what's defined, where each lands here, and if it's there
+```
+
+Then notebooks ask for the name, never the path:
+
+```python
+import mooring_datasets as md
+import polars as pl
+
+sales = pl.read_parquet(md.path("sales"))
+```
+
+`md.path()` resolves the name **on the machine that runs the notebook**, so the same
+notebook works for everyone. A `kind=https` dataset is downloaded once into
+`.mooring/` (which never syncs) and reused after that.
+
+### When your copy is somewhere else
+
+Mapped the share to `D:` instead? Point **your** machine at it. This never syncs, so
+it can't break anyone else:
+
+```bash
+mooring datasets set-local sales "D:/finance/sales.parquet"
+mooring datasets set-local sales --clear    # back to the team's pointer
+```
+
+Resolution order, highest first:
+
+1. a `MOORING_DATASET_SALES_PATH` environment variable (handy for a scheduled run)
+2. your local redirect — `.mooring/datasets.local.toml`, set by `datasets set-local`
+3. the team's pointer in the synced `mooring.toml`
+
+If nothing resolves, the error names the dataset, where it looked, which of those
+three sent it there, and the exact command to fix it.
+
+### Prove the file hasn't moved
+
+A pointer says **where** the data came from. Pair it with an [input
+fingerprint](#fingerprinting-your-inputs) to prove **it's the same data** as last
+time:
+
+```python
+import mooring_inputs as mi
+
+sales = pl.read_parquet(md.path("sales"))
+mi.fingerprint(sales, "sales", path=md.path("sales"))
+```
+
+!!! warning "A pointer carries a location — never a credential"
+
+    A `kind=https` URL may not carry a **query string**, a **fragment**, or embedded
+    `user:password@` credentials. mooring refuses all three outright — not by trying to
+    recognise a credential, but because a location does not need them, and that is
+    exactly where every pre-signed / SAS link (Azure `sig`, S3 `X-Amz-Signature`,
+    Backblaze `Authorization`, SharePoint `tempauth`, Dropbox `rlkey`, …) keeps its
+    key. A `password`/`token`/`key`-shaped **field** is refused too.
+
+    So `?download=1` is refused along with the rest. That is deliberate: for anything
+    that needs authentication, sign in to (or mount) the source on each machine and use
+    `datasets set-local` / `MOORING_DATASET_*_PATH` to point the name at your copy.
+
+    **What this does not catch:** a token buried in a plain path segment
+    (`https://host/AKIA…/sales.csv`) is indistinguishable from a folder name.
+    `mooring datasets add` and `mooring datasets check` scan for known token shapes,
+    but that is a best-effort scan, not the structural rule above.
+
+    The copilot sees dataset **names and file formats** only — never the path, the
+    server, or the URL. It has everything it needs to write `md.path("sales")` for
+    you, and nothing else.
+
+!!! note "What a pointer lets a teammate do"
+
+    A pointer is a **read** instruction that anyone who can push to the repo can
+    change. Repointing `sales` at a different file on the share — or at any file your
+    Windows account can read — makes the next run load that file instead, and it looks
+    like a perfectly normal dataframe. That is inherent to the feature (the whole point
+    is reading files outside the repo), and it is the same trust model as a teammate
+    editing a notebook's `pl.read_parquet(...)` line. It is worth knowing about because
+    a pointer is quieter: `datasets check` scans for credentials, **not** for a location
+    somebody changed.
+
+    Two things bound it: `mooring datasets list` shows exactly where every name lands
+    on your machine, and [an input fingerprint](#prove-the-file-hasnt-moved) fails
+    loudly when a dataset's content changes underneath a notebook. A `kind=https`
+    pointer additionally cannot aim at `127.0.0.1` or a cloud metadata address — see
+    the [threat model](../admins/threat-model.md).
 
 ## Proposing changes for review
 
@@ -508,7 +719,9 @@ with the notebook.
 
     Pushes **warn at 10 MB** and **refuse at 45 MB** per file (a GitHub
     Contents API limit). Store large or sensitive datasets elsewhere and have
-    notebooks load them at runtime.
+    notebooks load them at runtime — and give that "elsewhere" a **name**, with
+    [a dataset pointer](#pointing-at-data-too-big-to-sync), so it is shared with the
+    team instead of buried in one person's cell.
 
 ## What you can import in a notebook
 

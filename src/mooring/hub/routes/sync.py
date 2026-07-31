@@ -14,6 +14,7 @@ from starlette.responses import JSONResponse
 
 from mooring import auth, celldiff, manifest, pushguard, sync, telemetry, whatsnew
 from mooring import workspace_config
+from mooring.app import conflict_merge
 from mooring.app import notebooks as nb_ops
 from mooring.github import GitHubError, Unreachable
 from mooring.hub.routes.files import _resolve_within
@@ -245,6 +246,95 @@ async def api_resolve(request: Request) -> JSONResponse:
         lambda guard_fn: sync.resolve(
             hub.client(), hub.cfg, data["path"], strategy, username, guard_fn=guard_fn
         ),
+    )
+
+
+def _merge_target(hub, data: dict) -> str:
+    """The conflicted file a cell-merge request names, validated against the
+    workspace (the /api/diff posture). Raises ``ValueError`` for a bad path."""
+    rel, _ = _resolve_within(hub.cfg.workspace(), str(data.get("path", "")))
+    return rel
+
+
+async def api_resolve_cells(request: Request) -> JSONResponse:
+    """Plan a per-cell resolution of one conflicted notebook (see
+    :mod:`mooring.app.conflict_merge`). Strictly read-only — it fetches the base and
+    remote blobs and reads the local file, and writes nothing.
+
+    A conflict that cannot be merged per cell answers 409 with ``unavailable``, which
+    the hub renders as a notice beside the three unchanged whole-file resolutions —
+    this endpoint only ever ADDS an option."""
+    hub = request.app.state.hub
+    data = await request.json()
+    try:
+        rel = _merge_target(hub, data)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    try:
+        # Two blob fetches plus three marimo parses: network + CPU, so off the
+        # event loop exactly like /api/diff.
+        merge_plan = await asyncio.to_thread(conflict_merge.plan, hub.client(), hub.cfg, rel)
+    except conflict_merge.MergeUnavailable as exc:
+        return JSONResponse({"error": str(exc), "unavailable": True}, status_code=409)
+    except (GitHubError, OSError) as exc:
+        # Type only: a NotFound message embeds the contents/<path> URL (the history
+        # endpoints' telemetry posture — paths never reach central telemetry).
+        telemetry.log_error(exc=type(exc)("cell merge plan failed"), op="resolve_cells")
+        return JSONResponse({"error": str(exc)}, status_code=502)
+    return JSONResponse(conflict_merge.plan_payload(merge_plan))
+
+
+async def api_resolve_cells_apply(request: Request) -> JSONResponse:
+    """Write the merged notebook for one conflicted file.
+
+    LOCAL ONLY: it never pushes. Afterwards the file is a normal modified file the
+    analyst publishes themselves, and its pre-merge bytes are in the local trash, so
+    the response's ``trashed`` drives the hub's existing Undo toast. The request
+    carries only per-cell decisions — the server recomputes the plan and refuses
+    (409) if any of the three sides moved since it was rendered, or 400s if the
+    request did not say which versions it was rendered against."""
+    hub = request.app.state.hub
+    data = await request.json()
+    try:
+        rel = _merge_target(hub, data)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    choices = {str(k): str(v) for k, v in (data.get("choices") or {}).items()}
+    # A missing sha is passed through as "" rather than defaulted or dropped: the
+    # engine treats a blank as a malformed request (400), so ONE place decides
+    # whether a merge may proceed and neither adapter can waive the check.
+    expect = {key: str(data.get(key) or "") for key in ("base_sha", "local_sha", "remote_sha")}
+    try:
+        outcome = await asyncio.to_thread(
+            conflict_merge.apply, hub.client(), hub.cfg, rel, choices, expect=expect
+        )
+    except conflict_merge.MergeStale as exc:
+        return JSONResponse({"error": str(exc), "stale": True}, status_code=409)
+    except conflict_merge.MergeUnavailable as exc:
+        return JSONResponse({"error": str(exc), "unavailable": True}, status_code=409)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    except (GitHubError, OSError) as exc:
+        telemetry.log_error(exc=type(exc)("cell merge failed"), op="resolve_cells_apply")
+        return JSONResponse({"error": str(exc)}, status_code=502)
+    # Counts only — the ledger and central telemetry never carry cell source.
+    telemetry.log_event(
+        "resolve_cells",
+        auto=outcome.auto_merged,
+        chosen=outcome.chosen_local + outcome.chosen_remote,
+    )
+    trashed = [{"path": p, "token": t} for p, t in outcome.trashed]
+    hub._activity("resolve-cells", path=rel, summary=outcome.summary(), trashed=trashed)
+    return JSONResponse(
+        {
+            "path": rel,
+            "lines": list(outcome.lines),
+            "summary": outcome.summary(),
+            "auto_merged": outcome.auto_merged,
+            "chosen_local": outcome.chosen_local,
+            "chosen_remote": outcome.chosen_remote,
+            "trashed": trashed,
+        }
     )
 
 

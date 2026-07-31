@@ -332,7 +332,7 @@ def test_cancel_kills_the_running_kernel_and_stops_the_fan_out(monkeypatch, tmp_
     cancel = threading.Event()
     killed = []
 
-    def _run(cmd, cwd, env, timeout, cancel_event=None):
+    def _run(cmd, cwd, env, timeout, *, cancel=None):
         # Fire the cancel while THIS value is "executing", exactly as the hub's button
         # would, and let the real runner notice it.
         cancel.set()
@@ -372,7 +372,7 @@ def test_cancel_fires_the_process_tree_kill(monkeypatch):
             return "", ""
 
     monkeypatch.setattr(notebook_run.subprocess, "Popen", lambda *a, **k: _Proc())
-    notebook_run._exec(["marimo"], ".", None, 5, cancel)
+    notebook_run._exec(["marimo"], ".", None, 5, cancel=cancel)
     assert killed and killed[0].pid == 4242
 
 
@@ -382,7 +382,7 @@ def test_a_cancelled_run_deletes_its_half_written_render(monkeypatch, tmp_path):
     cfg, ws = _mk(tmp_path)
     cancel = threading.Event()
 
-    def _run(cmd, cwd, env, timeout, cancel_event=None):
+    def _run(cmd, cwd, env, timeout, *, cancel=None):
         out = _out_of(cmd)
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text("<html>half a render with SECRET_VALUE_DO_NOT_LEAK</html>", encoding="utf-8")
@@ -401,7 +401,7 @@ def test_the_handle_reports_progress_and_cancels(monkeypatch, tmp_path):
     cfg, ws = _mk(tmp_path)
     gate = threading.Event()
 
-    def _run(cmd, cwd, env, timeout, cancel_event=None):
+    def _run(cmd, cwd, env, timeout, *, cancel=None):
         gate.wait(5)  # hold the first value open so the snapshot is observably mid-run
         out = _out_of(cmd)
         out.parent.mkdir(parents=True, exist_ok=True)

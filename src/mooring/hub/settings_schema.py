@@ -231,6 +231,29 @@ EDITABLE: tuple[SettingSpec, ...] = (
         "Off by default; a per-module opt-out lives in the synced mooring.toml.",
     ),
     SettingSpec(
+        key="ai.notebook_catalog",
+        accessor="ai_notebook_catalog",
+        label="Let the copilot search every notebook (repo-wide catalog)",
+        group="ai",
+        type="bool",
+        control="toggle",
+        default=False,
+        sensitivity="weakens",
+        env_var="MOORING_AI_NOTEBOOK_CATALOG",
+        weaken_value=True,
+        confirm="Turning the notebook catalog ON widens what the copilot sees from the "
+        "ONE notebook you have open to EVERY notebook in the repo. For each it gets the "
+        "`# H1` title, the imports, and the inputs/checks/SQL tables the source declares "
+        "— never another notebook's code, its outputs, or a run receipt. Those facts are "
+        "value-free by construction, but the title is prose your team wrote (scanned, "
+        "like a docstring), so this is a weaker tier than the value-blind schema. "
+        "Continue?",
+        help="Let the copilot find work a teammate already did — 'does anyone already "
+        "reconcile the GL feed?' — instead of rebuilding it. Off by default; a notebook "
+        "you have turned AI off for is left out. The hub's own search box indexes the "
+        "same facts locally either way.",
+    ),
+    SettingSpec(
         key="ai.traceback_guard",
         accessor="ai_traceback_guard",
         label="Sanitise pasted tracebacks",

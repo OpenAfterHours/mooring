@@ -32,6 +32,7 @@ from mooring import (
     checks,
     config,
     inputs,
+    lineage,
     notebook_template,
     pbip,
     pbip_model,
@@ -129,10 +130,11 @@ class Hub:
         # The env can't change within a running process, so enumerate site-packages
         # once instead of on every /api/state poll. See _notebook_env.
         self._top_level_pkgs: list[str] | None = None
-        # Cache of the notebook-vs-module sniff (see _is_notebook), keyed by absolute
-        # path → (mtime_ns, is_notebook). /api/state re-lists on every refresh, so this
-        # avoids re-reading every .py off disk each time; a changed mtime invalidates it.
-        self._notebook_cache: dict[str, tuple[int, bool]] = {}
+        # Cache of the notebook sniff (see _sniff_notebook), keyed by absolute path →
+        # (mtime_ns, is_notebook, title, catalog terms). /api/state re-lists on every
+        # refresh, so this avoids re-reading AND re-parsing every .py each time; a changed
+        # mtime invalidates it.
+        self._notebook_cache: dict[str, tuple[int, bool, str, tuple[str, ...]]] = {}
         # Cache of each PBIP semantic model's tables/measures summary (the artifact
         # row's `model` field), keyed by model dir → (definition signature, summary).
         # The same idiom as _notebook_cache: _files_artifacts runs on EVERY /api/state
@@ -356,10 +358,19 @@ class Hub:
         # read_results from re-hashing every verified notebook on each poll.
         local_shas = {f.path: f.local_sha for f in report.files if f.local_sha is not None}
         verify_results = verify.read_results(workspace, local_shas)
-        # Value-free input fingerprints per notebook (.mooring/inputs/*.json), written by
-        # mooring_inputs.fingerprint calls in the kernel — content hash + shape + schema,
+        # Value-free input/output fingerprints per notebook (.mooring/inputs/*.json),
+        # written by mooring_inputs calls in the kernel — content hash + shape + schema,
         # never a value. Surfaced as a row badge: N inputs pinned, M changed since last run.
-        input_results = inputs.read_results(workspace)
+        # The same receipts carry the lineage graph, so read them ONCE and derive both.
+        receipts = inputs.read_receipts(workspace)
+        input_results = inputs.summarize(receipts)
+        # "3 notebooks read this" for a data file others depend on — the warning that makes
+        # overwriting one a decision rather than an accident. Only paths with a recorded
+        # reader or writer get an entry: lineage knows only opted-in notebooks, so the row
+        # may claim what IS recorded and must never imply a bare row is safe to change.
+        lineage_counts = lineage.counts(
+            lineage.from_receipts(receipts), [f.path for f in report.files]
+        )
         # Notebooks whose filename shadows an importable module (e.g. polars.py) —
         # surfaced as a per-row badge instead of an inscrutable kernel traceback.
         shadowed: dict[str, str] = {}
@@ -374,18 +385,21 @@ class Hub:
             return f.state is sync.FileState.LOCAL or f.local_sha is not None
 
         # Tell a runnable marimo notebook from a plain helper module (sniffed off disk),
-        # and harvest each notebook's value-free title in the same read. Only meaningful
-        # for a .py that exists locally; drives the Open/AI buttons, the "module" badge,
-        # the catalog title/search, and keeps the editor from opening a module.
+        # and harvest each notebook's value-free title + catalog terms in the same read.
+        # Only meaningful for a .py that exists locally; drives the Open/AI buttons, the
+        # "module" badge, the catalog title/search, and keeps the editor opening a module.
         notebooks: set[str] = set()
         titles: dict[str, str] = {}
+        terms: dict[str, list[str]] = {}
         for f in report.files:
             if f.path.endswith(".py") and _has_local(f):
-                is_notebook, title = self._sniff_notebook(workspace, f.path)
+                is_notebook, title, row_terms = self._sniff_notebook(workspace, f.path)
                 if is_notebook:
                     notebooks.add(f.path)
                     if title:
                         titles[f.path] = title
+                    if row_terms:
+                        terms[f.path] = list(row_terms)
         files = [
             {
                 "path": f.path,
@@ -397,8 +411,15 @@ class Hub:
                 **({"checks": check_results[f.path]} if f.path in check_results else {}),
                 **({"verified": verify_results[f.path]} if f.path in verify_results else {}),
                 **({"inputs": input_results[f.path]} if f.path in input_results else {}),
+                **({"lineage": lineage_counts[f.path]} if f.path in lineage_counts else {}),
                 **({"is_notebook": True} if f.path in notebooks else {}),
                 **({"title": titles[f.path]} if f.path in titles else {}),
+                # The notebook's value-free catalog terms (mooring.ai.notebookindex) —
+                # what it says it does, what it imports, the inputs/checks/tables its
+                # source declares — so the hub's filter box searches CONTENT, not just a
+                # filename. Client-side only; the same allowlist the copilot's catalog
+                # tools serve, so local search and the model's view never diverge.
+                **({"terms": terms[f.path]} if f.path in terms else {}),
                 **(
                     {"is_module": True}
                     if f.path.endswith(".py") and _has_local(f) and f.path not in notebooks
@@ -474,34 +495,48 @@ class Hub:
         self._model_summary_cache[cache_key] = (sig, summary)
         return summary
 
-    def _sniff_notebook(self, workspace: Path, rel: str) -> tuple[bool, str]:
-        """``(is_notebook, title)`` for the local ``.py`` at ``rel``, from ONE mtime-cached
-        file read (this runs per row on every /api/state).
+    def _sniff_notebook(self, workspace: Path, rel: str) -> tuple[bool, str, tuple[str, ...]]:
+        """``(is_notebook, title, terms)`` for the local ``.py`` at ``rel``, from ONE
+        mtime-cached file read + parse (this runs per row on every /api/state).
 
         ``is_notebook``: whether it is a marimo notebook (vs a plain helper module). A
         blank/whitespace-only file counts as a notebook — it opens as a fresh notebook,
         matching the open guards — EXCEPT a dunder package marker like ``__init__.py``
         (see :func:`notebook_template.opens_as_notebook`). ``title``: the notebook's own
         first-markdown-cell heading, harvested value-free (authored text, never a data
-        value; ``""`` for a module or a title-less notebook). The whole file is read (the
-        marimo marker can sit past a large header). Missing/unreadable → ``(False, "")``."""
+        value; ``""`` for a module or a title-less notebook). ``terms``: that notebook's
+        value-free catalog terms, so the hub's filter box can search CONTENT — the same
+        :mod:`mooring.ai.notebookindex` allowlist the copilot's catalog tools serve, so
+        the two can never drift apart. The whole file is read (the marimo marker can sit
+        past a large header). Missing/unreadable → ``(False, "", ())``."""
         path = workspace / rel
         try:
             mtime = path.stat().st_mtime_ns
         except OSError:
-            return (False, "")
+            return (False, "", ())
         key = str(path)
         cached = self._notebook_cache.get(key)
         if cached is not None and cached[0] == mtime:
-            return (cached[1], cached[2])
+            return (cached[1], cached[2], cached[3])
         try:
             source = path.read_bytes().decode("utf-8", "ignore")
         except OSError:
-            return (False, "")
+            return (False, "", ())
         is_notebook = notebook_template.opens_as_notebook(rel, source)
-        title = notebook_template.notebook_title(source) if is_notebook else ""
-        self._notebook_cache[key] = (mtime, is_notebook, title)
-        return (is_notebook, title)
+        title = ""
+        terms: tuple[str, ...] = ()
+        if is_notebook:
+            from mooring.ai import notebookindex
+
+            title = notebook_template.notebook_title(source)
+            # extract_notebook never raises: a half-written notebook reports a parse error
+            # and yields no terms, rather than blanking the whole file listing. The path
+            # is dropped from the row's copy — /api/state polls, and `matches` already
+            # searches `file.path`, so repeating it would be payload for nothing.
+            entry, report = notebookindex.extract_notebook(source, rel)
+            terms = () if report.error else tuple(t for t in entry.terms() if t != rel)
+        self._notebook_cache[key] = (mtime, is_notebook, title, terms)
+        return (is_notebook, title, terms)
 
     def _is_notebook(self, workspace: Path, rel: str) -> bool:
         return self._sniff_notebook(workspace, rel)[0]
@@ -832,13 +867,15 @@ class Hub:
         dictionary=None,
         semantic_models=None,
         helpers=None,
+        catalog=None,
     ):
         """Open a streaming Copilot chat session bound to this notebook.
 
         ``model``/``reasoning_effort`` override the configured defaults;
         ``dictionary`` (a parsed index) enables the value-free dictionary tools;
         ``semantic_models`` (pre-parsed, already-gated Power BI models from
-        build_context) enables the semantic-model tools.
+        build_context) enables the semantic-model tools; ``catalog`` (the parsed
+        repo-wide notebook index) enables the notebook-catalog tools.
         Raises AIError (-> 502) if Copilot isn't available/installed; a sign-in or
         handshake failure surfaces over the SSE stream instead (the session starts
         in the background — ``background=True`` — so the open response is immediate).
@@ -879,6 +916,7 @@ class Hub:
             dictionary=dictionary,
             semantic_models=semantic_models,
             helpers=helpers,
+            catalog=catalog,
             run_investigation=run_investigation,
             # The whole guard config travels as ONE object, so a field can't be
             # silently dropped on the way to the session (the session downloads any
@@ -904,11 +942,11 @@ class Hub:
         as the interactive chat, but built with NO propose/edit tool and NO
         ``mooring_investigate`` (so it can neither write nor recurse), and the PII guard
         forced to BLOCK mode because there is no human at a sub-agent to confirm. ``ctx`` is
-        the 6-tuple ``build_context`` returns; a branch's finding is trusted because this
+        the 7-tuple ``build_context`` returns; a branch's finding is trusted because this
         session is structurally value-blind, which the read_only tool subset guarantees."""
         from dataclasses import replace
 
-        system_context, index, _pii_banner, _live_text, models, code_index = ctx
+        system_context, index, _pii_banner, _live_text, models, code_index, catalog = ctx
         provider = self._provider_for()
         return provider.open_chat(
             system_context=system_context,
@@ -920,6 +958,7 @@ class Hub:
             dictionary=index,
             semantic_models=models,
             helpers=code_index,
+            catalog=catalog,
             read_only=True,
             pii=replace(self.app_cfg.ai.pii, block_prompt=True),
             traceback_guard=self.app_cfg.ai.traceback_guard,
@@ -1104,12 +1143,19 @@ def create_app(hub: Hub) -> Starlette:
             Route("/api/push", sync_routes.api_push, methods=["POST"]),
             Route("/api/propose", sync_routes.api_propose, methods=["POST"]),
             Route("/api/resolve", sync_routes.api_resolve, methods=["POST"]),
+            Route("/api/resolve/cells", sync_routes.api_resolve_cells, methods=["POST"]),
+            Route(
+                "/api/resolve/cells/apply",
+                sync_routes.api_resolve_cells_apply,
+                methods=["POST"],
+            ),
             Route("/api/recall", sync_routes.api_recall, methods=["POST"]),
             Route("/api/new", files.api_new, methods=["POST"]),
             Route("/api/duplicate", files.api_duplicate, methods=["POST"]),
             Route("/api/open", files.api_open, methods=["POST"]),
             Route("/api/reveal", files.api_reveal, methods=["POST"]),
             Route("/api/deliver", files.api_deliver, methods=["POST"]),
+            Route("/api/deliver/excel", files.api_deliver_excel, methods=["POST"]),
             Route("/api/verify", files.api_verify, methods=["POST"]),
             Route("/api/delete", files.api_delete, methods=["POST"]),
             Route("/api/rollback", files.api_rollback, methods=["POST"]),
