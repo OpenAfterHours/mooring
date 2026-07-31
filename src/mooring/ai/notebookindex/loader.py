@@ -36,16 +36,23 @@ def load_catalog(
     *,
     max_file_bytes: int = DEFAULT_MAX_FILE_BYTES,
     exclude: Iterable[str] = (),
+    exclude_fn=None,
     scan=None,
 ) -> Catalog:
     """Parse every marimo notebook under ``<workspace>/<folder>`` (and the loose repo
     root) into a :class:`Catalog`.
 
-    ``exclude`` holds workspace-relative POSIX paths to skip — the caller passes the
-    team's per-notebook AI opt-out here, so a notebook the team fenced off never enters
-    the catalog the copilot can search. ``scan`` overrides the scanner applied to the one
-    authored-prose slot (see :func:`mooring.ai.notebookindex.ast_walk.extract_notebook`).
-    Never raises: a bad file becomes a value-free error report and is dropped.
+    ``exclude`` holds workspace-relative POSIX paths to skip and ``exclude_fn`` is an
+    injected ``rel -> bool`` predicate; a notebook matching EITHER is left out. The
+    caller passes the team's per-notebook AI opt-out and the policy's ``ai_off`` globs
+    here (``mooring.policy.ai_gate``), so a notebook the team fenced off never enters
+    the catalog the copilot can search. The predicate is injected rather than imported
+    for the same reason ``sync``'s ``guard_fn`` is: this layer stays free of the policy
+    module. Both are unioned, so adding one can only ever exclude MORE.
+
+    ``scan`` overrides the scanner applied to the one authored-prose slot (see
+    :func:`mooring.ai.notebookindex.ast_walk.extract_notebook`). Never raises: a bad
+    file becomes a value-free error report and is dropped.
     """
     ws = Path(workspace)
     ws_resolved = ws.resolve()
@@ -84,12 +91,22 @@ def load_catalog(
 
     notebooks: list[Notebook] = []
     reports: list[ExtractReport] = []
+    skipped: list[str] = []
     for path in files:
         rel = _safe_rel(path, ws_resolved)
         if rel is None:
             reports.append(ExtractReport(path=str(path), error="PathEscape@0"))
             continue
-        if rel in excluded:
+        # Fail CLOSED on a predicate that blows up: an opt-out that cannot be
+        # evaluated must keep the notebook OUT, never wave it into the catalog.
+        blocked = rel in excluded
+        if not blocked and exclude_fn is not None:
+            try:
+                blocked = bool(exclude_fn(rel))
+            except Exception:  # noqa: BLE001
+                blocked = True
+        if blocked:
+            skipped.append(rel)
             continue
         notebook, report = _extract_file(path, rel, max_file_bytes, scan)
         if notebook is not None:
@@ -98,6 +115,7 @@ def load_catalog(
     return Catalog(
         notebooks=tuple(_with_helpers(nb, ws_resolved) for nb in notebooks),
         reports=tuple(reports),
+        excluded=tuple(sorted(skipped)),
     )
 
 

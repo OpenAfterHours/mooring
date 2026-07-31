@@ -12,7 +12,7 @@ from collections import Counter
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from mooring import auth, celldiff, manifest, pushguard, sync, telemetry, whatsnew
+from mooring import auth, celldiff, manifest, policy, pushguard, sync, telemetry, whatsnew
 from mooring import workspace_config
 from mooring.app import conflict_merge
 from mooring.app import notebooks as nb_ops
@@ -159,28 +159,43 @@ async def api_whatsnew_detail(request: Request) -> JSONResponse:
     return JSONResponse({"path": rel, **body})
 
 
-def _guarded_sync_op(hub, name: str, data: dict, run) -> JSONResponse:
-    """Run push/propose behind the push guard's warn-and-confirm flow.
+def _guarded_sync_op(hub, name: str, data: dict, run, *, direct: bool = True) -> JSONResponse:
+    """Run push/propose behind the push guard's warn-and-confirm flow, plus the
+    team policy's propose-only gate.
 
     Every outgoing candidate is scanned (mooring.pushguard) via sync's injected
     ``guard_fn``; flagged files are WITHHELD (clean ones still go), and the
     response upgrades to a 409 carrying value-free findings + per-file confirm
     tokens. "Push anyway" re-POSTs with those tokens: each token binds the exact
     findings to the exact bytes, so a changed file or a new finding is never
-    covered by an old confirm. In block mode ([guard] push = "block" in the
-    synced mooring.toml) tokens are refused — the pragma/fix is the only way.
+    covered by an old confirm. In block mode ([guard] push = "block", or the
+    policy's own floor) tokens are refused — the pragma/fix is the only way.
+
+    ``direct`` marks a write to the SHARED branch (push, and resolve's PUSH_COPY);
+    only then is the policy's propose-only gate composed in. Its blocks come back
+    as ``policy_blocked`` with NO token: a propose-only path has no override at
+    all, and the withhold happens at the same sync seam as the scanner's, so no
+    second code path can push those bytes without passing it.
     """
-    mode = workspace_config.guard_mode(hub.cfg.workspace())
+    workspace = hub.cfg.workspace()
+    pol = policy.load(workspace)
+    mode = pol.guard_mode(workspace_config.guard_mode(workspace))
     confirmed = frozenset(str(t) for t in (data.get("confirm_tokens") or []))
     if mode == "block":
         confirmed = frozenset()
     guard_fn, collected = pushguard.make_guard(confirmed)
-    body, status = hub._sync_op_body(name, lambda: run(guard_fn))
-    if status == 200 and collected:
-        telemetry.log_event("push_guard", findings=sum(
-            len(info["findings"]) for info in collected.values()
-        ))
-        body["needs_confirm"] = mode != "block"
+    gate_fn, blocked = policy.make_propose_gate(pol) if direct else (None, {})
+    combined = policy.compose_guards(guard_fn, gate_fn)
+    body, status = hub._sync_op_body(name, lambda: run(combined))
+    if status == 200 and (collected or blocked):
+        telemetry.log_event(
+            "push_guard",
+            findings=sum(len(info["findings"]) for info in collected.values()),
+            policy_blocked=len(blocked),
+        )
+        # Only scanner findings are acknowledgeable; a policy block never is, so a
+        # response carrying one must not offer "Push anyway" for it.
+        body["needs_confirm"] = bool(collected) and mode != "block"
         body["guard_mode"] = mode
         body["guard_findings"] = [
             {
@@ -189,6 +204,9 @@ def _guarded_sync_op(hub, name: str, data: dict, run) -> JSONResponse:
                 "findings": [{"line": f.line, "kind": f.kind} for f in info["findings"]],
             }
             for path, info in sorted(collected.items())
+        ]
+        body["policy_blocked"] = [
+            {"path": path, "reason": reason} for path, reason in sorted(blocked.items())
         ]
         status = 409
     return JSONResponse(body, status_code=status)
@@ -219,11 +237,14 @@ async def api_propose(request: Request) -> JSONResponse:
     hub = request.app.state.hub
     data = await request.json() if await request.body() else {}
     paths_arg = data.get("paths") or None
+    # direct=False: propose is exactly the road a propose-only policy points at,
+    # so that gate must never fire here (it would strand those files entirely).
     return _guarded_sync_op(
         hub, "propose", data,
         lambda guard_fn: sync.propose(
             hub.client(), hub.cfg, paths=paths_arg, message=_note(data), guard_fn=guard_fn
         ),
+        direct=False,
     )
 
 

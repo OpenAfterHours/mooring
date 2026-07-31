@@ -21,7 +21,7 @@ import contextlib
 import threading
 from pathlib import Path
 
-from mooring import checks, datasets, inputs, workbook, workspace_config
+from mooring import checks, datasets, inputs, policy, workbook, workspace_config
 from mooring.app import notebooks
 
 
@@ -87,7 +87,7 @@ class ChatService:
         open) because the notebook may be disabled mid-session from the hub or a
         teammate's sync."""
         target = self.target(sid)
-        if target and workspace_config.is_ai_disabled(Path(target[0]), target[1]):
+        if target and policy.ai_disabled(Path(target[0]), target[1]):
             self.close(sid)
             return True
         return False
@@ -312,9 +312,14 @@ class ChatService:
                     ),
                     backend=cat_backend,
                 )
-            ai_off = sorted(workspace_config.disabled_notebooks(workspace))
+            # The per-notebook opt-out AND the policy's ai_off globs (policy.ai_gate
+            # unions them), so a path an admin fenced off never enters the repo-wide
+            # catalog the copilot can search — the widest AI surface there is.
             catalog = notebookindex.load_catalog(
-                workspace, tuple(folders), exclude=ai_off, scan=title_scan
+                workspace,
+                tuple(folders),
+                exclude_fn=policy.ai_gate(workspace),
+                scan=title_scan,
             )
 
         context = egress.build_system_context(

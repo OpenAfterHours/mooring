@@ -36,14 +36,14 @@ class ApplyGuard:
         patch fails the just-taken snapshot is discarded, so a failed Apply never
         leaves a phantom Undo step.
         """
-        from mooring import notebook_undo, workspace_config
+        from mooring import notebook_undo, policy
         from mooring.ai import cellwrite
 
         with self.lock:
             # Final TOCTOU guard: a concurrent disable writes mooring.toml before it
             # tears sessions down, so an in-flight Apply re-reads it here, under the
             # same lock, and refuses to land on the now-protected notebook.
-            if workspace_config.is_ai_disabled(workspace, notebook_rel):
+            if policy.ai_disabled(workspace, notebook_rel):
                 raise PermissionError("notebook_disabled")
             token = notebook_undo.snapshot(workspace, notebook_rel, nb_path.read_bytes())
             try:

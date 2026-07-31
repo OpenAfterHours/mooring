@@ -109,6 +109,10 @@ class ExtractReport:
 class Catalog:
     notebooks: tuple[Notebook, ...] = ()
     reports: tuple[ExtractReport, ...] = ()
+    # Workspace-relative paths the caller's AI opt-out kept OUT of the catalog —
+    # recorded so `mooring ai catalog` can name them (a fenced-off notebook that
+    # vanishes with no explanation looks like a bug, not a policy).
+    excluded: tuple[str, ...] = ()
 
     def is_empty(self) -> bool:
         return not self.notebooks

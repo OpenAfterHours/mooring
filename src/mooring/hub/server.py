@@ -36,6 +36,7 @@ from mooring import (
     notebook_template,
     pbip,
     pbip_model,
+    policy,
     pyproject_env,
     shadow,
     sync,
@@ -83,7 +84,12 @@ _UNKNOWN_CHAT_SESSION = "Unknown chat session."
 
 class Hub:
     def __init__(self, app_cfg: config.AppConfig) -> None:
-        self.app_cfg = app_cfg
+        # The RAW per-machine config. Everything reads it through the app_cfg
+        # PROPERTY below, which folds the team policy over it on the way out.
+        self._app_cfg = app_cfg
+        # (workspace, stat-signature) -> Policy, so the property costs one stat()
+        # rather than a TOML parse (the _model_summary_cache idiom).
+        self._policy_cache: tuple[tuple, policy.Policy] | None = None
         # One editor per workspace, created lazily: switching repos must not
         # kill marimo tabs open against the previous workspace.
         self.editors: dict[str, EditorServer] = {}
@@ -142,6 +148,48 @@ class Hub:
         self._whatsnew_detail: dict[tuple[str, str, str], dict] = {}
 
     # -- helpers -------------------------------------------------------------
+
+    @property
+    def app_cfg(self) -> config.AppConfig:
+        """The per-machine config with the repo's admin policy folded over it.
+
+        A PROPERTY, not an attribute set at three well-chosen moments: a policy
+        arrives by PULL, mid-session, and every "fold it at each assignment"
+        scheme missed that — the pull route touches none of them, so every
+        ``[policy.settings]`` knob kept its permissive value for the rest of the
+        session while the Settings page rendered the row as locked. Folding on
+        READ makes the seam impossible to bypass; it mirrors ``cfg`` below, which
+        already re-reads the synced file on every access for the same reason.
+        Tighten-only, so with no ``[policy]`` block this returns the raw config
+        unchanged (``policy.tighten`` short-circuits on an empty rule set).
+        """
+        return policy.tighten(self._app_cfg, self.team_policy())
+
+    @app_cfg.setter
+    def app_cfg(self, value: config.AppConfig) -> None:
+        self._app_cfg = value
+
+    def team_policy(self) -> policy.Policy:
+        """The active repo's policy, re-read whenever the synced file changes.
+
+        Cached on a stat signature (mtime_ns + size + path) so the hot read path
+        pays one ``stat()``; a pull that rewrites ``mooring.toml`` changes the
+        signature and the next read re-parses. The single source the Settings
+        page, the sync routes and the ``app_cfg`` fold all ask.
+        """
+        workspace = self._app_cfg.config_for(None).workspace()
+        path = workspace_config.config_path(workspace)
+        try:
+            st = path.stat()
+            sig = (str(path), st.st_mtime_ns, st.st_size)
+        except OSError:
+            sig = (str(path), None, None)
+        cached = self._policy_cache
+        if cached is not None and cached[0] == sig:
+            return cached[1]
+        pol = policy.load(workspace)
+        self._policy_cache = (sig, pol)
+        return pol
 
     @property
     def cfg(self) -> config.Config:
@@ -322,8 +370,10 @@ class Hub:
         cfg = self.cfg
         artifacts, _ = pbip.group(report.files)
         artifact_of = {m.path: a.key for a in artifacts for m in a.members}
-        # Notebooks the team has turned the copilot off for (synced mooring.toml).
-        ai_off = workspace_config.disabled_notebooks(workspace)
+        # Is the copilot off for this path? The per-notebook opt-out list UNIONED
+        # with the policy's [policy] ai_off globs (mooring.policy.ai_gate) — one
+        # read of the shared file, then a cheap predicate per row.
+        ai_off = policy.ai_gate(workspace)
         # Value-free tie-out check results per notebook (.mooring/checks/*.json),
         # written by mooring_checks calls in the kernel — surfaced as a green/red
         # row badge. Counts + names only; local-only, never synced, never seen by AI.
@@ -384,7 +434,7 @@ class Hub:
                 "state": f.state.value,
                 "has_local": _has_local(f),
                 **({"artifact": artifact_of[f.path]} if f.path in artifact_of else {}),
-                **({"ai_disabled": True} if f.path.endswith(".py") and f.path in ai_off else {}),
+                **({"ai_disabled": True} if f.path.endswith(".py") and ai_off(f.path) else {}),
                 **({"shadows": shadowed[f.path]} if f.path in shadowed else {}),
                 **({"checks": check_results[f.path]} if f.path in check_results else {}),
                 **({"verified": verify_results[f.path]} if f.path in verify_results else {}),
@@ -587,6 +637,10 @@ class Hub:
         labels = spec.enum_labels or spec.enum_values
         return [{"value": v, "label": label} for v, label in zip(spec.enum_values, labels)]
 
+    def _policy_lock(self, key: str) -> bool | None:
+        """The value the team's policy pins ``key`` to, or ``None`` when free."""
+        return self.team_policy().locked_value(key)
+
     def _needs_confirm(self, spec, value) -> bool:
         """Whether writing ``value`` is a privacy-weakening flip that needs an explicit
         confirm. Wraps the registry rule with one runtime refinement: the warn-only
@@ -606,11 +660,17 @@ class Hub:
         import os
 
         cfg = self.app_cfg
+        pol = self.team_policy()
         editable = []
         for spec in settings_schema.EDITABLE:
             value = getattr(cfg, spec.accessor)
             if isinstance(value, tuple):
                 value = list(value)
+            # HONESTY: a policy-locked row says so, and says where the lock came
+            # from. The value shown is already the tightened one (app_cfg is folded
+            # at every assignment), so the page can never display a setting the app
+            # is not actually running with.
+            locked = pol.locked_value(spec.key)
             editable.append(
                 {
                     "key": spec.key,
@@ -629,6 +689,10 @@ class Hub:
                     "env_overridden": bool(
                         spec.env_var and os.environ.get(spec.env_var) is not None
                     ),
+                    "locked": locked is not None,
+                    "locked_note": (
+                        settings_schema.POLICY_LOCK_NOTE if locked is not None else ""
+                    ),
                 }
             )
         return {
@@ -636,7 +700,24 @@ class Hub:
             "editable": editable,
             "admin": self._admin_rows(),
             "pii": self._pii_status(),
+            "policy": self._policy_rows(pol),
             "ai_enabled": cfg.ai_enabled,
+        }
+
+    def _policy_rows(self, pol: policy.Policy) -> dict:
+        """The value-free "what your team enforces" block for the Settings page:
+        counts, rule names, and the ignored-rule warning — never a data value."""
+        from mooring import __version__
+
+        return {
+            "in_force": pol.in_force,
+            "unreadable": pol.unreadable,
+            "lines": policy.describe(
+                pol,
+                current_version=__version__,
+                local_guard=workspace_config.guard_mode(self.cfg.workspace()),
+            ),
+            "locked_keys": sorted(pol.settings),
         }
 
     def _admin_rows(self) -> list[dict]:
@@ -658,7 +739,30 @@ class Hub:
             {"label": "PII name model variant", "value": cfg.ai_pii_name_variant or "default"},
             {"label": "Synced folders", "value": ", ".join(cfg.folders) or "—"},
             {"label": "Sync excludes", "value": ", ".join(cfg.exclude) or "—"},
+            {"label": "Team policy", "value": self._policy_admin_value()},
         ]
+
+    def _policy_admin_value(self) -> str:
+        """A one-line, value-free summary of the synced team policy for the admin block."""
+        pol = self.team_policy()
+        if pol.unreadable:
+            return "unreadable mooring.toml — no policy in force"
+        if not pol.in_force:
+            return "none"
+        parts = []
+        if pol.min_version:
+            parts.append(f"min version {pol.min_version}")
+        if pol.push_guard:
+            parts.append(f"push guard {pol.push_guard}")
+        if pol.propose_only:
+            parts.append(f"{len(pol.propose_only.globs)} propose-only")
+        if pol.ai_off:
+            parts.append(f"{len(pol.ai_off.globs)} AI-off")
+        if pol.settings:
+            parts.append(f"{len(pol.settings)} locked setting(s)")
+        if pol.ignored:
+            parts.append(f"{len(pol.ignored)} rule(s) ignored")
+        return ", ".join(parts)
 
 
     def _apply_setting_change(self) -> None:
@@ -1046,7 +1150,7 @@ class Hub:
             open_session=lambda ctx, nb, model, effort, dic: self._make_batch_session(
                 ctx, nb, model=model, reasoning_effort=(effort or None), dictionary=dic
             ),
-            is_disabled=lambda nb: workspace_config.is_ai_disabled(workspace, nb),
+            is_disabled=policy.ai_gate(workspace),
             discard_notebook=lambda nb: batch_service.discard_batch_notebook(workspace, nb),
             # emit_job is the broadcaster's PUBLIC progress channel: it touches the
             # activity clock (so a building run is never idle-reaped) and fans out.

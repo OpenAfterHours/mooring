@@ -172,25 +172,33 @@ async function action(path, body, refreshAfter = true, status = "") {
 function showGuardDialog(data, apiPath, body) {
   const dialog = $("guard-dialog");
   const findings = data.guard_findings || [];
-  const files = findings.length;
-  $("guard-message").textContent =
-    `${files} file(s) were NOT ${apiPath.includes("propose") ? "proposed" : "pushed"} — ` +
-    "they contain something that looks sensitive:";
+  const policyRows = GuardFmt.policyRows(data);
+  const files = findings.length + policyRows.length;
+  const verb = apiPath.includes("propose") ? "proposed" : "pushed";
+  $("guard-message").textContent = findings.length
+    ? `${files} file(s) were NOT ${verb} — they contain something that looks sensitive:`
+    : `${files} file(s) were NOT ${verb} — your team's policy doesn't allow a direct push:`;
   const list = $("guard-findings");
   list.innerHTML = "";
-  for (const row of GuardFmt.rows(findings)) {
+  for (const row of GuardFmt.rows(findings).concat(policyRows)) {
     const li = document.createElement("li");
     li.textContent = row;
     list.appendChild(li);
   }
   const override = GuardFmt.canOverride(data);
-  $("guard-hint").textContent = override
+  const policyNote = policyRows.length
+    ? " Files listed as propose-only can’t be pushed directly at all — send them " +
+      "for review with Propose."
+    : "";
+  $("guard-hint").textContent = (override
     ? "Remove the flagged content, or add a “mooring: push-ok” comment on a " +
       "reviewed false-positive line. Pushing anyway publishes it to everyone " +
       "with access to the repo."
-    : "Your team's policy blocks pushing flagged files ([guard] push = \"block\"). " +
+    : findings.length
+    ? "Your team's policy blocks pushing flagged files ([guard] push = \"block\"). " +
       "Remove the flagged content, or add a “mooring: push-ok” comment on a " +
-      "reviewed false-positive line, then push again.";
+      "reviewed false-positive line, then push again."
+    : "Your team's policy allows these paths to change only through review.") + policyNote;
   const anyway = $("guard-anyway");
   anyway.classList.toggle("hidden", !override);
   anyway.onclick = () => {

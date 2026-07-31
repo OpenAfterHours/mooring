@@ -85,7 +85,10 @@ function makeControl(spec) {
     el.value = spec.value == null ? "" : spec.value;
   }
   el.id = `ctrl:${spec.key}`;
-  if (spec.env_overridden) el.disabled = true;
+  // A policy-locked control is disabled as well as annotated: the server refuses
+  // the write with a 409 either way, but a click that appears to work and then
+  // snaps back is exactly the "silently ignored" experience the lock must avoid.
+  if (spec.env_overridden || spec.locked) el.disabled = true;
   el.addEventListener("change", () => save(spec, el));
   if (spec.control === "toggle") {
     // Wrap the checkbox as a sliding on/off switch (the input keeps its id, so the
@@ -101,6 +104,8 @@ function makeControl(spec) {
 }
 
 function badge(spec) {
+  // The lock wins the badge slot: "who decided this" outranks "how risky is it".
+  if (spec.locked) return { cls: "warn", text: "Set by your team" };
   if (spec.sensitivity === "weakens") return { cls: "danger", text: "Weakens privacy" };
   if (spec.sensitivity === "needs_care") return { cls: "warn", text: "Heads up" };
   return null;
@@ -135,6 +140,13 @@ function renderRow(spec) {
     note.textContent = "Couldn’t load models — " + modelsError;
     left.appendChild(note);
   }
+  if (spec.locked) {
+    // Honesty: say WHERE the lock came from, not just that the control is dead.
+    const note = document.createElement("div");
+    note.className = "settings-help env-note";
+    note.textContent = spec.locked_note;
+    left.appendChild(note);
+  }
   if (spec.env_overridden) {
     const note = document.createElement("div");
     note.className = "settings-help muted env-note";
@@ -148,8 +160,8 @@ function renderRow(spec) {
   const reset = document.createElement("button");
   reset.className = "small ghost";
   reset.textContent = "Reset";
-  reset.title = "Reset to the default";
-  reset.disabled = spec.env_overridden;
+  reset.title = spec.locked ? "Set by your team's policy" : "Reset to the default";
+  reset.disabled = spec.env_overridden || spec.locked;
   reset.addEventListener("click", () => resetKey(spec));
   right.appendChild(reset);
 
@@ -191,6 +203,33 @@ function render(payload) {
       card.appendChild(line);
     }
     for (const spec of specs) card.appendChild(renderRow(spec));
+    root.appendChild(card);
+  }
+
+  // What the TEAM enforces, above the per-machine admin block: the synced
+  // [policy] rules this client actually applies (and any it had to ignore).
+  const pol = payload.policy;
+  if (pol && (pol.in_force || pol.unreadable)) {
+    const card = document.createElement("section");
+    card.className = "card admin-card";
+    const h = document.createElement("h2");
+    h.textContent = "Set by your team (policy)";
+    card.appendChild(h);
+    const p = document.createElement("p");
+    p.className = "muted";
+    p.textContent =
+      "From the [policy] block in this repo's synced mooring.toml. Policy can only make " +
+      "things stricter than your own settings, never weaker. Change it with `mooring policy` " +
+      "and push, or ask whoever maintains the repo.";
+    card.appendChild(p);
+    const ul = document.createElement("ul");
+    ul.className = "settings-help";
+    for (const line of pol.lines || []) {
+      const li = document.createElement("li");
+      li.textContent = line.trim();
+      ul.appendChild(li);
+    }
+    card.appendChild(ul);
     root.appendChild(card);
   }
 
@@ -252,6 +291,12 @@ async function save(spec, el) {
     return;
   }
   let res = await api("/api/settings", { key: spec.key, value });
+  // A policy lock has no confirm path — restore the server's truth and explain.
+  if (res.status === 409 && res.data.locked) {
+    await reload();
+    showError(res.data.message || res.data.error || "Your team's policy sets this.");
+    return;
+  }
   if (res.status === 409 && res.data.needs_confirm) {
     if (window.confirm(res.data.message || "Are you sure?")) {
       res = await api("/api/settings", { key: spec.key, value, confirm: true });
@@ -269,6 +314,11 @@ async function save(spec, el) {
 
 async function resetKey(spec) {
   let res = await api("/api/settings/reset", { key: spec.key });
+  if (res.status === 409 && res.data.locked) {
+    await reload();
+    showError(res.data.message || res.data.error || "Your team's policy sets this.");
+    return;
+  }
   if (res.status === 409 && res.data.needs_confirm) {
     if (!window.confirm(res.data.message || "Are you sure?")) return; // nothing changed
     res = await api("/api/settings/reset", { key: spec.key, confirm: true });
