@@ -23,7 +23,7 @@ from pathlib import Path
 
 import pytest
 
-from mooring import config, pushguard, sweep, sync, verify
+from mooring import config, gitsha, pushguard, sweep, sync, verify
 from mooring.app import notebook_run, refresh, sweep_run
 from mooring.config import Config
 
@@ -139,6 +139,25 @@ def test_a_notebook_that_could_not_run_is_its_own_outcome(monkeypatch, tmp_path)
     assert "notebooks/a.py" not in verify.read_results(ws)
 
 
+def test_a_blocked_reason_carries_the_exception_TYPE_not_its_path(monkeypatch, tmp_path):
+    # notebook_run's OSError message interpolates str(exc), which on Windows carries an
+    # absolute path. That was fine while it only reached a console; the sweep PERSISTS its
+    # reasons to .mooring/sweep.json, so the exception contributes its type only.
+    cfg, ws = _mk(tmp_path, "notebooks/a.py")
+
+    def _boom(cmd, cwd, env, timeout):
+        raise PermissionError(r"[Errno 13] Permission denied: 'C:\Users\alice\secret\x.py'")
+
+    monkeypatch.setattr(notebook_run, "_exec", _boom)
+    report = sweep_run.sweep_workspace(cfg)
+
+    reason = report.items[0].reason
+    assert report.blocked == 1
+    assert "PermissionError" in reason
+    assert "alice" not in reason and "C:" not in reason
+    assert "alice" not in sweep.sweep_path(ws).read_text("utf-8")
+
+
 def test_stderr_never_reaches_the_report(monkeypatch, tmp_path):
     # marimo's stderr can quote a data value; only the marker COUNT is value-free.
     cfg, ws = _mk(tmp_path, "notebooks/a.py")
@@ -208,6 +227,49 @@ def test_the_aggregate_claim_cannot_outlive_an_edit_it_covered(monkeypatch, tmp_
     assert "1 edited since" in sweep.headline(stale)
 
 
+def test_an_item_is_keyed_to_the_bytes_that_RAN_not_to_a_post_run_re_hash(
+    monkeypatch, tmp_path
+):
+    # THE reason app/verify_run.VerifyResult carries `sha` at all: hashing after the run
+    # would key a "ran clean" claim to the edited-and-maybe-broken bytes — the exact
+    # false-green the SHA-before-run rule exists to prevent. Re-hashing here would make
+    # this notebook look covered by a run that never executed it.
+    cfg, ws = _mk(tmp_path, "notebooks/a.py")
+    before = gitsha.local_blob_sha(ws / "notebooks/a.py", "notebooks/a.py")
+
+    def _edit_midrun():
+        (ws / "notebooks/a.py").write_text(NOTEBOOK + "\n# edited mid-run\n", encoding="utf-8")
+
+    monkeypatch.setattr(notebook_run, "_exec", _fake_exec(during=_edit_midrun))
+    report = sweep_run.sweep_workspace(cfg)
+
+    assert report.items[0].sha == before  # the PRE-run bytes, not the file on disk
+    # ...so the aggregate disowns it on read, exactly as the badge clears.
+    assert sweep.read(ws).stale == ("notebooks/a.py",)
+    assert sweep.read(ws).clean == 0
+    assert verify.read_results(ws) == {}
+
+
+def test_the_report_records_the_lock_the_runs_ACTUALLY_ran_under(monkeypatch, tmp_path):
+    # Fingerprinting after the runs would let a `deps` command landing mid-sweep stamp the
+    # NEW lock onto results produced under the old one — a green report for an environment
+    # nothing was executed against.
+    cfg, ws = _mk(tmp_path, "notebooks/a.py")
+    old = sweep.lock_fingerprint(ws)
+    new_lock = LOCK + '\n[[package]]\nname = "pyarrow"\n'
+
+    def _deps_add_midrun():
+        (ws / "uv.lock").write_bytes(new_lock.encode())
+
+    monkeypatch.setattr(notebook_run, "_exec", _fake_exec(during=_deps_add_midrun))
+    report = sweep_run.sweep_workspace(cfg)
+
+    assert report.lock == old
+    # ...and the gate refuses to let it vouch for the lock that is actually being pushed.
+    guard_fn, _ = _guard(ws)
+    assert "different uv.lock" in guard_fn("uv.lock", new_lock.encode())[0]
+
+
 def test_a_deleted_notebook_drops_out_of_the_claim(monkeypatch, tmp_path):
     cfg, ws = _mk(tmp_path, "notebooks/a.py", "notebooks/b.py")
     monkeypatch.setattr(notebook_run, "_exec", _fake_exec())
@@ -252,7 +314,7 @@ def test_cancel_actually_stops_the_sweep(monkeypatch, tmp_path):
 
 def test_resume_skips_what_is_still_verified(monkeypatch, tmp_path):
     # The "resumable-ish" half: finishing a cancelled sweep must not re-run what already
-    # passed AT ITS CURRENT BYTES (read_results only returns SHA-valid receipts).
+    # passed AT ITS CURRENT BYTES, under THESE dependencies.
     cfg, ws = _mk(tmp_path, "notebooks/a.py", "notebooks/b.py")
     calls: list[str] = []
     monkeypatch.setattr(notebook_run, "_exec", _fake_exec(calls=calls))
@@ -263,6 +325,72 @@ def test_resume_skips_what_is_still_verified(monkeypatch, tmp_path):
 
     assert calls == [_slug("notebooks/b.py")]
     assert report.clean == 2
+
+
+# -- resume can never manufacture a green report -----------------------------
+
+
+def test_resume_across_a_lock_change_runs_everything(monkeypatch, tmp_path):
+    # THE false green this gate exists to prevent, and it was reachable in one documented
+    # command: a verify receipt is keyed to the NOTEBOOK's bytes and knows nothing about
+    # uv.lock, so resuming on receipts would stamp the NEW lock fingerprint onto an OLD
+    # sweep having executed nothing at all — a green report and a disarmed push gate.
+    cfg, ws = _mk(tmp_path, "notebooks/a.py", "notebooks/b.py", "notebooks/c.py")
+    monkeypatch.setattr(notebook_run, "_exec", _fake_exec())
+    sweep_run.sweep_workspace(cfg)  # all clean under the OLD lock
+
+    new_lock = LOCK + '\n[[package]]\nname = "pyarrow"\n'
+    (ws / "uv.lock").write_bytes(new_lock.encode())
+    # Everything now fails under the new lock.
+    calls: list[str] = []
+    monkeypatch.setattr(notebook_run, "_exec", _fake_exec(default=(1, "MarimoExc\n"), calls=calls))
+
+    report = sweep_run.sweep_workspace(cfg, skip_verified=True)
+
+    assert len(calls) == 3, "a resume across a lock change must re-run everything"
+    assert report.clean == 0 and report.failed == 3
+    guard_fn, _ = _guard(ws)
+    assert "breaks 3 notebooks" in guard_fn("uv.lock", new_lock.encode())[0]
+
+
+def test_resume_scope_says_why_it_cannot_resume(monkeypatch, tmp_path):
+    cfg, ws = _mk(tmp_path, "notebooks/a.py")
+    assert sweep_run.resume_scope(cfg) == (frozenset(), "there is no previous check to resume")
+
+    monkeypatch.setattr(notebook_run, "_exec", _fake_exec())
+    sweep_run.sweep_workspace(cfg)
+    assert sweep_run.resume_scope(cfg) == (frozenset({"notebooks/a.py"}), "")
+
+    (ws / "uv.lock").write_bytes((LOCK + "# moved\n").encode())
+    scope, why = sweep_run.resume_scope(cfg)
+    assert scope == frozenset() and "different dependencies" in why
+
+
+def test_resume_re_runs_a_notebook_edited_since_the_last_sweep(monkeypatch, tmp_path):
+    cfg, ws = _mk(tmp_path, "notebooks/a.py", "notebooks/b.py")
+    monkeypatch.setattr(notebook_run, "_exec", _fake_exec())
+    sweep_run.sweep_workspace(cfg)
+    (ws / "notebooks/a.py").write_text(NOTEBOOK + "\n# edited\n", encoding="utf-8")
+
+    calls: list[str] = []
+    monkeypatch.setattr(notebook_run, "_exec", _fake_exec(calls=calls))
+    sweep_run.sweep_workspace(cfg, skip_verified=True)
+
+    assert calls == [_slug("notebooks/a.py")]
+
+
+def test_the_cli_says_when_a_resume_cannot_be_honoured(monkeypatch, tmp_path, capsys):
+    from mooring import cli
+
+    cfg, ws = _mk(tmp_path, "notebooks/a.py")
+    monkeypatch.setattr(notebook_run, "_exec", _fake_exec())
+    sweep_run.sweep_workspace(cfg)
+    (ws / "uv.lock").write_bytes((LOCK + "# moved\n").encode())
+
+    cli.cmd_verify(cfg, _verify_args(resume=True))
+    out = capsys.readouterr().out
+
+    assert "Nothing to resume" in out and "different dependencies" in out
 
 
 # -- serialization with the scheduled refresh --------------------------------
@@ -300,8 +428,8 @@ def test_the_report_is_structurally_unsyncable(tmp_path):
 # -- the dependency gate -----------------------------------------------------
 
 
-def _guard(ws, tokens=frozenset()):
-    return pushguard.make_lock_guard(ws, tokens)
+def _guard(ws, tokens=frozenset(), notebooks_fn=None):
+    return pushguard.make_lock_guard(ws, tokens, notebooks_fn=notebooks_fn)
 
 
 def test_the_gate_only_looks_at_the_lock(tmp_path):
@@ -386,6 +514,97 @@ def test_a_new_failure_invalidates_a_stale_confirm(monkeypatch, tmp_path):
 
     assert findings and "breaks 2 notebooks" in findings[0]
     assert collected["uv.lock"]["token"] != stale_token
+
+
+def test_a_swapped_failure_invalidates_a_confirm_even_though_the_count_holds(
+    monkeypatch, tmp_path
+):
+    # The sharper version of the token rule: the finding COLLAPSES to a count, so one
+    # notebook being fixed while another breaks reads identically. Binding the confirm to
+    # the wording would let a stale acknowledgement cover a result nobody has read; it is
+    # bound to a per-item digest of the report instead.
+    cfg, ws = _mk(tmp_path, "notebooks/a.py", "notebooks/b.py")
+    monkeypatch.setattr(
+        notebook_run, "_exec", _fake_exec({_slug("notebooks/a.py"): (1, "MarimoExc\n")})
+    )
+    sweep_run.sweep_workspace(cfg)
+    guard_fn, collected = _guard(ws)
+    first = guard_fn("uv.lock", LOCK.encode())
+    stale_token = collected["uv.lock"]["token"]
+
+    # a is fixed, b breaks: the SAME sentence, a different world.
+    monkeypatch.setattr(
+        notebook_run, "_exec", _fake_exec({_slug("notebooks/b.py"): (1, "MarimoExc\n")})
+    )
+    sweep_run.sweep_workspace(cfg)
+
+    guard_fn, collected = _guard(ws, frozenset({stale_token}))
+    second = guard_fn("uv.lock", LOCK.encode())
+
+    assert second == first, "the wording is identical — that is the point"
+    assert second, "...but the stale confirm must NOT cover it"
+    assert collected["uv.lock"]["token"] != stale_token
+
+
+def test_shrinking_coverage_invalidates_a_confirm_the_count_would_hide(monkeypatch, tmp_path):
+    # `broken` masks `stale`: acknowledge while nothing is stale, then edit two notebooks,
+    # and the breakage count is unchanged while the sweep now covers less.
+    cfg, ws = _mk(tmp_path, "notebooks/a.py", "notebooks/b.py", "notebooks/c.py")
+    monkeypatch.setattr(
+        notebook_run, "_exec", _fake_exec({_slug("notebooks/a.py"): (1, "MarimoExc\n")})
+    )
+    sweep_run.sweep_workspace(cfg)
+    guard_fn, collected = _guard(ws)
+    guard_fn("uv.lock", LOCK.encode())
+    token = collected["uv.lock"]["token"]
+
+    (ws / "notebooks/b.py").write_text(NOTEBOOK + "\n# edited\n", encoding="utf-8")
+    (ws / "notebooks/c.py").write_text(NOTEBOOK + "\n# edited\n", encoding="utf-8")
+
+    guard_fn, collected = _guard(ws, frozenset({token}))
+    assert guard_fn("uv.lock", LOCK.encode()), "coverage shrank — the old confirm must lapse"
+
+
+def test_a_notebook_added_since_the_sweep_reopens_the_gate(monkeypatch, tmp_path):
+    # The gate's SILENCE reads as "everything was checked", so it must know what "everything"
+    # is now — not just what the sweep happened to cover.
+    cfg, ws = _mk(tmp_path, "notebooks/a.py")
+    monkeypatch.setattr(notebook_run, "_exec", _fake_exec())
+    sweep_run.sweep_workspace(cfg)
+    guard_fn, _ = _guard(ws, notebooks_fn=lambda: sweep_run.plan(cfg))
+    assert guard_fn("uv.lock", LOCK.encode()) == []  # covered
+
+    (ws / "notebooks" / "new.py").write_text(NOTEBOOK, encoding="utf-8")
+
+    guard_fn, _ = _guard(ws, notebooks_fn=lambda: sweep_run.plan(cfg))
+    findings = guard_fn("uv.lock", LOCK.encode())
+    assert findings and "added since the sweep" in findings[0]
+
+
+def test_the_gate_never_walks_the_workspace_for_an_ordinary_file(tmp_path):
+    cfg, ws = _mk(tmp_path, "notebooks/a.py")
+    walked = []
+
+    def _boom():
+        walked.append(True)
+        return []
+
+    guard_fn, _ = _guard(ws, notebooks_fn=_boom)
+    assert guard_fn("notebooks/a.py", NOTEBOOK.encode()) == []
+    assert walked == [], "enumerating is only worth it when a uv.lock is actually going"
+
+
+def test_an_absent_lock_is_not_an_empty_lock(tmp_path):
+    # "" is the sentinel for "there is no lock file". Collapsing an EMPTY lock onto it
+    # would make a no-lock sweep silently vouch for a zero-byte lock being pushed.
+    assert sweep.fingerprint(None) == sweep.NO_LOCK
+    assert sweep.fingerprint(b"") != sweep.NO_LOCK
+
+    cfg, ws = _mk(tmp_path, "notebooks/a.py", lock=None)
+    assert sweep.lock_fingerprint(ws) == sweep.NO_LOCK
+    sweep.record(ws, sweep.SweepReport(items=(), lock=sweep.NO_LOCK))
+    guard_fn, _ = _guard(ws)
+    assert guard_fn("uv.lock", b""), "a lock appearing out of nowhere is still a change"
 
 
 def test_changed_lock_bytes_invalidate_a_confirm_too(monkeypatch, tmp_path):
@@ -482,6 +701,46 @@ def test_cli_verify_clear_forgets_the_aggregate_too(monkeypatch, tmp_path):
     assert sweep.read(ws) is None
 
 
+def test_clearing_ONE_badge_takes_it_out_of_the_aggregate_too(monkeypatch, tmp_path):
+    # Asymmetric otherwise: the badge goes, but "2 ran clean" keeps standing over a
+    # receipt the user just asked mooring to forget.
+    from mooring import cli
+
+    cfg, ws = _mk(tmp_path, "notebooks/a.py", "notebooks/b.py")
+    monkeypatch.setattr(notebook_run, "_exec", _fake_exec())
+    sweep_run.sweep_workspace(cfg)
+    assert sweep.read(ws).clean == 2
+
+    cli.cmd_verify(
+        cfg, argparse.Namespace(path=None, clear="notebooks/b.py", all_notebooks=False)
+    )
+
+    after = sweep.read(ws)
+    assert after.clean == 1 and after.total == 1
+    assert [i.notebook for i in after.items] == ["notebooks/a.py"]
+
+
+def test_the_cost_line_prices_itself_from_the_last_check(monkeypatch, tmp_path):
+    # "It can take a while" is not a number, and the worst case (RUN_TIMEOUT per notebook)
+    # is over an hour. Once one sweep has been timed, say roughly how long.
+    cfg, ws = _mk(tmp_path, "notebooks/a.py", "notebooks/b.py")
+    assert "can take a while" in sweep_run.describe_cost(cfg, 2)
+
+    sweep.record(
+        ws,
+        sweep.SweepReport(
+            items=(
+                sweep.SweepItem("notebooks/a.py", sweep.CLEAN, sha="x", seconds=90),
+                sweep.SweepItem("notebooks/b.py", sweep.CLEAN, sha="y", seconds=90),
+            ),
+            lock=sweep.lock_fingerprint(ws),
+        ),
+    )
+
+    assert sweep_run.estimate_minutes(cfg, 8) == 12
+    assert "roughly 12 min" in sweep_run.describe_cost(cfg, 8)
+
+
 def test_deps_offers_the_sweep_only_when_the_lock_actually_moved(monkeypatch, tmp_path, capsys):
     from mooring import cli, pyproject_env
 
@@ -526,15 +785,16 @@ def test_cli_push_warns_about_an_unchecked_lock_and_acknowledging_shows_it(
     from mooring import cli
 
     cfg, ws = _mk(tmp_path, "notebooks/a.py")
-    guard_fn, collected, lock_collected, mode, acknowledged = cli._push_guard_fn(cfg, False)
+    guard_fn, collected, lock_collected, *_ = cli._push_guard_fn(cfg, False)
     assert guard_fn("uv.lock", LOCK.encode())
     assert set(lock_collected) == {"uv.lock"} and collected == {}
 
     # --acknowledge-findings does NOT turn the gate off: it lets the push through and
-    # SHOWS what was let through.
-    guard_fn, collected, lock_collected, mode, acknowledged = cli._push_guard_fn(cfg, True)
+    # SHOWS what was let through — in the DEPS ledger, not the content one, so it can
+    # never print in the content guard's "now visible to everyone" vocabulary.
+    guard_fn, collected, lock_collected, mode, ack, lock_ack = cli._push_guard_fn(cfg, True)
     assert guard_fn("uv.lock", LOCK.encode()) == []
-    assert set(acknowledged) == {"uv.lock"}
+    assert set(lock_ack) == {"uv.lock"} and ack == {}
 
 
 def test_block_mode_never_walls_off_a_dependency_warning(tmp_path, monkeypatch):
@@ -545,11 +805,11 @@ def test_block_mode_never_walls_off_a_dependency_warning(tmp_path, monkeypatch):
     cfg, ws = _mk(tmp_path, "notebooks/a.py")
     monkeypatch.setattr(workspace_config, "guard_mode", lambda ws_: "block")
 
-    guard_fn, collected, lock_collected, mode, acknowledged = cli._push_guard_fn(cfg, True)
+    guard_fn, collected, lock_collected, mode, ack, lock_ack = cli._push_guard_fn(cfg, True)
 
     assert mode == "block"
     assert guard_fn("uv.lock", LOCK.encode()) == []  # the deps gate stays acknowledgeable
-    assert set(acknowledged) == {"uv.lock"}
+    assert set(lock_ack) == {"uv.lock"}
 
 
 # -- the hub surface ---------------------------------------------------------
@@ -574,7 +834,8 @@ def test_hub_sweep_reports_its_cost_then_runs_it(monkeypatch, tmp_path):
     hub = _hub(tmp_path, monkeypatch)
     monkeypatch.setattr(notebook_run, "_exec", _fake_exec())
     with TestClient(create_app(hub)) as client:
-        assert client.get("/api/sweep/plan").json() == {"total": 2}
+        plan = client.get("/api/sweep/plan").json()
+        assert plan["total"] == 2 and "2 notebooks" in plan["cost"]
         assert client.post("/api/sweep", json={}).json()["running"] is True
         assert hub.sweep.wait(30) is True
         state = client.get("/api/sweep").json()

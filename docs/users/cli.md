@@ -188,9 +188,12 @@ branch, so the changes can be reviewed as a pull request (see
   it is about to run before it starts (`-y` skips the prompt), prints a line per
   notebook, and exits non-zero if anything is not runnable. A failing notebook never
   stops the sweep, and each one records the same badge a single `verify` does.
-  `--resume` skips notebooks whose badge is still valid, so a sweep you stopped halfway
-  is cheap to finish. `verify --clear` (no path) forgets the summary along with the
-  badges. See [Checking that everything still runs](daily-workflow.md#checking-that-everything-still-runs).
+  `--resume` finishes a sweep you stopped halfway: it skips only what the **last sweep**
+  ran clean, and only while the lock file and those notebooks are unchanged — otherwise it
+  says so and runs everything, so a resume can never inherit an answer from a different
+  environment. `verify --clear [PATH]` drops the badge *and* that notebook's contribution
+  to the summary. See
+  [Checking that everything still runs](daily-workflow.md#checking-that-everything-still-runs).
 - `checks` — list the tie-out / data-quality check results recorded per notebook
   by `import mooring_checks` calls (value-free: names and pass/fail counts only).
   See [Checking your numbers tie out](daily-workflow.md#checking-your-numbers-tie-out).
@@ -296,7 +299,9 @@ known-broken `uv.lock` is **withheld** with a value-free reason (*"this dependen
 breaks 3 notebooks"*) while the rest of the push goes. It warns, it never blocks —
 `push --acknowledge-findings` sends it anyway and prints exactly what you let through. The
 check is tied to the exact lock bytes it ran against, so an older sweep never vouches for
-a lock it never saw. See
+a lock it never saw — nor for a notebook added since. It only sees `uv.lock`, though: a
+`uv sync --extra`, a hand-edited venv, or a `pyproject.toml` change with no re-lock all
+move the real environment invisibly. See
 [Changing the team's packages](daily-workflow.md#changing-the-teams-packages).
 
 ### `build-requirements`

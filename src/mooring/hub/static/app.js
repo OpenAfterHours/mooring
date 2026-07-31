@@ -118,7 +118,11 @@ function showLog(data) {
 
 function setBusy(value) {
   busy = value;
-  document.querySelectorAll("button, select").forEach((b) => (b.disabled = value));
+  // #btn-sweep-cancel is exempt: a sweep runs for minutes OUTSIDE the busy lock, and any
+  // unrelated in-flight action (a Pull) would otherwise grey out the only way to stop it.
+  document.querySelectorAll("button, select").forEach((b) => {
+    if (b.id !== "btn-sweep-cancel") b.disabled = value;
+  });
   // A visible "working" cue for the whole surface. The toolbar is disabled while
   // an action is in flight, but that greying is faint — .busy adds a progress
   // cursor (+ a subtle dim, in CSS) so even a fast op looks like it did something.
@@ -189,16 +193,23 @@ function showGuardDialog(data, apiPath, body) {
     list.appendChild(li);
   }
   const override = GuardFmt.canOverride(data);
+  const contentHint =
+    "Remove the flagged content, or add a “mooring: push-ok” comment on a " +
+    "reviewed false-positive line. Pushing anyway publishes it to everyone " +
+    "with access to the repo.";
+  const depsHint =
+    "Use “Check all notebooks run” to see what these dependencies do to the " +
+    "repo. Pushing anyway changes the environment for everyone on the team.";
+  // Both can fire on one push, and each has its own remedy — never drop one.
+  const hints = [];
+  if (findings.length) hints.push(contentHint);
+  if (depsRows.length) hints.push(depsHint);
   $("guard-hint").textContent = !override
     ? "Your team's policy blocks pushing flagged files ([guard] push = \"block\"). " +
       "Remove the flagged content, or add a “mooring: push-ok” comment on a " +
-      "reviewed false-positive line, then push again."
-    : findings.length
-    ? "Remove the flagged content, or add a “mooring: push-ok” comment on a " +
-      "reviewed false-positive line. Pushing anyway publishes it to everyone " +
-      "with access to the repo."
-    : "Use “Check all notebooks run” to see what these dependencies do to the " +
-      "repo. Pushing anyway changes the environment for everyone on the team.";
+      "reviewed false-positive line, then push again." +
+      (depsRows.length ? " " + depsHint : "")
+    : hints.join(" ");
   const anyway = $("guard-anyway");
   anyway.classList.toggle("hidden", !override);
   anyway.onclick = () => {
@@ -463,21 +474,22 @@ let sweepPoll = null;
 
 async function sweepAction() {
   if (busy || sweepPoll) return;
-  let total = 0;
+  let plan;
   try {
-    const plan = await (await fetch("/api/sweep/plan")).json();
-    total = plan.total || 0;
+    plan = await (await fetch("/api/sweep/plan")).json();
   } catch {
     showError("Couldn't work out how many notebooks to check.");
     return;
   }
+  const total = plan.total || 0;
   if (!total) {
     showError("No notebooks to check.");
     return;
   }
-  const noun = total === 1 ? "notebook" : "notebooks";
+  // The server words the cost (and prices it from the last check's median run time), so
+  // the hub and the CLI can never quote a different number for the same work.
   const ok = window.confirm(
-    `This runs ${total} ${noun} on this machine, one at a time, and can take a while.\n\n` +
+    `${plan.cost}\n\n` +
       "It records the same “ran clean” badge as Verify — and proves each notebook RUNS, " +
       "not that its numbers are right.\n\nStart?"
   );
@@ -487,8 +499,27 @@ async function sweepAction() {
     showError(started.error);
     return;
   }
-  showSweepProgress({ running: true, done: 0, total });
-  sweepPoll = setInterval(pollSweep, 1500);
+  sweepTotal = total;
+  watchSweep({ running: true, done: 0, total });
+}
+
+// A sweep outlives the page: it runs on a server thread for minutes, so a reload (or a
+// tab reopened from the checklist) must find it again rather than leaving the progress
+// box hidden and Cancel unreachable for the rest of the run.
+let sweepTotal = 0;
+async function resumeSweepWatch() {
+  let state;
+  try {
+    state = await (await fetch("/api/sweep")).json();
+  } catch {
+    return;
+  }
+  if (state.running) watchSweep(state);
+}
+
+function watchSweep(state) {
+  showSweepProgress(state);
+  if (!sweepPoll) sweepPoll = setInterval(pollSweep, 1500);
 }
 
 function showSweepProgress(state) {
@@ -496,8 +527,11 @@ function showSweepProgress(state) {
   const running = !!state.running;
   box.classList.toggle("hidden", !running);
   if (running) {
+    // `total` is 0 until the worker's first progress tick; fall back to the count this
+    // tab already fetched so the line never reads "0 of 0".
+    const total = state.total || sweepTotal || 0;
     $("sweep-progress-text").textContent =
-      `Checking notebooks… ${state.done || 0} of ${state.total || 0} run. ` +
+      `Checking notebooks… ${state.done || 0} of ${total} run. ` +
       "You can keep working; this runs one notebook at a time.";
   }
 }
@@ -2950,3 +2984,5 @@ document.addEventListener("visibilitychange", maybeFocusRefresh);
 setInterval(renderFreshnessBanner, 60_000);
 
 refresh();
+// Re-attach to a sweep already running on the server (a reload mid-check).
+resumeSweepWatch();

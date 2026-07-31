@@ -15,6 +15,7 @@ from starlette.responses import JSONResponse
 from mooring import auth, celldiff, manifest, pushguard, sync, telemetry, whatsnew
 from mooring import workspace_config
 from mooring.app import notebooks as nb_ops
+from mooring.app import sweep_run as nb_sweep
 from mooring.github import GitHubError, Unreachable
 from mooring.hub.routes.files import _resolve_within
 
@@ -191,7 +192,9 @@ def _guarded_sync_op(hub, name: str, data: dict, run) -> JSONResponse:
     confirmed = frozenset(str(t) for t in (data.get("confirm_tokens") or []))
     content_ok = frozenset() if mode == "block" else confirmed
     content_fn, collected = pushguard.make_guard(content_ok)
-    lock_fn, lock_collected = pushguard.make_lock_guard(workspace, confirmed)
+    lock_fn, lock_collected = pushguard.make_lock_guard(
+        workspace, confirmed, notebooks_fn=lambda: nb_sweep.plan(hub.cfg)
+    )
     body, status = hub._sync_op_body(name, lambda: run(pushguard.combine(content_fn, lock_fn)))
     if status == 200 and (collected or lock_collected):
         telemetry.log_event("push_guard", findings=sum(

@@ -194,7 +194,8 @@ async def api_sweep_plan(request: Request) -> JSONResponse:
     def _plan() -> JSONResponse:
         from mooring.app import sweep_run
 
-        return JSONResponse({"total": len(sweep_run.plan(hub.cfg))})
+        total = len(sweep_run.plan(hub.cfg))
+        return JSONResponse({"total": total, "cost": sweep_run.describe_cost(hub.cfg, total)})
 
     return await run_in_threadpool(_plan)
 
@@ -213,10 +214,17 @@ async def api_sweep(request: Request) -> JSONResponse:
     if request.method == "GET":
         return JSONResponse(hub.sweep.snapshot())
     data = await request.json() if await request.body() else {}
-    try:
-        return JSONResponse(hub.sweep.start(hub.cfg, resume=bool(data.get("resume"))))
-    except SweepBusy as exc:
-        return JSONResponse({"error": str(exc)}, status_code=409)
+    resume = bool(data.get("resume"))
+
+    def _start() -> JSONResponse:
+        try:
+            return JSONResponse(hub.sweep.start(hub.cfg, resume=resume))
+        except SweepBusy as exc:
+            return JSONResponse({"error": str(exc)}, status_code=409)
+
+    # Off the event loop: start() itself is cheap now, but it reads the stored report and
+    # spawns a thread, and every other blocking hub call takes this route.
+    return await run_in_threadpool(_start)
 
 
 async def api_sweep_cancel(request: Request) -> JSONResponse:

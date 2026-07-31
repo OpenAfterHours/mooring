@@ -34,7 +34,7 @@ page that opens when you run the app). The same actions are available from the
 | **New notebook** | Create a fresh marimo notebook from a template and open it. A bare name lands in `notebooks/`; type a path (e.g. `packages/finance/notebooks/sales`) to place it in a sub-folder — mooring registers that folder so it syncs for the team. |
 | **Deliver** | Render a notebook to a **self-contained HTML snapshot** (code hidden) you can email a stakeholder who won't open marimo. See [Delivering a result](#delivering-a-result-for-a-stakeholder). |
 | **Verify runs** | Smoke-run the notebook once on your machine and badge the row with whether it **ran clean** — the "does this still run before I share it?" check. See [Verifying a notebook runs](#verifying-a-notebook-runs). |
-| **Check all run** | The same check for **every** notebook in the workspace, one at a time, with a summary of what still runs. Slow, and cancellable. See [Checking that everything still runs](#checking-that-everything-still-runs). |
+| **Check all notebooks run** | The same check for **every** notebook in the workspace, one at a time, with a summary of what still runs. Slow, and cancellable. See [Checking that everything still runs](#checking-that-everything-still-runs). |
 | **Schedule refresh…** | Re-run a notebook on a cadence (pull → run → report), so you stop having to remember. Appears once the notebook has verified clean. See [Refreshing a notebook on a schedule](#refreshing-a-notebook-on-a-schedule). |
 | **Push** | Upload your changed files to the team repo — **one commit per file**. Blocked for any file that's in conflict. |
 | **Propose** | Like Push, but uploads to a **review branch** instead of the shared branch, so a teammate can review the changes as a pull request before they land. See [Proposing changes](#proposing-changes-for-review). |
@@ -160,11 +160,11 @@ its number, **Verify** it.
 
 ## Checking that *everything* still runs
 
-Verify asks about one notebook. **Check all run** asks about the whole repo — useful
+Verify asks about one notebook. **Check all notebooks run** asks about the whole repo — useful
 after you change a shared package, before a month-end, or when you inherit somebody's
 folder and want to know what you're walking into.
 
-Click **✓ Check all run** in the toolbar (or run
+Click **Check all notebooks run…** in the toolbar (or run
 [`mooring verify --all`](cli.md#deliver-verify-checks-inputs)). Mooring tells you how
 many notebooks it is about to run, then runs them **one at a time** on your machine and
 reports:
@@ -179,8 +179,10 @@ reports:
 
 A broken notebook never stops the sweep, and each notebook records exactly the same
 **✓ ran clean** badge a hand Verify does — so the rows badge as normal, and each badge
-still clears itself the moment you edit that file. `--resume` skips notebooks that are
-already badged, so a run you stopped halfway is cheap to finish.
+still clears itself the moment you edit that file. `--resume` finishes a run you stopped
+halfway: it skips only the notebooks the **last check** ran clean, and only while nothing
+about the environment has moved since — change the packages, or edit one of them, and
+resume quietly runs the lot rather than inheriting an answer that no longer applies.
 
 !!! info "It's slow, and you can stop it"
 
@@ -217,7 +219,16 @@ gets you through, deliberately, so the decision is yours and it's on the record.
     A badge is tied to the *notebook's* contents, not to `uv.lock`. Change the packages
     and every badge stays green over an environment nothing has been run against. So the
     check is tied to the exact lock file it was run against — swap the lock and mooring
-    asks again rather than trusting a check that never saw it.
+    asks again rather than trusting a check that never saw it. (That's also why
+    `--resume` won't skip across a package change.)
+
+!!! warning "It only sees the lock file"
+
+    The check is tied to `uv.lock`, because that's the environment mooring itself manages
+    and shares. It can't see a `uv sync --extra`, a virtualenv you edited by hand, or a
+    `pyproject.toml` change you never re-locked — those all move what your notebooks
+    actually run on while the check stays green. If you changed the environment some
+    other way, run **Check all notebooks run** yourself.
 
 ## Refreshing a notebook on a schedule
 

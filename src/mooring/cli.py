@@ -954,7 +954,7 @@ def cmd_pull(cfg: config.Config, theirs: bool, keep_both: bool) -> int:
 
 def _push_guard_fn(cfg: config.Config, acknowledge: bool):
     """The push guards for a CLI push/propose. Returns
-    ``(guard_fn, collected, lock_collected, mode, acknowledged)``.
+    ``(guard_fn, collected, lock_collected, mode, acknowledged, lock_acknowledged)``.
 
     Two guards ride the one ``guard_fn`` sync expects (:func:`pushguard.combine`): the
     content scanners, and the dependency-change gate that questions a ``uv.lock`` against
@@ -968,35 +968,72 @@ def _push_guard_fn(cfg: config.Config, acknowledge: bool):
     ([guard] push = "block") the flag is refused for CONTENT findings; the dependency gate
     stays acknowledgeable, because it warns about a broken notebook rather than something
     that must not leave the machine, and a content policy must not quietly become one."""
-    from mooring import pushguard
+    from mooring import pushguard, sweep
 
     workspace = cfg.workspace()
     mode = workspace_config.guard_mode(workspace)
+    # TWO acknowledgement ledgers, printed in their own words. A content finding is
+    # "you published something sensitive"; a dependency finding is "you changed what the
+    # team runs on". Merging them made the latter print in the former's vocabulary
+    # ("now visible to everyone", plus a meaningless line number).
     acknowledged: dict = {}
+    lock_acknowledged: dict = {}
 
-    def _note(rel_path: str, findings: list) -> None:
+    def _note(ledger: dict, rel_path: str, findings: list) -> None:
         if findings:
-            acknowledged.setdefault(rel_path, {"findings": []})["findings"].extend(findings)
+            ledger.setdefault(rel_path, {"findings": []})["findings"].extend(findings)
 
     if acknowledge and mode != "block":
         collected: dict = {}
 
         def content_fn(rel_path: str, data: bytes) -> list[str]:
-            _note(rel_path, pushguard.scan_text(rel_path, data))
+            _note(acknowledged, rel_path, pushguard.scan_text(rel_path, data))
             return []
     else:
         content_fn, collected = pushguard.make_guard()
 
+    notebooks_fn = _sweep_notebooks_fn(cfg)
     if acknowledge:
         lock_collected: dict = {}
 
         def lock_fn(rel_path: str, data: bytes) -> list[str]:
-            _note(rel_path, pushguard.lock_findings(workspace, rel_path, data))
+            if sweep.is_lock(rel_path):  # never walk the workspace for an ordinary file
+                _note(
+                    lock_acknowledged,
+                    rel_path,
+                    pushguard.lock_findings(workspace, rel_path, data, notebooks_fn()),
+                )
             return []
     else:
-        lock_fn, lock_collected = pushguard.make_lock_guard(workspace)
+        lock_fn, lock_collected = pushguard.make_lock_guard(
+            workspace, notebooks_fn=notebooks_fn
+        )
 
-    return pushguard.combine(content_fn, lock_fn), collected, lock_collected, mode, acknowledged
+    return (
+        pushguard.combine(content_fn, lock_fn),
+        collected,
+        lock_collected,
+        mode,
+        acknowledged,
+        lock_acknowledged,
+    )
+
+
+def _sweep_notebooks_fn(cfg: config.Config):
+    """A lazy "what notebooks exist right now" for the dependency gate — so it can tell a
+    fully-checked repo from one that has grown a notebook since the last sweep. Lazy
+    because enumerating costs a workspace walk and only a ``uv.lock`` in the push needs
+    it; the walk is memoised in case both guards ask."""
+    cache: list = []
+
+    def _notebooks() -> list[str]:
+        if not cache:
+            from mooring.app import sweep_run
+
+            cache.append(sweep_run.plan(cfg))
+        return cache[0]
+
+    return _notebooks
 
 
 def _print_guard_findings(collected: dict, mode: str, verb: str) -> None:
@@ -1038,12 +1075,24 @@ def _print_acknowledged(acknowledged: dict) -> None:
             print(f"  {path}:{f.line}  {f.kind}")
 
 
+def _print_lock_acknowledged(acknowledged: dict, verb: str) -> None:
+    """The deps gate's own acknowledgement wording. A dependency change is not an
+    exposure — "now visible to everyone" (and a line number) would be the wrong story."""
+    past = "Pushed" if verb == "push" else "Proposed"
+    for path, info in sorted(acknowledged.items()):
+        for f in info["findings"]:
+            print(f"\n{past} {path} anyway — {f.kind}.")
+    print("The whole team's notebooks now run against these dependencies.")
+
+
 def cmd_push(
     cfg: config.Config, only_paths: list[str], message: str | None, acknowledge: bool = False
 ) -> int:
     from mooring import sync
 
-    guard_fn, collected, lock_collected, mode, acknowledged = _push_guard_fn(cfg, acknowledge)
+    (
+        guard_fn, collected, lock_collected, mode, acknowledged, lock_acknowledged
+    ) = _push_guard_fn(cfg, acknowledge)
     result = sync.push(
         _client(cfg), cfg, paths=only_paths or None, message=message, guard_fn=guard_fn
     )
@@ -1062,6 +1111,8 @@ def cmd_push(
         _print_lock_findings(lock_collected, "push")
     if acknowledged:
         _print_acknowledged(acknowledged)
+    if lock_acknowledged:
+        _print_lock_acknowledged(lock_acknowledged, "push")
     return 0 if not (result.blocked_conflicts or collected or lock_collected) else 1
 
 
@@ -1070,7 +1121,9 @@ def cmd_propose(
 ) -> int:
     from mooring import sync
 
-    guard_fn, collected, lock_collected, mode, acknowledged = _push_guard_fn(cfg, acknowledge)
+    (
+        guard_fn, collected, lock_collected, mode, acknowledged, lock_acknowledged
+    ) = _push_guard_fn(cfg, acknowledge)
     result = sync.propose(
         _client(cfg), cfg, paths=only_paths or None, message=message, guard_fn=guard_fn
     )
@@ -1089,6 +1142,8 @@ def cmd_propose(
         _print_lock_findings(lock_collected, "propose")
     if acknowledged:
         _print_acknowledged(acknowledged)
+    if lock_acknowledged:
+        _print_lock_acknowledged(lock_acknowledged, "propose")
     return 0 if not (result.blocked_conflicts or collected or lock_collected) else 1
 
 
@@ -1484,10 +1539,10 @@ def cmd_verify(cfg: config.Config, args: argparse.Namespace) -> int:
         # this is the rarer "forget it entirely" case, mirroring `mooring checks --clear`.
         rel = clear if isinstance(clear, str) else (args.path or None)
         removed = verify.clear(cfg.workspace(), rel)
-        if rel is None:
-            # Clearing everything must take the aggregate with it, or a sweep report
-            # would keep vouching for badges the user just asked to forget.
-            sweep.clear(cfg.workspace())
+        # Clearing a badge must take that notebook out of the AGGREGATE too, or
+        # "2 ran clean" keeps standing over a receipt the user just asked to forget.
+        # `rel is None` clears the whole report; a path drops just its item.
+        sweep.clear(cfg.workspace(), rel)
         print(f"Cleared {removed} verify receipt(s)." if removed else "No verify receipts to clear.")
         return 0
     if getattr(args, "all_notebooks", False):
@@ -1520,8 +1575,15 @@ def _verify_sweep(cfg: config.Config, args: argparse.Namespace) -> int:
     if not targets:
         print("No notebooks to check.")
         return 0
-    noun = "notebook" if len(targets) == 1 else "notebooks"
-    print(f"This runs {len(targets)} {noun} on this machine, one at a time — it can take a while.")
+    print(sweep_run.describe_cost(cfg, len(targets)))
+    if args.resume:
+        # A resume that cannot be honoured must SAY so: silently running everything is
+        # merely slow, but silently skipping on a stale basis would be a false green.
+        skippable, why = sweep_run.resume_scope(cfg)
+        if why:
+            print(f"Nothing to resume — {why}; running all of them.")
+        else:
+            print(f"Resuming: {len(skippable)} already checked against these dependencies.")
     if not args.yes and sys.stdin.isatty():
         if input("Start? [Y/n] ").strip().lower() in ("n", "no"):
             print("Cancelled.")
@@ -1945,8 +2007,10 @@ def _offer_sweep_after_deps(
     print(f"\n{pyproject_env.LOCK_NAME} changed — {len(targets)} {noun} run against it.")
     want = getattr(args, "sweep", None)
     if want is None:
+        minutes = sweep_run.estimate_minutes(cfg, len(targets))
+        cost = f", roughly {minutes} min" if minutes else ", one at a time"
         want = sys.stdin.isatty() and input(
-            f"Check they still run? (runs {len(targets)} {noun}, one at a time) [Y/n] "
+            f"Check they still run? (runs {len(targets)} {noun}{cost}) [Y/n] "
         ).strip().lower() not in ("n", "no")
     if not want:
         print(

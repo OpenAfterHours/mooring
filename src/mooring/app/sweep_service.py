@@ -50,16 +50,20 @@ class SweepService:
     def start(self, cfg: Config, *, resume: bool = False) -> dict:
         """Begin a sweep on a worker thread; returns the initial snapshot.
 
+        Deliberately does NOT enumerate the workspace: this runs inside the request, and
+        the walk belongs on the worker (the first ``on_progress`` fills ``total`` in, and
+        the client already has the count from ``/api/sweep/plan``, which it needed for the
+        cost prompt anyway). One walk per sweep, none of it on the event loop.
+
         Raises :class:`SweepBusy` if one is already running here, and
         :class:`mooring.app.refresh.RefreshBusy` — surfaced from the worker into the
         snapshot's ``error`` — when a scheduled refresh holds the workspace."""
-        total = len(sweep_run.plan(cfg))
         with self._lock:
             if self._state.get("running"):
                 raise SweepBusy("A check is already running.")
             self._cancel = threading.Event()
             self._state = _idle()
-            self._state.update(running=True, total=total)
+            self._state.update(running=True)
         thread = threading.Thread(
             target=self._run, args=(cfg, resume), name="mooring-sweep", daemon=True
         )

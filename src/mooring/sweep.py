@@ -70,21 +70,33 @@ def sweep_path(workspace: Path | str) -> Path:
 # -- the environment fingerprint ---------------------------------------------
 
 
+#: What a fingerprint of "there is no lock file at all" looks like. Distinct from the hash
+#: of an EMPTY lock file — collapsing the two would make an absent lock and a zero-byte one
+#: compare equal, and the gate reads equality as "this sweep covers these dependencies".
+NO_LOCK = ""
+
+
 def fingerprint(data: bytes | None) -> str:
-    """A short content hash of the dependency lock, or "" for absent/empty."""
-    return hashlib.sha256(data).hexdigest()[:16] if data else ""
+    """A short content hash of the dependency lock. ``None`` (absent) is the ONLY input
+    that maps to :data:`NO_LOCK`; empty bytes hash like any other content."""
+    return NO_LOCK if data is None else hashlib.sha256(data).hexdigest()[:16]
 
 
 def lock_fingerprint(workspace: Path | str) -> str:
-    """Fingerprint the workspace's ``uv.lock`` as it stands (best-effort, "" when absent).
+    """Fingerprint the workspace's ``uv.lock`` as it stands (:data:`NO_LOCK` when absent).
 
     This is what makes a sweep's claim expire when the environment moves: the notebooks'
     own SHAs are untouched by ``mooring deps add``, so without it every receipt would keep
-    vouching across a lock change that may well have broken them."""
+    vouching across a lock change that may well have broken them.
+
+    It is a fingerprint of the DECLARED lock, not of the interpreter that actually ran —
+    ``uv sync --extra``, a hand-edited venv, or a ``pyproject.toml`` edit with no re-lock
+    all move the real environment without moving this. Documented as a limit rather than
+    papered over: this catches the change mooring itself makes."""
     try:
         return fingerprint(pyproject_env.lock_path(Path(workspace)).read_bytes())
     except OSError:
-        return ""
+        return NO_LOCK
 
 
 def is_lock(rel_path: str) -> bool:
@@ -105,6 +117,7 @@ class SweepItem:
     sha: str = ""
     cells_failed: int | None = None  # value-free count, or None when unknown
     reason: str = ""  # curated + value-free; "" when there is nothing to say
+    seconds: int = 0  # how long the run took, so the NEXT sweep can price itself
 
     def to_dict(self) -> dict:
         return {
@@ -113,6 +126,7 @@ class SweepItem:
             "sha": self.sha,
             "cells_failed": self.cells_failed,
             "reason": self.reason,
+            "seconds": self.seconds,
         }
 
 
@@ -170,6 +184,14 @@ class SweepReport:
     def covered(self) -> int:
         """How many of the covered notebooks the report still describes."""
         return len(self._live())
+
+    @property
+    def median_seconds(self) -> int:
+        """Median wall time of the notebooks this sweep actually EXECUTED, so the next
+        sweep can price itself in minutes instead of saying "it can take a while".
+        Zero when nothing was timed (an all-resumed or all-blocked sweep)."""
+        times = sorted(i.seconds for i in self.items if i.seconds > 0)
+        return times[len(times) // 2] if times else 0
 
     def to_dict(self) -> dict:
         return {
@@ -244,6 +266,7 @@ def read(workspace: Path | str) -> SweepReport | None:
         if not isinstance(rel, str) or not isinstance(outcome, str):
             continue
         cells = raw.get("cells_failed")
+        seconds = raw.get("seconds")
         items.append(
             SweepItem(
                 notebook=rel,
@@ -251,6 +274,7 @@ def read(workspace: Path | str) -> SweepReport | None:
                 sha=str(raw.get("sha") or ""),
                 cells_failed=cells if isinstance(cells, int) else None,
                 reason=str(raw.get("reason") or ""),
+                seconds=seconds if isinstance(seconds, int) and seconds > 0 else 0,
             )
         )
     report = SweepReport(
@@ -279,54 +303,139 @@ def _moved(workspace: Path, item: SweepItem) -> bool:
         return True
 
 
-def clear(workspace: Path | str) -> bool:
-    """Forget the stored sweep. Best-effort; True when something was removed."""
-    try:
-        sweep_path(workspace).unlink()
-        return True
-    except OSError:
+def clear(workspace: Path | str, rel: str | None = None) -> bool:
+    """Forget the stored sweep — all of it, or just ``rel``'s contribution to it.
+
+    Dropping ONE notebook matters for symmetry with ``verify --clear <path>``: clearing a
+    badge but leaving the aggregate still counting that notebook would leave "2 ran clean"
+    standing over a receipt the user just asked mooring to forget.
+
+    Best-effort; True when something changed."""
+    if rel is None:
+        try:
+            sweep_path(workspace).unlink()
+            return True
+        except OSError:
+            return False
+    report = read(workspace)
+    if report is None:
         return False
+    want = rel.replace("\\", "/")
+    kept = tuple(i for i in report.items if i.notebook != want)
+    if len(kept) == len(report.items):
+        return False
+    if not kept:
+        return clear(workspace)
+    record(workspace, replace(report, items=kept, stale=()))
+    return True
 
 
 # -- the dependency-change gate ----------------------------------------------
 
 
-def dependency_findings(workspace: Path | str, rel_path: str, data: bytes) -> list[tuple[int, str]]:
-    """Value-free ``(line, kind)`` findings for ONE outgoing file — the push-time gate on
-    dependency changes. Empty for everything that is not the repo's ``uv.lock``.
+@dataclass(frozen=True)
+class LockGate:
+    """The push-time verdict on one outgoing ``uv.lock``.
+
+    ``digest`` is what a confirm token is bound to. The findings COLLAPSE the report to a
+    count ("breaks 3 notebooks"), and two genuinely different results can word themselves
+    identically — one notebook fixed while another broke, or coverage shrinking behind an
+    unchanged breakage count. Binding the acknowledgement to the wording would let a stale
+    "push anyway" cover a result nobody has read, so the token takes this instead: a hash
+    of exactly what the report claims right now."""
+
+    findings: tuple[tuple[int, str], ...] = ()
+    digest: str = ""
+
+    def __bool__(self) -> bool:
+        return bool(self.findings)
+
+
+def result_digest(report: SweepReport | None, uncovered: tuple[str, ...] = ()) -> str:
+    """A value-free hash of everything the gate's verdict depends on.
+
+    Deliberately per-ITEM, not per-count: outcome, content SHA and identity of every
+    notebook the report still describes, plus what it does not describe. Any change in
+    which notebooks are covered, or how any one of them came out, moves this."""
+    h = hashlib.sha256()
+    if report is None:
+        h.update(b"no-report")
+    else:
+        h.update(f"{report.lock}|{report.finished_at}|{int(report.cancelled)}".encode())
+        for item in sorted(report.items, key=lambda i: i.notebook):
+            h.update(f"\n{item.notebook}|{item.outcome}|{item.sha}".encode())
+        for rel in sorted(report.stale):
+            h.update(f"\nstale:{rel}".encode())
+    for rel in sorted(uncovered):
+        h.update(f"\nnew:{rel}".encode())
+    return h.hexdigest()[:16]
+
+
+def gate(
+    workspace: Path | str,
+    rel_path: str,
+    data: bytes,
+    notebooks: list[str] | None = None,
+) -> LockGate:
+    """The push-time gate on a dependency change: value-free findings for ONE outgoing
+    file, plus the digest a confirm is bound to. Empty for anything but the repo's
+    ``uv.lock``.
 
     ``mooring deps add`` rewrites ``uv.lock`` **for the whole team**, and because mooring is
     the only road into the repo a check here covers 100% of the pushes that could break
-    everyone at once. The finding is derived from the stored sweep, and the sweep only
-    counts when it was run against *these exact* lock bytes — the report cannot vouch for a
-    dependency set it never saw.
+    everyone at once. The verdict comes from the stored sweep, and the sweep only counts
+    when it ran against *these exact* lock bytes — a report cannot vouch for a dependency
+    set it never saw.
 
-    This WARNS; it does not block. The adapters render it through the push guard's
-    warn-and-confirm flow, where the confirm token binds the exact bytes to the exact
-    findings — so a run that has since broken one more notebook changes the finding, and a
-    stale acknowledgement stops matching."""
+    ``notebooks`` is the workspace's current notebook list when the caller can supply it
+    (the adapters can; this lean leaf cannot enumerate). Without it the gate cannot tell a
+    fully-checked repo from one that has grown a notebook since, and its SILENCE would read
+    as "everything was checked".
+
+    This WARNS; it never blocks."""
     if not is_lock(rel_path):
-        return []
+        return LockGate()
     report = read(workspace)
+    uncovered: tuple[str, ...] = ()
+    if report is not None and notebooks is not None:
+        seen = {i.notebook for i in report.items}
+        uncovered = tuple(sorted(rel for rel in notebooks if rel not in seen))
+    digest = result_digest(report, uncovered)
+
+    def _found(kind: str) -> LockGate:
+        return LockGate(findings=((1, kind),), digest=digest)
+
     if report is None:
-        return [(1, "dependency change not checked — `mooring verify --all` runs "
-                    "every notebook against it first")]
+        return _found("dependency change not checked — `mooring verify --all` runs "
+                      "every notebook against it first")
     if report.lock != fingerprint(data):
-        return [(1, "these dependencies have not been checked — the last sweep ran "
-                    "against a different uv.lock")]
+        return _found("these dependencies have not been checked — the last sweep ran "
+                      "against a different uv.lock")
     broken = report.broken
     if broken:
         noun = "notebook" if len(broken) == 1 else "notebooks"
-        return [(1, f"this dependency change breaks {len(broken)} {noun} — "
-                    f"they no longer run clean")]
+        return _found(f"this dependency change breaks {len(broken)} {noun} — "
+                      f"they no longer run clean")
     if report.stale:
         noun = "notebook" if len(report.stale) == 1 else "notebooks"
-        return [(1, f"{len(report.stale)} {noun} changed since the sweep — "
-                    f"its result no longer covers them")]
+        return _found(f"{len(report.stale)} {noun} changed since the sweep — "
+                      f"its result no longer covers them")
     if report.skipped:
         # A cancelled sweep always leaves its remainder recorded as SKIPPED, so this is
         # also the "it was cancelled" case — phrased by what it means rather than by how
         # it happened: some notebooks were never checked against these dependencies.
         noun = "notebook" if report.skipped == 1 else "notebooks"
-        return [(1, f"the sweep was cancelled — {report.skipped} {noun} were never checked")]
-    return []
+        return _found(f"the sweep was cancelled — {report.skipped} {noun} were never checked")
+    if uncovered:
+        noun = "notebook" if len(uncovered) == 1 else "notebooks"
+        return _found(f"{len(uncovered)} {noun} added since the sweep — "
+                      f"they have never run against these dependencies")
+    return LockGate(digest=digest)
+
+
+def dependency_findings(
+    workspace: Path | str, rel_path: str, data: bytes, notebooks: list[str] | None = None
+) -> list[tuple[int, str]]:
+    """:func:`gate`'s findings alone — for callers that only want to SHOW the verdict
+    (the CLI's ``--acknowledge-findings`` path), never to bind a confirm to it."""
+    return list(gate(workspace, rel_path, data, notebooks).findings)
