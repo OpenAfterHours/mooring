@@ -112,6 +112,45 @@ def test_no_deliver_runs_every_value_and_writes_nothing(workspace, monkeypatch, 
     assert not deliver.outbox_dir(workspace).exists()
 
 
+def test_ctrl_c_exits_4_and_reports_the_partial_pack(workspace, monkeypatch, capsys):
+    # It exited 1 with no report, which is the "did not run" code a wrapper script branches
+    # on — and printed nothing at all under --json.
+    killed = []
+    monkeypatch.setattr(notebook_run, "_kill_tree", lambda proc: killed.append(proc))
+
+    class _Proc:
+        pid = 31337
+        returncode = 1
+
+        def communicate(self, timeout=None):
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(notebook_run.subprocess, "Popen", lambda *a, **k: _Proc())
+
+    assert cli.main(["run", REL, "--for", "region=EMEA,APAC,AMER"]) == 4
+    out = capsys.readouterr().out
+    assert "INCOMPLETE" in out
+    assert killed  # the marimo tree was actually torn down
+
+
+def test_ctrl_c_still_emits_json(workspace, monkeypatch, capsys):
+    monkeypatch.setattr(notebook_run, "_kill_tree", lambda proc: None)
+
+    class _Proc:
+        pid = 1
+        returncode = 1
+
+        def communicate(self, timeout=None):
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(notebook_run.subprocess, "Popen", lambda *a, **k: _Proc())
+
+    assert cli.main(["run", REL, "--for", "region=EMEA,APAC", "--json"]) == 4
+    data = json.loads(capsys.readouterr().out)
+    assert data["complete"] is False and data["cancelled"] is True
+    assert [r["outcome"] for r in data["runs"]] == ["cancelled", "skipped"]
+
+
 def test_a_bad_spec_exits_with_the_curated_reason(workspace, monkeypatch, capsys):
     _fake_exec(monkeypatch)
     with pytest.raises(SystemExit) as exc:

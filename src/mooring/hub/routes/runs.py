@@ -11,8 +11,8 @@ carry one frame a minute in exchange for a broadcaster, a run registry and a rep
 keep correct. On loopback, a one-second poll is the honest transport.
 
 ONE fan-out per hub at a time, which is not a limitation this module invents: the workspace
-run lock (:func:`mooring.app.refresh.workspace_guard`) already permits exactly one
-whole-notebook run per workspace, shared with the scheduled refresh.
+run lock (:func:`mooring.app.notebook_run.workspace_guard`) already permits exactly one
+whole-notebook run per workspace, shared with Verify, Deliver and the scheduled refresh.
 
 Everything returned is either a count, a boolean, a timestamp, a curated reason, or the
 parameter value the user typed (which is already in the artifact's filename they are about
@@ -40,7 +40,7 @@ async def api_run_start(request: Request) -> JSONResponse:
 
 
 def _start(hub, data: dict) -> JSONResponse:
-    from mooring.app import param_runs, refresh
+    from mooring.app import notebook_run, param_runs
 
     rel = str(data.get("path", "")).replace("\\", "/")
     if not rel:
@@ -67,7 +67,7 @@ def _start(hub, data: dict) -> JSONResponse:
             return JSONResponse({"error": str(exc)}, status_code=400)
         except param_runs.FanOutRefused as exc:
             return JSONResponse({"error": str(exc)}, status_code=409)
-        except refresh.RefreshBusy as exc:
+        except notebook_run.RunBusy as exc:
             return JSONResponse({"error": str(exc)}, status_code=409)
         hub.param_run = handle
     return JSONResponse({"ok": True, "run": handle.snapshot()})

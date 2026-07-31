@@ -31,6 +31,7 @@ it carries no path to marimo, the Copilot SDK, or spaCy, and nothing here reache
 
 from __future__ import annotations
 
+import ast
 import json
 import re
 from dataclasses import dataclass
@@ -44,7 +45,8 @@ PYLIB_DIRNAME = "pylib"
 # The packaged payload (this file's sibling) and the importable name it is written out as
 # in the notebook kernel — the same two-file idiom as checks.py / inputs.py.
 _RUNTIME_SRC = "_params_runtime.py"
-_MODULE_NAME = "mooring_params.py"
+_MODULE_STEM = "mooring_params"
+_MODULE_NAME = f"{_MODULE_STEM}.py"
 
 # The one channel a value travels on. Kept in sync with _params_runtime._ENV_VAR (a test
 # pins the pair — the injected module is standalone and cannot import this one).
@@ -162,6 +164,7 @@ def _month_range(lo: str, hi: str) -> list[str] | None:
     last = int(end.group(1)) * 12 + int(end.group(2)) - 1
     if last < first:
         raise ParamError(f"{lo}..{hi} runs backwards — put the earlier month first.")
+    _refuse_wide_span(lo, hi, last - first + 1)
     return [f"{n // 12:04d}-{n % 12 + 1:02d}" for n in range(first, last + 1)]
 
 
@@ -171,7 +174,22 @@ def _int_range(lo: str, hi: str) -> list[str] | None:
     first, last = int(lo), int(hi)
     if last < first:
         raise ParamError(f"{lo}..{hi} runs backwards — put the smaller number first.")
+    _refuse_wide_span(lo, hi, last - first + 1)
     return [str(n) for n in range(first, last + 1)]
+
+
+def _refuse_wide_span(lo: str, hi: str, span: int) -> None:
+    """Refuse an over-wide range BEFORE materialising it.
+
+    The per-item cap below catches an over-long list, but only after the list exists —
+    ``1..999999999`` would spend a minute and a gigabyte building the very list it is about
+    to be told is too long, on the hub's threadpool. Arithmetic is the check; the list is
+    never built."""
+    if span > MAX_VALUES:
+        raise ParamError(
+            f"{lo}..{hi} is {span} values — more than {MAX_VALUES}. A run executes the whole "
+            "notebook once per value, one at a time; narrow the range."
+        )
 
 
 def _refuse_collisions(values: list[str]) -> None:
@@ -207,17 +225,69 @@ def slug(value: str) -> str:
 
 
 def reads_parameter(source: str, name: str) -> bool:
-    """Whether ``source`` looks like a notebook that reads the parameter ``name``.
+    """Whether ``source`` contains a ``mooring_params`` read of the parameter ``name``.
 
-    A cheap, deliberately literal check: the source must mention ``mooring_params`` AND the
-    parameter's name as a quoted string. It exists to catch the one failure this feature
-    cannot recover from — running a notebook that ignores the parameter N times and writing
-    N differently-named artifacts with IDENTICAL contents. A typo (``--for regoin=…``) is
-    exactly that failure, and it is otherwise invisible until a stakeholder acts on the
-    wrong number."""
-    if "mooring_params" not in source:
+    This is the guard against the one failure this feature cannot recover from: running a
+    notebook that IGNORES the parameter N times and writing N differently-named artifacts
+    with identical contents. An artifact labelled ``APAC`` holding EMEA's numbers cannot be
+    detected by the person acting on it.
+
+    It is an AST scan, and it has to be. The obvious substring version — "mentions
+    ``mooring_params``" AND "mentions the name in quotes" — joins two facts that need not be
+    about each other, and ordinary analytics defeats it: a notebook reading
+    ``mooring_params.get("month", …)`` and containing ``df.groupby("region")`` anywhere
+    passes a ``--for region=…`` fan-out, which then reports three clean values over one set
+    of numbers. Here the name must be the FIRST ARGUMENT of a ``get`` call reached through a
+    name actually bound to ``mooring_params`` by an import in this file — so a dict's
+    ``.get("region")`` and a column named ``"region"`` are both correctly ignored.
+
+    It is deliberately fail-closed, and therefore has false NEGATIVES: a ``get`` call that
+    lives in a helper module, or a name computed at runtime, is not visible here and the
+    fan-out is refused. Refusing a run that would probably have been fine is recoverable in
+    seconds; shipping a mislabelled board pack is not. The refusal message says so."""
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError):
+        return False  # unparseable source cannot be shown to read anything
+    modules, direct = _param_bindings(tree)
+    if not (modules or direct):
         return False
-    return f'"{name}"' in source or f"'{name}'" in source
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not node.args:
+            continue
+        func = node.func
+        if isinstance(func, ast.Attribute):
+            # mooring_params.get(...) / mp.get(...) — the receiver must be a bound alias.
+            reads = (
+                func.attr == "get"
+                and isinstance(func.value, ast.Name)
+                and func.value.id in modules
+            )
+        elif isinstance(func, ast.Name):
+            reads = func.id in direct  # from mooring_params import get [as ...]
+        else:
+            reads = False
+        first = node.args[0]
+        if reads and isinstance(first, ast.Constant) and first.value == name:
+            return True
+    return False
+
+
+def _param_bindings(tree: ast.AST) -> tuple[set[str], set[str]]:
+    """The names this module actually binds to ``mooring_params``: (module aliases, ``get``
+    aliases). Everything else called ``.get`` in the file is somebody else's dictionary."""
+    modules: set[str] = set()
+    direct: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == _MODULE_STEM:
+                    modules.add(alias.asname or alias.name)
+        elif isinstance(node, ast.ImportFrom) and node.module == _MODULE_STEM:
+            for alias in node.names:
+                if alias.name == "get":
+                    direct.add(alias.asname or alias.name)
+    return modules, direct
 
 
 # -- the injected kernel module ----------------------------------------------

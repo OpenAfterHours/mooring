@@ -38,7 +38,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from mooring import activity, params, telemetry, verify
-from mooring.app import deliver, notebook_run, notebooks, refresh, verify_run
+from mooring.app import deliver, notebook_run, notebooks, verify_run
 from mooring.config import Config
 
 # Per-value outcomes. Deliberately NOT reusing the schedule vocabulary: a fan-out has no
@@ -52,6 +52,11 @@ SKIPPED = "skipped"  # the fan-out was cancelled before this value started
 
 class FanOutRefused(Exception):
     """The fan-out must not start. ``str(exc)`` is the user-facing reason."""
+
+
+class _PromoteFailed(Exception):
+    """This value's artifact could not be written. Internal: it becomes a FAILED value, never
+    a clean one (see :func:`_promote`)."""
 
 
 @dataclass(frozen=True)
@@ -126,15 +131,16 @@ def fan_out(
     recorded as skipped.
 
     Raises :class:`FanOutRefused` for a target that must not be fanned out,
-    :class:`mooring.app.refresh.RefreshBusy` when another run holds the workspace, and
+    :class:`mooring.app.notebook_run.RunBusy` when another run holds the workspace, and
     ``ValueError`` / ``FileNotFoundError`` for a bad path."""
     workspace = cfg.workspace()
     rel_posix = verify_run.ensure_runnable(workspace, rel_path, FanOutRefused)
     _refuse_if_the_notebook_ignores_the_parameter(workspace, rel_posix, spec)
 
-    # The SAME lockfile a scheduled refresh takes, so the two can never run over each other
-    # in either order — including across processes (a background refresh agent).
-    with refresh.workspace_guard(workspace):
+    # The one workspace run lock, which Verify, Deliver and the scheduled refresh also take —
+    # so no two whole-notebook runs can overlap, in any order, including across processes (a
+    # background refresh agent).
+    with notebook_run.workspace_guard(workspace):
         return _run_values(cfg, rel_posix, spec, do_deliver, on_event, cancel)
 
 
@@ -161,7 +167,17 @@ def _run_values(
             _emit(on_event, "value", index=index, total=total, run=asdict(runs[-1]))
             continue
         _emit(on_event, "running", index=index, total=total, value=value)
-        run = _run_one(cfg, rel_posix, spec, value, index, total, do_deliver, cancel)
+        try:
+            run = _run_one(cfg, rel_posix, spec, value, index, total, do_deliver, cancel)
+        except KeyboardInterrupt:
+            # Ctrl+C on the CLI, where the fan-out runs on the main thread. The runner has
+            # already killed the process tree and removed the render (its own rules 1 and 2),
+            # so nothing is left running — record the cancel and carry on marking the rest
+            # skipped, rather than losing the whole report to an unwind. An interrupted pack
+            # must still be able to say what it did and did not produce.
+            if cancel is not None:
+                cancel.set()
+            run = ValueRun(value=value, outcome=CANCELLED, reason="cancelled part-way through")
         runs.append(run)
         if run.outcome == CANCELLED:
             cancelled = True
@@ -214,7 +230,12 @@ def _run_one(
     # so a failed value never even opens the artifact a previous good run left behind. The
     # promotion happens inside this try (as it does in the scheduled refresh) because the
     # `finally` below removes whatever value-bearing render is left, on every path.
-    render = verify.render_target(workspace, rel_posix)
+    #
+    # The path is per-VALUE, not just per-notebook: were it shared, a render written by
+    # anything else could be promoted as this value's artifact — a file labelled EMEA holding
+    # somebody else's numbers. (The workspace run lock should prevent that; this makes it
+    # structural rather than dependent on the lock being correct.)
+    render = verify.render_target(workspace, rel_posix, variant=spec.variant(value))
     ran_at = ""
     artifact = ""
     try:
@@ -236,6 +257,13 @@ def _run_one(
         # never marimo's stderr — which the runner refuses to store because it can quote a
         # data value.
         return ValueRun(value=value, outcome=FAILED, reason=str(exc))
+    except _PromoteFailed as exc:
+        # The notebook ran fine but its artifact could not be written — most often because
+        # the PREVIOUS one is open in the analyst's own viewer, which on Windows makes
+        # os.replace raise and leaves the old file sitting there under today's date. Counting
+        # that as clean is how a pack ships January's numbers labelled February: the value is
+        # reported FAILED so `complete` is false and the summary says so.
+        return ValueRun(value=value, outcome=FAILED, ran=True, reason=str(exc), ran_at=ran_at)
     finally:
         with contextlib.suppress(OSError):
             render.unlink()
@@ -265,15 +293,22 @@ def _promote(
     """Move this value's completed render into the outbox under its OWN name and stamp the
     provenance footer with which value it is and where it sat in the fan-out.
 
-    Best-effort: failing to promote is not a failed RUN (the notebook executed fine), so it
-    degrades to "no artifact for this value" — which the report shows — rather than
-    reporting a run that did happen as one that did not."""
+    Raises :class:`_PromoteFailed` when the move does not happen. It deliberately does NOT
+    degrade to "ran clean, no artifact": the file at that path is then the PREVIOUS delivery
+    — which is exactly what an ``os.replace`` blocked by the analyst's own open viewer
+    leaves behind — so reporting the value clean would present last month's numbers under
+    this month's name in a pack the summary calls complete. This is the lesson the Excel
+    last mile learned in ``deliver._run_wrote``, applied to the same failure here."""
     final = deliver.outbox_target(workspace, rel_posix, variant=spec.variant(value))
     try:
         final.parent.mkdir(parents=True, exist_ok=True)
         os.replace(render, final)
-    except OSError:
-        return ""
+    except OSError as exc:
+        stale = " The file already there is from an earlier run." if final.exists() else ""
+        raise _PromoteFailed(
+            f"the notebook ran, but its artifact could not be written ({type(exc).__name__})"
+            f" — close it if it is open in another program, then run this value again.{stale}"
+        ) from exc
     deliver.stamp_provenance(
         final, cfg, rel_posix, workspace, note=spec.note(value, index, total)
     )
@@ -299,7 +334,13 @@ def _refuse_if_the_notebook_ignores_the_parameter(
     name (``--for regoin=…``), which is otherwise completely invisible.
 
     Refusing costs one file read and happens BEFORE any notebook runs, so the analyst learns
-    in a second rather than after six minutes of rendering."""
+    in a second rather than after six minutes of rendering.
+
+    :func:`mooring.params.reads_parameter` is an AST scan and is fail-closed, so it also
+    refuses a notebook whose ``get`` call it cannot SEE — one hidden behind a helper module,
+    or with a computed name. That is the right side to err on here (a refusal costs a
+    minute; a mislabelled board pack costs trust), and the message says so rather than
+    leaving a puzzled analyst to guess."""
     target = notebooks.ws_file(workspace, rel_posix, suffix=".py")
     try:
         source = target.read_text("utf-8", errors="replace")
@@ -308,13 +349,16 @@ def _refuse_if_the_notebook_ignores_the_parameter(
     if params.reads_parameter(source, spec.name):
         return
     raise FanOutRefused(
-        f"{rel_posix} never reads a parameter called {spec.name!r}, so running it once per "
-        f"value would write {len(spec)} identically-numbered artifacts under {len(spec)} "
-        "different names. Add it to the notebook first:\n"
+        f"{rel_posix} has no visible read of a parameter called {spec.name!r}, so running it "
+        f"once per value would write {len(spec)} identically-numbered artifacts under "
+        f"{len(spec)} different names. Add the read to the notebook itself:\n"
         "    import mooring_params\n"
         f'    {spec.name} = mooring_params.get("{spec.name}", "{spec.values[0]}")\n'
         "(with the default there, the notebook still runs exactly as it does today when you "
-        "open it or verify it.)"
+        "open it or verify it.)\n"
+        "mooring looks for that call IN THIS FILE with the name written out in full, and "
+        "refuses when it cannot see one — so a read that lives in a helper module, or whose "
+        "name is computed, has to be spelled out here before a fan-out will run."
     )
 
 
@@ -436,11 +480,17 @@ def start(
 
     Every refusal (bad path, non-notebook, ignores the parameter, workspace busy) is raised
     HERE, synchronously, so the caller can answer with a real error instead of minting a run
-    that immediately dies. Only a failure that happens once values are executing lands on
-    the handle."""
+    that immediately dies.
+
+    "Workspace busy" is checked by TAKING the lock and letting it go again — the worker
+    re-takes it for real a moment later. That leaves a hair of a race in which someone else
+    grabs it in between; that one lands on the handle's ``error`` instead of the caller's
+    status code, which is why :meth:`RunHandle.finish` is reached from a catch-all below."""
     workspace = cfg.workspace()
     rel_posix = verify_run.ensure_runnable(workspace, rel_path, FanOutRefused)
     _refuse_if_the_notebook_ignores_the_parameter(workspace, rel_posix, spec)
+    with notebook_run.workspace_guard(workspace):
+        pass  # probe: raises RunBusy here, where the caller can still answer with a 409
     handle = RunHandle(notebook=rel_posix, param=spec.name, values=spec.values)
 
     def _work() -> None:
@@ -453,10 +503,15 @@ def start(
                 on_event=handle.on_event,
                 cancel=handle.cancel,
             )
-        except (FanOutRefused, refresh.RefreshBusy, ValueError, FileNotFoundError) as exc:
+        except (FanOutRefused, notebook_run.RunBusy, ValueError, FileNotFoundError) as exc:
             handle.finish(str(exc))
-        except OSError as exc:
-            handle.finish(f"The run could not continue: {exc}")
+        except BaseException as exc:  # noqa: BLE001
+            # A catch-all, because the alternative is worse than any exception: an escape
+            # leaves this handle permanently not-done, and the hub's single run slot then
+            # refuses every future start with "a run is already going" for the life of the
+            # process. Reported as a TYPE, never str(exc) — an arbitrary exception's message
+            # is not a curated, value-free string.
+            handle.finish(f"The run stopped unexpectedly ({type(exc).__name__}).")
         else:
             handle.finish()
 

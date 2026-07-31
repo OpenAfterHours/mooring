@@ -91,10 +91,22 @@ test("the value currently executing is marked running, the rest queued", () => {
   assert.equal(rows[2].state.text, "queued");
 });
 
-test("a value that ran clean but wrote no artifact is NOT plain green", () => {
-  const state = P.valueState(ran("EMEA", { artifact: "" }));
-  assert.equal(state.tone, "warn");
-  assert.match(state.text, /no artifact/);
+test("a value whose artifact could not be written reads as failed, not clean", () => {
+  // The server decides this (a blocked os.replace is a FAILED value, because the file left
+  // at that path is the PREVIOUS delivery). The card must not soften it back to green.
+  const blocked = ran("APAC", {
+    outcome: "failed",
+    artifact: "",
+    reason: "the notebook ran, but its artifact could not be written (PermissionError)",
+  });
+  assert.equal(P.valueState(blocked).tone, "bad");
+  assert.match(P.valueDetail(blocked), /could not be written/);
+  const s = snap({ done: true, runs: [ran("EMEA"), blocked] });
+  assert.match(P.summary(s), /INCOMPLETE/);
+});
+
+test("a --no-deliver run is still plain green (there was no artifact to want)", () => {
+  assert.equal(P.valueState(ran("EMEA", { artifact: "" })).tone, "good");
 });
 
 test("the detail line shows the artifact, else the curated reason — never anything else", () => {

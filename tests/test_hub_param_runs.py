@@ -135,8 +135,21 @@ def test_start_refuses_a_notebook_that_ignores_the_parameter(client):
     )
     resp = tc.post("/api/run/start", json={"path": "plain.py", "for": "region=EMEA,APAC"})
     assert resp.status_code == 409
-    assert "never reads a parameter" in resp.json()["error"]
+    assert "no visible read of a parameter" in resp.json()["error"]
     assert tc.get("/api/run/state").json()["run"] is None  # no doomed run was minted
+
+
+def test_start_refuses_a_busy_workspace_with_a_409_not_a_dead_run(client, monkeypatch):
+    # The route's 409 for a busy workspace used to be dead code — the lock was taken on the
+    # worker thread, so the run was minted, hub.param_run pointed at it, and it then died.
+    tc, hub, ws = client
+    monkeypatch.setattr(notebook_run, "_exec", _fake_exec())
+    with notebook_run.workspace_guard(ws):
+        resp = tc.post("/api/run/start", json={"path": REL, "for": "region=EMEA,APAC"})
+    assert resp.status_code == 409
+    assert "already running a notebook" in resp.json()["error"]
+    assert hub.param_run is None  # the slot was never claimed by a run that could not go
+    assert tc.get("/api/run/state").json()["run"] is None
 
 
 def test_start_rejects_an_escaping_path(client):

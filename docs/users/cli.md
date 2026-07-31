@@ -321,13 +321,21 @@ region = mooring_params.get("region", "EMEA")   # the default is required
 
 **The default is what keeps the notebook normal.** With no parameter supplied — opening it in
 the editor, `mooring verify`, a scheduled refresh — `get` returns the default and the notebook
-behaves exactly as it did before. `mooring run` will refuse a notebook that never reads the
-parameter you named, because running it once per value would write differently-named
-artifacts holding identical numbers.
+behaves exactly as it did before.
+
+`mooring run` refuses a notebook with no **visible** `mooring_params.get("<name>", …)` call
+for the parameter you named, because running it once per value would write differently-named
+artifacts holding identical numbers. The check reads the notebook's syntax tree, so a column
+called `"region"` elsewhere in the file does not satisfy it — and neither does a `get` call
+that lives in a helper module or whose name is computed. That is deliberate: it errs towards
+refusing a run you could have had, never towards shipping a mislabelled pack. Spell the call
+out in the notebook itself.
 
 Values run **one at a time**, and one failing value never stops the others — each is reported
-separately. `Ctrl+C` genuinely stops the run: the marimo process tree is killed and every
-value that never ran is listed as such.
+separately. A value whose artifact could not be written (its previous one open in Excel or a
+browser, say) is reported **failed**, not clean: the file still at that path is the earlier
+delivery. `Ctrl+C` genuinely stops the run — the marimo process tree is killed, the
+value-bearing render is removed, and every value that never ran is listed as such.
 
 Exit codes (stable, for scripting): **0** every value ran clean · **1** at least one value
 failed · **4** stopped part-way, so the pack is incomplete.
@@ -337,8 +345,8 @@ failed · **4** stopped part-way, so the pack is incomplete.
     `mooring run` needs you watching — it is not something to put on a cadence. A schedule's
     promise is one notebook, one receipt, one artifact whose staleness is arithmetic; N
     artifacts on a cadence is a different promise about retention that mooring has not made.
-    A fan-out and a scheduled refresh also share one workspace lock, so they can never run
-    over each other.
+    Every way of running a notebook (`verify`, `deliver`, `refresh`, `run`) shares one
+    workspace lock, so no two can run over each other.
 
 ### `connections` — share a DB connection shape, keep the secret local
 

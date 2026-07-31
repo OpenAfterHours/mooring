@@ -94,6 +94,29 @@ def test_the_value_count_is_capped():
     assert len(params.parse_spec(f"n=1..{params.MAX_VALUES}")) == params.MAX_VALUES
 
 
+def test_a_huge_range_is_refused_by_ARITHMETIC_not_by_building_it():
+    # `1..999999999` must not spend a minute and a gigabyte materialising the list it is
+    # about to be told is too long — on the hub's threadpool, no less.
+    import time as _time
+
+    start = _time.monotonic()
+    with pytest.raises(params.ParamError) as exc:
+        params.parse_spec("n=1..999999999")
+    assert _time.monotonic() - start < 1.0
+    assert str(params.MAX_VALUES) in str(exc.value)
+
+    start = _time.monotonic()
+    with pytest.raises(params.ParamError):
+        params.parse_spec("month=1000-01..9999-12")
+    assert _time.monotonic() - start < 1.0
+
+
+def test_the_cap_still_catches_a_long_literal_list():
+    values = ",".join(f"v{i}" for i in range(params.MAX_VALUES + 3))
+    with pytest.raises(params.ParamError):
+        params.parse_spec(f"n={values}")
+
+
 # -- artifacts can never collide ---------------------------------------------
 
 
@@ -128,6 +151,24 @@ def test_the_slug_keeps_the_value_readable_and_bounded():
     assert params.slug("ACME Ltd (UK)") == "ACME-Ltd-UK"
     assert "/" not in params.slug("a/b\\c")
     assert len(params.slug("x" * 500)) <= 40
+
+
+def test_the_slug_never_starts_or_ends_with_a_separator_or_a_dot():
+    # The trims are the load-bearing half of the sanitiser, not tidiness. A leading "-" makes
+    # the filename look like a command-line flag to whatever a stakeholder pipes it into; a
+    # leading or trailing "." makes a hidden file or collides with the extension boundary.
+    for raw in (" EMEA ", "/EMEA/", "-EMEA-", "..EMEA..", "..", "///", "-", "."):
+        out = params.slug(raw)
+        assert not out.startswith(("-", "."))
+        assert not out.endswith(("-", "."))
+    assert params.slug("/EMEA/") == "EMEA"
+    assert params.slug("...") == ""  # nothing nameable -> parse_spec refuses it
+
+
+def test_a_truncated_long_value_is_still_trimmed_at_the_cut():
+    # Truncation happens BEFORE the final trim, so a cut landing on a separator cannot
+    # re-expose one at the end.
+    assert not params.slug("x" * 39 + " tail").endswith(("-", "."))
 
 
 def test_the_variant_names_both_the_parameter_and_the_value():
@@ -264,7 +305,7 @@ def test_the_editor_installs_the_params_runtime_beside_the_others(tmp_path):
 # -- the "does it read the parameter" guard ----------------------------------
 
 
-def test_reads_parameter_needs_both_the_module_and_the_name():
+def test_reads_parameter_needs_a_real_get_call_for_that_name():
     good = 'import mooring_params\nregion = mooring_params.get("region", "EMEA")\n'
     assert params.reads_parameter(good, "region") is True
     assert params.reads_parameter(good, "regoin") is False  # the typo this exists to catch
@@ -274,6 +315,69 @@ def test_reads_parameter_needs_both_the_module_and_the_name():
 
 def test_reads_parameter_accepts_either_quote_style():
     assert params.reads_parameter("import mooring_params\nmooring_params.get('m', 1)", "m")
+
+
+def test_ordinary_analytics_mentioning_the_name_does_not_count_as_reading_it():
+    # THE defeat of the old substring scan: two unrelated facts ANDed together. A notebook
+    # that reads `month` and groups by a column called "region" would have passed a
+    # `--for region=…` fan-out and produced three artifacts over ONE set of numbers.
+    source = (
+        "import mooring_params\n"
+        "import polars as pl\n"
+        'month = mooring_params.get("month", "2026-01")\n'
+        'totals = df.group_by("region").sum()\n'
+        'label = "region"\n'
+    )
+    assert params.reads_parameter(source, "month") is True
+    assert params.reads_parameter(source, "region") is False
+
+
+def test_somebody_elses_dot_get_is_not_a_parameter_read():
+    # A dict/DataFrame `.get("region")` is the other half of the same trap.
+    source = (
+        "import mooring_params\n"
+        'month = mooring_params.get("month", "2026-01")\n'
+        'region = config.get("region", "EMEA")\n'
+        'other = {"region": 1}.get("region")\n'
+    )
+    assert params.reads_parameter(source, "region") is False
+
+
+def test_the_name_must_be_the_first_argument_not_merely_present():
+    source = 'import mooring_params\nx = mooring_params.get("month", "region")\n'
+    assert params.reads_parameter(source, "region") is False
+    assert params.reads_parameter(source, "month") is True
+
+
+def test_reads_parameter_follows_import_aliases():
+    assert params.reads_parameter(
+        'import mooring_params as mp\nr = mp.get("region", "EMEA")\n', "region"
+    )
+    assert params.reads_parameter(
+        'from mooring_params import get\nr = get("region", "EMEA")\n', "region"
+    )
+    assert params.reads_parameter(
+        'from mooring_params import get as gp\nr = gp("region", "EMEA")\n', "region"
+    )
+    # An alias bound to something ELSE is not a parameter read.
+    assert not params.reads_parameter(
+        'import configparser as mp\nr = mp.get("region", "EMEA")\n', "region"
+    )
+
+
+def test_reads_parameter_is_fail_closed_on_what_it_cannot_see():
+    # Documented false negatives: the call in a helper module, and a computed name. Refusing
+    # a run that would probably have been fine beats shipping a mislabelled pack — and the
+    # refusal message (see test_param_runs) explains exactly this.
+    assert not params.reads_parameter(
+        "import helpers\nregion = helpers.current_region()\n", "region"
+    )
+    assert not params.reads_parameter(
+        "import mooring_params\nname = 'reg' + 'ion'\nr = mooring_params.get(name, 'EMEA')\n",
+        "region",
+    )
+    # ...and source that will not parse can never be shown to read anything.
+    assert params.reads_parameter("import mooring_params\ndef (:\n", "region") is False
 
 
 def test_no_data_value_can_reach_the_spec_machinery():

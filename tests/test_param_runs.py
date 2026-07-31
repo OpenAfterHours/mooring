@@ -18,8 +18,10 @@ and the real workspace lock.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import threading
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -145,7 +147,13 @@ def test_the_parameter_never_reaches_the_command_line(monkeypatch, tmp_path):
     param_runs.fan_out(cfg, REL, _spec("region=EMEA"), do_deliver=False)
 
     (cmd, env) = calls[0]
-    assert "EMEA" not in " ".join(cmd)
+    # The value appears ONLY in the -o path (mooring's own per-value temp file, which marimo
+    # writes to and never parses). Nothing the notebook can read as an argument carries it:
+    # there is no `--` passthrough and no extra token at all.
+    out_index = cmd.index("-o")
+    rest = cmd[:out_index] + cmd[out_index + 2 :]
+    assert "EMEA" not in " ".join(rest)
+    assert "--" not in rest
     assert json.loads(env[params.ENV_VAR]) == {"region": "EMEA"}
     # The rest of the parent environment survives — marimo still needs PATH etc.
     assert len(env) > 1
@@ -305,6 +313,56 @@ def test_the_summary_never_reads_as_complete_when_it_is_not(monkeypatch, tmp_pat
     assert param_runs.exit_code(whole) == 0
 
 
+def test_an_artifact_that_could_not_be_written_is_NOT_a_clean_value(monkeypatch, tmp_path):
+    # The failure master's Excel last mile learned the hard way: an os.replace blocked by the
+    # analyst's own open viewer leaves the PREVIOUS delivery sitting at that path. Counting
+    # the value clean ships January's numbers under February's name in a pack the summary
+    # calls complete.
+    cfg, ws = _mk(tmp_path)
+    monkeypatch.setattr(notebook_run, "_exec", _fake_exec())
+    january = param_runs.fan_out(cfg, REL, _spec("region=EMEA,APAC"))
+    stale = ws / january.artifacts[1]
+    kept = stale.read_text("utf-8")
+
+    real_replace = os.replace
+
+    def _blocked(src, dst):
+        if "APAC" in str(dst):
+            raise PermissionError(13, "being used by another process")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(param_runs.os, "replace", _blocked)
+    february = param_runs.fan_out(cfg, REL, _spec("region=EMEA,APAC"))
+
+    by_value = {run.value: run for run in february.runs}
+    assert by_value["APAC"].outcome == param_runs.FAILED
+    assert by_value["APAC"].ran is True  # the notebook DID run; the delivery did not
+    assert "could not be written" in by_value["APAC"].reason
+    assert "earlier run" in by_value["APAC"].reason  # the stale file is called out
+    assert february.complete is False and february.artifacts == [february.runs[0].artifact]
+    assert "INCOMPLETE" in param_runs.describe_result(february)
+    assert param_runs.exit_code(february) == 1
+    # The stale file is untouched — and now correctly reported as not this run's.
+    assert stale.read_text("utf-8") == kept
+
+
+def test_a_promote_failure_does_not_stop_the_remaining_values(monkeypatch, tmp_path):
+    cfg, ws = _mk(tmp_path)
+    monkeypatch.setattr(notebook_run, "_exec", _fake_exec())
+    real_replace = os.replace
+
+    def _blocked(src, dst):
+        if "EMEA" in str(dst):
+            raise PermissionError(13, "locked")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(param_runs.os, "replace", _blocked)
+    result = param_runs.fan_out(cfg, REL, _spec())
+    assert [r.outcome for r in result.runs] == [
+        param_runs.FAILED, param_runs.OK, param_runs.OK
+    ]
+
+
 def test_no_artifacts_are_written_when_deliver_is_off(monkeypatch, tmp_path):
     cfg, ws = _mk(tmp_path)
     monkeypatch.setattr(notebook_run, "_exec", _fake_exec())
@@ -397,6 +455,59 @@ def test_a_cancelled_run_deletes_its_half_written_render(monkeypatch, tmp_path):
     assert not deliver.outbox_dir(ws).exists()
 
 
+def test_a_single_value_fan_out_cancelled_mid_run_is_still_incomplete(monkeypatch, tmp_path):
+    # The one-value case has no "skipped" tail to give it away, so `complete` has to be false
+    # on its own account rather than because something else is missing.
+    cfg, ws = _mk(tmp_path)
+    cancel = threading.Event()
+
+    def _runner(cmd, cwd, env, timeout, *, cancel=None):
+        cancel_event.set()  # cancelled while THIS (only) value is executing
+        return subprocess.CompletedProcess(cmd, 1, "", "")
+
+    cancel_event = cancel
+    monkeypatch.setattr(notebook_run, "_exec", _runner)
+    result = param_runs.fan_out(cfg, REL, _spec("region=EMEA"), cancel=cancel)
+
+    assert [r.outcome for r in result.runs] == [param_runs.CANCELLED]
+    assert result.complete is False and result.cancelled is True
+    assert result.clean == 0 and result.failed == 0
+    assert "INCOMPLETE" in param_runs.describe_result(result)
+    assert param_runs.exit_code(result) == 4
+
+
+def test_ctrl_c_kills_the_tree_and_leaves_no_render_behind(monkeypatch, tmp_path):
+    # A console Ctrl+C reaches mooring but NOT marimo (the child runs in its own process
+    # group so it ignores the keystroke). Without _exec's own kill the kernel runs on and
+    # re-writes the value-bearing render AFTER cleanup and after the lock is released.
+    from mooring import verify as verify_mod
+
+    cfg, ws = _mk(tmp_path)
+    killed = []
+    monkeypatch.setattr(notebook_run, "_kill_tree", lambda proc: killed.append(proc))
+
+    class _Proc:
+        pid = 777
+        returncode = 1
+
+        def communicate(self, timeout=None):
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(notebook_run.subprocess, "Popen", lambda *a, **k: _Proc())
+
+    result = param_runs.fan_out(cfg, REL, _spec(), do_deliver=True)
+
+    assert killed and killed[0].pid == 777  # the tree kill actually fired
+    assert [r.outcome for r in result.runs] == [
+        param_runs.CANCELLED, param_runs.SKIPPED, param_runs.SKIPPED
+    ]
+    assert result.complete is False and param_runs.exit_code(result) == 4
+    assert list(verify_mod.verify_dir(ws).glob("*.html")) == []
+    assert not deliver.outbox_dir(ws).exists()
+    with notebook_run.workspace_guard(ws):  # the lock was released too
+        pass
+
+
 def test_the_handle_reports_progress_and_cancels(monkeypatch, tmp_path):
     cfg, ws = _mk(tmp_path)
     gate = threading.Event()
@@ -436,8 +547,8 @@ def test_a_fan_out_and_a_scheduled_refresh_cannot_run_concurrently(monkeypatch, 
     cfg, ws = _mk(tmp_path)
     monkeypatch.setattr(notebook_run, "_exec", _fake_exec())
 
-    with refresh.workspace_guard(ws):  # a refresh (or a background agent) holds it
-        with pytest.raises(refresh.RefreshBusy):
+    with notebook_run.workspace_guard(ws):  # a refresh (or a background agent) holds it
+        with pytest.raises(notebook_run.RunBusy):
             param_runs.fan_out(cfg, REL, _spec(), do_deliver=False)
 
     started = threading.Event()
@@ -468,7 +579,93 @@ def test_the_lock_is_released_when_the_fan_out_finishes(monkeypatch, tmp_path):
     cfg, ws = _mk(tmp_path)
     monkeypatch.setattr(notebook_run, "_exec", _fake_exec())
     param_runs.fan_out(cfg, REL, _spec(), do_deliver=False)
-    with refresh.workspace_guard(ws):  # must not still be held
+    with notebook_run.workspace_guard(ws):  # must not still be held
+        pass
+
+
+def test_verify_and_deliver_take_the_same_lock(monkeypatch, tmp_path):
+    # They did not, and that was a route to a mislabelled artifact: Verify writes the SAME
+    # per-notebook throwaway render, so an unparameterised verify running beside a fan-out
+    # could have its render promoted as a VALUE's artifact — a file named APAC holding
+    # numbers from a run that had no parameter at all.
+    from mooring.app import deliver as deliver_mod
+    from mooring.app import verify_run
+
+    cfg, ws = _mk(tmp_path)
+    monkeypatch.setattr(notebook_run, "_exec", _fake_exec())
+    with notebook_run.workspace_guard(ws):
+        with pytest.raises(verify_run.VerifyError) as verr:
+            verify_run.verify_notebook(cfg, REL)
+        assert "already running a notebook" in str(verr.value)
+        with pytest.raises(deliver_mod.DeliverError) as derr:
+            deliver_mod.deliver_html(cfg, REL)
+        assert "already running a notebook" in str(derr.value)
+    # ...and they work normally once it is free.
+    assert verify_run.verify_notebook(cfg, REL).passed is True
+
+
+def test_a_fan_outs_render_path_is_per_value(monkeypatch, tmp_path):
+    # Defence in depth behind the lock: even if two runs ever did overlap, one value's render
+    # can never be the file another value (or a plain verify) promotes.
+    from mooring import verify as verify_mod
+
+    cfg, ws = _mk(tmp_path)
+    spec = _spec()
+    plain = verify_mod.render_target(ws, REL)
+    paths = {verify_mod.render_target(ws, REL, variant=spec.variant(v)) for v in spec.values}
+    assert len(paths) == 3
+    assert plain not in paths
+
+    seen = []
+    monkeypatch.setattr(
+        notebook_run,
+        "_exec",
+        _fake_exec(during=lambda v: seen.append(v)),
+    )
+    captured = []
+
+    real_run = notebook_run.run
+
+    def _spy(workspace, rel, out_path, **kw):
+        captured.append(out_path)
+        return real_run(workspace, rel, out_path, **kw)
+
+    monkeypatch.setattr(param_runs.notebook_run, "run", _spy)
+    param_runs.fan_out(cfg, REL, spec, do_deliver=False)
+    assert len(set(captured)) == 3
+    assert plain not in set(captured)
+
+
+def test_a_live_fan_outs_lock_is_not_stolen_after_the_stale_window(monkeypatch, tmp_path):
+    # The stale window (900s) was written for a single refresh; a fan-out legitimately holds
+    # the lock for MAX_VALUES x RUN_TIMEOUT = 15000s. Without a heartbeat the mtime is set
+    # once at open, so a second run would take the lock out from under a live one.
+    cfg, ws = _mk(tmp_path)
+    monkeypatch.setattr(notebook_run, "_LOCK_BEAT_S", 0.05)
+    lock = ws / ".mooring" / notebook_run._LOCK_NAME
+    with notebook_run.workspace_guard(ws):
+        # Age the lock well past the stale window, as a long run's untouched mtime would.
+        ancient = datetime.now(timezone.utc).timestamp() - (notebook_run._LOCK_STALE_S + 600)
+        os.utime(lock, (ancient, ancient))
+        for _ in range(200):  # let the heartbeat bring it back
+            if not notebook_run._stale(lock):
+                break
+            threading.Event().wait(0.01)
+        assert notebook_run._stale(lock) is False
+        with pytest.raises(notebook_run.RunBusy):
+            notebook_run.workspace_guard(ws).__enter__()
+
+
+def test_a_genuinely_dead_holders_lock_is_still_stolen(tmp_path):
+    # The heartbeat must not turn the stale-lock rescue off: a killed agent's lock still ages
+    # out, or every future run on that workspace is wedged forever.
+    cfg, ws = _mk(tmp_path)
+    lock = ws / ".mooring" / notebook_run._LOCK_NAME
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    lock.write_text("999999", encoding="utf-8")
+    ancient = datetime.now(timezone.utc).timestamp() - (notebook_run._LOCK_STALE_S + 60)
+    os.utime(lock, (ancient, ancient))
+    with notebook_run.workspace_guard(ws):
         pass
 
 
@@ -484,9 +681,38 @@ def test_a_notebook_that_never_reads_the_parameter_is_refused(monkeypatch, tmp_p
 
     with pytest.raises(param_runs.FanOutRefused) as exc:
         param_runs.fan_out(cfg, REL, _spec(), do_deliver=False)
-    assert "never reads a parameter" in str(exc.value)
+    assert "no visible read of a parameter" in str(exc.value)
     assert "mooring_params" in str(exc.value)  # the fix is in the message
+    # ...and the message admits the scan is fail-closed, so a legitimate refusal is not a
+    # mystery to whoever hits it (the get() call may live in a helper module).
+    assert "helper module" in str(exc.value)
     assert not deliver.outbox_dir(ws).exists()  # refused BEFORE anything ran
+
+
+def test_ordinary_analytics_mentioning_the_name_does_not_defeat_the_guard(
+    monkeypatch, tmp_path
+):
+    # The confirmed defeat of the old substring scan, end to end: a notebook that reads
+    # `month` and groups by a column called "region" produced three artifacts with IDENTICAL
+    # bodies and a green "3 of 3 ran clean".
+    source = (
+        "import marimo\n\napp = marimo.App()\n\n\n@app.cell\ndef _():\n"
+        "    import mooring_params\n"
+        '    month = mooring_params.get("month", "2026-01")\n'
+        '    totals = df.group_by("region").sum()\n'
+        "    return\n"
+    )
+    cfg, ws = _mk(tmp_path, source=source)
+    ran = []
+    monkeypatch.setattr(notebook_run, "_exec", _fake_exec(seen=ran))
+
+    with pytest.raises(param_runs.FanOutRefused):
+        param_runs.fan_out(cfg, REL, _spec("region=EMEA,APAC,AMER"))
+    assert ran == []
+    # The parameter it really does read still works.
+    assert param_runs.fan_out(
+        cfg, REL, _spec("month=2026-01,2026-02"), do_deliver=False
+    ).complete
 
 
 def test_a_typo_in_the_parameter_name_is_caught_before_anything_runs(monkeypatch, tmp_path):
@@ -513,6 +739,37 @@ def test_start_refuses_synchronously_rather_than_minting_a_doomed_run(tmp_path):
     cfg, ws = _mk(tmp_path, source=plain)
     with pytest.raises(param_runs.FanOutRefused):
         param_runs.start(cfg, REL, _spec())
+
+
+def test_start_refuses_a_busy_workspace_synchronously_too(monkeypatch, tmp_path):
+    # The docstring claimed this and it was not true: the guard was entered on the WORKER
+    # thread, so the route's 409 was dead code and hub.param_run ended up pointing at a run
+    # that never ran.
+    cfg, ws = _mk(tmp_path)
+    monkeypatch.setattr(notebook_run, "_exec", _fake_exec())
+    with notebook_run.workspace_guard(ws):
+        with pytest.raises(notebook_run.RunBusy):
+            param_runs.start(cfg, REL, _spec())
+
+
+def test_an_unexpected_failure_finishes_the_handle_instead_of_wedging_it(
+    monkeypatch, tmp_path
+):
+    # An exception escaping the worker leaves the handle permanently not-done, and the hub's
+    # single run slot then refuses every later start for the life of the process.
+    cfg, ws = _mk(tmp_path)
+
+    def _boom(*a, **k):
+        raise RuntimeError("SECRET_VALUE_DO_NOT_LEAK exploded")
+
+    monkeypatch.setattr(param_runs, "_run_values", _boom)
+    handle, thread = param_runs.start(cfg, REL, _spec(), do_deliver=False)
+    thread.join(timeout=20)
+
+    snap = handle.snapshot()
+    assert snap["done"] is True  # the slot is free again
+    assert "RuntimeError" in snap["error"]
+    assert "SECRET" not in snap["error"]  # a TYPE, never an arbitrary exception's message
 
 
 # -- what is recorded --------------------------------------------------------
@@ -562,15 +819,76 @@ def test_a_fan_out_records_no_verify_receipt_and_no_schedule_receipt(monkeypatch
 def test_a_fan_out_has_no_path_to_the_network_or_the_schedule(monkeypatch, tmp_path):
     # It is ATTENDED and local: no pull, no push, no propose, and nothing that could put a
     # GitHub error's str(exc) (which embeds a request URL) on a report.
+    #
+    # Checked as IMPORTS, not just attribute access: `from mooring.sync import pull; pull()`
+    # leaves no `sync.` attribute anywhere and would sail past a receiver-name scan.
     import ast
 
+    forbidden = {"sync", "github", "schedule", "schedule_os", "manifest"}
     tree = ast.parse(Path(param_runs.__file__).read_text("utf-8"))
-    names = {
+    imported: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported |= {a.name.split(".")[-1] for a in node.names}
+            imported |= {a.asname for a in node.names if a.asname}
+        elif isinstance(node, ast.ImportFrom):
+            imported |= {a.name for a in node.names}
+            imported |= {a.asname for a in node.names if a.asname}
+            if node.module:
+                imported |= set(node.module.split("."))
+    used = {
         node.value.id
         for node in ast.walk(tree)
         if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name)
     }
-    assert "sync" not in names and "github" not in names and "schedule" not in names
+    assert not (forbidden & imported), f"param_runs imports {forbidden & imported}"
+    assert not (forbidden & used), f"param_runs reaches {forbidden & used}"
+
+
+def test_a_fan_out_does_not_even_import_the_refresh_orchestrator():
+    # It used to, for the workspace lock. Moving that lock down into notebook_run (where
+    # Verify and Deliver could take it too) removed the last param_runs -> refresh -> sync
+    # chain, so the module now has no transitive route to the network at all.
+    import ast
+
+    tree = ast.parse(Path(param_runs.__file__).read_text("utf-8"))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module == "mooring.app":
+            assert "refresh" not in {a.name for a in node.names}
+
+
+def test_a_stale_parameter_in_mooring_s_own_environment_cannot_leak_into_an_ordinary_run(
+    monkeypatch, tmp_path
+):
+    # Nothing scrubbed MOORING_PARAMS, so one left in mooring's environment (exported in a
+    # shell, or surviving an earlier run) silently parameterised EVERY later run: a scheduled
+    # refresh would write board-20260731.html — no value in the name — holding APAC's numbers.
+    from mooring.app import verify_run
+
+    cfg, ws = _mk(tmp_path)
+    monkeypatch.setenv(params.ENV_VAR, json.dumps({"region": "APAC"}))
+    seen = {}
+
+    def _run(cmd, cwd, env, timeout):
+        seen["env"] = dict(env) if env is not None else dict(os.environ)
+        out = _out_of(cmd)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text("<html></html>", encoding="utf-8")
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(notebook_run, "_exec", _run)
+    verify_run.verify_notebook(cfg, REL)
+
+    assert params.ENV_VAR not in seen["env"]
+
+
+def test_a_parameterised_run_still_gets_its_own_value_over_a_stale_one(monkeypatch, tmp_path):
+    cfg, ws = _mk(tmp_path)
+    monkeypatch.setenv(params.ENV_VAR, json.dumps({"region": "STALE"}))
+    seen = []
+    monkeypatch.setattr(notebook_run, "_exec", _fake_exec(seen=seen))
+    param_runs.fan_out(cfg, REL, _spec("region=EMEA,APAC"), do_deliver=False)
+    assert seen == ["EMEA", "APAC"]
 
 
 def test_describe_run_wording():

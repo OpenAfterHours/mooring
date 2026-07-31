@@ -279,22 +279,26 @@ outbox, named so a stakeholder can tell them apart:
 - **A half-finished pack always looks half-finished.** The summary says *"2 of 3 value(s) ran
   clean — INCOMPLETE"*, and each snapshot's footer records *"region = EMEA · value 1 of 3"* —
   so even someone holding a single emailed file can see one is missing.
-- **Nothing is ever mislabelled.** Mooring refuses two values that would collide on one
-  filename (`EMEA` and `emea` are the same file on Windows), and refuses to fan out a notebook
-  that never reads the parameter you named — which is what catches a typo like `regoin=` before
-  it produces three identical files under three different names.
+- **A snapshot is never labelled with a value it did not use.** Four things enforce that:
+  mooring refuses two values that would collide on one filename (`EMEA` and `emea` are the
+  same file on Windows); it refuses to fan out a notebook with no visible
+  `mooring_params.get("region", …)` call, which is what catches a typo like `regoin=`; only
+  one notebook runs on a workspace at a time, so nothing else's output can be picked up; and
+  a value whose snapshot could not be written is reported as **failed**, never as clean —
+  because the file left at that path is the previous one.
 - **A failed value never overwrites its last good snapshot.** Anything in the outbox is always
   a complete run.
-- **Cancel really cancels.** The running notebook is stopped, and every value that never ran is
-  listed as not run.
+- **Cancel really cancels.** `Ctrl+C`, or the hub's Cancel button, stops the running notebook
+  itself — not just the reporting — and every value that never ran is listed as not run.
 
 !!! warning "This is attended, not a schedule"
 
     You stay and watch it: it can take several minutes per value, and it is the moment to
     notice a wrong value. It is deliberately not something you can put on a cadence — a
     schedule promises one artifact whose staleness is arithmetic, which is a different promise
-    from N artifacts. A fan-out and a scheduled refresh share one lock, so they can never run
-    at the same time; if one is going, the other waits.
+    from N artifacts. Every way of running a notebook — Verify, Deliver, a scheduled refresh
+    and a fan-out — shares one workspace lock, so no two can ever run at once; whichever
+    starts second is refused with a message saying so.
 
 Nothing is pushed. The artifacts live in the sync-excluded `.mooring/outbox`, exactly like
 [Deliver](#delivering-a-result-for-a-stakeholder)'s.

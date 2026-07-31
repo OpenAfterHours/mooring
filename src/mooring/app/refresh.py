@@ -33,7 +33,6 @@ from __future__ import annotations
 import contextlib
 import os
 import threading
-import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -48,79 +47,15 @@ from mooring.github import AuthFailed, GitHubError, Unreachable
 # "Run now" click serialize here rather than racing.
 _run_lock = threading.Lock()
 
-# ...and one per WORKSPACE across processes. Once background refresh is registered (an OS
-# task or a sign-in agent — see mooring.schedule_os), the hub's sweep and that background
-# process are genuinely separate processes pointed at the same workspace, and a thread lock
-# says nothing about them. Two concurrent runs would both pull, both write receipts, and
-# fight for CPU.
-_LOCK_NAME = "refresh.lock"
-# A held lock older than this is assumed to belong to a process that died mid-run (a
-# hard reboot, a killed agent). Comfortably above the 300s run timeout so a slow-but-alive
-# run is never stolen from.
-_LOCK_STALE_S = 900
-
-
-class RefreshBusy(Exception):
-    """Another notebook run already holds this workspace (in this process or a background
-    one). Not an error to record — the caller simply steps aside; whatever is already
-    running will write the receipt.
-
-    Raised by :func:`workspace_guard`, so it also covers an attended parameterised run
-    (:mod:`mooring.app.param_runs`) colliding with a scheduled refresh, in either order."""
-
-
-_BUSY = (
-    "This workspace is already running a notebook (a scheduled refresh or a parameterised "
-    "run) — wait for it to finish."
-)
-
-
-@contextlib.contextmanager
-def workspace_guard(workspace: Path):
-    """Hold the cross-process run lock for ``workspace``, or raise :class:`RefreshBusy`.
-
-    ``O_CREAT | O_EXCL`` is atomic on Windows and POSIX alike, so the file's existence IS the
-    lock. A stale lock (older than :data:`_LOCK_STALE_S`) is stolen rather than deadlocking
-    forever — a background agent killed mid-run must not wedge every future refresh, which
-    would be a silent stop of exactly the kind this feature exists to prevent.
-
-    It is deliberately ONE lock for every kind of whole-notebook run, not one per feature:
-    two runs against the same workspace fight over the CPU, over the same throwaway render
-    path, and over the files the notebooks read. A fan-out therefore takes this same lock,
-    so a scheduled refresh cannot start underneath it (and vice versa)."""
-    path = workspace / ".mooring" / _LOCK_NAME
-    path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        handle = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-    except FileExistsError:
-        if not _stale(path):
-            raise RefreshBusy(_BUSY) from None
-        # Steal it: best-effort unlink then one retry. Losing the retry means another process
-        # got there first, which is a perfectly good outcome — it is doing the work.
-        with contextlib.suppress(OSError):
-            path.unlink()
-        try:
-            handle = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        except OSError:
-            raise RefreshBusy(_BUSY) from None
-    except OSError as exc:
-        # A read-only or otherwise unusable state dir: refuse rather than running unguarded.
-        raise RefreshBusy(f"Could not take the workspace run lock: {exc}") from exc
-    try:
-        with contextlib.suppress(OSError):
-            os.write(handle, str(os.getpid()).encode("ascii"))
-        os.close(handle)
-        yield
-    finally:
-        with contextlib.suppress(OSError):
-            path.unlink()
-
-
-def _stale(path: Path) -> bool:
-    try:
-        return (time.time() - path.stat().st_mtime) > _LOCK_STALE_S
-    except OSError:
-        return False
+# ...and one per WORKSPACE across processes, which now lives in app/notebook_run.py — the
+# module whose subject IS running a notebook. Every caller that starts a kernel needs it for
+# the same reasons (Verify and Deliver were running unguarded), and a lock owned by one
+# feature is a lock the next feature forgets to take. Re-exported here because this is where
+# it was born and where the CLI, the hub and the tests reach for it.
+RefreshBusy = notebook_run.RunBusy
+workspace_guard = notebook_run.workspace_guard
+_LOCK_NAME = notebook_run._LOCK_NAME
+_LOCK_STALE_S = notebook_run._LOCK_STALE_S
 
 
 class RefreshRefused(Exception):

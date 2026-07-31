@@ -119,14 +119,20 @@ def deliver_html(cfg: Config, rel_path: str) -> DeliverResult:
 
     cmd, env = editor.export_html_command(workspace, rel_posix, out_path, include_code=False)
     try:
-        proc = subprocess.run(
-            cmd,
-            cwd=str(workspace),
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=_EXPORT_TIMEOUT,
-        )
+        # The workspace run lock: one whole-notebook run at a time. A Deliver launched
+        # while a scheduled refresh or a parameterised fan-out is going would put a second
+        # kernel on the same CPU and the same workspace files.
+        with notebook_run.workspace_guard(workspace):
+            proc = subprocess.run(
+                cmd,
+                cwd=str(workspace),
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=_EXPORT_TIMEOUT,
+            )
+    except notebook_run.RunBusy as exc:
+        raise DeliverError(str(exc)) from exc
     except FileNotFoundError as exc:  # marimo/uv not found on PATH
         raise DeliverError(f"Could not run the renderer: {exc}") from exc
     except subprocess.TimeoutExpired as exc:
@@ -180,9 +186,13 @@ def deliver_excel(cfg: Config, rel_path: str) -> DeliverResult:
     env_extra = {workbook.ENV_TARGET: str(out_path), workbook.ENV_NOTEBOOK: rel_posix}
     render = workbook.render_target(workspace, rel_posix)
     try:
-        outcome = notebook_run.run(
-            workspace, rel_posix, render, keep_on_success=False, env_extra=env_extra
-        )
+        with notebook_run.workspace_guard(workspace):  # one whole-notebook run at a time
+            outcome = notebook_run.run(
+                workspace, rel_posix, render, keep_on_success=False, env_extra=env_extra
+            )
+    except notebook_run.RunBusy as exc:
+        _clear(out_path)
+        raise DeliverError(str(exc)) from exc
     except notebook_run.RunError as exc:
         # A run that stopped early may have left the sheets it got to. A delivery mooring
         # REFUSED must leave nothing deliverable behind — a half-populated workbook in the

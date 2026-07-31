@@ -1937,16 +1937,19 @@ def _refresh_exit_code(results: list) -> int:
 def cmd_run(cfg: config.Config, args: argparse.Namespace) -> int:
     """``mooring run <path> --for NAME=VALUES`` — the attended fan-out.
 
-    Ctrl+C is a real cancel, not a half-killed kernel: it sets the same event the hub's
-    Cancel button sets, so the in-flight marimo process TREE is torn down and the values
-    still queued are reported as not run. The partial result is then printed exactly like a
-    completed one — an interrupted pack must never look finished."""
+    Ctrl+C is a real cancel, not a half-killed kernel. The console interrupt reaches mooring
+    but NOT marimo (the child deliberately runs in its own process group so it ignores the
+    keystroke), so the kill is done explicitly in :func:`notebook_run._exec`, which turns any
+    abnormal exit from the wait — timeout or interrupt — into the same process-tree kill.
+    The fan-out then reports the partial result exactly like a completed one, with the
+    unrun values named: an interrupted pack must never look finished, and must never leave
+    a value-bearing render behind."""
     import dataclasses
     import json as _json
     import threading
 
     from mooring import params
-    from mooring.app import param_runs, refresh
+    from mooring.app import notebook_run, param_runs
 
     try:
         spec = params.parse_spec(args.for_spec)
@@ -1976,11 +1979,22 @@ def cmd_run(cfg: config.Config, args: argparse.Namespace) -> int:
             cancel=cancel,
         )
     except KeyboardInterrupt:
-        # The fan-out runs on THIS thread, so Ctrl+C lands here rather than in the loop.
-        # Nothing is left running: the runner's own kill already tore the tree down.
+        # A BACKSTOP only: the fan-out itself catches the interrupt per value and returns a
+        # normal partial result (with exit code 4), so this fires only for an interrupt
+        # landing outside a value's run. Nothing is left running either way — the runner
+        # kills the tree before unwinding.
         cancel.set()
-        sys.exit("Cancelled. Some values may not have run — check .mooring/outbox.")
-    except (ValueError, FileNotFoundError, param_runs.FanOutRefused, refresh.RefreshBusy) as exc:
+        if args.json:
+            print(_json.dumps({"error": "cancelled", "cancelled": True, "runs": []}))
+        else:
+            print("\nCancelled. Some values did not run — the pack is INCOMPLETE.")
+        return 4
+    except (
+        ValueError,
+        FileNotFoundError,
+        param_runs.FanOutRefused,
+        notebook_run.RunBusy,
+    ) as exc:
         if args.json:
             print(_json.dumps({"error": str(exc), "runs": []}))
         sys.exit(str(exc))

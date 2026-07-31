@@ -24,17 +24,15 @@ const ParamsFmt = (function () {
     skipped: { text: "not run", tone: IDLE },
   };
 
-  // The badge for one value's row: {text, tone}. A value that ran clean but produced NO
-  // artifact is deliberately not plain green — the run happened, the deliverable did not,
-  // and that gap is exactly what someone assembling a pack needs to see.
+  // The badge for one value's row: {text, tone}.
+  //
+  // "ran clean" means the artifact is there. The server guarantees it: a value whose
+  // artifact could not be written (its previous one open in a viewer, say) is reported
+  // FAILED, never clean-with-nothing-to-show — so this does not have to guess, and an "ok"
+  // with no artifact means only that the run was asked not to deliver one.
   function valueState(run) {
     if (!run) return { text: "", tone: IDLE };
-    const outcome = OUTCOMES[run.outcome];
-    if (!outcome) return { text: "", tone: IDLE };
-    if (run.outcome === "ok" && run.ran && !run.artifact) {
-      return { text: "ran clean, no artifact", tone: WARN };
-    }
-    return outcome;
+    return OUTCOMES[run.outcome] || { text: "", tone: IDLE };
   }
 
   // The detail line under a value's row: the curated reason, or where the artifact landed.

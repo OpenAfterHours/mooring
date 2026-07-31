@@ -38,6 +38,7 @@ import os
 import subprocess
 import sys
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -59,6 +60,101 @@ _FAIL_MARKER = "MarimoExceptionRaisedError"
 # How often the cancel watchdog wakes while a run is in flight. Short enough that "Cancel"
 # feels immediate, long enough to cost nothing over a run measured in minutes.
 _CANCEL_POLL_S = 0.25
+
+
+# -- the one workspace run lock ----------------------------------------------
+#
+# One whole-notebook run per WORKSPACE, across processes. It lives here, in the module whose
+# whole subject is running a notebook, rather than in any one feature: every caller that
+# starts a kernel needs it for the same reasons, and a lock owned by one feature is a lock
+# the next feature forgets to take. (It began life in app/refresh.py, which still re-exports
+# it; Verify, Deliver and the parameterised fan-out were all running unguarded.)
+_LOCK_NAME = "refresh.lock"
+# A held lock older than this belongs to a process that died mid-run (a hard reboot, a killed
+# agent) and is stolen. The bound is on the HEARTBEAT below, not on how long a run may take:
+# a fan-out can legitimately hold this for MAX_VALUES x RUN_TIMEOUT, many times any run
+# timeout, so deriving it from a single run's length was wrong and let a live fan-out's lock
+# be stolen out from under it.
+_LOCK_STALE_S = 900
+# How often a live holder touches its lockfile. Two orders of magnitude inside the stale
+# window, so a missed beat or two proves nothing and only a genuinely dead process ages out.
+_LOCK_BEAT_S = 60
+
+_BUSY = (
+    "This workspace is already running a notebook (a verify, a delivery, a scheduled "
+    "refresh, or a parameterised run) — wait for it to finish."
+)
+
+
+class RunBusy(Exception):
+    """Another whole-notebook run already holds this workspace, in this process or another.
+
+    Not necessarily an error to record — a scheduled sweep simply steps aside, because
+    whatever holds the lock is doing the work. Attended callers translate it into their own
+    refusal (``VerifyError`` / ``DeliverError`` / a hub 409)."""
+
+
+@contextlib.contextmanager
+def workspace_guard(workspace: Path):
+    """Hold the cross-process run lock for ``workspace``, or raise :class:`RunBusy`.
+
+    ``O_CREAT | O_EXCL`` is atomic on Windows and POSIX alike, so the file's existence IS the
+    lock. A stale lock is stolen rather than deadlocking forever — a background agent killed
+    mid-run must not wedge every future run, which would be a silent stop of exactly the kind
+    the scheduled-refresh feature exists to prevent.
+
+    While held, the lockfile's mtime is HEARTBEATEN (:data:`_LOCK_BEAT_S`). Without that,
+    "stale" meant "older than one run", which a parameterised fan-out exceeds by design — and
+    a second run would take the lock out from under a live one, put two kernels on the same
+    CPU and the same throwaway render path, and let one run's render be promoted as another
+    value's artifact."""
+    path = workspace / ".mooring" / _LOCK_NAME
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        handle = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        if not _stale(path):
+            raise RunBusy(_BUSY) from None
+        # Steal it: best-effort unlink then one retry. Losing the retry means another process
+        # got there first, which is a perfectly good outcome — it is doing the work.
+        with contextlib.suppress(OSError):
+            path.unlink()
+        try:
+            handle = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except OSError:
+            raise RunBusy(_BUSY) from None
+    except OSError as exc:
+        # A read-only or otherwise unusable state dir: refuse rather than running unguarded.
+        raise RunBusy(f"Could not take the workspace run lock: {exc}") from exc
+    stop = threading.Event()
+    beat = threading.Thread(target=_heartbeat, args=(path, stop), daemon=True)
+    beat.start()  # STARTED before the try, so the finally's join always has a live thread
+    try:
+        with contextlib.suppress(OSError):
+            os.write(handle, str(os.getpid()).encode("ascii"))
+        with contextlib.suppress(OSError):
+            os.close(handle)
+        yield
+    finally:
+        stop.set()
+        beat.join(timeout=5)
+        with contextlib.suppress(OSError):
+            path.unlink()
+
+
+def _heartbeat(path: Path, stop: threading.Event) -> None:
+    """Keep a held lock's mtime current, so a long legitimate hold is never mistaken for a
+    dead process's abandoned one."""
+    while not stop.wait(_LOCK_BEAT_S):
+        with contextlib.suppress(OSError):
+            os.utime(path, None)
+
+
+def _stale(path: Path) -> bool:
+    try:
+        return (time.time() - path.stat().st_mtime) > _LOCK_STALE_S
+    except OSError:
+        return False
 
 
 class RunError(Exception):
