@@ -38,6 +38,7 @@ mooring open notebooks/sales.py
 mooring open reports/sales.pbip
 mooring new sales-analysis
 mooring catalog [terms...] [--full]
+mooring deliver notebooks/sales.py [--excel]
 mooring delete notebooks/sales.py [-y]
 mooring rollback notebooks/sales.py [-y] [--conflicts]
 mooring init
@@ -200,6 +201,14 @@ preview is never a superset). See
   (e.g. `deliver notebooks/sales.py`). The notebook runs on your machine; the
   HTML embeds the values but lives in `.mooring`, which never syncs — attach it to
   email/Teams yourself. See [Delivering a result](daily-workflow.md#delivering-a-result-for-a-stakeholder).
+  `--excel` delivers an `.xlsx` instead: one sheet per table the notebook named with
+  `import mooring_deliver`, plus a **Provenance** sheet mooring stamps after the run.
+  It is all-or-nothing — a table that could not be written fails the command and names
+  the lost sheet, rather than delivering a workbook missing one. The workbook is
+  written by the notebook's own environment, so the repo needs an Excel writer
+  (`mooring deps add openpyxl`); without one the run still completes and the command
+  says what to add. See
+  [Delivering it as an Excel workbook](daily-workflow.md#delivering-it-as-an-excel-workbook).
 - `verify <workspace-relative-path>` — smoke-run a notebook once on your machine and
   print whether it ran clean; exits non-zero if a cell failed. Records a value-free
   trust receipt (a boolean, never a value) that badges the notebook's row in the hub

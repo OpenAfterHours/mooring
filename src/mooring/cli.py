@@ -195,6 +195,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="render a notebook to a shareable HTML snapshot (code hidden) in the local outbox",
     )
     deliver_cmd.add_argument("path", help="workspace-relative notebook path to deliver")
+    deliver_cmd.add_argument(
+        "--excel",
+        action="store_true",
+        help="deliver an .xlsx workbook of the tables the notebook named with "
+        "`import mooring_deliver` instead of the HTML snapshot",
+    )
 
     verify_cmd = sub.add_parser(
         "verify",
@@ -1564,15 +1570,21 @@ def cmd_duplicate(cfg: config.Config, rel_path: str) -> int:
     return cmd_open(cfg, new_rel)
 
 
-def cmd_deliver(cfg: config.Config, rel_path: str) -> int:
+def cmd_deliver(cfg: config.Config, rel_path: str, excel: bool = False) -> int:
     from mooring.app import deliver
 
     try:
-        result = deliver.deliver_html(cfg, rel_path)
+        if excel:
+            result = deliver.deliver_excel(cfg, rel_path)
+        else:
+            result = deliver.deliver_html(cfg, rel_path)
     except (ValueError, FileNotFoundError, deliver.DeliverError) as exc:
         sys.exit(str(exc))
-    telemetry.log_event("deliver")  # value-free: no path, just that a deliver ran
+    # value-free: which last mile ran, never a path
+    telemetry.log_event("deliver", kind="xlsx" if excel else "html")
     print(f"Delivered {result.notebook_rel} -> {result.out_rel}")
+    if result.sheets:
+        print(f"Sheets: {', '.join(result.sheets)} (+ Provenance)")
     print(
         "It's local only (in .mooring/outbox) and never pushed — attach it to "
         "email/Teams yourself."
@@ -3240,7 +3252,7 @@ def _dispatch(
     if command == "duplicate":
         return cmd_duplicate(cfg, args.path)
     if command == "deliver":
-        return cmd_deliver(cfg, args.path)
+        return cmd_deliver(cfg, args.path, excel=getattr(args, "excel", False))
     if command == "verify":
         return cmd_verify(cfg, args)
     if command == "schedule":

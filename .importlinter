@@ -180,6 +180,7 @@ source_modules =
     mooring.lineage
     mooring.connections
     mooring.datasets
+    mooring.workbook
     mooring.schedule
     mooring.config
     mooring.config_store

@@ -108,6 +108,60 @@ that you can double-click or attach to an email or Teams message.
     by accident. Sending it to a stakeholder is a deliberate step you take
     yourself.
 
+### Delivering it as an Excel workbook
+
+Plenty of the people you send numbers to don't want a chart — they want the rows,
+in Excel, so they can pivot them. Name the tables that should go, in any cell:
+
+```python
+import mooring_deliver as md
+md.reset()                          # start fresh each run
+md.table(summary, "Summary")        # one sheet per call
+md.table(by_region, "By region")
+```
+
+Then choose **Deliver as Excel** on the notebook's **Actions ▾** menu (or
+[`mooring deliver <path> --excel`](cli.md)). Mooring runs the notebook and writes
+one `.xlsx` to the same local outbox, with your sheets in the order you named them
+plus a **Provenance** sheet carrying the same repo / commit / notebook / date /
+*View on GitHub* trail as the HTML footer. Pass a polars or pandas dataframe, a
+list of dicts, or a `{column: values}` mapping; naming the same sheet twice
+replaces it, so re-running a cell is safe.
+
+!!! warning "It's all of the workbook or none of it"
+
+    If any table can't be written, mooring **refuses the whole delivery** and tells
+    you which sheet was lost — it never hands over a workbook that is quietly
+    missing one. A run with a failed cell is refused for the same reason. Half the
+    numbers looks exactly like all of them once somebody forwards it.
+
+The workbook is written by **your notebook's own environment**, not by mooring, so
+it needs an Excel writer among the repo's packages (`xlsxwriter` or `openpyxl` —
+polars' `write_excel` and pandas' `to_excel` need one of the same two). If none is
+installed you get a message saying exactly that: add one for the team with
+`mooring deps add openpyxl` and deliver again. Nothing breaks in the meantime —
+the run finishes normally, you just get no workbook.
+
+#### What mooring changes on the way into Excel
+
+Excel can't hold everything Python can, and the two writer packages disagree about
+what to do. Mooring settles it once, so the same notebook gives the same workbook
+whichever package your repo has:
+
+| Your value | In the workbook | Why |
+| --- | --- | --- |
+| Text starting with `=` `+` `-` `@` | the text, exactly | otherwise Excel treats it as a **live formula** — `=1+1` would reach your reader as `2`, and a value from an upstream free-text field could run something |
+| `NaN`, `inf`, `-inf` | `NaN`, `Infinity`, `-Infinity` | one writer leaves these **blank** (so a broken ratio reads as "no data" and sums as zero); the other refuses the file |
+| A number over 15 significant digits | the exact digits, as text | Excel rounds past 15, and a rounded account number breaks the join your reader does next |
+| A timezone-aware timestamp | the same instant **in UTC** | Excel has no timezones; keeping the local wall clock would land one instant on different *dates*. The Provenance sheet says when this happened |
+| Text over 32,767 characters | cut, ending `…[truncated by mooring]` | Excel's cell limit, marked so a cut memo can't read as a whole one |
+
+Like the HTML, the workbook lands in `.mooring/outbox/` and **never syncs** — and
+this one is nothing but your data, so that exclusion is doing real work. The
+Provenance sheet is written by mooring *after* your notebook has finished, so it
+records where the numbers actually came from rather than what the notebook says
+they did.
+
 ## Checking your numbers tie out
 
 A number is only trustworthy once it *ties out* — segment totals reconcile to a

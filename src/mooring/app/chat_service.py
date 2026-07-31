@@ -21,7 +21,7 @@ import contextlib
 import threading
 from pathlib import Path
 
-from mooring import checks, datasets, inputs, workspace_config
+from mooring import checks, datasets, inputs, workbook, workspace_config
 from mooring.app import notebooks
 
 
@@ -338,6 +338,9 @@ class ChatService:
             # guide DESCRIBES the API; the receipts themselves (and the lineage graph
             # derived from them) are never read into the model's context.
             inputs_help=inputs.copilot_guide(),
+            # And author the Excel-delivery cell (mooring_deliver) on request — sheet
+            # names and frames it can already see in the source, so no new channel either.
+            workbook_help=workbook.copilot_guide(),
             # The team's value-free connection SHAPES (names + fields, never the secret),
             # so the copilot can write connection code that references them.
             connections_help=workspace_config.connections_hint(workspace),
