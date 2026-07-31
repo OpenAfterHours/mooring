@@ -472,46 +472,45 @@ def test_the_lock_is_heartbeaten_WHILE_a_child_process_blocks(monkeypatch, tmp_p
     lock the refresh holds.
 
     Answer, pinned here: it ticks. ``workspace_guard`` runs the heartbeat on its own daemon
-    thread, so it is independent of whatever the holding thread is blocked on. The window
-    and beat are shrunk so a real blocking child crosses the staleness threshold several
-    times over."""
-    monkeypatch.setattr(notebook_run, "_LOCK_STALE_S", 0.4)
+    thread, so it is independent of whatever the holding thread is blocked on.
+
+    Asserted on the lockfile's MTIME rather than by racing a probe thread against the
+    staleness window. The mtime advancing past its creation stamp IS the heartbeat, and
+    checking it directly needs no tight timing: an earlier version shrank the window to
+    0.4s with a 0.05s beat and passed alone but failed under full-suite load, where one
+    scheduling stall is enough to cross eight beats. A test that flakes under load is
+    worse than no test — it trains the suite to be ignored."""
     monkeypatch.setattr(notebook_run, "_LOCK_BEAT_S", 0.05)
     cfg, ws = _mk(tmp_path, "notebooks/a.py", "notebooks/b.py")
+    lock = ws / ".mooring" / notebook_run._LOCK_NAME
+    stamps: list[float] = []
 
     def _slow_child(cmd, cwd, env, timeout, *, cancel=None):
-        time.sleep(0.6)  # a child that blocks the holder for longer than the stale window
+        # Block the HOLDING thread the way proc.communicate does, and sample the lock's
+        # mtime from inside that block — if the beat only fired between operations, every
+        # sample here would be identical.
+        for _ in range(8):
+            time.sleep(0.05)
+            stamps.append(lock.stat().st_mtime)
         out = _out_of(cmd)
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text("<html>ok</html>", encoding="utf-8")
         return subprocess.CompletedProcess(cmd, 0, "", "")
 
     monkeypatch.setattr(notebook_run, "_exec", _slow_child)
-
-    refusals: list[bool] = []
-    done = threading.Event()
-
-    def _probe() -> None:
-        # A background refresh trying to take the workspace, over and over, for the whole
-        # sweep. Every single attempt must be refused.
-        while not done.wait(0.1):
-            try:
-                with notebook_run.workspace_guard(ws):
-                    refusals.append(False)  # STOLE the lock — the heartbeat is not ticking
-            except notebook_run.RunBusy:
-                refusals.append(True)
-
-    prober = threading.Thread(target=_probe, daemon=True)
-    prober.start()
-    try:
-        report = sweep_run.sweep_workspace(cfg)
-    finally:
-        done.set()
-        prober.join(timeout=5)
+    report = sweep_run.sweep_workspace(cfg)
 
     assert report.clean == 2
-    assert len(refusals) >= 4, "the probe must have tried across more than one stale window"
-    assert all(refusals), "a live sweep's lock was stolen — the heartbeat does NOT tick"
+    assert stamps, "the child never ran, so nothing was sampled"
+    assert stamps[-1] > stamps[0], (
+        "the lock's mtime never advanced while a child was blocking the holder — "
+        "the heartbeat does NOT tick during a run"
+    )
+    # ...and the guard is genuinely exclusive while held (the property the beat protects).
+    with notebook_run.workspace_guard(ws):
+        with pytest.raises(notebook_run.RunBusy):
+            with notebook_run.workspace_guard(ws):
+                pass
 
 
 def test_the_report_is_structurally_unsyncable(tmp_path):
