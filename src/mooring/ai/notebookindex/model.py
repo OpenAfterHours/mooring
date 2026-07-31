@@ -2,27 +2,37 @@
 
 The frozen dataclasses here ARE the privacy allowlist, exactly as
 :mod:`mooring.ai.codelib.model` is for helper modules. Only these fields may ever
-reach the model: a notebook's PATH, its TITLE, the collapsed text of its first
-markdown cell, the dotted NAMES of what it imports, the ``name``/``path`` STRING
-LITERALS it hands ``mooring_inputs.fingerprint``, the ``mooring_checks`` function it
-calls plus that check's literal ``name=``, and the identifier-shaped table names its
-``mo.sql`` queries select FROM. A cell BODY, an expression, an arbitrary literal, and
-a cell OUTPUT have **no slot** — a mis-detection degrades to a missing field, never a
-leak. Nothing here is ever read from a ``.mooring/`` receipt: the catalog describes
-what the source SAYS a run reads, never what a run actually saw.
+reach the model: a notebook's PATH, its H1 TITLE, the dotted NAMES of what it imports,
+the ``name``/``path`` STRING LITERALS it hands ``mooring_inputs.fingerprint``, the
+``mooring_checks`` function it calls plus that check's literal ``name=``, and the
+identifier-shaped table names its ``mo.sql`` queries select FROM. A cell BODY, an
+expression, an arbitrary literal, a cell OUTPUT, and **the prose of a markdown cell**
+have **no slot** — a mis-detection degrades to a missing field, never a leak. Nothing
+here is ever read from a ``.mooring/`` receipt: the catalog describes what the source
+SAYS a run reads, never what a run actually saw.
 
-This is a STRUCTURAL guarantee for everything except the one free-text slot,
-``summary`` — prose the analyst wrote in a markdown cell, best-effort minimised
-(scanned at extraction; see :mod:`mooring.ai.notebookindex.prosescan`) and
-human-reviewed, the same weaker tier as a code-library docstring. Value-blindness
-here does NOT lean on the egress scrubber, which is only a checksum-PII floor.
+**There is deliberately no free-prose summary field.** An earlier draft carried the
+collapsed text of a notebook's first markdown cell; it was cut, not scanned. Markdown
+cells routinely hold pasted result tables, closing balances, and account names, and no
+scanner makes arbitrary prose value-free — the same reasoning that cut ``get_source``
+from :mod:`mooring.ai.codelib`. The structural facts below already answer "which
+notebook does X".
+
+That leaves exactly ONE authored-prose slot, ``title``, and it is the narrowest
+possible: only a markdown ``# H1`` heading qualifies (never a fallback to whatever
+prose happens to come first), it is capped at :data:`TITLE_CAP`, and it is scanned at
+extraction and withheld WHOLE on a hit — see :mod:`mooring.ai.notebookindex.prosescan`.
+That one slot is best-effort, not structural, which is why the whole feature is
+opt-in (``[ai] notebook_catalog``), alongside team context and the code library.
+Value-blindness here does NOT lean on the egress scrubber, which is only a
+checksum-PII floor.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-SUMMARY_CAP = 400  # max chars kept from a first markdown cell (the one free-text slot)
+TITLE_CAP = 120  # max chars kept from an H1 heading (the one authored-prose slot)
 
 
 @dataclass(frozen=True)
@@ -52,8 +62,7 @@ class Check:
 @dataclass(frozen=True)
 class Notebook:
     path: str  # workspace-relative POSIX path
-    title: str = ""  # the first markdown H1 (mooring.notebook_template.notebook_title)
-    summary: str = ""  # first markdown cell, collapsed + capped + scanned (the free-text slot)
+    title: str = ""  # a markdown H1 ONLY — capped + scanned; "" when absent or withheld
     imports: tuple[str, ...] = ()  # dotted module/name strings, as imported
     helpers: tuple[str, ...] = ()  # the subset of `imports` that resolve to a .py in the workspace
     datasets: tuple[Dataset, ...] = ()
@@ -69,7 +78,7 @@ class Notebook:
         (the hub row carries this list). Deriving both from the same allowlist is what
         keeps the local search box and the model's view of a notebook identical.
         """
-        out: list[str] = [self.path, self.title, self.summary]
+        out: list[str] = [self.path, self.title]
         out += list(self.imports)
         for ds in self.datasets:
             out += [ds.name, ds.path]
@@ -130,8 +139,8 @@ class Catalog:
 
         Terms are ANDed (so "month end recon" narrows rather than widens) and matched
         case-insensitively against :meth:`Notebook.terms`. The score prefers a hit in the
-        path/title over one buried in the prose summary, so "the notebook actually called
-        recon" outranks "a notebook that mentions recon".
+        path/title over one in a dataset path or check name, so "the notebook actually
+        called recon" outranks "a notebook that happens to read a recon table".
         """
         terms = _norm(query).split()
         if not terms:
@@ -162,11 +171,18 @@ def _stem(path: str) -> str:
 
 def render_notebook(nb: Notebook) -> str:
     """One notebook as compact catalog text. Every line is an allowlisted field; there
-    is deliberately no cell-source line (the model reads the CURRENT notebook's source
-    through ``mooring_read_notebook_source``, and no tool serves another one's)."""
-    lines = [f"Notebook `{nb.path}`" + (f" — {nb.title}" if nb.title else "")]
-    if nb.summary:
-        lines.append(f"  about: {nb.summary}")
+    is deliberately no cell-source line and no prose line (the model reads the CURRENT
+    notebook's source through ``mooring_read_notebook_source``, and no tool serves
+    another one's).
+
+    The PATH gets a line to itself, never sharing one with the authored title: the
+    egress floor (``egress.scrub_text``) withholds a whole LINE on a checksum-PII hit,
+    so a title that tripped it would otherwise take the notebook's identity down with
+    it and leave the model an anonymous, unattributable entry.
+    """
+    lines = [f"Notebook `{nb.path}`"]
+    if nb.title:
+        lines.append(f"  title: {nb.title}")
     if nb.n_cells:
         lines.append(f"  cells: {nb.n_cells}")
     if nb.datasets:
@@ -193,8 +209,12 @@ def render_notebooks(notebooks) -> str:
 
 
 def render_lines(notebooks) -> str:
-    """One line per notebook — path, title, and a value-free count of what it pins — in
-    the order given, so a search keeps its ranking."""
+    """The compact listing, in the order given so a search keeps its ranking: the path
+    and a value-free count of what it pins, with the authored title indented beneath.
+
+    The title takes its own line for the same reason as in :func:`render_notebook` — the
+    egress floor drops a whole line, and the path must survive that.
+    """
     out: list[str] = []
     for nb in notebooks:
         bits = []
@@ -202,8 +222,9 @@ def render_lines(notebooks) -> str:
             bits.append(f"{len(nb.datasets)} input(s)")
         if nb.checks:
             bits.append(f"{len(nb.checks)} check(s)")
-        suffix = f"  [{', '.join(bits)}]" if bits else ""
-        out.append(f"{nb.path}" + (f" — {nb.title}" if nb.title else "") + suffix)
+        out.append(f"{nb.path}" + (f"  [{', '.join(bits)}]" if bits else ""))
+        if nb.title:
+            out.append(f"    {nb.title}")
     return "\n".join(out)
 
 

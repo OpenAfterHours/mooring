@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from mooring.ai.chat import build_system_context
 
 BASE = {"schema_text": "DATASET", "notebook_source": "import marimo", "notebook_rel": "nb.py"}
@@ -81,11 +83,14 @@ def test_build_context_no_code_library_when_flag_off(tmp_path):
 
 # -- ChatService.build_context: the repo-wide notebook catalog --------------------
 
+_CATALOG_ON = {"MOORING_AI_NOTEBOOK_CATALOG": "1"}
 _CATALOG_NB = (
     "import marimo\n\napp = marimo.App()\n\n"
     "@app.cell\ndef _():\n"
     "    import marimo as mo\n"
-    '    mo.md("""# Month End Recon""")\n'
+    '    mo.md("""# Month End Recon\n'
+    "\n"
+    "    Ties out the ledger. Top account SECRET_VALUE_DO_NOT_LEAK.\"\"\")\n"
     '    key = "SECRET_VALUE_DO_NOT_LEAK"\n'
     "    return\n"
 )
@@ -94,17 +99,32 @@ _CATALOG_NB = (
 def test_build_context_returns_the_catalog_but_never_bloats_the_context(tmp_path):
     # The catalog is deliberately tool-only: nothing about it enters the system context,
     # because a repo-wide listing would be paid on every turn even when never asked for.
-    service, app_cfg, ws = _service_setup(tmp_path)  # notebook_catalog defaults ON
+    service, app_cfg, ws = _service_setup(tmp_path, env=_CATALOG_ON)
     (ws / "recon.py").write_text(_CATALOG_NB, "utf-8")
-    context, *_rest, catalog = service.build_context(app_cfg, ws, "nb.py", "")
+    context, *_rest, catalog = service.build_context(app_cfg, ws, "nb.py", "", folders=("",))
     assert catalog is not None and not catalog.is_empty()
     assert catalog.get("recon.py").title == "Month End Recon"
     assert "Month End Recon" not in context
     assert "SECRET_VALUE_DO_NOT_LEAK" not in context
 
 
-def test_build_context_no_catalog_when_flag_off(tmp_path):
-    service, app_cfg, ws = _service_setup(tmp_path, env={"MOORING_AI_NOTEBOOK_CATALOG": "0"})
+def test_build_context_no_catalog_by_default(tmp_path):
+    # OPT-IN: the catalog widens the model's view from one notebook to the whole repo and
+    # its title slot is authored prose, so it ships off like context/code_index — NOT on
+    # like semantic_model, whose extractor has no free-prose field at all.
+    from mooring.ai_config import AiConfig
+
+    service, app_cfg, ws = _service_setup(tmp_path)
+    (ws / "recon.py").write_text(_CATALOG_NB, "utf-8")
+    assert AiConfig().notebook_catalog is False  # the dataclass default...
+    assert app_cfg.ai_notebook_catalog is False  # ...and what config_default.toml ships
+    assert service.build_context(app_cfg, ws, "nb.py", "", folders=("",))[6] is None
+
+
+def test_build_context_skips_the_catalog_when_no_folders_are_passed(tmp_path):
+    # The batch planner's build_context deliberately passes no folders and discards
+    # everything past [:2]; building a whole-repo index per job would be pure cost.
+    service, app_cfg, ws = _service_setup(tmp_path, env=_CATALOG_ON)
     (ws / "recon.py").write_text(_CATALOG_NB, "utf-8")
     assert service.build_context(app_cfg, ws, "nb.py", "")[6] is None
 
@@ -114,12 +134,59 @@ def test_build_context_drops_notebooks_the_team_turned_ai_off_for(tmp_path):
     # notebook from the searchable catalog too, not just refuse to open a chat on it.
     from mooring import workspace_config
 
-    service, app_cfg, ws = _service_setup(tmp_path)
+    service, app_cfg, ws = _service_setup(tmp_path, env=_CATALOG_ON)
     (ws / "recon.py").write_text(_CATALOG_NB, "utf-8")
     workspace_config.set_ai_disabled(ws, "recon.py", True)
-    catalog = service.build_context(app_cfg, ws, "nb.py", "")[6]
+    catalog = service.build_context(app_cfg, ws, "nb.py", "", folders=("",))[6]
     assert catalog.get("recon.py") is None
     assert catalog.search("recon") == []
+
+
+def test_build_context_gives_the_title_the_operators_full_scanner(tmp_path, monkeypatch):
+    # S3: the title is the one authored-prose slot, and this is the egressing path, so it
+    # must get the NER-capable pii.scan_prose with the operator's own [ai.pii] settings —
+    # not the structured-only default the local hub listing uses (which would never catch
+    # a person's name in a heading). Asserted at the seam, so no NER extra is needed.
+    from mooring.ai.notebookindex import prosescan
+
+    service, app_cfg, ws = _service_setup(
+        tmp_path,
+        env={
+            **_CATALOG_ON,
+            "MOORING_AI_PII": "1",
+            "MOORING_AI_PII_NAMES": "1",
+            "MOORING_AI_PII_NAME_THRESHOLD": "0.9",
+        },
+    )
+    (ws / "recon.py").write_text(
+        _CATALOG_NB.replace("Month End Recon", "Jane Smith quarterly"), "utf-8"
+    )
+    built: list[dict] = []
+
+    def fake_make_scanner(**kw):
+        built.append(kw)
+        return lambda text: "person name" if "Jane" in text else None
+
+    monkeypatch.setattr(prosescan, "make_scanner", fake_make_scanner)
+    catalog = service.build_context(app_cfg, ws, "nb.py", "", folders=("",))[6]
+
+    assert built and built[0]["names"] is True  # the name pass was armed...
+    assert built[0]["threshold"] == 0.9  # ...with the operator's own settings
+    assert catalog.get("recon.py").title == ""  # and the flagged title was withheld
+
+
+def test_build_context_leaves_the_title_scanner_structured_when_the_pii_guard_is_off(
+    tmp_path, monkeypatch
+):
+    from mooring.ai.notebookindex import prosescan
+
+    service, app_cfg, ws = _service_setup(tmp_path, env=_CATALOG_ON)  # [ai.pii] off
+    (ws / "recon.py").write_text(_CATALOG_NB, "utf-8")
+    monkeypatch.setattr(
+        prosescan, "make_scanner", lambda **kw: pytest.fail("must not build a NER scanner")
+    )
+    catalog = service.build_context(app_cfg, ws, "nb.py", "", folders=("",))[6]
+    assert catalog.get("recon.py").title == "Month End Recon"
 
 
 # -- ChatService.build_context: the semantic-model gates + the returned tuple ----

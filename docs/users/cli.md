@@ -173,10 +173,10 @@ branch, so the changes can be reviewed as a pull request (see
 ### `catalog`
 
 Search every notebook in the workspace — "has someone already built this?" — by name,
-title, or **what it does**: the description in its own first markdown cell, what it
-imports, the datasets it fingerprints, the checks it asserts, and the tables its SQL
-queries. All terms must match; omit them to list the whole catalog. `--full` prints each
-match in detail instead of one line each. Exits non-zero when nothing matches.
+heading, or **what it does**: what it imports, the datasets it fingerprints, the checks it
+asserts, and the tables its SQL queries. All terms must match; omit them to list the whole
+catalog. `--full` prints each match in detail instead of one line each. Exits non-zero
+when nothing matches.
 
 ```
 mooring catalog                     # every notebook, path-sorted
@@ -186,8 +186,10 @@ mooring catalog tieout --full       # with the inputs/checks each one declares
 ```
 
 Local and offline: it parses each notebook with `ast` and never runs one, never opens a
-`.mooring/` run receipt, and never talks to GitHub. It is also the way to preview exactly
-what the copilot's catalog tools can see — see
+`.mooring/` run receipt, and never talks to GitHub. It works whether or not the copilot's
+own catalog is enabled — and when that opt-in **is** on, this is the way to preview
+exactly what its tools can see (the same per-notebook AI opt-out is applied, so the
+preview is never a superset). See
 [why the copilot can't see your data](../admins/ai-privacy.md#notebook-catalog).
 
 ### `deliver` / `verify` / `checks` / `inputs`

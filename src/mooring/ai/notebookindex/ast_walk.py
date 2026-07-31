@@ -10,11 +10,20 @@ real data, and routing one to the model would be a new egress channel).
 A marimo notebook keeps its real content INSIDE cell function bodies, so unlike the
 code-library walk this one does descend into them — but only to *count* allowlisted
 facts. The extractor still has no slot for a cell body, an expression, an arbitrary
-literal, or an output, so descending cannot widen what leaves. A literal is lifted only
-from a named argument of a known call (``mooring_inputs.fingerprint``,
-``mooring_checks.*``, ``mo.md``, ``mo.sql``); a computed argument — an f-string, a
-variable, a concatenation — has no slot at all and is dropped, which is what keeps a
-runtime-built value out of the catalog.
+literal, an output, or **the prose of a markdown cell**, so descending cannot widen what
+leaves. A literal is lifted only from a named argument of a known call
+(``mooring_inputs.fingerprint``, ``mooring_checks.*``, ``mo.md``, ``mo.sql``); a computed
+argument — an f-string, a variable, a concatenation — has no slot at all and is dropped,
+which is what keeps a runtime-built value out of the catalog.
+
+Two reductions do the narrowing, and both fail CLOSED:
+
+* A markdown cell yields **only a ``# H1`` heading** — never the paragraph beneath it,
+  and never a fallback to "whatever prose came first" (that fallback is why the hub's
+  DISPLAY title can be a pasted table row; the catalog egresses, so it does not take it).
+* An ``mo.sql`` literal has its **strings and comments stripped before** the FROM/JOIN
+  scan, so a narrative like ``'%transfer from ACME_Holdings_Ltd%'`` cannot present a data
+  value as a table name.
 """
 
 from __future__ import annotations
@@ -25,7 +34,7 @@ from collections import Counter
 
 from mooring import notebook_template
 from mooring.ai.notebookindex import prosescan
-from mooring.ai.notebookindex.model import SUMMARY_CAP, Check, Dataset, ExtractReport, Notebook
+from mooring.ai.notebookindex.model import TITLE_CAP, Check, Dataset, ExtractReport, Notebook
 
 _INPUTS_MODULE = "mooring_inputs"
 _CHECKS_MODULE = "mooring_checks"
@@ -44,20 +53,47 @@ _MAX_DATASETS = 40
 _MAX_CHECKS = 40
 _MAX_SQL_TABLES = 12
 
-# The one reduction applied to an mo.sql literal: the identifier-shaped token after
-# FROM/JOIN. It cannot match a quoted string (an identifier can't start with a quote),
-# so a value inlined into a WHERE clause has no way to be captured as a "table".
+# The identifier-shaped token after FROM/JOIN — applied ONLY to SQL whose string
+# literals and comments have already been removed by _strip_sql_text. Scanning the raw
+# query would be a leak, not a nicety: "from" appears inside real narrative text
+# (`where narrative like '%transfer from ACME_Holdings_Ltd%'`), and account names,
+# addresses and note fields would then be reported to the model as "tables" — a channel
+# neither prosescan nor the egress floor watches, since a bare name trips neither.
 _SQL_TABLE_RE = re.compile(r"\b(?:from|join)\s+([A-Za-z_][A-Za-z0-9_.$]*)", re.IGNORECASE)
 # Words that legally follow FROM/JOIN without naming a table.
 _SQL_NOISE = frozenset({"lateral", "unnest", "values", "only", "select"})
 
-# A leading markdown ATX heading — already harvested as the title, so the summary keeps
-# the prose BENEATH it rather than restating it.
-_HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s")
+# Everything in a SQL string that can carry a value rather than name a thing: single- and
+# dollar-quoted strings (SQL doubles a quote to escape it), double- and backtick-quoted
+# identifiers, and both comment forms. Each is replaced by a space, so `from` can never
+# fuse with the text that followed it. Double-quoted identifiers are dropped WITH the
+# literals — losing `from "my table"` is the fail-closed trade for never mistaking a
+# quoted value for a table.
+_SQL_QUOTED_RE = re.compile(
+    r"""'(?:''|[^'])*'      # single-quoted string
+      | \$\$.*?\$\$         # dollar-quoted block
+      | "(?:""|[^"])*"      # double-quoted identifier
+      | `[^`]*`             # backtick-quoted identifier
+      | --[^\n]*            # line comment
+      | /\*.*?\*/           # block comment
+    """,
+    re.VERBOSE | re.DOTALL,
+)
+
+# A markdown ATX heading. Only an H1 becomes a catalog title.
+_H1_RE = re.compile(r"^\s{0,3}#\s+(.+?)\s*#*\s*$")
 
 
-def extract_notebook(source: str, rel: str) -> tuple[Notebook, ExtractReport]:
+def extract_notebook(
+    source: str, rel: str, *, scan: "prosescan.Scanner | None" = None
+) -> tuple[Notebook, ExtractReport]:
     """Parse ``source`` into a value-free :class:`Notebook` + a drift :class:`ExtractReport`.
+
+    ``scan`` vets the ONE authored-prose slot (the H1 title) and defaults to the
+    structured-only :func:`mooring.ai.notebookindex.prosescan.scan_title`. The chat path
+    injects :func:`~mooring.ai.notebookindex.prosescan.make_scanner`, which also runs the
+    operator's configured NER name pass — the extractor sits below config, so the strength
+    of the scan is the caller's to choose, never read from here.
 
     Never raises for bad input: a ``SyntaxError`` (or any parse error) degrades to an
     empty entry and a report whose ``error`` is the exception TYPE + line ONLY — never
@@ -103,17 +139,16 @@ def extract_notebook(source: str, rel: str) -> tuple[Notebook, ExtractReport]:
         elif module == _MARIMO_MODULE and attr == "sql":
             sql_tables += _sql_tables(_first_str(node, dropped) or "")
 
-    title = notebook_template.notebook_title(source)
-    summary, withheld = _summary(markdown, title)
+    dropped["markdown_prose"] += len(markdown)  # read for its H1 only; the prose has no slot
+    title, withheld = _title(markdown, scan or prosescan.scan_title)
     if withheld:
-        dropped["summary"] += 1
+        dropped["title"] += 1
     n_cells = sum(1 for stmt in tree.body if _is_cell(stmt))
     dropped["cell_body"] += n_cells  # walked for facts; NEVER read into any slot
 
     notebook = Notebook(
         path=rel,
         title=title,
-        summary=summary,
         imports=tuple(dict.fromkeys(imports))[:_MAX_IMPORTS],
         datasets=tuple(dict.fromkeys(datasets))[:_MAX_DATASETS],
         checks=tuple(dict.fromkeys(checks))[:_MAX_CHECKS],
@@ -215,38 +250,54 @@ def _dataset(call, dropped: Counter) -> Dataset:
     return Dataset(name=name or "", path=_kwarg_str(call, "path", dropped) or "")
 
 
+def _strip_sql_text(sql: str) -> str:
+    """``sql`` with every string literal, quoted identifier, and comment replaced by a
+    space — fail-CLOSED, so a value can never be read out as a table name.
+
+    An unbalanced quote is the interesting case: a regex that needs a closing quote
+    simply won't match, leaving the rest of the query (and whatever prose follows the
+    stray quote) scannable. So after stripping the well-formed literals, everything from
+    the first surviving quote onward is discarded too — losing a table name is the
+    correct trade against reporting a customer's name as one.
+    """
+    stripped = _SQL_QUOTED_RE.sub(" ", sql)
+    cut = min((i for i in (stripped.find("'"), stripped.find('"'), stripped.find("`")) if i >= 0),
+              default=-1)
+    return stripped if cut < 0 else stripped[:cut]
+
+
 def _sql_tables(sql: str) -> list[str]:
     return [
-        t for t in _SQL_TABLE_RE.findall(sql) if t.lower() not in _SQL_NOISE
+        t for t in _SQL_TABLE_RE.findall(_strip_sql_text(sql)) if t.lower() not in _SQL_NOISE
     ][:_MAX_SQL_TABLES]
 
 
-# -- the one free-text slot --------------------------------------------------
+# -- the one authored-prose slot ---------------------------------------------
 
 
-def _summary(markdown: list[tuple[int, str]], title: str) -> tuple[str, bool]:
-    """``(summary, withheld)`` from the FIRST markdown cell in source order.
+def _title(markdown: list[tuple[int, str]], scan: "prosescan.Scanner") -> tuple[str, bool]:
+    """``(title, withheld)`` — the FIRST markdown ``# H1`` in source order.
 
-    ``ast.walk`` is breadth-first, so the cells arrive unordered; the line number picks
-    the one the analyst actually wrote first. Its leading heading is dropped (that is
-    already the title), the rest is collapsed to a single capped line — a compact tool
-    result and a good search haystack — and withheld entirely on a scan hit. A cell that
-    is ONLY a heading therefore yields no summary rather than restating the title.
+    ``ast.walk`` is breadth-first, so the cells arrive unordered; the line number restores
+    what the analyst actually wrote first. Only an H1 qualifies: there is deliberately NO
+    fallback to the first non-empty line (the hub's display title has one, and it is why a
+    notebook whose first markdown cell is a pasted result table gets a title like
+    ``| Region | Revenue |`` — harmless in a local listing, unacceptable in a tool result).
+    No H1 means no title; the path already identifies the notebook.
+
+    The heading is collapsed, capped, and withheld WHOLE on a scan hit — a heading that
+    trips the scanner yields ``("", True)``, never a trimmed-around remnant.
     """
-    if not markdown:
-        return "", False
-    text = min(markdown, key=lambda m: m[0])[1]
-    lines = text.splitlines()
-    if lines and _HEADING_RE.match(lines[0]):
-        lines = lines[1:]
-    flat = " ".join(" ".join(lines).split())
-    if not flat or flat.casefold() == (title or "").casefold():
-        return "", False
-    if len(flat) > SUMMARY_CAP:
-        flat = flat[:SUMMARY_CAP].rstrip() + " ...[trimmed]"
-    if prosescan.scan_summary(flat):
-        return "", True
-    return flat, False
+    for _lineno, text in sorted(markdown, key=lambda m: m[0]):
+        for line in text.splitlines():
+            match = _H1_RE.match(line)
+            if not match:
+                continue
+            flat = " ".join(match.group(1).split())[:TITLE_CAP].strip()
+            if not flat:
+                return "", False
+            return ("", True) if scan(flat) else (flat, False)
+    return "", False
 
 
 def _is_cell(stmt) -> bool:

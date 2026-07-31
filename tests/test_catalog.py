@@ -61,7 +61,10 @@ RICH = (
     "@app.cell\ndef _():\n"
     "    import marimo as mo\n"
     "    import mooring_inputs as mi\n"
-    '    mo.md("""# Sales Reconciliation\n\n    Ties the ledger to the GL feed.""")\n'
+    '    mo.md("""# Sales Reconciliation\n'
+    "\n"
+    "    Ties the ledger to the GL feed. Top account SECRET_VALUE_DO_NOT_LEAK.\n"
+    '    | EMEA | 4,231,999 |""")\n'
     '    mi.fingerprint(df, "ledger", path="data/gl_ledger.parquet")\n'
     '    hush = "SECRET_VALUE_DO_NOT_LEAK"\n'
     "    return\n"
@@ -76,10 +79,15 @@ def test_notebook_row_carries_value_free_catalog_terms(tmp_path, monkeypatch):
     terms = row["terms"]
     # The search box can now find this notebook by what it DOES, not just its filename.
     assert "Sales Reconciliation" in terms
-    assert "Ties the ledger to the GL feed." in terms
     assert "data/gl_ledger.parquet" in terms
-    # ...and never by a value in a cell body.
-    assert "SECRET_VALUE_DO_NOT_LEAK" not in " ".join(terms)
+    assert "mooring_inputs" in terms
+    # The hub row is built from the SAME allowlist the copilot's tools serve, so the
+    # markdown PROSE that allowlist refuses is absent here too — a value in a cell body
+    # or a pasted result table can never become a search term.
+    joined = " ".join(terms)
+    assert "SECRET_VALUE_DO_NOT_LEAK" not in joined
+    assert "Ties the ledger" not in joined
+    assert "4,231,999" not in joined
 
 
 def test_module_row_has_no_terms(tmp_path, monkeypatch):

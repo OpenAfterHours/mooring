@@ -138,14 +138,17 @@ class AiConfig:
     # by default: it is a new egress surface (docstrings are best-effort, like a dictionary
     # description). A synced per-module opt-out lives in the workspace mooring.toml.
     code_index: bool = False
-    # Index every marimo notebook in the workspace (title, first markdown cell, imports,
-    # and the inputs/checks/SQL tables its SOURCE declares) so the copilot — and the hub's
-    # search box — can answer "has someone already built this?". Defaults ON like
-    # ``semantic_model``: every field is derived from authored source, the class the
-    # assistant already sees, and reduced to a structural allowlist (a cell body, an
-    # output, and a .mooring receipt have no slot). The per-notebook opt-out already in
+    # Index every marimo notebook in the workspace (its H1 title, imports, and the
+    # inputs/checks/SQL tables its SOURCE declares) so the copilot can answer "has someone
+    # already built this?". OPT-IN, off by default, for the same reason as ``context`` and
+    # ``code_index``: it widens what the model sees from ONE notebook to the whole repo,
+    # and its title slot is authored prose (scanned, but best-effort) rather than a
+    # structural field. Not the ``semantic_model`` tier — that extractor has no free-prose
+    # field at all. Everything else here is structural: a cell body, a markdown paragraph,
+    # an output, and a .mooring receipt have no slot. The per-notebook opt-out already in
     # the synced mooring.toml ([ai] disabled_notebooks) also removes a notebook here.
-    notebook_catalog: bool = True
+    # The hub's own search box uses the same index locally and is NOT gated by this.
+    notebook_catalog: bool = False
     # Sanitise-and-hold for pasted Python tracebacks (which can embed data values).
     # Default ON: it only ever REMOVES information, and the raw paste is never
     # stored, so there is no send-raw path. Turning it off is a weakening flip.
@@ -287,7 +290,7 @@ def load_ai_config(ai: Mapping, env: Mapping[str, str]) -> AiConfig:
         ),
         code_index=_as_bool(env.get("MOORING_AI_CODE_INDEX"), _as_bool(ai.get("code_index"), False)),
         notebook_catalog=_as_bool(
-            env.get("MOORING_AI_NOTEBOOK_CATALOG"), _as_bool(ai.get("notebook_catalog"), True)
+            env.get("MOORING_AI_NOTEBOOK_CATALOG"), _as_bool(ai.get("notebook_catalog"), False)
         ),
         traceback_guard=_as_bool(
             env.get("MOORING_AI_TRACEBACK_GUARD"), _as_bool(ai.get("traceback_guard"), True)

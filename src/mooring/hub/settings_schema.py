@@ -233,18 +233,25 @@ EDITABLE: tuple[SettingSpec, ...] = (
     SettingSpec(
         key="ai.notebook_catalog",
         accessor="ai_notebook_catalog",
-        label="Index every notebook (repo-wide catalog)",
+        label="Let the copilot search every notebook (repo-wide catalog)",
         group="ai",
         type="bool",
         control="toggle",
-        default=True,
-        sensitivity="needs_care",
+        default=False,
+        sensitivity="weakens",
         env_var="MOORING_AI_NOTEBOOK_CATALOG",
-        help="Let the copilot search every notebook in the repo — each one's title, its "
-        "own description, and the inputs/checks/tables its source declares — so it can "
-        "point at work a teammate already did instead of duplicating it. Never another "
-        "notebook's code, its outputs, or any data value. OFF is the more conservative "
-        "choice (the copilot then sees only the notebook you have open).",
+        weaken_value=True,
+        confirm="Turning the notebook catalog ON widens what the copilot sees from the "
+        "ONE notebook you have open to EVERY notebook in the repo. For each it gets the "
+        "`# H1` title, the imports, and the inputs/checks/SQL tables the source declares "
+        "— never another notebook's code, its outputs, or a run receipt. Those facts are "
+        "value-free by construction, but the title is prose your team wrote (scanned, "
+        "like a docstring), so this is a weaker tier than the value-blind schema. "
+        "Continue?",
+        help="Let the copilot find work a teammate already did — 'does anyone already "
+        "reconcile the GL feed?' — instead of rebuilding it. Off by default; a notebook "
+        "you have turned AI off for is left out. The hub's own search box indexes the "
+        "same facts locally either way.",
     ),
     SettingSpec(
         key="ai.traceback_guard",

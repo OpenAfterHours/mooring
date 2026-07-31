@@ -1726,7 +1726,12 @@ def cmd_catalog(app_cfg: config.AppConfig, cfg: config.Config, args: argparse.Na
     from mooring.ai import notebookindex
 
     workspace = cfg.workspace()
-    catalog = notebookindex.load_catalog(workspace, tuple(cfg.folders))
+    # Apply the SAME per-notebook AI opt-out the chat path applies, so this really is a
+    # preview of what the copilot can see rather than a superset of it.
+    ai_off = sorted(workspace_config.disabled_notebooks(workspace))
+    catalog = notebookindex.load_catalog(workspace, tuple(cfg.folders), exclude=ai_off)
+    if ai_off:
+        print(f"Excluded (AI off for them): {', '.join(ai_off)}\n")
     if catalog.is_empty():
         print(
             "No notebooks found. They must live under a synced folder or at the repo root "

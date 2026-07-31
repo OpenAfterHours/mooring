@@ -1,8 +1,12 @@
 """The value-blind notebook-catalog trio, gated on a passed Catalog (build_tool_specs).
 
-The leak test that matters: a data value planted in every place a notebook can hold one —
-a cell body, a filter literal, a computed path, a markdown paragraph — must not reach the
-model through ANY of the three tools, and no tool may serve another notebook's source.
+The leak test that matters: a data value planted where a notebook can actually hold one —
+a cell body, a filter literal, a computed path, and a markdown PARAGRAPH — must not reach
+the model through any of the three tools, and no tool may serve another notebook's source.
+
+Scope note, kept honest: the markdown-paragraph case passes STRUCTURALLY (prose has no
+slot in the model), not because a scanner caught it. The one slot that is merely scanned
+is the H1 title; ``test_notebookindex.py`` covers that one and labels it best-effort.
 """
 
 from __future__ import annotations
@@ -38,7 +42,11 @@ _RECON = (
     "    import marimo as mo\n"
     "    import mooring_inputs as mi\n"
     "    import mooring_checks as mc\n"
-    '    mo.md("""# Month End Recon\n\n    Ties the ledger to the GL feed.""")\n'
+    '    mo.md("""# Month End Recon\n'
+    "\n"
+    "    Ties the ledger to the GL feed. Top account SECRET_VALUE_DO_NOT_LEAK.\n"
+    "    | Region | Revenue | Top customer |\n"
+    '    | EMEA | 4,231,999 | SECRET_VALUE_DO_NOT_LEAK |""")\n'
     "    return\n\n"
     "@app.cell\n"
     "def _():\n"
@@ -47,7 +55,7 @@ _RECON = (
     "    total = 4012888888881881\n"
     '    mi.fingerprint(df, "ledger", path="data/ledger.parquet")\n'
     '    mc.unique_key(df, "id")\n'
-    '    res = mo.sql("""select id from gl_feed""")\n'
+    "    res = mo.sql(\"\"\"select id from gl_feed where n like '%paid from ACME_Holdings_Ltd%'\"\"\")\n"
     "    hit\n"
     "    return\n\n"
     'if __name__ == "__main__":\n    app.run()\n'
@@ -75,8 +83,10 @@ def _all_outputs(tmp_path, catalog) -> str:
 
 def test_no_data_value_reaches_the_model_through_any_catalog_tool(tmp_path):
     text = _all_outputs(tmp_path, _catalog(tmp_path))
-    assert SECRET not in text
+    assert SECRET not in text  # a cell body AND a markdown paragraph
     assert CARD not in text
+    assert "4,231,999" not in text  # a pasted result table in a markdown cell
+    assert "ACME_Holdings_Ltd" not in text  # a narrative inside a SQL string literal
     # ...while the value-free facts DO come through, so the tools are actually working.
     assert "reports/recon.py" in text and "Month End Recon" in text
     assert "data/ledger.parquet" in text and "unique_key" in text and "gl_feed" in text
@@ -86,6 +96,35 @@ def test_no_tool_returns_another_notebooks_source(tmp_path):
     text = _all_outputs(tmp_path, _catalog(tmp_path))
     for code_fragment in ("pl.read_parquet", "df.filter", "@app.cell", "mi.fingerprint"):
         assert code_fragment not in text
+
+
+def test_every_tool_result_passes_the_egress_floor(tmp_path):
+    # The structural allowlist is the real guarantee, but the checksum-PII floor is the
+    # backstop beneath it — and it must actually be wired into EACH of the three handlers.
+    # The catalog is built by hand rather than extracted, precisely so the floor is tested
+    # on its own: extraction's title scan would withhold the title before a handler saw
+    # it, which would make this vacuous for the tools that render only a title.
+    from mooring.ai.notebookindex import Catalog, Dataset, Notebook
+
+    catalog = Catalog(
+        notebooks=(
+            Notebook(
+                path="reports/ledger.py",
+                title=f"Ledger for card {CARD}",
+                datasets=(Dataset(name="ledger", path=f"data/{CARD}.parquet"),),
+            ),
+        )
+    )
+    specs = {s.name: s for s in _specs(tmp_path, catalog)}
+    for name, args in (
+        ("mooring_list_notebooks", None),
+        ("mooring_search_notebooks", _inv({"query": "ledger"})),
+        ("mooring_describe_notebook", _inv({"notebook": "reports/ledger.py"})),
+    ):
+        out = specs[name].handler(args).text
+        assert CARD not in out, name
+        # ...and the floor drops only the offending LINE, so the entry keeps its identity.
+        assert "reports/ledger.py" in out, name
 
 
 def test_catalog_tools_registered_value_free_skip_permission(tmp_path):

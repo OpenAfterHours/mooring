@@ -20,6 +20,9 @@ DEFAULT_MAX_FILE_BYTES = 2 * 1024 * 1024  # skip a .py larger than this (a gener
 # Directory names never scanned: virtualenvs, caches, VCS, build output, third-party.
 # Duplicated from the code library's loader rather than imported: each feature package
 # owns what it will read, so tightening one can never silently loosen the other.
+# `.mooring` is listed here AND caught by the dot-prefix rule in _ignored — deliberately
+# double-covered, because it holds the run receipts and the undo SNAPSHOTS of real
+# notebooks, neither of which may ever become a catalog entry.
 _IGNORE_DIRS = frozenset({
     ".venv", "venv", "env", ".env", "site-packages", "__pycache__", ".mooring", ".git",
     ".hg", ".svn", "build", "dist", "node_modules", ".ipynb_checkpoints", ".tox",
@@ -33,14 +36,16 @@ def load_catalog(
     *,
     max_file_bytes: int = DEFAULT_MAX_FILE_BYTES,
     exclude: Iterable[str] = (),
+    scan=None,
 ) -> Catalog:
     """Parse every marimo notebook under ``<workspace>/<folder>`` (and the loose repo
     root) into a :class:`Catalog`.
 
     ``exclude`` holds workspace-relative POSIX paths to skip — the caller passes the
     team's per-notebook AI opt-out here, so a notebook the team fenced off never enters
-    the catalog the copilot can search. Never raises: a bad file becomes a value-free
-    error report and is dropped.
+    the catalog the copilot can search. ``scan`` overrides the scanner applied to the one
+    authored-prose slot (see :func:`mooring.ai.notebookindex.ast_walk.extract_notebook`).
+    Never raises: a bad file becomes a value-free error report and is dropped.
     """
     ws = Path(workspace)
     ws_resolved = ws.resolve()
@@ -86,7 +91,7 @@ def load_catalog(
             continue
         if rel in excluded:
             continue
-        notebook, report = _extract_file(path, rel, max_file_bytes)
+        notebook, report = _extract_file(path, rel, max_file_bytes, scan)
         if notebook is not None:
             notebooks.append(notebook)
         reports.append(report)
@@ -115,7 +120,7 @@ def _safe_rel(path: Path, ws_resolved: Path) -> str | None:
 
 
 def _extract_file(
-    path: Path, rel: str, max_file_bytes: int
+    path: Path, rel: str, max_file_bytes: int, scan=None
 ) -> tuple[Notebook | None, ExtractReport]:
     try:
         raw = path.read_bytes()
@@ -124,7 +129,7 @@ def _extract_file(
     if len(raw) > max_file_bytes:
         return None, ExtractReport(path=rel, error=f"TooLarge@{len(raw) // 1024}")
     source = raw.decode("utf-8-sig", errors="replace")  # -sig strips a UTF-8 BOM (Windows hazard)
-    notebook, report = ast_walk.extract_notebook(source, rel)
+    notebook, report = ast_walk.extract_notebook(source, rel, scan=scan)
     if report.error:
         return None, report  # unparseable (mid-edit, or hand-mangled) — keep the report only
     if not report.is_notebook:
