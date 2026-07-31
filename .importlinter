@@ -189,6 +189,7 @@ source_modules =
     mooring.datasets
     mooring.workbook
     mooring.schedule
+    mooring.params
     mooring.config
     mooring.config_store
     mooring.ai_config

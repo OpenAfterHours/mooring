@@ -71,9 +71,19 @@ def verify_notebook(cfg: Config, rel_path: str) -> VerifyResult:
     sha = gitsha.local_blob_sha(target, rel_posix)
 
     try:
-        outcome = notebook_run.run(
-            workspace, rel_posix, verify.render_target(workspace, rel_posix), keep_on_success=False
-        )
+        # The workspace run lock. A verify launched while a scheduled refresh or a
+        # parameterised fan-out is going would put two kernels on one CPU AND write the same
+        # per-notebook throwaway render — which the other run would then promote as ITS
+        # artifact, giving a file labelled with a value it does not contain.
+        with notebook_run.workspace_guard(workspace):
+            outcome = notebook_run.run(
+                workspace,
+                rel_posix,
+                verify.render_target(workspace, rel_posix),
+                keep_on_success=False,
+            )
+    except notebook_run.RunBusy as exc:
+        raise VerifyError(str(exc)) from exc
     except notebook_run.RunError as exc:
         raise VerifyError(str(exc)) from exc
 

@@ -74,6 +74,11 @@ EXPECTED_ROUTES = {
     ("/api/schedule/pause", ("POST",), "api_schedule_pause"),
     ("/api/schedule/background", ("POST",), "api_schedule_background"),
     ("/api/refresh", ("POST",), "api_refresh"),
+    # Attended parameterised runs: start a fan-out, poll its per-value progress, cancel it
+    # (roadmap: parameterised-runs). /api/run/start EXECUTES a notebook; it never pushes.
+    ("/api/run/start", ("POST",), "api_run_start"),
+    ("/api/run/state", ("GET",), "api_run_state"),
+    ("/api/run/cancel", ("POST",), "api_run_cancel"),
     # The local safety net: the trash + activity ledger (roadmap: local-safety-net).
     ("/activity", ("GET",), "activity_page"),
     ("/api/trash", ("GET",), "api_trash"),

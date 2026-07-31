@@ -297,6 +297,43 @@
       </div>
     </section>
 
+    <!-- Attended parameterised runs: one notebook, once per region/entity/month. Opened
+         from a notebook's Actions ▾ → "Run for each…". Deliberately a card rather than a
+         modal, for the same reason the schedules card is: this is where the per-value
+         result shows up, so it is where the run is started. -->
+    <section id="params-card" class="card hidden">
+      <div class="schedules-head">
+        <h3>Run for each value</h3>
+        <button id="params-close" class="small" title="Close this card">Close</button>
+      </div>
+      <div class="schedule-form">
+        <div class="schedule-form-title">Run <b id="params-path"></b></div>
+        <div class="schedule-form-row">
+          <label style="flex:1">For
+            <input id="params-for" type="text" placeholder="region=EMEA,APAC,AMER"
+                   style="width:100%"
+                   aria-label="parameter name and values, e.g. region=EMEA,APAC,AMER">
+          </label>
+        </div>
+        <div id="params-preview" class="muted schedule-detail"></div>
+        <label class="schedule-check"><input id="params-deliver" type="checkbox" checked>
+          Save an HTML snapshot per value to your local outbox</label>
+        <div class="toolbar">
+          <button id="params-start" class="primary small">Start</button>
+          <button id="params-cancel" class="small hidden">Cancel run</button>
+        </div>
+      </div>
+      <div id="params-banner" class="notice notice-fresh hidden" role="status"></div>
+      <table id="params-table" class="hidden">
+        <thead><tr><th>Value</th><th>Status</th><th>Artifact / reason</th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <div class="schedules-foot">
+        <div class="muted schedule-detail">Values run one at a time, and one failing value
+          never stops the others. Nothing is pushed &mdash; artifacts stay in your local outbox.</div>
+      </div>
+    </section>
+
     <section id="log-card" class="card hidden">
       <h3>Last operation</h3>
       <pre id="log"></pre>
@@ -440,6 +477,7 @@
   <script src="/static/merge_fmt.js"></script>
   <script src="/static/whatsnew_fmt.js"></script>
   <script src="/static/schedule_fmt.js"></script>
+  <script src="/static/params_fmt.js"></script>
   <script src="/static/checklist.js"></script>
   <!-- Shared appearance module (applyTheme + cross-tab follower). Before app.js,
        which aliases window.MooringTheme. The zero-flash pre-paint stays inline in

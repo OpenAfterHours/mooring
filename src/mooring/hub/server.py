@@ -108,6 +108,16 @@ class Hub:
         # The batch application service: the run registry (+ reap/abort/cancel)
         # around the pure ai.batch.BatchPlanner (app/batch_service.py).
         self.batch = BatchService()
+        # The one in-flight parameterised run (app/param_runs.RunHandle), or None. A
+        # single slot rather than a registry on purpose: the workspace run lock already
+        # permits exactly one whole-notebook run at a time, so a second slot could only
+        # ever hold something that is blocked. Kept after it finishes so the page can
+        # still read the final per-value report on a reload. The lock makes check-then-claim
+        # atomic: two concurrent POSTs to /api/run/start both run on the threadpool, and
+        # without it the loser would overwrite the winner's handle with a run about to die
+        # on the workspace lock — losing the live one from the UI.
+        self.param_run = None
+        self.param_run_lock = threading.Lock()
         # One AI provider reused across opens, so the provider's auth (45s TTL) and
         # model-list (300s TTL) caches actually hit instead of being rebuilt — and
         # thrown away — on every chat-open / models request. Keyed on the config that
@@ -215,6 +225,9 @@ class Hub:
         # In-flight batches are bound to the old workspace too — cancel them (their
         # un-reviewed proposals are lost; the UI warns not to switch repos mid-batch).
         self.batch.abort_all()
+        # ...and so is a parameterised run: its remaining values would execute against the
+        # OLD workspace while the page shows the new one. Cancel it and drop the handle.
+        self._cancel_param_run()
         # The provider is shaped by [ai] provider/model — a reload may change them,
         # so drop the cached one (rebuilt lazily on next use).
         with self._provider_lock:
@@ -345,9 +358,18 @@ class Hub:
         return self.chat.pii_status(self.app_cfg)
 
 
+    def _cancel_param_run(self) -> None:
+        """Stop any in-flight fan-out and forget it. Best-effort — the runner's own
+        process-tree kill is what actually stops marimo; this only fires the event."""
+        handle, self.param_run = self.param_run, None
+        if handle is not None:
+            with contextlib.suppress(Exception):
+                handle.cancel.set()
+
     def shutdown(self) -> None:
         self.chat.close_all()
         self.batch.abort_all()
+        self._cancel_param_run()
         for editor in self.editors.values():
             # Suppress per editor (mirrors _close_all_chats): one editor failing to
             # die must not leak the others' marimo trees or skip the lifespan's
@@ -1193,7 +1215,7 @@ def create_app(hub: Hub) -> Starlette:
     # constants) never form an import cycle: by the time create_app runs, this
     # module is fully initialized.
     from mooring.hub import pages
-    from mooring.hub.routes import batch, chat, files, reviews, settings, setup
+    from mooring.hub.routes import batch, chat, files, reviews, runs, settings, setup
     from mooring.hub.routes import schedule as schedule_routes
     from mooring.hub.routes import sync as sync_routes
 
@@ -1261,6 +1283,11 @@ def create_app(hub: Hub) -> Starlette:
                 methods=["POST"],
             ),
             Route("/api/refresh", schedule_routes.api_refresh, methods=["POST"]),
+            # Attended parameterised runs: one notebook, once per value (roadmap:
+            # parameterised-runs). /api/run/start EXECUTES a notebook; it never pushes.
+            Route("/api/run/start", runs.api_run_start, methods=["POST"]),
+            Route("/api/run/state", runs.api_run_state),
+            Route("/api/run/cancel", runs.api_run_cancel, methods=["POST"]),
             Route("/api/trash", files.api_trash),
             Route("/api/trash/restore", files.api_trash_restore, methods=["POST"]),
             Route("/api/activity", files.api_activity),

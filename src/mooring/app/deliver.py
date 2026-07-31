@@ -62,15 +62,24 @@ def _slug(rel_posix: str) -> str:
     return stem.replace("/", "__")
 
 
-def outbox_target(workspace: Path, rel_posix: str, ext: str = ".html") -> Path:
+def outbox_target(
+    workspace: Path, rel_posix: str, ext: str = ".html", *, variant: str = ""
+) -> Path:
     """Where ``rel_posix``'s delivered artifact lands: one dated file per notebook per day.
 
     Public so the scheduled refresh (:mod:`mooring.app.refresh`) puts its artifact exactly
     where an attended Deliver would — one naming scheme, not two. ``ext`` picks the last
     mile (``.html`` or ``.xlsx``); both sit in the same per-notebook folder so a stakeholder
-    pack for one notebook stays together."""
+    pack for one notebook stays together.
+
+    ``variant`` inserts a fragment before the date, which is how a parameterised run
+    (:mod:`mooring.app.param_runs`) gives every value its OWN file —
+    ``board-region-EMEA-20260731.html`` beside ``board-region-APAC-20260731.html``. The
+    value is in the name a stakeholder reads, and two values can never land on one path
+    (:func:`mooring.params.parse_spec` refuses a spec whose values would collide)."""
     out_dir = outbox_dir(workspace) / _slug(rel_posix)
-    return out_dir / f"{Path(rel_posix).stem}-{datetime.now():%Y%m%d}{ext}"
+    tag = f"-{variant}" if variant else ""
+    return out_dir / f"{Path(rel_posix).stem}{tag}-{datetime.now():%Y%m%d}{ext}"
 
 
 def _ensure_notebook(workspace: Path, rel_path: str) -> Path:
@@ -110,14 +119,20 @@ def deliver_html(cfg: Config, rel_path: str) -> DeliverResult:
 
     cmd, env = editor.export_html_command(workspace, rel_posix, out_path, include_code=False)
     try:
-        proc = subprocess.run(
-            cmd,
-            cwd=str(workspace),
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=_EXPORT_TIMEOUT,
-        )
+        # The workspace run lock: one whole-notebook run at a time. A Deliver launched
+        # while a scheduled refresh or a parameterised fan-out is going would put a second
+        # kernel on the same CPU and the same workspace files.
+        with notebook_run.workspace_guard(workspace):
+            proc = subprocess.run(
+                cmd,
+                cwd=str(workspace),
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=_EXPORT_TIMEOUT,
+            )
+    except notebook_run.RunBusy as exc:
+        raise DeliverError(str(exc)) from exc
     except FileNotFoundError as exc:  # marimo/uv not found on PATH
         raise DeliverError(f"Could not run the renderer: {exc}") from exc
     except subprocess.TimeoutExpired as exc:
@@ -171,9 +186,13 @@ def deliver_excel(cfg: Config, rel_path: str) -> DeliverResult:
     env_extra = {workbook.ENV_TARGET: str(out_path), workbook.ENV_NOTEBOOK: rel_posix}
     render = workbook.render_target(workspace, rel_posix)
     try:
-        outcome = notebook_run.run(
-            workspace, rel_posix, render, keep_on_success=False, env_extra=env_extra
-        )
+        with notebook_run.workspace_guard(workspace):  # one whole-notebook run at a time
+            outcome = notebook_run.run(
+                workspace, rel_posix, render, keep_on_success=False, env_extra=env_extra
+            )
+    except notebook_run.RunBusy as exc:
+        _clear(out_path)
+        raise DeliverError(str(exc)) from exc
     except notebook_run.RunError as exc:
         # A run that stopped early may have left the sheets it got to. A delivery mooring
         # REFUSED must leave nothing deliverable behind — a half-populated workbook in the
@@ -337,7 +356,7 @@ def provenance(cfg: Config, rel_posix: str, workspace: Path) -> tuple[str, str, 
 
 
 def stamp_provenance(
-    out_path: Path, cfg: Config, rel_posix: str, workspace: Path, *, freshness: str = ""
+    out_path: Path, cfg: Config, rel_posix: str, workspace: Path, *, note: str = ""
 ) -> str:
     """Append a value-free provenance footer to the rendered HTML. Returns the short
     head commit (or "").
@@ -347,13 +366,20 @@ def stamp_provenance(
     never-pushed notebook would otherwise get a 404 link and a false "at this commit"
     claim (blob_url's precondition is that the file exists remotely).
 
-    ``freshness`` (see :func:`mooring.schedule.freshness_note`) adds the scheduled
-    cadence and the next-due date for an artifact produced by a scheduled refresh. That
-    clause is what makes staleness travel WITH the output: a stakeholder holding the
-    emailed HTML weeks later can see it is overdue without access to mooring, the repo,
-    or the analyst. An attended Deliver passes "" — it makes no recurrence claim."""
+    ``note`` adds one extra clause to the footer, and it is the mechanism that makes an
+    artifact honest about its own context — WITHOUT access to mooring, the repo, or the
+    analyst. Two producers use it:
+
+    - a scheduled refresh passes :func:`mooring.schedule.freshness_note` — the cadence and
+      the next-due date, so a manager holding the emailed HTML three weeks later can see it
+      is overdue;
+    - a parameterised run passes :meth:`mooring.params.ParamSpec.note` — *"region = EMEA ·
+      value 1 of 3 in this run"*, so a fan-out that only got half way through is visible
+      from any ONE of the artifacts it did produce, instead of looking complete.
+
+    An attended Deliver passes "" — it makes neither claim."""
     origin, link, short = provenance(cfg, rel_posix, workspace)
-    footer = _footer_html(origin, rel_posix, f"{datetime.now():%Y-%m-%d}", link, freshness)
+    footer = _footer_html(origin, rel_posix, f"{datetime.now():%Y-%m-%d}", link, note)
     try:
         content = out_path.read_text("utf-8")
     except (OSError, UnicodeDecodeError):
@@ -369,10 +395,10 @@ def stamp_provenance(
     return short
 
 
-def _footer_html(origin: str, rel_posix: str, day: str, link: str, freshness: str = "") -> str:
+def _footer_html(origin: str, rel_posix: str, day: str, link: str, note: str = "") -> str:
     text = f"Generated by mooring from {escape(origin)} · notebook {escape(rel_posix)} · {day}"
-    if freshness:
-        text += f" · {escape(freshness)}"
+    if note:
+        text += f" · {escape(note)}"
     if link:
         text += f' · <a href="{escape(link, quote=True)}" style="color:inherit">View on GitHub</a>'
     return (

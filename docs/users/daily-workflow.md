@@ -34,6 +34,7 @@ page that opens when you run the app). The same actions are available from the
 | **New notebook** | Create a fresh marimo notebook from a template and open it. A bare name lands in `notebooks/`; type a path (e.g. `packages/finance/notebooks/sales`) to place it in a sub-folder — mooring registers that folder so it syncs for the team. |
 | **Deliver** | Render a notebook to a **self-contained HTML snapshot** (code hidden) you can email a stakeholder who won't open marimo. See [Delivering a result](#delivering-a-result-for-a-stakeholder). |
 | **Verify runs** | Smoke-run the notebook once on your machine and badge the row with whether it **ran clean** — the "does this still run before I share it?" check. See [Verifying a notebook runs](#verifying-a-notebook-runs). |
+| **Run for each…** | Run this notebook **once per region / entity / month** and save one snapshot per value — the month-end "same pack, six times" loop. See [Running one notebook for each value](#running-one-notebook-for-each-value). |
 | **Schedule refresh…** | Re-run a notebook on a cadence (pull → run → report), so you stop having to remember. Appears once the notebook has verified clean. See [Refreshing a notebook on a schedule](#refreshing-a-notebook-on-a-schedule). |
 | **Push** | Upload your changed files to the team repo — **one commit per file**. Blocked for any file that's in conflict. |
 | **Propose** | Like Push, but uploads to a **review branch** instead of the shared branch, so a teammate can review the changes as a pull request before they land. See [Proposing changes](#proposing-changes-for-review). |
@@ -221,6 +222,92 @@ its number, **Verify** it.
     correct — for that, tie your numbers out with
     [`mooring_checks`](#checking-your-numbers-tie-out) and review the logic with the
     copilot's [Review logic](ai-copilot.md#review-my-logic).
+
+## Running one notebook for each value
+
+A board pack is often the same notebook run once per region, once per entity, or once per
+month. Done by hand that is: edit a value, run, Deliver, rename, repeat — and the renaming
+is where a pack gets a file labelled *APAC* holding EMEA's numbers.
+
+**Run for each** does the whole loop in one click, and gives every value its own artifact.
+
+### 1. Let the notebook read a value
+
+Add one line to the notebook. Mooring injects a `mooring_params` helper into every workspace,
+the same way it injects `mooring_checks`:
+
+```python
+import mooring_params
+
+region = mooring_params.get("region", "EMEA")   # the default is required
+sales = pl.read_parquet(f"sales_{region}.parquet")
+```
+
+!!! success "The notebook still works exactly as it did"
+
+    The default is not optional, and that is the whole point. Opening the notebook in the
+    editor, **Verify**, and a scheduled refresh all supply no parameter — so `get` returns the
+    default and the notebook runs precisely as it does today. There is no "parameterised mode"
+    to be in or out of.
+
+### 2. Run it for each value
+
+On the notebook's **Actions ▾** menu, choose **Run for each…**, type the parameter and its
+values, and press **Start**:
+
+```
+region=EMEA,APAC,AMER
+month=2026-01..2026-06
+```
+
+Ranges cover whole numbers (`1..4`) and calendar months (`2026-01..2026-06`); anything else is
+a literal value, so a list of entity names needs no special syntax.
+
+Mooring then runs the notebook **once per value, one at a time**, showing which value is going
+and how each one turned out. Each successful value writes its own snapshot to your local
+outbox, named so a stakeholder can tell them apart:
+
+```
+.mooring/outbox/notebooks__board/board-region-EMEA-20260731.html
+.mooring/outbox/notebooks__board/board-region-APAC-20260731.html
+```
+
+### What it guarantees
+
+- **One failing value never stops the others.** Each value is reported separately, so you get
+  five artifacts and one clear failure rather than nothing.
+- **A half-finished pack always looks half-finished.** The summary says *"2 of 3 value(s) ran
+  clean — INCOMPLETE"*, and each snapshot's footer records *"region = EMEA · value 1 of 3"* —
+  so even someone holding a single emailed file can see one is missing.
+- **A snapshot is never labelled with a value it did not use.** Four things enforce that:
+  mooring refuses two values that would collide on one filename (`EMEA` and `emea` are the
+  same file on Windows); it refuses to fan out a notebook with no visible
+  `mooring_params.get("region", …)` call, which is what catches a typo like `regoin=`; only
+  one notebook runs on a workspace at a time, so nothing else's output can be picked up; and
+  a value whose snapshot could not be written is reported as **failed**, never as clean —
+  because the file left at that path is the previous one.
+- **A failed value never overwrites its last good snapshot.** Anything in the outbox is always
+  a complete run.
+- **Cancel really cancels.** `Ctrl+C`, or the hub's Cancel button, stops the running notebook
+  itself — not just the reporting — and every value that never ran is listed as not run.
+
+!!! warning "This is attended, not a schedule"
+
+    You stay and watch it: it can take several minutes per value, and it is the moment to
+    notice a wrong value. It is deliberately not something you can put on a cadence — a
+    schedule promises one artifact whose staleness is arithmetic, which is a different promise
+    from N artifacts. Every way of running a notebook — Verify, Deliver, a scheduled refresh
+    and a fan-out — shares one workspace lock, so no two can ever run at once; whichever
+    starts second is refused with a message saying so.
+
+Nothing is pushed. The artifacts live in the sync-excluded `.mooring/outbox`, exactly like
+[Deliver](#delivering-a-result-for-a-stakeholder)'s.
+
+On the command line this is [`mooring run`](cli.md#run):
+
+```bash
+mooring run notebooks/board.py --for region=EMEA,APAC,AMER
+```
 
 ## Refreshing a notebook on a schedule
 

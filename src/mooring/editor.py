@@ -31,7 +31,16 @@ from pathlib import Path
 
 import tomli_w
 
-from mooring import checks, connections, datasets, inputs, paths, pyproject_env, workbook
+from mooring import (
+    checks,
+    connections,
+    datasets,
+    inputs,
+    params,
+    paths,
+    pyproject_env,
+    workbook,
+)
 
 STARTUP_TIMEOUT = 30.0
 
@@ -170,6 +179,7 @@ def ensure_runtime_config(workspace: Path, *, theme: str | None = None) -> None:
     connections.install_runtime(workspace)  # and mooring_connections (shape + local secret)
     datasets.install_runtime(workspace)  # and mooring_datasets (pointer + local redirect)
     workbook.install_runtime(workspace)  # and mooring_deliver (result tables -> .xlsx)
+    params.install_runtime(workspace)  # and mooring_params (the parameterised-run value)
     path = workspace / ".marimo.toml"
     try:
         data: dict = {}
