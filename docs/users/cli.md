@@ -299,6 +299,27 @@ while the **secret stays on each machine**. See
 - `connections rm <name>` — remove a connection definition.
 - `connections check` — scan the synced definitions for anything secret-shaped.
 
+### `datasets` — name the data files that are too big to sync
+
+Give a file that lives **outside** the repo (a network share, a URL) a name in the
+synced `mooring.toml`, so notebooks read `md.path("sales")` instead of hard-coding
+one person's UNC path — while each machine can redirect that name locally. See
+[Pointing at data too big to sync](daily-workflow.md#pointing-at-data-too-big-to-sync).
+
+- `datasets list` — every pointer, where it resolves on **this** machine (team
+  pointer, local redirect, env var or cached download), and whether the file is there.
+- `datasets add <name> kind=<share|https> path=…|url=…` — define/update a pointer
+  (e.g. `datasets add sales kind=share path="//fileserver/finance/sales.parquet"`).
+  A `password`/`token`/`key`-shaped field, and any **pre-signed or SAS URL**, is
+  **refused** — a pointer carries a location, never a credential.
+- `datasets set-local <name> <path>` — point the name somewhere else on this machine;
+  it lives under `.mooring`, which never syncs. `--clear` reverts to the team's pointer.
+- `datasets rm <name>` — remove a pointer.
+- `datasets check` — scan the synced pointers for anything credential-shaped.
+
+Resolution order in a notebook: `MOORING_DATASET_<NAME>_PATH` → your local redirect →
+the team's pointer (for `kind=https`, the copy cached under `.mooring/`).
+
 ### `init` / `deps` — notebook dependencies
 
 A repo declares the packages its notebooks need in a `pyproject.toml` + `uv.lock`
