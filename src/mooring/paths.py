@@ -10,6 +10,8 @@ from pathlib import Path
 
 import platformdirs
 
+from mooring import githost
+
 APP_NAME = "mooring"
 
 # On Windows os.replace raises PermissionError if another process holds the TARGET
@@ -74,20 +76,38 @@ def user_log_dir() -> Path:
     return Path(platformdirs.user_log_dir(APP_NAME, appauthor=False))
 
 
-def default_workspace(owner: str, repo: str) -> Path:
+def default_workspace(owner: str, repo: str, host: str = githost.DEFAULT_HOST) -> Path:
     # Keyed by owner AND repo so same-named repos under different owners
     # don't share a workspace. Lives under ~/PythonProjects in the user's home
     # directory rather than Documents, which Windows redirects into OneDrive
     # where cloud sync corrupts mooring's state (see synced_folder_provider).
-    return Path.home() / "PythonProjects" / APP_NAME / owner / repo
+    #
+    # Keyed by HOST too, because owner/repo is only unique *within* a GitHub
+    # instance: acme/notebooks on github.com and acme/notebooks on an Enterprise
+    # host are different repositories, and sharing a folder would mean sharing
+    # one .mooring/manifest.json — base blob SHAs from the wrong remote, so pull
+    # sees the whole tree as deleted and push sends a stale base_sha. github.com
+    # keeps the un-prefixed path so existing workspaces are untouched (the same
+    # back-compat idiom auth.py uses for token keys); other hosts nest under it.
+    root = Path.home() / "PythonProjects" / APP_NAME
+    if host and host != githost.DEFAULT_HOST:
+        root = root / host.replace(":", "_")
+    return root / owner / repo
 
 
-def legacy_workspaces(owner: str, repo: str) -> tuple[Path, ...]:
-    """Past default workspace locations (under Documents), newest first, kept so
-    we can hint existing users to migrate to the current default_workspace():
-    the owner-keyed Documents default, then the pre-multi-repo repo-only key."""
+def legacy_workspaces(
+    owner: str, repo: str, host: str = githost.DEFAULT_HOST
+) -> tuple[Path, ...]:
+    """Past default workspace locations, newest first, kept so we can hint
+    existing users to migrate to the current default_workspace(): the
+    pre-multi-host un-prefixed path (Enterprise hosts only), then the owner-keyed
+    Documents default, then the pre-multi-repo repo-only key."""
+    home = Path.home() / "PythonProjects" / APP_NAME
     docs = Path(platformdirs.user_documents_dir()) / APP_NAME
-    return (docs / owner / repo, docs / repo)
+    older = (docs / owner / repo, docs / repo)
+    if host and host != githost.DEFAULT_HOST:
+        return (home / owner / repo, *older)
+    return older
 
 
 def synced_folder_provider(workspace: Path) -> str:

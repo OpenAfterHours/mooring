@@ -152,11 +152,20 @@ If your GitHub is a **GitHub Enterprise** instance (say
 `https://ghe.example.com/` instead of `github.com`), everything above still
 applies — it just happens on *your* instance:
 
-1. Set the **`host`** config key (in `[github]`, next to `client_id`) to your
-   instance — a bare host like `ghe.example.com` or a full URL like
-   `https://ghe.example.com/` both work. There is one host per installation;
-   all registered repos live on it. From the CLI:
-   `mooring repo add your-org/notebooks --host ghe.example.com`.
+1. Add an **account** for your instance and sign in to it. The host and the OAuth
+   client id belong to the account, so a machine can hold several — a
+   `ghe.example.com` identity and a `github.com` one, or even two identities on
+   the same host:
+
+    ```bash
+    mooring account add work --host ghe.example.com --client-id Ov23li…
+    mooring repo add your-org/notebooks --account work
+    ```
+
+    Each repo remembers the account it was registered with, so switching repos
+    switches identity and a push can never go out under the wrong token. See
+    `mooring account list` for who you are signed in as and which repos use each
+    account.
 2. Register the OAuth app **on your instance** (same path: your GHE →
    Settings → Developer settings → OAuth Apps), not on public github.com — a
    github.com client id will not work against an Enterprise host.

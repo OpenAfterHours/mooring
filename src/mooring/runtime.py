@@ -35,7 +35,7 @@ def legacy_workspace_hint(cfg: config.Config) -> str:
     new = cfg.workspace()
     if (new / ".mooring").is_dir():
         return ""
-    for old in paths.legacy_workspaces(cfg.owner or "_", cfg.repo):
+    for old in paths.legacy_workspaces(cfg.owner or "_", cfg.repo, cfg.host):
         if old != new and (old / ".mooring").is_dir():
             return (
                 f"Found an old workspace at {old} — move the folder to {new} "

@@ -29,7 +29,11 @@ def _hermetic_telemetry(monkeypatch):
 
 
 class FakeClient:
-    def __init__(self, files: dict[str, bytes] | None = None):
+    def __init__(self, files: dict[str, bytes] | None = None, login: str = "phil"):
+        # `login` is what get_user() answers. Parameterized because identity is now
+        # per-account: a test with two accounts needs two fakes that disagree about
+        # who they are, or "repo A is @alice, repo B is @bob" proves nothing.
+        self.login = login
         self.blobs: dict[str, bytes] = {}
         self.trees: dict[str, dict[str, str]] = {DEFAULT_BRANCH: {}}
         self.commit_count = 0
@@ -93,7 +97,7 @@ class FakeClient:
     # -- GitHubClient interface ------------------------------------------------
 
     def get_user(self):
-        return {"login": "phil"}
+        return {"login": self.login}
 
     def get_branch_head(self, branch):
         if branch not in self.heads:

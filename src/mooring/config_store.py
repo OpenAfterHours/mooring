@@ -46,17 +46,107 @@ def write_user_data(data: dict) -> None:
 
 
 def _materialized(data: dict) -> dict:
-    """Ensure data has a [repos] section reflecting the effective repo set."""
-    if isinstance(data.get("repos"), dict):
-        return data
-    specs, active = config.repo_specs_from_data(config.merged_data())
-    repos: dict = {"active": active} if active else {}
-    for s in specs:
-        repos[s.alias] = {"owner": s.owner, "repo": s.repo, "branch": s.branch}
-        if s.workspace_path:
-            repos[s.alias]["workspace"] = s.workspace_path
-    data["repos"] = repos
+    """Ensure data has a [repos] section reflecting the effective repo set.
+
+    Note the two checks are INDEPENDENT: accounts must materialize even for a file
+    that already has [repos], which is every multi-repo user — i.e. exactly the
+    people this feature is for.
+    """
+    if not isinstance(data.get("repos"), dict):
+        specs, active = config.repo_specs_from_data(config.merged_data())
+        repos: dict = {"active": active} if active else {}
+        for s in specs:
+            repos[s.alias] = {"owner": s.owner, "repo": s.repo, "branch": s.branch}
+            if s.workspace_path:
+                repos[s.alias]["workspace"] = s.workspace_path
+            if s.account:
+                repos[s.alias]["account"] = s.account
+        data["repos"] = repos
+    if not isinstance(data.get("accounts"), dict):
+        data["accounts"] = _legacy_account(data)
     return data
+
+
+def _legacy_account(data: dict) -> dict:
+    """Seed [accounts] from a pre-accounts [github] host/client_id, if there is one.
+
+    The login is left blank on purpose — we do not know who the stored token belongs
+    to until someone signs in, and config.Config.token_slot treats a blank login as
+    "not signed in" rather than resolving onto the host-keyed token. So this records
+    the CONNECTION details (which instance, which OAuth app) without ever claiming
+    an identity. Repos stay unbound, which is what keeps their existing token working.
+    """
+    gh = config.merged_data().get("github", {})  # already has the user file overlaid
+    client_id = str(gh.get("client_id", "") or "")
+    try:
+        host = githost.normalize_host(str(gh.get("host", "") or ""))
+    except ValueError:
+        host = githost.DEFAULT_HOST
+    if not client_id and host == githost.DEFAULT_HOST:
+        return {}
+    return {"legacy": {"host": host, "client_id": client_id}}
+
+
+def add_account(alias: str, host: str, login: str = "", client_id: str = "") -> None:
+    """Create or update an account record, merging into any existing table.
+
+    Merging matters: the device flow writes the login *after* the record exists, and
+    an overwrite would drop the client_id the flow was started with.
+    """
+    validate_alias(alias)
+    data = _materialized(read_user_data())
+    entry = data["accounts"].get(alias)
+    if not isinstance(entry, dict):
+        entry = {}
+    entry["host"] = githost.normalize_host(host)
+    if login:
+        entry["login"] = login
+    if client_id:
+        entry["client_id"] = client_id
+    data["accounts"][alias] = entry
+    if not data["accounts"].get("active"):
+        data["accounts"]["active"] = alias
+    write_user_data(data)
+
+
+def remove_account(alias: str) -> tuple[str, ...]:
+    """Forget an account. Returns the repo aliases that were bound to it.
+
+    Those repos KEEP the now-dangling binding rather than being unbound, and keep
+    their files and sync history. Unbinding would look tidier but is the unsafe
+    option: an unbound repo falls back to the global [github] host and the
+    pre-accounts token slot, so an Enterprise repo would quietly start pointing at
+    github.com with a different workspace. A dangling binding instead resolves to
+    a reported account_error and NO token at all (config.Config.token_slot),
+    which is the honest state — and re-adding the account restores it as it was.
+    """
+    data = _materialized(read_user_data())
+    if alias not in data["accounts"] or alias in RESERVED_ALIASES:
+        raise KeyError(alias)
+    del data["accounts"][alias]
+    remaining = sorted(k for k in data["accounts"] if k not in RESERVED_ALIASES)
+    if data["accounts"].get("active") == alias:
+        if remaining:
+            data["accounts"]["active"] = remaining[0]
+        else:
+            data["accounts"].pop("active", None)
+    orphaned = tuple(
+        sorted(
+            name
+            for name, tbl in data.get("repos", {}).items()
+            if name not in RESERVED_ALIASES and isinstance(tbl, dict) and tbl.get("account") == alias
+        )
+    )
+    write_user_data(data)
+    return orphaned
+
+
+def set_active_account(alias: str) -> None:
+    data = _materialized(read_user_data())
+    if alias not in data["accounts"] or alias in RESERVED_ALIASES:
+        raise KeyError(alias)
+    data["accounts"]["active"] = alias
+    write_user_data(data)
 
 
 def add_repo(
@@ -68,12 +158,26 @@ def add_repo(
     make_active: bool = True,
     client_id: str | None = None,
     host: str | None = None,
+    account: str | None = None,
 ) -> None:
     validate_alias(alias)
     data = _materialized(read_user_data())
-    data["repos"][alias] = {"owner": owner, "repo": repo, "branch": branch or "main"}
+    # MERGE, don't replace: re-adding an existing alias must not silently drop keys
+    # it isn't being asked about. Dropping `account` in particular would unbind the
+    # repo, and an unbound repo falls back to the pre-accounts host-keyed token —
+    # i.e. it would quietly start pushing under whoever logged in before accounts.
+    entry = data["repos"].get(alias)
+    if not isinstance(entry, dict):
+        entry = {}
+    entry.update({"owner": owner, "repo": repo, "branch": branch or "main"})
     if workspace:
-        data["repos"][alias]["workspace"] = workspace
+        entry["workspace"] = workspace
+    if account is not None:
+        if account:
+            entry["account"] = account
+        else:
+            entry.pop("account", None)
+    data["repos"][alias] = entry
     if make_active or not data["repos"].get("active"):
         data["repos"]["active"] = alias
     if client_id is not None:

@@ -38,12 +38,48 @@ def normalize_theme(value: object) -> str:
 
 
 @dataclass(frozen=True)
+class Account:
+    """One GitHub identity on one instance — the thing a token belongs to.
+
+    Keyed by (host, login) rather than host alone so two users can coexist on the
+    same instance. ``client_id`` rides here because each instance needs its own
+    OAuth app: a github.com client id does not work against Enterprise.
+
+    ``login`` is discovered from ``GET /user`` after the device flow, never typed.
+    A blank ``login`` means the flow never finished, and is treated as NOT LOGGED
+    IN — see :meth:`is_signed_in` and ``Config.token_login``.
+    """
+
+    alias: str
+    host: str = githost.DEFAULT_HOST
+    login: str = ""
+    client_id: str = ""
+
+    @property
+    def is_signed_in(self) -> bool:
+        return bool(self.login)
+
+    @property
+    def label(self) -> str:
+        return f"{self.login}@{self.host}" if self.login else self.host
+
+
+@dataclass(frozen=True)
 class Config:
     client_id: str = ""
     owner: str = ""
     repo: str = ""
     branch: str = "main"
     host: str = githost.DEFAULT_HOST
+    # The repo's account: which alias it is bound to, that account's GitHub login,
+    # and why resolution failed (empty when fine). `account_error` is the third
+    # state between "configured" and "not configured" — a repo whose account was
+    # deleted or misspelt is NOT unconfigured, it is broken in a way the user can
+    # fix, and the adapters need to say so rather than silently falling back to
+    # local mode. See AppConfig.config_for, which never raises.
+    account: str = ""
+    account_login: str = ""
+    account_error: str = ""
     folders: tuple[str, ...] = ("notebooks", "data", "reports")
     exclude: tuple[str, ...] = ()
     warn_file_mb: int = 10
@@ -67,10 +103,29 @@ class Config:
     def is_configured(self) -> bool:
         return bool(self.client_id and self.owner and self.repo)
 
+    @property
+    def token_slot(self) -> tuple[str, str] | None:
+        """Where this repo's token lives — ``(host, login)`` — or ``None`` if no
+        token can exist for it. Pass to :func:`mooring.auth.token_for`.
+
+        This is the ONE place the account/legacy token decision is made, and it is
+        deliberately fail-closed. A repo bound to an account that never finished
+        signing in (blank login) resolves to ``None``, NOT to the host-keyed slot:
+        that slot may still hold a previous user's pre-accounts token, and handing
+        it back would silently push under their name. An UNBOUND repo does read the
+        host-keyed slot — that token is genuinely its own, from before accounts
+        existed — which is what keeps upgrades seamless.
+        """
+        if self.account_error:
+            return None
+        if self.account and not self.account_login:
+            return None
+        return (self.host, self.account_login)
+
     def workspace(self) -> Path:
         if self.workspace_path:
             return Path(self.workspace_path).expanduser()
-        return paths.default_workspace(self.owner or "_", self.repo or "workspace")
+        return paths.default_workspace(self.owner or "_", self.repo or "workspace", self.host)
 
 
 @dataclass(frozen=True)
@@ -80,6 +135,11 @@ class RepoSpec:
     repo: str
     branch: str = "main"
     workspace_path: str = ""
+    # The account alias this repo is bound to. Empty = unbound, i.e. a pre-accounts
+    # config that still uses the global [github] host/client_id. Binding is what
+    # makes identity follow the repo, so switching repos can never push under the
+    # wrong token.
+    account: str = ""
     # This machine's per-user AI context SUBSCRIPTION for the repo: which of the team's
     # offered context folders (synced mooring.toml [ai] context_folders) this user's copilot
     # actually reads. ``None`` = no choice recorded → read the WHOLE offer (the opt-out
@@ -98,6 +158,17 @@ class AppConfig:
     repos: tuple[RepoSpec, ...] = ()
     active_alias: str = ""
     host: str = githost.DEFAULT_HOST
+    # The known GitHub identities. This tuple IS the account index: keyring has no
+    # portable way to enumerate credentials for a service, so the config file is
+    # the only list of which accounts exist. `active_account` is just the default
+    # offered when registering a new repo — it is NOT a global identity switch,
+    # because identity follows the repo (RepoSpec.account).
+    accounts: tuple[Account, ...] = ()
+    active_account: str = ""
+    # Accounts dropped while parsing, as (alias, reason) — a bad host or a
+    # malformed table takes out that one account and is reported, never raised.
+    # Mirrors policy.Policy.ignored; see config_for's totality guarantee.
+    ignored_accounts: tuple[tuple[str, str], ...] = ()
     folders: tuple[str, ...] = ("notebooks", "data", "reports")
     exclude: tuple[str, ...] = ()
     warn_file_mb: int = 10
@@ -147,11 +218,53 @@ class AppConfig:
                 return s
         raise KeyError(alias)
 
+    def account(self, alias: str) -> Account:
+        for a in self.accounts:
+            if a.alias == alias:
+                return a
+        raise KeyError(alias)
+
+    def _identity(self, spec: RepoSpec) -> tuple[str, str, str, str]:
+        """Resolve a repo's (host, client_id, login, error). NEVER raises.
+
+        Totality matters here more than anywhere else in this file: Hub.app_cfg is
+        a property that calls config_for on EVERY read, so an exception would 500
+        every hub route — including the ones that would let the user fix it — and
+        would stop policy.tighten_app_config from ever running, silently dropping
+        the admin policy. A dangling binding therefore degrades to a reported
+        error, exactly the way policy.parse records rather than raises.
+        """
+        if not spec.account:
+            # Unbound: the pre-accounts world, where host/client_id are global.
+            return self.host, self.client_id, "", ""
+        for a in self.accounts:
+            if a.alias == spec.account:
+                if not a.is_signed_in:
+                    return (
+                        a.host,
+                        a.client_id,
+                        "",
+                        f"Account {spec.account!r} is not signed in — "
+                        f"run `mooring account add {spec.account}`.",
+                    )
+                return a.host, a.client_id, a.login, ""
+        dropped = dict(self.ignored_accounts).get(spec.account)
+        reason = (
+            f"Account {spec.account!r} was dropped from the config: {dropped}"
+            if dropped
+            else f"Account {spec.account!r} is not configured — "
+            f"run `mooring account add {spec.account}`."
+        )
+        return githost.DEFAULT_HOST, "", "", reason
+
     def config_for(self, alias: str | None = None) -> Config:
         """The single-repo Config for an alias (None = the active repo).
 
         An app with no repos yields an unconfigured Config so callers can
-        keep using cfg.is_configured.
+        keep using cfg.is_configured. A repo bound to a missing or unusable
+        account yields a Config carrying ``account_error`` rather than raising
+        (see _identity) — the repo is broken, not unconfigured, and the adapters
+        need to say which.
         """
         if alias is None:
             if not self.repos:
@@ -171,12 +284,16 @@ class AppConfig:
                 )
             alias = self.active_alias
         s = self.spec(alias)
+        host, client_id, login, account_error = self._identity(s)
         return Config(
-            client_id=self.client_id,
+            client_id=client_id,
             owner=s.owner,
             repo=s.repo,
             branch=s.branch,
-            host=self.host,
+            host=host,
+            account=s.account,
+            account_login=login,
+            account_error=account_error,
             folders=self.sync_folders,
             exclude=self.exclude,
             warn_file_mb=self.warn_file_mb,
@@ -428,6 +545,45 @@ def _opt_subscription(raw: object) -> tuple[str, ...] | None:
     return None  # a malformed value (e.g. a table) → treated as "no choice"
 
 
+def account_specs_from_data(
+    data: dict,
+) -> tuple[tuple[Account, ...], str, tuple[tuple[str, str], ...]]:
+    """Extract (accounts, active_account, ignored) from raw config data.
+
+    Mirrors repo_specs_from_data's shape — ``sorted()`` for a stable order and
+    ``isinstance(tbl, dict)`` so the scalar ``active`` key is skipped rather than
+    becoming a phantom account. Tolerant like policy.parse: a table with an
+    unparseable host is DROPPED with a recorded reason instead of raising, because
+    this is parsed on every config load and an exception here would wedge every
+    command, including the one that would fix it.
+    """
+    accounts_data = data.get("accounts")
+    if not isinstance(accounts_data, dict):
+        return (), "", ()
+    specs: list[Account] = []
+    ignored: list[tuple[str, str]] = []
+    for alias, tbl in sorted(accounts_data.items()):
+        if not isinstance(tbl, dict):
+            continue
+        try:
+            host = githost.normalize_host(str(tbl.get("host", "")))
+        except ValueError as exc:
+            ignored.append((str(alias), str(exc)))
+            continue
+        specs.append(
+            Account(
+                alias=str(alias),
+                host=host,
+                login=str(tbl.get("login", "")),
+                client_id=str(tbl.get("client_id", "")),
+            )
+        )
+    active = str(accounts_data.get("active", ""))
+    if active not in {a.alias for a in specs}:
+        active = specs[0].alias if specs else ""
+    return tuple(specs), active, tuple(ignored)
+
+
 def repo_specs_from_data(data: dict) -> tuple[tuple[RepoSpec, ...], str]:
     """Extract (repos, active_alias) from raw config data.
 
@@ -445,6 +601,7 @@ def repo_specs_from_data(data: dict) -> tuple[tuple[RepoSpec, ...], str]:
                 branch=str(tbl.get("branch", "main") or "main"),
                 workspace_path=str(tbl.get("workspace", "")),
                 context_folders=_opt_subscription(tbl.get("ai_context_folders")),
+                account=str(tbl.get("account", "")),
             )
             for alias, tbl in sorted(repos_data.items())
             if isinstance(tbl, dict)
@@ -482,6 +639,8 @@ def load_app_config(
     trash = data.get("trash", {})
     review = data.get("review", {})
 
+    accounts, active_account, ignored_accounts = account_specs_from_data(data)
+
     specs, active = repo_specs_from_data(data)
     if env.get("MOORING_ACTIVE_REPO") in {s.alias for s in specs}:
         active = env["MOORING_ACTIVE_REPO"]
@@ -518,11 +677,34 @@ def load_app_config(
             )
             specs, active = (spec,), spec.alias
 
+    # MOORING_GITHUB_HOST / MOORING_CLIENT_ID follow the same rule as MOORING_OWNER:
+    # they override the ACTIVE repo. When that repo is bound to an account they
+    # retarget that one account (leaving every other account alone); otherwise they
+    # fall through to the global [github] fields below, which is the pre-accounts
+    # behaviour the CI recipe in CLAUDE.md relies on.
+    env_host = env.get("MOORING_GITHUB_HOST")
+    env_client_id = env.get("MOORING_CLIENT_ID")
+    bound = next((s.account for s in specs if s.alias == active and s.account), "")
+    if bound and (env_host or env_client_id):
+        accounts = tuple(
+            replace(
+                a,
+                host=githost.normalize_host(env_host) if env_host else a.host,
+                client_id=env_client_id if env_client_id is not None else a.client_id,
+            )
+            if a.alias == bound
+            else a
+            for a in accounts
+        )
+
     return AppConfig(
         client_id=env.get("MOORING_CLIENT_ID", gh.get("client_id", "")),
         repos=specs,
         active_alias=active,
-        host=githost.normalize_host(env.get("MOORING_GITHUB_HOST") or str(gh.get("host", ""))),
+        accounts=accounts,
+        active_account=active_account,
+        ignored_accounts=ignored_accounts,
+        host=githost.normalize_host(env_host or str(gh.get("host", ""))),
         folders=_folder_list(sync.get("folders", ("notebooks", "data", "reports")), "folders"),
         exclude=_str_list(sync.get("exclude", ()), "exclude"),
         warn_file_mb=int(sync.get("warn_file_mb", 10)),

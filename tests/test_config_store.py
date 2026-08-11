@@ -47,6 +47,87 @@ def test_add_repo_without_host_keeps_existing():
     assert config.load_app_config().host == "ghe.example"
 
 
+def test_add_account_round_trip_and_binding():
+    config_store.add_account("work", "https://GHE.Example/", login="a.h", client_id="cid_ghe")
+    config_store.add_repo("team", "acme", "nbs", account="work")
+    data = tomllib.loads(paths.user_config_file().read_text("utf-8"))
+    assert data["accounts"]["work"] == {
+        "host": "ghe.example",
+        "login": "a.h",
+        "client_id": "cid_ghe",
+    }
+    assert data["accounts"]["active"] == "work"
+    assert data["repos"]["team"]["account"] == "work"
+
+    cfg = config.load_app_config().config_for("team")
+    assert (cfg.host, cfg.client_id, cfg.account_login) == ("ghe.example", "cid_ghe", "a.h")
+
+
+def test_add_account_merges_so_the_device_flow_can_fill_the_login_later():
+    """The flow writes the record first and the login only once GET /user answers."""
+    config_store.add_account("work", "ghe.example", client_id="cid_ghe")
+    config_store.add_account("work", "ghe.example", login="a.h")
+    data = tomllib.loads(paths.user_config_file().read_text("utf-8"))
+    assert data["accounts"]["work"] == {
+        "host": "ghe.example",
+        "client_id": "cid_ghe",
+        "login": "a.h",
+    }
+
+
+def test_add_repo_merges_and_never_silently_unbinds_an_account():
+    """Re-adding an alias must not drop its account: an unbound repo falls back to
+    the pre-accounts host-keyed token, i.e. it would push as the previous user."""
+    config_store.add_account("work", "ghe.example", login="a.h", client_id="c")
+    config_store.add_repo("team", "acme", "nbs", account="work")
+    config_store.add_repo("team", "acme", "nbs", branch="dev")  # no account= given
+    data = tomllib.loads(paths.user_config_file().read_text("utf-8"))
+    assert data["repos"]["team"]["account"] == "work"
+    assert data["repos"]["team"]["branch"] == "dev"
+
+
+def test_remove_account_leaves_its_repos_bound_but_broken():
+    config_store.add_account("work", "ghe.example", login="a.h", client_id="c")
+    config_store.add_repo("team", "acme", "nbs", account="work")
+    config_store.add_repo("lab", "acme", "lab", account="work", make_active=False)
+    config_store.add_repo("solo", "acme", "solo", make_active=False)
+
+    assert config_store.remove_account("work") == ("lab", "team")
+    data = tomllib.loads(paths.user_config_file().read_text("utf-8"))
+    assert "work" not in data["accounts"]
+    # The binding is KEPT and dangles. Unbinding would silently drop the repo back
+    # to the global [github] host and the pre-accounts token slot; dangling instead
+    # fails closed with an error the user can act on.
+    assert data["repos"]["team"]["account"] == "work"
+    assert data["repos"]["team"]["owner"] == "acme"  # the repo itself survives
+    cfg = config.load_app_config().config_for("team")
+    assert cfg.token_slot is None and "work" in cfg.account_error
+
+
+def test_remove_account_rejects_an_unknown_alias():
+    config_store.add_account("work", "ghe.example", login="a.h")
+    with pytest.raises(KeyError):
+        config_store.remove_account("nope")
+
+
+def test_upgrading_seeds_a_legacy_account_without_claiming_an_identity():
+    """A pre-accounts [github] host/client_id becomes a connection record. The login
+    stays blank because we do not know who the stored token belongs to — and a blank
+    login is treated as 'not signed in', never resolved onto that token."""
+    paths.user_config_file().parent.mkdir(parents=True, exist_ok=True)
+    paths.user_config_file().write_text(
+        '[github]\nclient_id = "cid"\nhost = "ghe.example"\nowner = "acme"\nrepo = "nbs"\n',
+        "utf-8",
+    )
+    config_store.set_active("nbs")  # any write materializes
+    data = tomllib.loads(paths.user_config_file().read_text("utf-8"))
+    assert data["accounts"]["legacy"] == {"host": "ghe.example", "client_id": "cid"}
+    assert "login" not in data["accounts"]["legacy"]
+    # The repo stays UNBOUND, so its existing host-keyed token keeps working.
+    cfg = config.load_app_config().config_for(None)
+    assert cfg.account == "" and cfg.token_slot == ("ghe.example", "")
+
+
 def test_add_preserves_unrelated_sections():
     paths.user_config_dir().mkdir(parents=True)
     paths.user_config_file().write_text("[sync]\nwarn_file_mb = 2\n", "utf-8")

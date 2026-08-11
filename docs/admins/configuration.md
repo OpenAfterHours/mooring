@@ -42,11 +42,50 @@ into three sections:
 | `owner` | `""` | GitHub org or user that owns the shared repo. Required (single-repo form). |
 | `repo` | `""` | Name of the shared notebooks repo. Required (single-repo form). |
 | `branch` | `"main"` | Branch to sync from / push to. |
-| `host` | `"github.com"` | The GitHub instance, for [GitHub Enterprise](github-setup.md#github-enterprise) setups (e.g. `ghe.example.com`; a full URL is also accepted). One host per installation — it applies to every registered repo. |
+| `host` | `"github.com"` | The GitHub instance, for [GitHub Enterprise](github-setup.md#github-enterprise) setups (e.g. `ghe.example.com`; a full URL is also accepted). The fallback for repos with no account — prefer [`[accounts]`](#accounts-signing-in-as-more-than-one-user), which keeps the host per-repo. |
 
 The app is considered **configured** only when `client_id` and a repo
 (owner + name) are known. Until then the hub shows the
 [setup form](#the-runtime-setup-form).
+
+### `[accounts]` — signing in as more than one user
+
+An **account** is one GitHub identity on one instance. Registering them lets a
+single machine hold several sign-ins — a work Enterprise identity and a personal
+`github.com` one, or even two identities on the *same* host:
+
+```toml
+[accounts]
+active = "work"            # the default offered when registering a new repo
+
+[accounts.work]
+host = "ghe.example.com"
+login = "a.harrison"       # filled in for you at sign-in; don't set it by hand
+client_id = "Ov23li…"      # the OAuth app registered ON THAT instance
+
+[accounts.personal]
+host = "github.com"
+client_id = "Iv1…"
+```
+
+Each repo records the account it syncs as (`[repos.<alias>].account`), so
+switching repos switches identity — a push can never go out under the wrong
+token. Manage them with `mooring account add|list|use|remove`; the `login` is
+read from GitHub after the device flow, never typed.
+
+Rules worth knowing:
+
+- **The host and the client id belong to the account**, because each GitHub
+  instance needs its own OAuth app. `[github] host`/`client_id` remain as the
+  fallback for repos that predate accounts, which keep working untouched.
+- **`active` is the default for new repos, not a global switch.** Identity
+  follows the repo, so there is no way to be "in the wrong account" for a repo
+  you already registered.
+- Two accounts on different hosts get **separate workspaces**
+  (`~/PythonProjects/mooring/<host>/<owner>/<repo>` for non-`github.com` hosts),
+  because `owner/repo` is only unique within one instance.
+- An account whose `login` is blank counts as *not signed in* — it is never
+  resolved onto another account's stored token.
 
 ### `[repos]` — multiple repos
 
@@ -58,6 +97,7 @@ Several repos can be registered as `[repos.<alias>]` tables; exactly one is
 active = "team"            # alias of the active repo
 
 [repos.team]
+account = "work"           # which account to sync as (see [accounts] above)
 owner = "your-org"
 repo = "notebooks"
 branch = "main"
