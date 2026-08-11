@@ -86,7 +86,7 @@ def test_add_repo_merges_and_never_silently_unbinds_an_account():
     assert data["repos"]["team"]["branch"] == "dev"
 
 
-def test_remove_account_unbinds_its_repos_and_reports_them():
+def test_remove_account_leaves_its_repos_bound_but_broken():
     config_store.add_account("work", "ghe.example", login="a.h", client_id="c")
     config_store.add_repo("team", "acme", "nbs", account="work")
     config_store.add_repo("lab", "acme", "lab", account="work", make_active=False)
@@ -95,8 +95,13 @@ def test_remove_account_unbinds_its_repos_and_reports_them():
     assert config_store.remove_account("work") == ("lab", "team")
     data = tomllib.loads(paths.user_config_file().read_text("utf-8"))
     assert "work" not in data["accounts"]
-    assert "account" not in data["repos"]["team"]  # unbound, not deleted
+    # The binding is KEPT and dangles. Unbinding would silently drop the repo back
+    # to the global [github] host and the pre-accounts token slot; dangling instead
+    # fails closed with an error the user can act on.
+    assert data["repos"]["team"]["account"] == "work"
     assert data["repos"]["team"]["owner"] == "acme"  # the repo itself survives
+    cfg = config.load_app_config().config_for("team")
+    assert cfg.token_slot is None and "work" in cfg.account_error
 
 
 def test_remove_account_rejects_an_unknown_alias():

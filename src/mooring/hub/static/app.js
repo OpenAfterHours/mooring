@@ -2683,10 +2683,16 @@ function renderRepoSelect(state) {
   select.innerHTML = "";
   const repos = state.repos || [];
   select.classList.toggle("hidden", repos.length === 0);
+  const many = (state.accounts || []).length > 1;
   for (const repo of repos) {
     const opt = document.createElement("option");
     opt.value = repo.alias;
-    opt.textContent = `${repo.alias} — ${repo.slug}`;
+    // Show the account only when there's more than one to tell apart; with a
+    // single identity the suffix is noise on every row.
+    const showWho = many && repo.account_label;
+    opt.textContent = showWho
+      ? `${repo.alias} — ${repo.slug} (${repo.account_label})`
+      : `${repo.alias} — ${repo.slug}`;
     opt.selected = repo.active;
     select.appendChild(opt);
   }
@@ -2694,6 +2700,126 @@ function renderRepoSelect(state) {
   add.value = "__add__";
   add.textContent = "+ Add repo…";
   select.appendChild(add);
+}
+
+// -- accounts -----------------------------------------------------------------
+
+function renderAccounts(state) {
+  const accounts = state.accounts || [];
+  // The card is for managing MULTIPLE identities; with none registered the setup
+  // form still covers the single-account path, so don't add a step to first run.
+  $("accounts-card").classList.toggle("hidden", accounts.length === 0);
+  const list = $("accounts-list");
+  list.textContent = "";
+  for (const account of accounts) {
+    const li = document.createElement("li");
+    const label = document.createElement("span");
+    label.textContent = account.label;
+    if (account.active) label.textContent += " (default for new repos)";
+    li.appendChild(label);
+
+    const state_ = document.createElement("span");
+    state_.className = account.signed_in ? "muted" : "warn";
+    const repos = account.repos.length ? account.repos.join(", ") : "no repos";
+    state_.textContent = account.signed_in
+      ? ` — signed in · ${repos}`
+      : ` — not signed in · ${repos}`;
+    li.appendChild(state_);
+
+    if (!account.signed_in) {
+      li.appendChild(accountButton("Sign in", () => startLogin(account.alias)));
+    }
+    if (!account.active) {
+      li.appendChild(
+        accountButton("Make default", async () => {
+          await action("/api/accounts/use", { alias: account.alias });
+        })
+      );
+    }
+    li.appendChild(
+      accountButton("Remove", async () => {
+        const used = account.repos.length
+          ? `\n\nThese repos will lose their account: ${account.repos.join(", ")}.`
+          : "";
+        if (!confirm(`Sign out and forget ${account.label}?${used}`)) return;
+        await action("/api/accounts/remove", { alias: account.alias });
+      })
+    );
+    list.appendChild(li);
+  }
+  renderAccountOptions(state);
+}
+
+function accountButton(text, onClick) {
+  const btn = document.createElement("button");
+  btn.className = "small";
+  btn.textContent = text;
+  btn.addEventListener("click", onClick);
+  return btn;
+}
+
+function renderAccountOptions(state) {
+  const select = $("setup-account");
+  const previous = select.value;
+  select.textContent = "";
+  for (const account of state.accounts || []) {
+    const opt = document.createElement("option");
+    opt.value = account.alias;
+    opt.textContent = account.label + (account.signed_in ? "" : " (not signed in)");
+    select.appendChild(opt);
+  }
+  const wanted = previous || state.active_account;
+  if (wanted && [...select.options].some((o) => o.value === wanted)) {
+    select.value = wanted;
+  }
+}
+
+// The owner/repo pickers ask ONE account what it can reach — never a merged view
+// across accounts, which would leak one identity's reach into another's picker.
+async function loadOwners() {
+  const alias = $("setup-account").value;
+  const ownerSelect = $("setup-owner-select");
+  if (!alias) return;
+  ownerSelect.textContent = "";
+  try {
+    const body = await api(`/api/accounts/${encodeURIComponent(alias)}/owners`);
+    for (const owner of body.owners || []) {
+      const opt = document.createElement("option");
+      opt.value = owner;
+      opt.textContent = owner;
+      ownerSelect.appendChild(opt);
+    }
+    await loadRepoChoices();
+  } catch (err) {
+    showError(err.message || String(err));
+  }
+}
+
+async function loadRepoChoices() {
+  const alias = $("setup-account").value;
+  const owner = $("setup-owner-select").value;
+  const repoSelect = $("setup-repo-select");
+  repoSelect.textContent = "";
+  if (!alias || !owner) return;
+  try {
+    const q = `?owner=${encodeURIComponent(owner)}`;
+    const body = await api(`/api/accounts/${encodeURIComponent(alias)}/repos${q}`);
+    for (const repo of body.repos || []) {
+      const opt = document.createElement("option");
+      opt.value = repo.name;
+      opt.textContent = repo.private ? `${repo.name} (private)` : repo.name;
+      opt.dataset.branch = repo.default_branch;
+      repoSelect.appendChild(opt);
+    }
+    if (body.truncated) {
+      const opt = document.createElement("option");
+      opt.disabled = true;
+      opt.textContent = "— showing the first page only —";
+      repoSelect.appendChild(opt);
+    }
+  } catch (err) {
+    showError(err.message || String(err));
+  }
 }
 
 async function refresh() {
@@ -2712,9 +2838,16 @@ async function refresh() {
   const localMode = state.mode === "local";
   const showFiles = state.logged_in || localMode;
 
-  const hostSuffix = state.host && state.host !== "github.com" ? ` · ${state.host}` : "";
+  // Identity is per-repo, so the badge names the ACCOUNT this repo syncs as, not a
+  // single installation-wide host. The host is only worth showing when it isn't
+  // github.com; the account is worth showing whenever there is more than one.
+  const activeRow = (state.repos || []).find((r) => r.active) || {};
+  const hostSuffix =
+    activeRow.host && activeRow.host !== "github.com" ? ` · ${activeRow.host}` : "";
+  const manyAccounts = (state.accounts || []).length > 1;
+  const whoSuffix = manyAccounts && activeRow.account_label ? ` · ${activeRow.account_label}` : "";
   const repoInfoText = state.repo
-    ? `${state.repo} @ ${state.branch}${hostSuffix}`
+    ? `${state.repo} @ ${state.branch}${hostSuffix}${whoSuffix}`
     : (localMode ? "Local workspace — not connected to a repo" : "");
   const repoInfoEl = $("repo-info");
   repoInfoEl.textContent = repoInfoText;
@@ -2736,12 +2869,24 @@ async function refresh() {
   aiChatEnabled = !!state.ai_chat;
 
   renderRepoSelect(state);
+  renderAccounts(state);
+  // A repo bound to a missing account is BROKEN, not unconfigured. Say so, or the
+  // falsy client_id silently drops the page into local mode and the repo looks gone.
+  if (state.account_error) {
+    showError(state.account_error);
+  }
   // The connect-repo form opens on demand — the header "Connect a repo" button in
   // local mode, or the switcher's "+ Add repo…" when configured — so it's never
   // forced on a local-only user who has no intention of connecting a repo.
   $("setup-card").classList.toggle("hidden", !showAddRepo);
-  $("setup-client-id-label").classList.toggle("hidden", state.configured);
-  $("setup-host-label").classList.toggle("hidden", state.configured);
+  // With accounts registered, the host and client id come from the chosen account,
+  // so the raw fields give way to an account picker plus browse-or-create.
+  const hasAccounts = (state.accounts || []).length > 0;
+  $("setup-account-label").classList.toggle("hidden", !hasAccounts);
+  $("setup-client-id-label").classList.toggle("hidden", state.configured || hasAccounts);
+  $("setup-host-label").classList.toggle("hidden", state.configured || hasAccounts);
+  $("setup-browse").classList.toggle("hidden", !hasAccounts);
+  $("setup-manual").classList.toggle("hidden", hasAccounts);
   $("setup-cancel").classList.toggle("hidden", !showAddRepo);
   $("setup-intro").classList.toggle("hidden", state.configured);
   // The header button is the local-mode entry to the form; when a repo is configured
@@ -2889,9 +3034,13 @@ async function refresh() {
   await maybeDiscover(state);
 }
 
-async function startLogin() {
+// Flows are keyed by account alias server-side, so several can be pending at once
+// (add a second account while the first is still waiting for its code). "" means
+// the active repo's own account.
+async function startLogin(alias = "") {
   showError("");
-  const data = await api("/api/login/start", {});
+  const q = alias ? `?account=${encodeURIComponent(alias)}` : "";
+  const data = await api(`/api/login/start${q}`, {});
   if (data.error) return showError(data.error);
   $("login-start").classList.add("hidden");
   $("login-code-box").classList.remove("hidden");
@@ -2899,11 +3048,12 @@ async function startLogin() {
   $("login-link").href = data.verification_uri;
   $("login-link").textContent = data.verification_uri.replace(/^https:\/\//, "");
   window.open(data.verification_uri, "_blank");
-  pollLogin();
+  pollLogin(data.account || "");
 }
 
-async function pollLogin() {
-  const data = await api("/api/login/poll");
+async function pollLogin(alias = "") {
+  const q = alias ? `?account=${encodeURIComponent(alias)}` : "";
+  const data = await api(`/api/login/poll${q}`);
   if (data.status === "ok") {
     $("login-code-box").classList.add("hidden");
     $("login-start").classList.remove("hidden");
@@ -2911,12 +3061,33 @@ async function pollLogin() {
     return;
   }
   if (data.status === "error") {
+    // `resumable` means GitHub authorised us but naming the account failed. The
+    // token is parked, so retrying does NOT need a new code.
     showError(data.message || "Login failed.");
     $("login-code-box").classList.add("hidden");
     $("login-start").classList.remove("hidden");
     return;
   }
-  setTimeout(pollLogin, 2500);
+  setTimeout(() => pollLogin(alias), 2500);
+}
+
+async function addAccount() {
+  showError("");
+  const alias = $("account-alias").value.trim();
+  const body = {
+    alias,
+    host: $("account-host").value.trim(),
+    client_id: $("account-client-id").value.trim(),
+  };
+  try {
+    await api("/api/accounts/add", body);
+  } catch (err) {
+    return showError(err.message || String(err));
+  }
+  $("account-alias").value = "";
+  $("account-client-id").value = "";
+  await refresh();
+  await startLogin(alias); // registering and signing in are one gesture for the user
 }
 
 // -- Copilot sign-in (separate from the GitHub login) -----------------------
@@ -3222,13 +3393,20 @@ $("btn-batch").addEventListener("click", () => {
 });
 $("connect-repo").addEventListener("click", () => {
   showAddRepo = true;
-  refresh();  // reveals #setup-card (and Cancel) and hides the button
+  // reveals #setup-card (and Cancel) and hides the button, then fills the pickers
+  refresh().then(openRepoForm);
 });
+
+// Populating owner/repo costs GitHub round trips, so it happens when the form is
+// actually opened rather than on every /api/state poll.
+function openRepoForm() {
+  if (!$("setup-browse").classList.contains("hidden")) loadOwners();
+}
 $("repo-select").addEventListener("change", (event) => {
   const alias = event.target.value;
   if (alias === "__add__") {
     showAddRepo = true;
-    refresh();
+    refresh().then(openRepoForm);
     return;
   }
   action("/api/repo/switch", { alias });
@@ -3241,14 +3419,33 @@ $("setup-save").addEventListener("click", async () => {
   setBusy(true);
   showError("");
   try {
-    const data = await api("/api/setup", {
-      client_id: $("setup-client-id").value,
-      host: $("setup-host").value,
-      owner: $("setup-owner").value,
-      repo: $("setup-repo").value,
-      branch: $("setup-branch").value,
-      alias: $("setup-alias").value,
-    });
+    const account = $("setup-account").value;
+    const browsing = !$("setup-browse").classList.contains("hidden");
+    let data;
+    if (browsing && $("setup-mode-new").checked) {
+      // Create it on GitHub first; the route registers it bound to this account.
+      data = await api(`/api/accounts/${encodeURIComponent(account)}/repos`, {
+        owner: $("setup-owner-select").value,
+        repo: $("setup-new-name").value.trim(),
+        private: $("setup-private").checked,
+        seed: $("setup-seed").checked,
+        alias: $("setup-alias").value,
+      });
+    } else {
+      const picked = $("setup-repo-select").selectedOptions[0];
+      data = await api("/api/setup", {
+        client_id: $("setup-client-id").value,
+        host: $("setup-host").value,
+        account,
+        owner: browsing ? $("setup-owner-select").value : $("setup-owner").value,
+        repo: browsing ? $("setup-repo-select").value : $("setup-repo").value,
+        branch:
+          browsing && picked && picked.dataset.branch
+            ? picked.dataset.branch
+            : $("setup-branch").value,
+        alias: $("setup-alias").value,
+      });
+    }
     if (data.error) {
       showError(data.error);  // leave the form open so the values can be corrected
       return;
@@ -3259,6 +3456,16 @@ $("setup-save").addEventListener("click", async () => {
     setBusy(false);
   }
 });
+$("account-save").addEventListener("click", addAccount);
+$("setup-account").addEventListener("change", loadOwners);
+$("setup-owner-select").addEventListener("change", loadRepoChoices);
+for (const id of ["setup-mode-existing", "setup-mode-new"]) {
+  $(id).addEventListener("change", () => {
+    const creating = $("setup-mode-new").checked;
+    $("setup-new-fields").classList.toggle("hidden", !creating);
+    $("setup-existing-label").classList.toggle("hidden", creating);
+  });
+}
 $("setup-cancel").addEventListener("click", () => {
   showAddRepo = false;
   refresh();

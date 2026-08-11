@@ -157,14 +157,53 @@
          while the files card is hidden behind the login wall. -->
     <div id="error-banner" class="notice notice-error hidden"></div>
 
+    <!-- Accounts: the GitHub identities this machine can act as. Reachable at any
+         time (not only before the first repo is configured), because adding a
+         second identity is a normal thing to do long after setup. -->
+    <section id="accounts-card" class="card hidden">
+      <h2>GitHub accounts</h2>
+      <p class="muted">Each repo syncs as one of these. Switching repos switches
+        account, so you can't push under the wrong identity.</p>
+      <ul id="accounts-list" class="plain"></ul>
+      <details id="account-add">
+        <summary>Add an account</summary>
+        <label>Short name <input id="account-alias" placeholder="work"></label>
+        <label>GitHub URL <input id="account-host" placeholder="github.com"></label>
+        <label>OAuth client id <input id="account-client-id" placeholder="Ov23li..."></label>
+        <p class="muted">The client id comes from an OAuth app registered on that
+          host with Device Flow enabled. Ask your admin.</p>
+        <button id="account-save" class="primary">Add and sign in</button>
+      </details>
+    </section>
+
     <section id="setup-card" class="card hidden">
       <h2>Connect a team repo</h2>
       <p id="setup-intro">Connect to a team repo to sync and share your notebooks. Ask your
         admin for these values:</p>
+      <label id="setup-account-label">Sign in as
+        <select id="setup-account"></select>
+      </label>
       <label id="setup-client-id-label">OAuth client id <input id="setup-client-id" placeholder="Ov23li..."></label>
       <label id="setup-host-label">GitHub URL (only for GitHub Enterprise) <input id="setup-host" placeholder="github.com"></label>
-      <label>Repo owner <input id="setup-owner" placeholder="your-org"></label>
-      <label>Repo name <input id="setup-repo" placeholder="notebooks"></label>
+      <div id="setup-browse" class="hidden">
+        <label>Owner
+          <select id="setup-owner-select"></select>
+        </label>
+        <label><input type="radio" name="setup-mode" id="setup-mode-existing" checked> Use an existing repo</label>
+        <label id="setup-existing-label">Repo
+          <select id="setup-repo-select"></select>
+        </label>
+        <label><input type="radio" name="setup-mode" id="setup-mode-new"> Create a new repo</label>
+        <div id="setup-new-fields" class="hidden">
+          <label>New repo name <input id="setup-new-name" placeholder="notebooks"></label>
+          <label><input type="checkbox" id="setup-private" checked> Private</label>
+          <label><input type="checkbox" id="setup-seed" checked> Add notebooks/ and data/ folders</label>
+        </div>
+      </div>
+      <div id="setup-manual">
+        <label>Repo owner <input id="setup-owner" placeholder="your-org"></label>
+        <label>Repo name <input id="setup-repo" placeholder="notebooks"></label>
+      </div>
       <label>Branch <input id="setup-branch" value="main"></label>
       <label>Short name (optional) <input id="setup-alias" placeholder="defaults to repo name"></label>
       <button id="setup-save" class="primary">Save</button>

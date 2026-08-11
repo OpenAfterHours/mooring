@@ -112,9 +112,13 @@ def add_account(alias: str, host: str, login: str = "", client_id: str = "") -> 
 def remove_account(alias: str) -> tuple[str, ...]:
     """Forget an account. Returns the repo aliases that were bound to it.
 
-    The repos are UNBOUND rather than deleted — their files and sync history are
-    intact, and re-adding the account re-binds them. They will report an account
-    error until then, which is the honest state.
+    Those repos KEEP the now-dangling binding rather than being unbound, and keep
+    their files and sync history. Unbinding would look tidier but is the unsafe
+    option: an unbound repo falls back to the global [github] host and the
+    pre-accounts token slot, so an Enterprise repo would quietly start pointing at
+    github.com with a different workspace. A dangling binding instead resolves to
+    a reported account_error and NO token at all (config.Config.token_slot),
+    which is the honest state — and re-adding the account restores it as it was.
     """
     data = _materialized(read_user_data())
     if alias not in data["accounts"] or alias in RESERVED_ALIASES:
@@ -133,8 +137,6 @@ def remove_account(alias: str) -> tuple[str, ...]:
             if name not in RESERVED_ALIASES and isinstance(tbl, dict) and tbl.get("account") == alias
         )
     )
-    for name in orphaned:
-        data["repos"][name].pop("account", None)
     write_user_data(data)
     return orphaned
 

@@ -121,7 +121,7 @@ def test_same_login_on_a_different_host_stays_a_separate_account(monkeypatch):
     assert auth.get_token(env={}, host="github.com", login="phil") == "gho_b"
 
 
-def test_forget_deletes_the_token_and_unbinds_repos(monkeypatch):
+def test_forget_deletes_the_token_and_leaves_its_repos_reporting_why(monkeypatch):
     config_store.add_account("work", "ghe.example", client_id="cid")
     _resolves(monkeypatch, "a.harrison")
     accounts.finish_login(_device(), "gho_tok")
@@ -130,7 +130,9 @@ def test_forget_deletes_the_token_and_unbinds_repos(monkeypatch):
     assert accounts.forget("work") == ("team",)
     assert auth.get_token(env={}, host="ghe.example", login="a.harrison") is None
     cfg = config.load_app_config().config_for("team")
-    assert cfg.account == "" and cfg.owner == "acme"
+    assert cfg.owner == "acme"  # the repo and its files survive
+    assert cfg.token_slot is None  # ...but it can no longer produce a credential
+    assert "work" in cfg.account_error
 
 
 def test_forget_rejects_an_unknown_alias():
@@ -213,11 +215,12 @@ def test_a_broken_binding_explains_itself_instead_of_looking_unconfigured(monkey
     accounts.forget("work")
 
     cfg = config.load_app_config().config_for("team")
-    # forget() unbinds rather than dangling, so the repo is honestly unbound...
-    assert cfg.account == ""
-
-    # ...whereas a hand-edited config naming a missing account reports the problem.
-    config_store.add_repo("team", "acme", "nbs", account="ghost")
-    cfg = config.load_app_config().config_for("team")
-    with pytest.raises(notebooks.NotConfigured, match="ghost"):
+    with pytest.raises(notebooks.NotConfigured, match="work"):
         notebooks.client_for(cfg)
+
+    # Re-adding the account restores the repo exactly as it was — the binding
+    # was never thrown away.
+    config_store.add_account("work", "ghe.example", login="a.harrison", client_id="cid")
+    auth.save_token("tok2", host="ghe.example", login="a.harrison")
+    cfg = config.load_app_config().config_for("team")
+    assert cfg.token_slot == ("ghe.example", "a.harrison")

@@ -94,10 +94,14 @@ class Hub:
         # One editor per workspace, created lazily: switching repos must not
         # kill marimo tabs open against the previous workspace.
         self.editors: dict[str, EditorServer] = {}
-        self._device: auth.DeviceCode | None = None
-        self._poll_interval = 5
-        self._next_poll = 0.0
-        self._user_login = ""
+        # Device flows and resolved identities, keyed by ACCOUNT alias ("" is the
+        # pre-accounts single slot). Several sign-ins can be in flight at once —
+        # the accounts panel lets you start one while another is pending — and two
+        # accounts must never share a cached username.
+        self._device: dict[str, auth.DeviceCode] = {}
+        self._poll_interval: dict[str, int] = {}
+        self._next_poll: dict[str, float] = {}
+        self._user_login: dict[str, str] = {}
         self._lock = threading.Lock()
         # The chat application service: the session registry + lifecycle, the
         # context assembly (the sole egress.build_system_context caller), and the
@@ -223,6 +227,9 @@ class Hub:
     def reload(self) -> None:
         with self._lock:
             self.app_cfg = config.load_app_config()
+            # Identity is per-repo now, so a repo switch can change who we are.
+            # Keeping the cache would render the previous account's username.
+            self._user_login.clear()
         # Chat context (schema + notebook source) is bound to the old config;
         # drop sessions so a new chat picks up the new repo/workspace.
         self._close_all_chats()
@@ -248,10 +255,21 @@ class Hub:
         return nb_ops.client_for(self.cfg)
 
     def username(self) -> str:
-        if not self._user_login:
-            self._user_login = self.client().get_user()["login"]
-            telemetry.set_user(self._user_login)
-        return self._user_login
+        """The active repo's GitHub login, cached per ACCOUNT.
+
+        A config-known login needs no round trip at all: the account record
+        already carries it, which is the common case once someone has signed in.
+        """
+        cfg = self.cfg
+        if cfg.account_login:
+            return cfg.account_login
+        alias = cfg.account
+        cached = self._user_login.get(alias)
+        if not cached:
+            cached = self.client().get_user()["login"]
+            self._user_login[alias] = cached
+            telemetry.set_user(cached)
+        return cached
 
     def ensure_editor(self) -> EditorServer:
         return self.ensure_editor_for(self.cfg.workspace())
@@ -1245,6 +1263,17 @@ def create_app(hub: Hub) -> Starlette:
             Route("/api/login/start", setup.api_login_start, methods=["POST"]),
             Route("/api/login/poll", setup.api_login_poll),
             Route("/api/logout", setup.api_logout, methods=["POST"]),
+            Route("/api/accounts", setup.api_accounts),
+            Route("/api/accounts/add", setup.api_account_add, methods=["POST"]),
+            Route("/api/accounts/remove", setup.api_account_remove, methods=["POST"]),
+            Route("/api/accounts/use", setup.api_account_use, methods=["POST"]),
+            Route("/api/accounts/{alias}/owners", setup.api_account_owners),
+            Route("/api/accounts/{alias}/repos", setup.api_account_repos),
+            Route(
+                "/api/accounts/{alias}/repos",
+                setup.api_account_create_repo,
+                methods=["POST"],
+            ),
             Route("/api/discover", sync_routes.api_discover),
             Route("/api/whatsnew", sync_routes.api_whatsnew),
             Route("/api/whatsnew/detail", sync_routes.api_whatsnew_detail, methods=["POST"]),

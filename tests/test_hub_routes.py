@@ -36,6 +36,15 @@ EXPECTED_ROUTES = {
     ("/api/login/start", ("POST",), "api_login_start"),
     ("/api/login/poll", ("GET",), "api_login_poll"),
     ("/api/logout", ("POST",), "api_logout"),
+    # The GitHub identities the hub can act as. Reads are account-scoped: the
+    # owner/repo pickers ask ONE account what it can reach, never a merged view.
+    ("/api/accounts", ("GET",), "api_accounts"),
+    ("/api/accounts/add", ("POST",), "api_account_add"),
+    ("/api/accounts/remove", ("POST",), "api_account_remove"),
+    ("/api/accounts/use", ("POST",), "api_account_use"),
+    ("/api/accounts/{alias}/owners", ("GET",), "api_account_owners"),
+    ("/api/accounts/{alias}/repos", ("GET",), "api_account_repos"),
+    ("/api/accounts/{alias}/repos", ("POST",), "api_account_create_repo"),
     ("/api/discover", ("GET",), "api_discover"),
     # The pull digest — "what changed while you were away" (roadmap: pull-digest).
     ("/api/whatsnew", ("GET",), "api_whatsnew"),

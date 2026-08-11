@@ -9,7 +9,17 @@ from starlette.concurrency import run_in_threadpool
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from mooring import __version__, auth, config, config_store, sync, telemetry, workspace_config
+from mooring import (
+    __version__,
+    auth,
+    config,
+    config_store,
+    githost,
+    sync,
+    telemetry,
+    workspace_config,
+)
+from mooring.app import accounts
 from mooring.github import AuthFailed, GitHubError, TlsFailure, Unreachable, compare_url
 from mooring.runtime import workspace_hint
 
@@ -19,6 +29,15 @@ def _read_context_dirs(hub, cfg) -> tuple[str, ...]:
     from mooring.app import context_folders as ctxdirs
 
     return ctxdirs.read_dirs(hub.app_cfg, cfg.workspace())
+
+
+def _account_label(app_cfg, alias: str) -> str:
+    if not alias:
+        return ""
+    try:
+        return app_cfg.account(alias).label
+    except KeyError:
+        return alias  # dangling binding; api_state also reports account_error
 
 
 def api_state(request: Request) -> JSONResponse:
@@ -49,6 +68,8 @@ def api_state(request: Request) -> JSONResponse:
         # offer, or the whole offer when unsubscribed). Drives the per-user subscription
         # checklist; the offer stays the ceiling.
         "selected_context_folders": list(_read_context_dirs(hub, cfg)),
+        # Identity is per-repo, so each row carries its own account and host rather
+        # than the page showing one global host badge.
         "repos": [
             {
                 "alias": s.alias,
@@ -56,10 +77,20 @@ def api_state(request: Request) -> JSONResponse:
                 "branch": s.branch,
                 "workspace": str(hub.app_cfg.config_for(s.alias).workspace()),
                 "active": s.alias == hub.app_cfg.active_alias,
+                "account": s.account,
+                "account_label": _account_label(hub.app_cfg, s.account),
+                "host": hub.app_cfg.config_for(s.alias).host,
             }
             for s in hub.app_cfg.repos
         ],
         "active_repo": hub.app_cfg.active_alias,
+        "accounts": [dict(row, repos=list(row["repos"])) for row in accounts.status(hub.app_cfg)],
+        "active_account": hub.app_cfg.active_account,
+        # Set when the active repo names an account that is missing or unusable. The
+        # repo is BROKEN, not unconfigured, and the UI must say which — otherwise a
+        # falsy client_id silently drops the page into local mode and the repo
+        # appears to have vanished.
+        "account_error": cfg.account_error,
         "ui_theme": hub.app_cfg.ui_theme,
         # What notebooks can import + how to add packages (mode-aware: locked uv
         # project vs mooring's bundled env vs a frozen build). See _notebook_env.
@@ -126,7 +157,8 @@ def api_state(request: Request) -> JSONResponse:
         # hub._state_heads is deliberately not touched — /api/freshness has
         # nothing new to compare against, and it too stays silent offline.
         telemetry.log_error(exc=exc, op="state")
-        body["user"] = hub._user_login  # may be "" on a cold start; don't retry here
+        # May be "" on a cold start with no account record; don't retry here.
+        body["user"] = cfg.account_login or hub._user_login.get(cfg.account, "")
         body["logged_in"] = True
         as_of = ""
         cached = sync.cached_status(cfg)
@@ -139,8 +171,8 @@ def api_state(request: Request) -> JSONResponse:
             "as_of": as_of,
         }
     except AuthFailed:
-        auth.delete_token(host=cfg.host)
-        hub._user_login = ""
+        auth.delete_token(host=cfg.host, login=cfg.account_login)
+        hub._user_login.pop(cfg.account, None)
         body["logged_in"] = False
         body["error"] = "Your GitHub login expired. Please log in again."
     except GitHubError as exc:
@@ -207,11 +239,18 @@ async def api_setup(request: Request) -> JSONResponse:
     data = await request.json()
     fields = {
         k: str(data.get(k, "")).strip()
-        for k in ("client_id", "owner", "repo", "branch", "alias", "host")
+        for k in ("client_id", "owner", "repo", "branch", "alias", "host", "account")
     }
     if not (fields["owner"] and fields["repo"]):
         return JSONResponse({"error": "owner and repo are required"}, status_code=400)
-    if not (fields["client_id"] or hub.app_cfg.client_id):
+    account = fields["account"]
+    if account and not any(a.alias == account for a in hub.app_cfg.accounts):
+        return JSONResponse({"error": f"Unknown account {account!r}."}, status_code=400)
+    if not account and hub.app_cfg.accounts:
+        account = hub.app_cfg.active_account
+    # The client id only has to be asked for on the pre-accounts path — with an
+    # account chosen it comes from that account's record.
+    if not (account or fields["client_id"] or hub.app_cfg.client_id):
         return JSONResponse({"error": "client_id is required on first setup"}, status_code=400)
     try:
         config_store.add_repo(
@@ -222,6 +261,7 @@ async def api_setup(request: Request) -> JSONResponse:
             make_active=True,
             client_id=fields["client_id"] or None,
             host=fields["host"] or None,
+            account=account or None,
         )
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
@@ -410,53 +450,267 @@ async def api_context_subscribe(request: Request) -> JSONResponse:
     )
 
 
+def _login_target(hub, alias: str) -> tuple[str, str, str]:
+    """Resolve (alias, host, client_id) for a sign-in the UI asked to start.
+
+    With no alias the request is about the active repo: its account when it has
+    one, else the pre-accounts global host/client_id.
+    """
+    if alias:
+        account = hub.app_cfg.account(alias)  # KeyError -> 404 at the caller
+        return alias, account.host, account.client_id
+    cfg = hub.cfg
+    if cfg.account:
+        return cfg.account, cfg.host, cfg.client_id
+    return "", cfg.host, cfg.client_id
+
+
 def api_login_start(request: Request) -> JSONResponse:
     hub = request.app.state.hub
+    requested = str(request.query_params.get("account", "")).strip()
     try:
-        device = auth.start_device_flow(hub.cfg.client_id, host=hub.cfg.host)
+        alias, host, client_id = _login_target(hub, requested)
+    except KeyError:
+        return JSONResponse({"error": f"Unknown account {requested!r}."}, status_code=404)
+    try:
+        device = auth.start_device_flow(client_id, host=host, account=alias)
     except Exception as exc:  # noqa: BLE001  # shown in the UI
-        return JSONResponse({"error": auth.device_flow_hint(hub.cfg.host, exc)}, status_code=502)
+        return JSONResponse({"error": auth.device_flow_hint(host, exc)}, status_code=502)
     with hub._lock:
-        hub._device = device
-        hub._poll_interval = device.interval
-        hub._next_poll = time.monotonic() + device.interval
+        hub._device[alias] = device
+        hub._poll_interval[alias] = device.interval
+        hub._next_poll[alias] = time.monotonic() + device.interval
     return JSONResponse(
-        {"user_code": device.user_code, "verification_uri": device.verification_uri}
+        {
+            "user_code": device.user_code,
+            "verification_uri": device.verification_uri,
+            "account": alias,
+        }
     )
 
 
 def api_login_poll(request: Request) -> JSONResponse:
     hub = request.app.state.hub
+    alias = str(request.query_params.get("account", "")).strip()
     with hub._lock:
-        device = hub._device
+        device = hub._device.get(alias)
         if device is None:
             return JSONResponse({"status": "error", "message": "No login in progress."})
-        if time.monotonic() < hub._next_poll:
+        now = time.monotonic()
+        if now < hub._next_poll.get(alias, 0.0):
             return JSONResponse({"status": "pending"})
+        interval = hub._poll_interval.get(alias, device.interval)
+        # Claim the next slot BEFORE releasing the lock and hitting the network:
+        # two concurrent polls that both passed the gate would earn a `slow_down`.
+        hub._next_poll[alias] = now + interval
     try:
-        result = auth.poll_once(hub.cfg.client_id, device, interval=hub._poll_interval)
+        # device carries its own client_id, so a repo switch mid-login cannot make
+        # this poll present a different account's OAuth app.
+        result = auth.poll_once(device.client_id, device, interval=interval)
     except auth.AuthError as exc:
         with hub._lock:
-            hub._device = None
+            hub._device.pop(alias, None)
         return JSONResponse({"status": "error", "message": str(exc)})
     if result.token:
-        # device.host, not hub.cfg.host: the token belongs to the host the
-        # flow was started against, even if the config changed mid-login.
-        auth.save_token(result.token, host=device.host)
         with hub._lock:
-            hub._device = None
-        hub._user_login = ""
+            hub._device.pop(alias, None)
+            hub._user_login.pop(alias, None)
+        if alias:
+            # host/client_id come from the device, not live config, for the same
+            # reason as above. finish_login parks the token before naming its owner.
+            try:
+                account = accounts.finish_login(device, result.token)
+            except accounts.AccountError as exc:
+                return JSONResponse({"status": "error", "message": str(exc), "resumable": True})
+            hub.reload()
+            telemetry.log_event("login")
+            return JSONResponse({"status": "ok", "account": account.alias, "user": account.login})
+        # Pre-accounts repo: keep the old host-keyed save.
+        auth.save_token(result.token, host=device.host)
         telemetry.log_event("login")
         return JSONResponse({"status": "ok"})
     with hub._lock:
-        hub._poll_interval = result.interval
-        hub._next_poll = time.monotonic() + result.interval
+        hub._poll_interval[alias] = result.interval
+        hub._next_poll[alias] = time.monotonic() + result.interval
     return JSONResponse({"status": "pending"})
 
 
 def api_logout(request: Request) -> JSONResponse:
     hub = request.app.state.hub
-    auth.delete_token(host=hub.cfg.host)
-    hub._user_login = ""
+    cfg = hub.cfg
+    auth.delete_token(host=cfg.host, login=cfg.account_login)
+    hub._user_login.pop(cfg.account, None)
     telemetry.log_event("logout")
     return JSONResponse({"ok": True})
+
+
+# -- accounts: the identities the hub can sign in and act as --------------------
+
+
+def api_accounts(request: Request) -> JSONResponse:
+    hub = request.app.state.hub
+    return JSONResponse(
+        {
+            "accounts": [dict(r, repos=list(r["repos"])) for r in accounts.status(hub.app_cfg)],
+            "active_account": hub.app_cfg.active_account,
+        }
+    )
+
+
+async def api_account_add(request: Request) -> JSONResponse:
+    """Register an account (host + client id). Signing in is a separate step —
+    the caller then starts a device flow against this alias."""
+    hub = request.app.state.hub
+    data = await request.json()
+    alias = str(data.get("alias", "")).strip()
+    host = str(data.get("host", "")).strip() or githost.DEFAULT_HOST
+    client_id = str(data.get("client_id", "")).strip()
+    if not alias:
+        return JSONResponse({"error": "alias is required"}, status_code=400)
+    if not client_id:
+        existing = next((a for a in hub.app_cfg.accounts if a.alias == alias), None)
+        client_id = existing.client_id if existing else hub.app_cfg.client_id
+    if not client_id:
+        return JSONResponse(
+            {
+                "error": "An OAuth client id is required. Register an OAuth app on that "
+                "host with Device Flow enabled, then paste its client id."
+            },
+            status_code=400,
+        )
+    try:
+        await run_in_threadpool(config_store.add_account, alias, host, "", client_id)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    hub.reload()
+    telemetry.log_event("account_add", alias=alias)
+    return JSONResponse({"ok": True, "alias": alias})
+
+
+async def api_account_remove(request: Request) -> JSONResponse:
+    hub = request.app.state.hub
+    data = await request.json()
+    alias = str(data.get("alias", "")).strip()
+    try:
+        orphaned = await run_in_threadpool(accounts.forget, alias)
+    except accounts.AccountError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=404)
+    hub.reload()
+    telemetry.log_event("account_remove", alias=alias)
+    return JSONResponse({"ok": True, "orphaned": list(orphaned)})
+
+
+async def api_account_use(request: Request) -> JSONResponse:
+    hub = request.app.state.hub
+    data = await request.json()
+    alias = str(data.get("alias", "")).strip()
+    try:
+        await run_in_threadpool(config_store.set_active_account, alias)
+    except KeyError:
+        return JSONResponse({"error": f"Unknown account {alias!r}."}, status_code=404)
+    hub.reload()
+    return JSONResponse({"ok": True, "active_account": alias})
+
+
+def _owner_rows(client, login: str) -> dict:
+    owners, truncated = client.list_owners()
+    if login and login not in owners:
+        owners = [login, *owners]
+    return {"owners": owners, "truncated": truncated}
+
+
+async def api_account_owners(request: Request) -> JSONResponse:
+    """The owners (you + your orgs) a repo could be created under or picked from."""
+    hub = request.app.state.hub
+    alias = request.path_params["alias"]
+    try:
+        client = accounts.client_for_account(hub.app_cfg, alias)
+        login = hub.app_cfg.account(alias).login
+        # Blocking `requests` work inside an async handler would stall the event
+        # loop and every open SSE stream, so it goes to the threadpool.
+        return JSONResponse(await run_in_threadpool(_owner_rows, client, login))
+    except (accounts.AccountError, KeyError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=404)
+    except (AuthFailed, GitHubError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=502)
+
+
+def _repo_rows(client, owner: str) -> dict:
+    repos, truncated = client.list_repos(owner=owner)
+    return {
+        "repos": [
+            {
+                "name": str(r.get("name", "")),
+                "full_name": str(r.get("full_name", "")),
+                "owner": str(r.get("owner", {}).get("login", "")),
+                "private": bool(r.get("private")),
+                "default_branch": str(r.get("default_branch") or "main"),
+            }
+            for r in repos
+        ],
+        "truncated": truncated,
+    }
+
+
+async def api_account_repos(request: Request) -> JSONResponse:
+    """Repositories this account can reach, for the picker's second dropdown."""
+    hub = request.app.state.hub
+    alias = request.path_params["alias"]
+    owner = str(request.query_params.get("owner", "")).strip()
+    try:
+        client = accounts.client_for_account(hub.app_cfg, alias)
+        return JSONResponse(await run_in_threadpool(_repo_rows, client, owner))
+    except (accounts.AccountError, KeyError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=404)
+    except (AuthFailed, GitHubError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=502)
+
+
+def _create_and_seed(client, hub, alias, owner, repo, private, seed) -> dict:
+    login = hub.app_cfg.account(alias).login
+    # An owner equal to the signed-in user is a personal repo; anything else is an
+    # organisation, which is a different creation endpoint.
+    created = client.create_repo(repo, owner="" if owner == login else owner, private=private)
+    branch = str(created.get("default_branch") or "main")
+    if seed:
+        seeder = accounts.repo_client_for_account(hub.app_cfg, alias, owner, repo)
+        for folder in ("notebooks", "data"):
+            # GitHub cannot hold an empty folder, so each one needs a file.
+            seeder.put_file(f"{folder}/.gitkeep", b"", f"mooring: add {folder}/", branch)
+    return {"branch": branch, "html_url": str(created.get("html_url", ""))}
+
+
+async def api_account_create_repo(request: Request) -> JSONResponse:
+    """Create a repo under this account and register it, bound to the account."""
+    hub = request.app.state.hub
+    alias = request.path_params["alias"]
+    data = await request.json()
+    owner = str(data.get("owner", "")).strip()
+    repo = str(data.get("repo", "")).strip()
+    if not owner or not repo:
+        return JSONResponse({"error": "owner and repo are required"}, status_code=400)
+    private = bool(data.get("private", True))
+    seed = bool(data.get("seed", True))
+    try:
+        client = accounts.client_for_account(hub.app_cfg, alias)
+        result = await run_in_threadpool(
+            _create_and_seed, client, hub, alias, owner, repo, private, seed
+        )
+    except (accounts.AccountError, KeyError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=404)
+    except (AuthFailed, GitHubError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=502)
+    try:
+        await run_in_threadpool(
+            _add_repo_bound, str(data.get("alias", "")).strip() or repo, owner, repo,
+            result["branch"], alias,
+        )
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    hub.reload()
+    telemetry.log_event("repo_create", alias=str(data.get("alias", "")).strip() or repo)
+    return JSONResponse({"ok": True, "html_url": result["html_url"]})
+
+
+def _add_repo_bound(alias: str, owner: str, repo: str, branch: str, account: str) -> None:
+    config_store.add_repo(alias, owner, repo, branch=branch, make_active=True, account=account)
