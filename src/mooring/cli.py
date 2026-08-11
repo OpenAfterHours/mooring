@@ -16,6 +16,7 @@ from mooring import (
     __version__,
     activity,
     config,
+    githost,
     paths,
     pyproject_env,
     schedule,
@@ -96,6 +97,30 @@ def _build_parser() -> argparse.ArgumentParser:
     sub.add_parser("whoami", help="show the logged-in GitHub user")
     status = sub.add_parser("status", help="show sync status of workspace files")
 
+    account = sub.add_parser("account", help="manage the GitHub accounts you sign in as")
+    account_sub = account.add_subparsers(dest="account_command", required=True)
+    account_sub.add_parser("list", help="list accounts ('*' marks the default for new repos)")
+    acc_add = account_sub.add_parser("add", help="sign in to a GitHub account (device flow)")
+    acc_add.add_argument("alias", help="short name for the account (e.g. work)")
+    acc_add.add_argument(
+        "--host",
+        default=githost.DEFAULT_HOST,
+        help="GitHub host or URL (e.g. ghe.example.com); default github.com",
+    )
+    acc_add.add_argument(
+        "--client-id",
+        default=None,
+        help="OAuth app client id registered ON THAT HOST (with Device Flow enabled)",
+    )
+    acc_resume = account_sub.add_parser(
+        "resume", help="finish a sign-in whose account lookup failed (no new code needed)"
+    )
+    acc_resume.add_argument("alias")
+    acc_use = account_sub.add_parser("use", help="set the default account for new repos")
+    acc_use.add_argument("alias")
+    acc_rm = account_sub.add_parser("remove", help="sign out and forget an account")
+    acc_rm.add_argument("alias")
+
     repo = sub.add_parser("repo", help="manage registered team repos")
     repo_sub = repo.add_subparsers(dest="repo_command", required=True)
     repo_sub.add_parser("list", help="list registered repos ('*' marks the active one)")
@@ -105,12 +130,32 @@ def _build_parser() -> argparse.ArgumentParser:
     repo_add.add_argument("--branch", default="main", help="branch to sync (default: main)")
     repo_add.add_argument("--workspace", default="", help="custom local workspace path")
     repo_add.add_argument(
+        "--account",
+        default=None,
+        help="account alias to sync this repo as (default: the active account); "
+        "see `mooring account list`",
+    )
+    repo_add.add_argument(
         "--host",
         default=None,
-        help="GitHub host or URL for GitHub Enterprise (e.g. ghe.example.com); "
-        "stored as the global host",
+        help="GitHub host or URL for GitHub Enterprise (e.g. ghe.example.com). "
+        "Deprecated: prefer --account, which keeps the host per-repo",
     )
     repo_add.add_argument("--no-use", action="store_true", help="register without switching to it")
+    repo_create = repo_sub.add_parser("create", help="create a repo on GitHub and register it")
+    repo_create.add_argument("slug", help="repo as owner/name; owner may be you or an org")
+    repo_create.add_argument("--alias", default=None, help="short name (default: repo name)")
+    repo_create.add_argument("--account", default=None, help="account alias to create it under")
+    repo_create.add_argument("--branch", default="main", help="branch to sync (default: main)")
+    repo_create.add_argument("--workspace", default="", help="custom local workspace path")
+    repo_create.add_argument(
+        "--public", action="store_true", help="create a public repo (default: private)"
+    )
+    repo_create.add_argument(
+        "--no-seed",
+        action="store_true",
+        help="skip creating the notebooks/ and data/ folders",
+    )
     repo_use = repo_sub.add_parser("use", help="switch the active repo")
     repo_use.add_argument("alias")
     repo_rm = repo_sub.add_parser("remove", help="forget a repo (local files are kept)")
@@ -932,46 +977,100 @@ def _client(cfg: config.Config):
         sys.exit("Not logged in. Run `mooring login` first.")
 
 
-def cmd_login(cfg: config.Config, host: str | None = None) -> int:
+def _device_login(alias: str, host: str, client_id: str) -> int:
+    """Run one device flow to completion and print the result.
+
+    Shared by `login` and `account add` so both go through app/accounts — the
+    save-then-identify order, the pending-slot parking, and the collapse of a
+    duplicate identity all live there, not here.
+    """
     import requests
 
-    from mooring import auth, config_store
+    from mooring import auth
+    from mooring.app import accounts
 
+    try:
+        device = accounts.start_login(alias, host, client_id)
+    except accounts.AccountError as exc:
+        sys.exit(str(exc))
+    except ValueError as exc:
+        sys.exit(str(exc))
+    except (auth.AuthError, requests.RequestException) as exc:
+        sys.exit(auth.device_flow_hint(host, exc))
+    print(f"Open {device.verification_uri} and enter code: {device.user_code}")
+    print("Waiting for authorization...")
+    token = auth.poll_for_token(device.client_id, device)
+    try:
+        account = accounts.finish_login(device, token)
+    except accounts.AccountError as exc:
+        sys.exit(str(exc))
+    telemetry.set_user(account.login)
+    telemetry.log_event("login")
+    print(f"Logged in as {account.label} (account '{account.alias}').")
+    return 0
+
+
+def cmd_login(cfg: config.Config, host: str | None = None) -> int:
+    """Sign in for the ACTIVE repo — re-authenticating its account when it has one."""
+    from mooring import config_store
+
+    app_cfg = config.load_app_config()
+    alias = cfg.account
+    if alias:
+        if host is not None:
+            sys.exit(
+                f"This repo signs in as account '{alias}'. Change its host with "
+                f"`mooring account add {alias} --host {host}` instead."
+            )
+        account = app_cfg.account(alias)
+        return _device_login(alias, account.host, account.client_id)
+
+    # Unbound (pre-accounts) repo: keep the old global-host behaviour, but land the
+    # result in a real account so the repo stops depending on the shared host slot.
     if host is not None:
         try:
             new_host = config_store.set_host(host)
         except ValueError as exc:
             sys.exit(str(exc))
         print(f"Saved GitHub host: {new_host}")
-        cfg = config.load_config()  # pick up the host just written
+        cfg = config.load_config()
     if not cfg.client_id:
         sys.exit(
             f"No OAuth client_id configured. Set [github] client_id in {paths.user_config_file()}."
         )
     print(f"Requesting device code from {cfg.host}…")
-    try:
-        device = auth.start_device_flow(cfg.client_id, host=cfg.host)
-    except (auth.AuthError, requests.RequestException) as exc:
-        sys.exit(auth.device_flow_hint(cfg.host, exc))
-    print(f"Open {device.verification_uri} and enter code: {device.user_code}")
-    print("Waiting for authorization...")
-    token = auth.poll_for_token(cfg.client_id, device)
-    auth.save_token(token, host=cfg.host)
-    from mooring.github import GitHubClient
+    alias = _fresh_account_alias(app_cfg, cfg.host)
+    code = _device_login(alias, cfg.host, cfg.client_id)
+    if code == 0 and cfg.repo:
+        config_store.add_repo(
+            config.load_app_config().active_alias,
+            cfg.owner,
+            cfg.repo,
+            branch=cfg.branch,
+            account=alias,
+        )
+        print(f"Repo '{config.load_app_config().active_alias}' now signs in as '{alias}'.")
+    return code
 
-    user = GitHubClient(token, cfg.owner, cfg.repo, host=cfg.host).get_user()
-    telemetry.set_user(user["login"])
-    telemetry.log_event("login")
-    print(f"Logged in as {user['login']}.")
-    return 0
+
+def _fresh_account_alias(app_cfg: config.AppConfig, host: str) -> str:
+    """An unused account alias derived from the host (github, ghe, ghe-2, …)."""
+    base = re.sub(r"[^A-Za-z0-9_-]", "-", host.split(":")[0].split(".")[0]) or "github"
+    taken = {a.alias for a in app_cfg.accounts}
+    if base not in taken:
+        return base
+    n = 2
+    while f"{base}-{n}" in taken:
+        n += 1
+    return f"{base}-{n}"
 
 
 def cmd_logout(cfg: config.Config) -> int:
     from mooring import auth
 
-    auth.delete_token(host=cfg.host)
+    auth.delete_token(host=cfg.host, login=cfg.account_login)
     telemetry.log_event("logout")
-    print("Logged out.")
+    print(f"Logged out of {cfg.account_login or cfg.host}.")
     return 0
 
 
@@ -983,6 +1082,71 @@ def cmd_whoami(cfg: config.Config) -> int:
     telemetry.log_event("whoami")
     print(user["login"])
     return 0
+
+
+def cmd_account(app_cfg: config.AppConfig, args: argparse.Namespace) -> int:
+    from mooring import config_store
+    from mooring.app import accounts
+
+    cmd = args.account_command
+    if cmd == "list":
+        rows = accounts.status(app_cfg)
+        if not rows:
+            print("No accounts. Add one with `mooring account add <alias> --host <host>`.")
+            return 0
+        for row in rows:
+            mark = "*" if row["active"] else " "
+            state = "signed in" if row["signed_in"] else "NOT signed in"
+            repos = ", ".join(row["repos"]) or "no repos"
+            print(f"{mark} {row['alias']:<12} {row['label']:<32} {state}  ({repos})")
+        return 0
+
+    if cmd == "add":
+        client_id = args.client_id
+        if client_id is None:
+            existing = next((a for a in app_cfg.accounts if a.alias == args.alias), None)
+            client_id = existing.client_id if existing else app_cfg.client_id
+        try:
+            host = githost.normalize_host(args.host)
+        except ValueError as exc:
+            sys.exit(str(exc))
+        print(f"Requesting device code from {host}…")
+        return _device_login(args.alias, host, client_id)
+
+    if cmd == "resume":
+        try:
+            account = accounts.resume_login(args.alias)
+        except accounts.AccountError as exc:
+            sys.exit(str(exc))
+        print(f"Logged in as {account.label} (account '{account.alias}').")
+        return 0
+
+    if cmd == "use":
+        try:
+            config_store.set_active_account(args.alias)
+        except KeyError:
+            sys.exit(_unknown_account(args.alias, app_cfg))
+        print(f"Default account for new repos: {args.alias}")
+        return 0
+
+    if cmd == "remove":
+        try:
+            orphaned = accounts.forget(args.alias)
+        except accounts.AccountError:
+            sys.exit(_unknown_account(args.alias, app_cfg))
+        print(f"Signed out and removed account '{args.alias}'.")
+        if orphaned:
+            print(
+                f"These repos no longer have an account: {', '.join(orphaned)}. "
+                "Re-bind them with `mooring repo add <owner>/<name> --account <alias>`."
+            )
+        return 0
+    return 0
+
+
+def _unknown_account(alias: str, app_cfg: config.AppConfig) -> str:
+    known = ", ".join(a.alias for a in app_cfg.accounts) or "none"
+    return f"Unknown account {alias!r}. Known: {known}."
 
 
 def cmd_status(cfg: config.Config) -> int:
@@ -2872,14 +3036,14 @@ def cmd_repo(app_cfg: config.AppConfig, args: argparse.Namespace) -> int:
         width = max(len(s.alias) for s in app_cfg.repos)
         for s in app_cfg.repos:
             marker = "*" if s.alias == app_cfg.active_alias else " "
-            ws = app_cfg.config_for(s.alias).workspace()
-            print(f"  {marker} {s.alias:<{width}}  {s.slug} @ {s.branch}  ({ws})")
+            rc = app_cfg.config_for(s.alias)
+            who = f" as {rc.account_login or s.account}" if s.account else ""
+            print(f"  {marker} {s.alias:<{width}}  {s.slug} @ {s.branch}{who}  ({rc.workspace()})")
         return 0
     if args.repo_command == "add":
-        owner, _, repo = args.slug.partition("/")
-        if not owner or not repo or "/" in repo:
-            sys.exit(f"Expected owner/repo (e.g. acme/notebooks), got {args.slug!r}.")
+        owner, repo = _split_slug(args.slug)
         alias = args.alias or repo
+        account = _resolve_account(app_cfg, getattr(args, "account", None))
         try:
             config_store.add_repo(
                 alias,
@@ -2889,13 +3053,17 @@ def cmd_repo(app_cfg: config.AppConfig, args: argparse.Namespace) -> int:
                 workspace=args.workspace,
                 make_active=not args.no_use,
                 host=args.host,
+                account=account,
             )
         except ValueError as exc:
             sys.exit(str(exc))
         telemetry.log_event("repo_add", alias=alias)
         active = " (now active)" if not args.no_use else ""
-        print(f"Registered {owner}/{repo} as {alias!r}{active}.")
+        who = f", signing in as {account!r}" if account else ""
+        print(f"Registered {owner}/{repo} as {alias!r}{active}{who}.")
         return 0
+    if args.repo_command == "create":
+        return _cmd_repo_create(app_cfg, args)
     if args.repo_command == "use":
         try:
             config_store.set_active(args.alias)
@@ -2933,6 +3101,78 @@ def cmd_repo(app_cfg: config.AppConfig, args: argparse.Namespace) -> int:
 def _unknown_alias(alias: str, app_cfg: config.AppConfig) -> str:
     known = ", ".join(app_cfg.aliases) or "(none)"
     return f"Unknown repo alias {alias!r}. Known: {known}"
+
+
+def _split_slug(slug: str) -> tuple[str, str]:
+    owner, _, repo = slug.partition("/")
+    if not owner or not repo or "/" in repo:
+        sys.exit(f"Expected owner/repo (e.g. acme/notebooks), got {slug!r}.")
+    return owner, repo
+
+
+def _resolve_account(app_cfg: config.AppConfig, requested: str | None) -> str:
+    """The account alias a new repo should bind to.
+
+    An explicit --account must exist. With none given we fall back to the active
+    account, and to "" when there are no accounts at all — which leaves the repo
+    unbound on the pre-accounts path, exactly as before.
+    """
+    if requested:
+        if not any(a.alias == requested for a in app_cfg.accounts):
+            sys.exit(_unknown_account(requested, app_cfg))
+        return requested
+    return app_cfg.active_account if app_cfg.accounts else ""
+
+
+def _cmd_repo_create(app_cfg: config.AppConfig, args: argparse.Namespace) -> int:
+    from mooring import config_store
+    from mooring.app import accounts
+    from mooring.github import GitHubError
+
+    owner, repo = _split_slug(args.slug)
+    account = _resolve_account(app_cfg, getattr(args, "account", None))
+    if not account:
+        sys.exit(
+            "Creating a repo needs an account to create it under. "
+            "Add one with `mooring account add <alias> --host <host>`."
+        )
+    try:
+        client = accounts.client_for_account(app_cfg, account)
+    except (accounts.AccountError, GitHubError) as exc:
+        sys.exit(str(exc))
+
+    # An owner equal to the signed-in user means a personal repo; anything else is
+    # an organisation, which is a different creation endpoint.
+    login = app_cfg.account(account).login
+    org = "" if owner == login else owner
+    try:
+        created = client.create_repo(repo, owner=org, private=not args.public)
+        branch = str(created.get("default_branch") or args.branch)
+        if not args.no_seed:
+            seeder = accounts.repo_client_for_account(app_cfg, account, owner, repo)
+            for folder in ("notebooks", "data"):
+                # GitHub cannot hold an empty folder, so each one needs a file.
+                seeder.put_file(f"{folder}/.gitkeep", b"", f"mooring: add {folder}/", branch)
+    except GitHubError as exc:
+        sys.exit(f"Could not create {owner}/{repo}: {exc}")
+
+    alias = args.alias or repo
+    try:
+        config_store.add_repo(
+            alias,
+            owner,
+            repo,
+            branch=branch,
+            workspace=args.workspace,
+            account=account,
+        )
+    except ValueError as exc:
+        sys.exit(str(exc))
+    telemetry.log_event("repo_create", alias=alias)
+    print(f"Created {created.get('html_url') or f'{owner}/{repo}'} and registered it as {alias!r}.")
+    return 0
+
+
 
 
 def cmd_ai_context(
@@ -3717,6 +3957,8 @@ def _dispatch(
         return 0
     if command == "repo":
         return cmd_repo(app_cfg, args)
+    if command == "account":
+        return cmd_account(app_cfg, args)
     if command == "config":
         return cmd_config(args)
     if command == "ai":

@@ -23,7 +23,7 @@ from dataclasses import replace
 import requests
 
 from mooring import auth, config, config_store, githost
-from mooring.github import AccountClient, AuthFailed, GitHubError
+from mooring.github import AccountClient, AuthFailed, GitHubClient, GitHubError
 
 # A token is parked here between "GitHub issued it" and "we know whose it is".
 # "~" cannot appear in a GitHub login, so this can never collide with a real
@@ -195,6 +195,24 @@ def client_for_account(app_cfg: config.AppConfig, alias: str) -> AccountClient:
     if not token:
         raise AuthFailed(f"Account {alias!r} is not signed in.")
     return AccountClient(token, account.host)
+
+
+def repo_client_for_account(
+    app_cfg: config.AppConfig, alias: str, owner: str, repo: str
+) -> GitHubClient:
+    """A repo-scoped client authenticated as ``alias``, for a repo not yet registered.
+
+    Needed for the seed-the-folders step right after ``create_repo``: the repo has
+    no ``[repos]`` entry yet, so ``notebooks.client_for`` has nothing to resolve.
+    """
+    try:
+        account = app_cfg.account(alias)
+    except KeyError:
+        raise AccountError(f"Unknown account {alias!r}.") from None
+    token = auth.get_token(host=account.host, login=account.login) if account.is_signed_in else None
+    if not token:
+        raise AuthFailed(f"Account {alias!r} is not signed in.")
+    return GitHubClient(token, owner, repo, host=account.host)
 
 
 def bind(app_cfg: config.AppConfig, repo_alias: str, account_alias: str) -> config.AppConfig:

@@ -119,28 +119,31 @@ def test_repo_remove_requires_alias_or_all():
     assert "Specify a repo alias" in str(exc.value)
 
 
-def test_login_with_host_persists_and_uses_it(capsys, monkeypatch):
-    from mooring import auth, github
+def _stub_device_flow(monkeypatch, login="octo"):
+    """Stub the whole flow: device code, poll, and the identity lookup."""
+    from mooring import auth
+    from mooring.app import accounts
 
-    monkeypatch.setenv("MOORING_CLIENT_ID", "cid")
     seen = {}
 
-    def fake_start(client_id, host="github.com", **kw):
+    def fake_start(client_id, session=None, host="github.com", account=""):
         seen["host"] = host
-        return auth.DeviceCode("d", "ABCD-1234", "https://x/login/device", 5, 900, host=host)
+        seen["client_id"] = client_id
+        seen["account"] = account
+        return auth.DeviceCode(
+            "d", "ABCD-1234", "https://x/login/device", 5, 900,
+            host=host, client_id=client_id, account=account,
+        )
 
     monkeypatch.setattr(auth, "start_device_flow", fake_start)
     monkeypatch.setattr(auth, "poll_for_token", lambda *a, **k: "gho_tok")
-    monkeypatch.setattr(auth, "save_token", lambda *a, **k: None)
+    monkeypatch.setattr(accounts, "resolve_login", lambda tok, host, session=None: login)
+    return seen
 
-    class FakeClient:
-        def __init__(self, *a, **k):
-            pass  # no-op: stub double, accepts and ignores constructor args
 
-        def get_user(self):
-            return {"login": "octo"}
-
-    monkeypatch.setattr(github, "GitHubClient", FakeClient)
+def test_login_with_host_persists_and_uses_it(capsys, monkeypatch):
+    monkeypatch.setenv("MOORING_CLIENT_ID", "cid")
+    seen = _stub_device_flow(monkeypatch)
 
     assert cli.main(["login", "--host", "https://GHE.Example/"]) == 0
     assert seen["host"] == "ghe.example"  # normalized host passed to the flow
@@ -149,6 +152,49 @@ def test_login_with_host_persists_and_uses_it(capsys, monkeypatch):
     out = capsys.readouterr().out
     assert "Saved GitHub host: ghe.example" in out
     assert "Requesting device code from ghe.example" in out
+    assert "Logged in as octo@ghe.example" in out
+
+
+def test_login_on_an_unbound_repo_migrates_it_onto_a_real_account(capsys, monkeypatch):
+    """Upgrades converge: a pre-accounts repo stops depending on the shared
+    host-keyed slot the first time its owner signs in again."""
+    from mooring import auth, config
+
+    monkeypatch.setenv("MOORING_CLIENT_ID", "cid")
+    _stub_device_flow(monkeypatch, login="octo")
+    cli.main(["repo", "add", "acme/nbs"])
+    assert config.load_app_config().config_for("nbs").account == ""
+
+    assert cli.main(["login"]) == 0
+
+    cfg = config.load_app_config().config_for("nbs")
+    assert cfg.account == "github"  # alias derived from the host
+    assert cfg.account_login == "octo"
+    assert cfg.token_slot == ("github.com", "octo")
+    assert auth.get_token(env={}, host="github.com", login="octo") == "gho_tok"
+
+
+def test_login_on_a_bound_repo_reauthenticates_that_account(capsys, monkeypatch):
+    from mooring import config, config_store
+
+    config_store.add_account("work", "ghe.example", login="a.h", client_id="cid_ghe")
+    config_store.add_repo("team", "acme", "nbs", account="work")
+    seen = _stub_device_flow(monkeypatch, login="a.h")
+
+    assert cli.main(["login"]) == 0
+    # The flow ran against the ACCOUNT's host and client id, not any global.
+    assert (seen["host"], seen["client_id"], seen["account"]) == ("ghe.example", "cid_ghe", "work")
+    assert config.load_app_config().config_for("team").token_slot == ("ghe.example", "a.h")
+
+
+def test_login_host_flag_on_a_bound_repo_points_at_the_account_command(monkeypatch):
+    from mooring import config_store
+
+    config_store.add_account("work", "ghe.example", login="a.h", client_id="cid")
+    config_store.add_repo("team", "acme", "nbs", account="work")
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["login", "--host", "other.example"])
+    assert "mooring account add work --host other.example" in str(exc.value)
 
 
 def test_login_failure_shows_enterprise_hint(monkeypatch):
