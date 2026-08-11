@@ -33,7 +33,7 @@ def test_api_reviews_empty_when_not_configured(tmp_path, monkeypatch):
 
 def test_api_reviews_lists_proposals(tmp_path, monkeypatch):
     hub, ws = _hub(tmp_path, monkeypatch)
-    monkeypatch.setattr(auth, "get_token", lambda host=None: "tok")
+    monkeypatch.setattr(auth, "get_token", lambda **kw: "tok")
     monkeypatch.setattr(hub, "username", lambda: "me")
     monkeypatch.setattr(
         rv,
@@ -55,7 +55,7 @@ def test_api_reviews_empty_when_login_unknown(tmp_path, monkeypatch):
     from mooring.github import Unreachable
 
     hub, ws = _hub(tmp_path, monkeypatch)
-    monkeypatch.setattr(auth, "get_token", lambda host=None: "tok")
+    monkeypatch.setattr(auth, "get_token", lambda **kw: "tok")
     def _boom():
         raise Unreachable("offline")
     monkeypatch.setattr(hub, "username", _boom)
@@ -69,7 +69,7 @@ def test_api_reviews_empty_when_login_unknown(tmp_path, monkeypatch):
 
 def test_api_review_detail(tmp_path, monkeypatch):
     hub, ws = _hub(tmp_path, monkeypatch)
-    monkeypatch.setattr(auth, "get_token", lambda host=None: "tok")
+    monkeypatch.setattr(auth, "get_token", lambda **kw: "tok")
     monkeypatch.setattr(hub, "username", lambda: "me")
     monkeypatch.setattr(
         rv,
@@ -92,7 +92,7 @@ def test_api_review_detail_rejects_no_number(tmp_path, monkeypatch):
 
 def test_api_review_submit_approve(tmp_path, monkeypatch):
     hub, ws = _hub(tmp_path, monkeypatch)
-    monkeypatch.setattr(auth, "get_token", lambda host=None: "tok")
+    monkeypatch.setattr(auth, "get_token", lambda **kw: "tok")
     monkeypatch.setattr(hub, "username", lambda: "me")
     calls = []
     monkeypatch.setattr(rv, "submit", lambda client, number, event, body, me="": calls.append((number, event, body)))
@@ -108,7 +108,7 @@ def test_api_review_submit_missing_note_is_400(tmp_path, monkeypatch):
     # The real service validates: REQUEST_CHANGES with no note -> ValueError -> 400,
     # before any GitHub call. A token is set so hub.client() constructs without network.
     hub, ws = _hub(tmp_path, monkeypatch)
-    monkeypatch.setattr(auth, "get_token", lambda host=None: "tok")
+    monkeypatch.setattr(auth, "get_token", lambda **kw: "tok")
     monkeypatch.setattr(hub, "username", lambda: "me")  # keep the login lookup offline
     with TestClient(create_app(hub)) as client:
         resp = client.post("/api/reviews/submit", json={"number": 5, "event": "REQUEST_CHANGES", "body": ""})

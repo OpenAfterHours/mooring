@@ -323,6 +323,149 @@ branch = "dev"
 """
 
 
+# -- multiple accounts ([accounts] tables, bound per repo) ------------------------
+
+
+ACCOUNTS_TOML = """
+[accounts]
+active = "work"
+
+[accounts.work]
+host = "ghe.service.group"
+login = "a.harrison"
+client_id = "cid_ghe"
+
+[accounts.personal]
+host = "github.com"
+login = "phil"
+client_id = "cid_dotcom"
+
+[repos]
+active = "analytics"
+
+[repos.analytics]
+account = "work"
+owner = "service-analytics"
+repo = "notebooks"
+
+[repos.side]
+account = "personal"
+owner = "phil"
+repo = "scratch"
+"""
+
+
+def test_each_repo_resolves_its_own_account(tmp_path):
+    """The core of the feature: host, client_id and login all follow the repo."""
+    user = tmp_path / "config.toml"
+    user.write_text(ACCOUNTS_TOML, "utf-8")
+    app = load_app_config(user_config_path=user, env={})
+
+    work = app.config_for("analytics")
+    assert (work.host, work.client_id) == ("ghe.service.group", "cid_ghe")
+    assert work.account_login == "a.harrison"
+    assert work.token_slot == ("ghe.service.group", "a.harrison")
+
+    personal = app.config_for("side")
+    assert (personal.host, personal.client_id) == ("github.com", "cid_dotcom")
+    assert personal.token_slot == ("github.com", "phil")
+
+
+def test_two_accounts_on_one_host_stay_distinct(tmp_path):
+    """Host alone cannot separate these — the login is what makes them two slots."""
+    user = tmp_path / "config.toml"
+    user.write_text(
+        "[accounts.a]\nlogin = 'alice'\nclient_id = 'c'\n"
+        "[accounts.b]\nlogin = 'bob'\nclient_id = 'c'\n"
+        "[repos]\nactive = 'ra'\n"
+        "[repos.ra]\naccount = 'a'\nowner = 'o'\nrepo = 'r'\n"
+        "[repos.rb]\naccount = 'b'\nowner = 'o'\nrepo = 'r2'\n",
+        "utf-8",
+    )
+    app = load_app_config(user_config_path=user, env={})
+    assert app.config_for("ra").token_slot == ("github.com", "alice")
+    assert app.config_for("rb").token_slot == ("github.com", "bob")
+
+
+def test_repo_bound_to_a_missing_account_degrades_and_never_raises(tmp_path):
+    """I1. Hub.app_cfg calls config_for on every read, so raising here would 500
+    every route — including the ones that would let the user fix it."""
+    user = tmp_path / "config.toml"
+    user.write_text(
+        "[accounts.work]\nhost = 'ghe.example'\nlogin = 'a'\nclient_id = 'c'\n"
+        "[repos]\nactive = 'orphan'\n"
+        "[repos.orphan]\naccount = 'gone'\nowner = 'o'\nrepo = 'r'\n",
+        "utf-8",
+    )
+    app = load_app_config(user_config_path=user, env={})
+    cfg = app.config_for(None)  # must not raise
+    assert "gone" in cfg.account_error
+    assert cfg.token_slot is None  # fail closed: no token may be handed out
+    assert cfg.owner == "o" and cfg.repo == "r"  # the repo itself still resolves
+
+
+def test_account_that_never_finished_signing_in_yields_no_token(tmp_path):
+    """I2. A blank login must NOT fall through to the pre-accounts host-keyed slot,
+    which may still hold a previous user's token."""
+    user = tmp_path / "config.toml"
+    user.write_text(
+        "[accounts.work]\nhost = 'github.com'\nclient_id = 'c'\n"  # no login yet
+        "[repos]\nactive = 'r'\n"
+        "[repos.r]\naccount = 'work'\nowner = 'o'\nrepo = 'r'\n",
+        "utf-8",
+    )
+    cfg = load_app_config(user_config_path=user, env={}).config_for(None)
+    assert cfg.token_slot is None
+    assert "not signed in" in cfg.account_error
+
+
+def test_unbound_repo_still_reads_the_legacy_host_keyed_token(tmp_path):
+    """The other half of I2: upgrades stay seamless. A repo with no account is a
+    pre-accounts repo and that host-keyed token is genuinely its own."""
+    user = tmp_path / "config.toml"
+    user.write_text(REPOS_TOML, "utf-8")
+    cfg = load_app_config(user_config_path=user, env={}).config_for(None)
+    assert cfg.account == "" and cfg.account_error == ""
+    assert cfg.token_slot == ("github.com", "")
+
+
+def test_a_bad_account_host_drops_that_account_only(tmp_path):
+    """Tolerant parsing: normalize_host raises, and an exception on every config
+    load would wedge every command including the one that fixes it."""
+    user = tmp_path / "config.toml"
+    user.write_text(
+        "[accounts.broken]\nhost = 'not a host'\nlogin = 'x'\n"
+        "[accounts.fine]\nhost = 'ghe.example'\nlogin = 'y'\nclient_id = 'c'\n",
+        "utf-8",
+    )
+    app = load_app_config(user_config_path=user, env={})
+    assert [a.alias for a in app.accounts] == ["fine"]
+    assert app.ignored_accounts and app.ignored_accounts[0][0] == "broken"
+
+
+def test_accounts_survive_a_cleared_repo_registry(tmp_path):
+    """`repo remove --all` writes [repos] = {}. Accounts live in their own section
+    precisely so that cannot wipe every credential."""
+    user = tmp_path / "config.toml"
+    user.write_text("[accounts.work]\nlogin = 'a'\nclient_id = 'c'\n[repos]\n", "utf-8")
+    app = load_app_config(user_config_path=user, env={})
+    assert app.repos == ()
+    assert [a.alias for a in app.accounts] == ["work"]
+
+
+def test_account_env_overrides_retarget_only_the_active_repos_account(tmp_path):
+    user = tmp_path / "config.toml"
+    user.write_text(ACCOUNTS_TOML, "utf-8")
+    app = load_app_config(
+        user_config_path=user,
+        env={"MOORING_GITHUB_HOST": "other.example", "MOORING_CLIENT_ID": "cid_env"},
+    )
+    active = app.config_for(None)  # "analytics", bound to "work"
+    assert (active.host, active.client_id) == ("other.example", "cid_env")
+    other = app.config_for("side")  # untouched
+    assert (other.host, other.client_id) == ("github.com", "cid_dotcom")
+
+
 def test_legacy_github_section_synthesizes_single_repo(tmp_path):
     user = tmp_path / "config.toml"
     user.write_text(
@@ -476,6 +619,38 @@ def test_legacy_workspaces_point_at_documents():
     assert repo_keyed == docs / "mooring" / "notebooks"
 
 
+def test_default_workspace_separates_the_same_slug_on_two_hosts():
+    """owner/repo is unique only WITHIN a GitHub instance. Sharing a folder would
+    share one .mooring/manifest.json — base SHAs from the wrong remote."""
+    dotcom = paths.default_workspace("acme", "notebooks")
+    ghe = paths.default_workspace("acme", "notebooks", "ghe.example")
+    assert dotcom != ghe
+    assert ghe == Path.home() / "PythonProjects" / "mooring" / "ghe.example" / "acme" / "notebooks"
+
+
+def test_default_workspace_on_github_com_is_unchanged():
+    """The back-compat half of the host keying: existing workspaces must not move."""
+    assert paths.default_workspace("acme", "nbs", "github.com") == paths.default_workspace(
+        "acme", "nbs"
+    )
+
+
+def test_default_workspace_host_port_uses_a_safe_folder_name():
+    ws = paths.default_workspace("acme", "nbs", "ghe.example:8443")
+    # ":" is not a legal NTFS filename character — the host segment must be sanitised
+    # the way auth._token_file already sanitises it.
+    assert "ghe.example_8443" in ws.parts
+    assert not any(":" in part for part in ws.parts[1:])
+
+
+def test_legacy_workspaces_offer_the_pre_host_path_on_enterprise():
+    """An Enterprise user's workspace moves under the host, so the migration hint
+    (runtime.legacy_workspace_hint) has to know where it used to be."""
+    olds = paths.legacy_workspaces("acme", "nbs", "ghe.example")
+    assert olds[0] == Path.home() / "PythonProjects" / "mooring" / "acme" / "nbs"
+    assert paths.legacy_workspaces("acme", "nbs") == olds[1:]
+
+
 def test_legacy_hint_points_documents_users_to_new_default(tmp_path, monkeypatch):
     from mooring import cli
     from mooring.config import Config
@@ -483,8 +658,8 @@ def test_legacy_hint_points_documents_users_to_new_default(tmp_path, monkeypatch
     old = tmp_path / "Documents" / "mooring" / "acme" / "nbs"
     new = tmp_path / "PythonProjects" / "mooring" / "acme" / "nbs"
     (old / ".mooring").mkdir(parents=True)  # existing sync history under Documents
-    monkeypatch.setattr(paths, "default_workspace", lambda o, r: new)
-    monkeypatch.setattr(paths, "legacy_workspaces", lambda o, r: (old,))
+    monkeypatch.setattr(paths, "default_workspace", lambda o, r, h=None: new)
+    monkeypatch.setattr(paths, "legacy_workspaces", lambda o, r, h=None: (old,))
 
     cfg = Config(owner="acme", repo="nbs")
     hint = cli.legacy_workspace_hint(cfg)

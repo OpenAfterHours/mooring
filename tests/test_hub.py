@@ -512,7 +512,7 @@ def configured(tmp_path, monkeypatch):
     )
     fake = FakeClient()
     monkeypatch.setattr(Hub, "client", lambda self: fake)
-    monkeypatch.setattr(server.auth, "get_token", lambda host=None: "t")
+    monkeypatch.setattr(server.auth, "get_token", lambda **kw: "t")
     hub = Hub(config.load_app_config())
     with TestClient(create_app(hub)) as client:
         yield client, hub, fake, tmp_path
@@ -667,7 +667,7 @@ def test_propose_compare_url_on_enterprise_host(tmp_path, monkeypatch):
     )
     fake = FakeClient()
     monkeypatch.setattr(Hub, "client", lambda self: fake)
-    monkeypatch.setattr(server.auth, "get_token", lambda host=None: "t")
+    monkeypatch.setattr(server.auth, "get_token", lambda **kw: "t")
     hub = Hub(config.load_app_config())
     with TestClient(create_app(hub)) as client:
         write_ws(tmp_path, "ws1", "notebooks/a.py", "a")
@@ -2512,7 +2512,7 @@ def test_state_offline_keeps_the_token_and_reports_tls(configured, monkeypatch):
 
     client, hub, fake, _ = configured
     deleted = []
-    monkeypatch.setattr(server.auth, "delete_token", lambda host=None: deleted.append(host))
+    monkeypatch.setattr(server.auth, "delete_token", lambda **kw: deleted.append(kw.get("host")))
     _go_offline(fake, monkeypatch, TlsFailure)  # cold start: no cache, no username yet
     state = client.get("/api/state").json()
     assert state["offline"] == {"reason": "tls", "as_of": ""}

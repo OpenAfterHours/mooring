@@ -92,7 +92,7 @@ def api_state(request: Request) -> JSONResponse:
         report = sync.local_report(cfg.workspace(), cfg.folders, cfg.exclude)
         body["files"], body["artifacts"] = hub._files_artifacts(report, cfg.workspace())
         return JSONResponse(body)
-    if not auth.get_token(host=cfg.host):
+    if not auth.token_for(cfg.token_slot):
         return JSONResponse(body)
     try:
         body["user"] = hub.username()

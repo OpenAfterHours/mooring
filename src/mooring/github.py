@@ -39,6 +39,14 @@ class RemoteConflict(GitHubError):
     """The remote file changed since our recorded base SHA (HTTP 409/422)."""
 
 
+class ScopeDenied(GitHubError):
+    """A 403 that isn't a rate limit — no access, or a scope the token lacks.
+
+    Typed so a caller can degrade around one specific missing capability (org
+    listing) without a bare ``except GitHubError`` that would also swallow 500s.
+    """
+
+
 class RateLimited(GitHubError):
     pass
 
@@ -144,17 +152,19 @@ class GitHubClientProtocol(Protocol):
     def create_pull(self, title: str, head: str, base: str, body: str = "") -> dict: ...
 
 
-class GitHubClient:
+class _BaseClient:
+    """Session setup and error classification, shared by the repo- and
+    account-scoped clients so both map GitHub's failures identically."""
+
     def __init__(
         self,
         token: str,
-        owner: str,
-        repo: str,
         host: str = githost.DEFAULT_HOST,
         session: requests.Session | None = None,
     ) -> None:
-        self.owner = owner
-        self.repo = repo
+        # Keep the host, not just the derived api_root: with several accounts in play
+        # a client has to be attributable to the instance (and identity) it speaks for.
+        self.host = host
         self.api_root = githost.api_root(host)
         if session is None:
             session = requests.Session()
@@ -176,9 +186,6 @@ class GitHubClient:
         )
 
     # -- plumbing ----------------------------------------------------------
-
-    def _repo_url(self, tail: str) -> str:
-        return f"{self.api_root}/repos/{self.owner}/{self.repo}/{tail}"
 
     def _send(self, method: str, url: str, **kwargs) -> requests.Response:
         """Every session call goes through here, so a transport failure (no HTTP
@@ -221,14 +228,60 @@ class GitHubClient:
             if "does not match" in message or "sha" in message.lower():
                 raise RemoteConflict("Remote changed since your last pull.")
             raise GitHubError(f"GitHub rejected the request: {message or resp.text}")
+        if resp.status_code == 403:
+            # Not a rate limit (checked above), so this is an authorization refusal —
+            # most often a token whose OAuth scopes don't cover the endpoint. Typed
+            # separately because callers legitimately degrade around a missing scope
+            # (e.g. org listing) and must not swallow 500s to do it.
+            raise ScopeDenied(
+                f"GitHub refused the request (403). The signed-in account may lack "
+                f"access, or the token's scopes may not cover it: {resp.url}"
+            )
         if resp.status_code >= 400:
             raise GitHubError(f"GitHub API error {resp.status_code}: {resp.text[:300]}")
         return resp.json()
 
-    # -- reads ---------------------------------------------------------------
+    def _paged(self, url: str, cap_pages: int = 30) -> tuple[list[dict], bool]:
+        """GET a list endpoint, following ``?page=N`` until a short (final) page or the
+        cap. Returns ``(rows, truncated)`` — ``truncated`` is True when the cap cut the
+        walk short, so callers can say "showing the first N" instead of implying they
+        have everything. ``url`` must already carry ``per_page=100``: the short-page
+        test below is what detects the last page.
+        """
+        out: list[dict] = []
+        page = 1
+        sep = "&" if "?" in url else "?"
+        while page <= cap_pages:
+            data = self._check(self._send("GET", f"{url}{sep}page={page}", timeout=30))
+            if not isinstance(data, list) or not data:
+                return out, False
+            out.extend(data)
+            if len(data) < 100:  # a short page is the last page
+                return out, False
+            page += 1
+        return out, True
 
     def get_user(self) -> dict:
         return self._check(self._send("GET", f"{self.api_root}/user", timeout=30))
+
+
+class GitHubClient(_BaseClient):
+    def __init__(
+        self,
+        token: str,
+        owner: str,
+        repo: str,
+        host: str = githost.DEFAULT_HOST,
+        session: requests.Session | None = None,
+    ) -> None:
+        self.owner = owner
+        self.repo = repo
+        super().__init__(token, host=host, session=session)
+
+    def _repo_url(self, tail: str) -> str:
+        return f"{self.api_root}/repos/{self.owner}/{self.repo}/{tail}"
+
+    # -- reads ---------------------------------------------------------------
 
     def get_branch_head(self, branch: str) -> str:
         data = self._check(self._send("GET", self._repo_url(f"git/ref/heads/{branch}"), timeout=30))
@@ -398,24 +451,12 @@ class GitHubClient:
     # -- pull requests (the reviewer inbox + propose auto-open) --------------
 
     def _get_all(self, tail: str, cap_pages: int = 30) -> list[dict]:
-        """GET a list endpoint, following ``?page=N`` until a short (final) page or the
-        cap — so a review is never computed from a silently truncated first page. ``tail``
-        already carries ``per_page=100`` + any other query. All PR operations fall under
-        the ``repo`` scope this client already holds."""
-        out: list[dict] = []
-        page = 1
-        sep = "&" if "?" in tail else "?"
-        while page <= cap_pages:
-            data = self._check(
-                self._send("GET", self._repo_url(f"{tail}{sep}page={page}"), timeout=30)
-            )
-            if not isinstance(data, list) or not data:
-                break
-            out.extend(data)
-            if len(data) < 100:  # a short page is the last page
-                break
-            page += 1
-        return out
+        """GET a repo-scoped list endpoint, all pages — so a review is never computed
+        from a silently truncated first page. ``tail`` already carries ``per_page=100``
+        + any other query. All PR operations fall under the ``repo`` scope this client
+        already holds."""
+        rows, _ = self._paged(self._repo_url(tail), cap_pages=cap_pages)
+        return rows
 
     def list_open_pulls(self) -> list[dict]:
         """Open pull requests, most-recently-updated first (all pages). Returns the raw
@@ -478,3 +519,64 @@ class GitHubClient:
                 if existing is not None:
                     return existing
         return self._check(resp)  # a new PR, or raise (incl. a non-already-exists 422)
+
+
+class AccountClient(_BaseClient):
+    """Account-scoped calls: who am I, what can I reach, make me a repo.
+
+    Separate from :class:`GitHubClient` because none of these hang off one
+    ``owner/repo`` — they are questions about the identity holding the token, which
+    is exactly what the account picker needs before a repo has been chosen.
+    """
+
+    def list_repos(self, owner: str = "", cap_pages: int = 30) -> tuple[list[dict], bool]:
+        """Repositories this account can reach, newest-touched first.
+
+        Deliberately built on ``/user/repos`` rather than an org walk: it covers
+        personal AND organisation repositories under the plain ``repo`` scope the
+        token already holds, so the picker works without asking anyone to
+        re-authorise for ``read:org``.
+        """
+        if owner:
+            url = f"{self.api_root}/orgs/{owner}/repos?per_page=100&sort=updated"
+            try:
+                return self._paged(url, cap_pages=cap_pages)
+            except NotFound:
+                # Not an org — a user account, whose repos live on a different path.
+                url = f"{self.api_root}/users/{owner}/repos?per_page=100&sort=updated"
+                return self._paged(url, cap_pages=cap_pages)
+        url = (
+            f"{self.api_root}/user/repos"
+            "?per_page=100&sort=updated&affiliation=owner,collaborator,organization_member"
+        )
+        return self._paged(url, cap_pages=cap_pages)
+
+    def list_owners(self, cap_pages: int = 30) -> tuple[list[str], bool]:
+        """The owner names available to this account, for the picker's first dropdown.
+
+        Derived from the repo list plus ``/user/orgs``. The derivation is the load-
+        bearing half: it needs no scope beyond ``repo``. ``/user/orgs`` only ADDS orgs
+        the user has no repo in yet, and needs ``read:org``, so a refusal there is
+        normal and never fatal.
+        """
+        repos, truncated = self.list_repos(cap_pages=cap_pages)
+        owners = {str(r.get("owner", {}).get("login", "")) for r in repos}
+        owners.discard("")
+        try:
+            orgs, _ = self._paged(f"{self.api_root}/user/orgs?per_page=100", cap_pages=cap_pages)
+            owners.update(str(o.get("login", "")) for o in orgs if o.get("login"))
+        except (ScopeDenied, NotFound):
+            pass  # no read:org — the repo-derived list is still complete enough to pick from
+        return sorted(owners, key=str.lower), truncated
+
+    def create_repo(self, name: str, owner: str = "", private: bool = True) -> dict:
+        """Create a repository and return it.
+
+        ``auto_init`` is not optional for mooring's purposes: an empty repo has no
+        commit and therefore no branch head, and every sync path starts by resolving
+        one. Passing ``owner`` creates it in that organisation, otherwise under the
+        signed-in user.
+        """
+        url = f"{self.api_root}/orgs/{owner}/repos" if owner else f"{self.api_root}/user/repos"
+        payload = {"name": name, "private": bool(private), "auto_init": True}
+        return self._check(self._send("POST", url, json=payload, timeout=30))

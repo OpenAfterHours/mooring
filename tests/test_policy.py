@@ -25,6 +25,7 @@ import pytest
 from conftest import FakeClient, write_local
 
 from mooring import config, policy, sync, workspace_config
+from mooring.ai_config import AiConfig
 from mooring.hub import settings_schema
 
 
@@ -1245,3 +1246,46 @@ def test_doctor_reports_policy_status(tmp_path):
 
     (workspace / "mooring.toml").write_text("[broken", "utf-8")
     assert doctor._probe_policy(cfg).status == doctor.FAIL
+
+
+# -- identity stays out of the policy surface (I4) ------------------------------
+
+
+def test_every_policy_knob_governs_only_the_ai_surface():
+    """The synced mooring.toml is attacker-controlled. Policy may tighten AI
+    behaviour; it must never be able to name a host, a client id, or an account —
+    letting a repo's own file redirect the identity that reads it would invert the
+    trust model. Structural, so a future knob can't quietly cross the line."""
+    assert all(knob.path[0] == "ai" for knob in policy.KNOBS)
+    assert all(knob.key.startswith("ai.") for knob in policy.KNOBS)
+
+
+def test_policy_settings_cannot_name_an_identity_key(tmp_path):
+    (tmp_path / "mooring.toml").write_text(
+        '[policy.settings]\n"github.host" = true\n"accounts.work.client_id" = true\n',
+        "utf-8",
+    )
+    pol = policy.load(tmp_path)
+    assert not pol.settings
+    assert pol.ignored  # dropped with a recorded reason, never applied
+
+
+def test_policy_still_tightens_when_a_repo_has_a_dangling_account(tmp_path):
+    """I1. tighten_app_config resolves the workspace via config_for(None). If that
+    raised, the admin policy would silently stop being enforced — a policy bypass
+    reachable without touching mooring.toml at all."""
+    app_cfg = config.AppConfig(
+        repos=(config.RepoSpec(alias="team", owner="acme", repo="nbs", account="gone"),),
+        active_alias="team",
+        accounts=(),
+        ai=AiConfig(enabled=True),
+    )
+    # A [policy.settings] entry survives only if it equals the knob's one `safe`
+    # value, so pinning the copilot off is spelled `false`.
+    (tmp_path / "mooring.toml").write_text('[policy.settings]\n"ai.enabled" = false\n', "utf-8")
+    tightened = policy.tighten_app_config(app_cfg, workspace=tmp_path)
+    assert tightened.ai.enabled is False  # the policy was applied, not skipped
+
+    # And the degraded config is still usable enough to render an explanation.
+    cfg = app_cfg.config_for(None)
+    assert "gone" in cfg.account_error and cfg.token_slot is None

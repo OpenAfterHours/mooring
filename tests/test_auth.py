@@ -156,3 +156,46 @@ def test_host_with_port_uses_safe_filename(file_tokens, capsys):
     auth.save_token("gho_port", host="ghe.example:8443")
     assert auth.get_token(env={}, host="ghe.example:8443") == "gho_port"
     assert (file_tokens / "token-ghe.example_8443").is_file()
+
+
+# -- account-keyed storage: two identities on ONE host -------------------------
+
+
+def test_two_accounts_on_the_same_host_get_separate_tokens(file_tokens, capsys):
+    """The whole point of the account dimension: host alone cannot tell these apart."""
+    auth.save_token("gho_alice", login="alice")
+    auth.save_token("gho_bob", login="bob")
+    assert auth.get_token(env={}, login="alice") == "gho_alice"
+    assert auth.get_token(env={}, login="bob") == "gho_bob"
+    assert (file_tokens / "token-alice@github.com").read_text("utf-8") == "gho_alice"
+    assert (file_tokens / "token-bob@github.com").read_text("utf-8") == "gho_bob"
+
+
+def test_same_login_on_two_hosts_is_two_accounts(file_tokens, capsys):
+    auth.save_token("gho_dotcom", login="alice")
+    auth.save_token("gho_ghe", host="ghe.example", login="alice")
+    assert auth.get_token(env={}, login="alice") == "gho_dotcom"
+    assert auth.get_token(env={}, host="ghe.example", login="alice") == "gho_ghe"
+
+
+def test_deleting_one_account_leaves_the_other(file_tokens, capsys):
+    auth.save_token("gho_alice", login="alice")
+    auth.save_token("gho_bob", login="bob")
+    auth.delete_token(login="alice")
+    assert auth.get_token(env={}, login="alice") is None
+    assert auth.get_token(env={}, login="bob") == "gho_bob"
+
+
+def test_an_account_never_reads_the_legacy_host_keyed_token(file_tokens, capsys):
+    """I2, the token-bleed guard. A pre-accounts login sits in the host-keyed slot.
+    A NAMED account must never resolve onto it — that would push as the wrong user.
+    The empty-login slot is the pre-accounts scheme, not a wildcard."""
+    auth.save_token("gho_legacy")  # the machine's existing github.com login
+    assert auth.get_token(env={}, login="alice") is None
+    assert auth.get_token(env={}) == "gho_legacy"  # still reachable pre-accounts
+
+
+def test_host_and_login_both_key_the_file_name(file_tokens, capsys):
+    auth.save_token("gho_port", host="ghe.example:8443", login="a.harrison")
+    assert (file_tokens / "token-a.harrison@ghe.example_8443").is_file()
+    assert auth.get_token(env={}, host="ghe.example:8443", login="a.harrison") == "gho_port"

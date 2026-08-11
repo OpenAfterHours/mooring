@@ -26,7 +26,7 @@ def test_client_for_unconfigured_raises_not_configured(tmp_path):
 
 
 def test_client_for_no_token_raises_auth_failed(tmp_path, monkeypatch):
-    monkeypatch.setattr(auth, "get_token", lambda host=None: None)
+    monkeypatch.setattr(auth, "get_token", lambda **kw: None)
     cfg = config.Config(client_id="c", owner="acme", repo="nbs", workspace_path=str(tmp_path))
     with pytest.raises(AuthFailed) as exc:
         notebooks.client_for(cfg)
@@ -35,7 +35,7 @@ def test_client_for_no_token_raises_auth_failed(tmp_path, monkeypatch):
 
 
 def test_client_for_builds_the_same_client_both_adapters_did(tmp_path, monkeypatch):
-    monkeypatch.setattr(auth, "get_token", lambda host=None: "tok")
+    monkeypatch.setattr(auth, "get_token", lambda **kw: "tok")
     cfg = config.Config(client_id="c", owner="acme", repo="nbs", workspace_path=str(tmp_path))
     client = notebooks.client_for(cfg)
     # Constructor args byte-identical to the previous cli/hub construction sites.

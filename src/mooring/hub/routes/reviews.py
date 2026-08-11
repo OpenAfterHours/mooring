@@ -20,7 +20,7 @@ from mooring.github import GitHubError
 
 def _configured(hub) -> bool:
     cfg = hub.cfg
-    return cfg.is_configured and bool(auth.get_token(host=cfg.host))
+    return cfg.is_configured and bool(auth.token_for(cfg.token_slot))
 
 
 def _whoami(hub) -> str | None:

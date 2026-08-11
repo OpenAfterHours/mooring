@@ -63,7 +63,7 @@ def _auth_probe_with(monkeypatch, cfg, exc):
         def get_branch_head(self, branch):
             return "head-1"
 
-    monkeypatch.setattr(doctor.auth, "get_token", lambda host=None: "tok")
+    monkeypatch.setattr(doctor.auth, "get_token", lambda **kw: "tok")
     monkeypatch.setattr(doctor, "GitHubClient", FakeGH)
     return doctor._probe_github_auth(cfg)
 
@@ -95,7 +95,7 @@ def test_auth_probe_network_drop_mid_check_is_a_tailored_hiccup(cfg, monkeypatch
 
 
 def test_auth_probe_not_logged_in_and_not_configured(cfg, monkeypatch, tmp_path):
-    monkeypatch.setattr(doctor.auth, "get_token", lambda host=None: "")
+    monkeypatch.setattr(doctor.auth, "get_token", lambda **kw: "")
     assert doctor._probe_github_auth(cfg).status == doctor.WARN
     bare = Config(workspace_path=str(tmp_path / "w2"))
     assert doctor._probe_github_auth(bare).status == doctor.UNKNOWN

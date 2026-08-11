@@ -77,7 +77,7 @@ def test_rollback_needs_login(workspace, monkeypatch, capsys):
     # No token: rollback fails fast with the login hint (unlike delete, which is
     # local-only). Force get_token to None so a real token on the dev machine's
     # keyring doesn't leak in and turn this into a live network call.
-    monkeypatch.setattr("mooring.auth.get_token", lambda host=None: None)
+    monkeypatch.setattr("mooring.auth.get_token", lambda **kw: None)
     (workspace / "notebooks").mkdir(parents=True)
     (workspace / "notebooks/a.py").write_text("mine\n", "utf-8", newline="\n")
     with pytest.raises(SystemExit) as exc:

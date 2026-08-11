@@ -1,15 +1,19 @@
 import base64
+import json
 
 import pytest
 import requests
 import responses
 
 from mooring.github import (
+    AccountClient,
     AuthFailed,
     GitHubClient,
     GitHubError,
+    RateLimited,
     RefAlreadyExists,
     RemoteConflict,
+    ScopeDenied,
     TlsFailure,
     Unreachable,
     blob_url,
@@ -555,3 +559,99 @@ def test_find_open_pull_filters_by_head_and_base():
         json=[],
     )
     assert client().find_open_pull("mooring/phil/x", base="main") is None
+
+
+# -- account-scoped calls (the owner/repo picker and repo creation) -----------
+
+
+def account_client(host: str = "github.com") -> AccountClient:
+    return AccountClient("tok", host)
+
+
+def _repo(name: str, owner: str) -> dict:
+    return {"name": name, "full_name": f"{owner}/{name}", "owner": {"login": owner}}
+
+
+@responses.activate
+def test_list_repos_covers_personal_and_org_repos_under_the_repo_scope():
+    responses.add(
+        responses.GET,
+        f"{API_ROOT}/user/repos",
+        json=[_repo("nbs", "phil"), _repo("notebooks", "acme")],
+    )
+    repos, truncated = account_client().list_repos()
+    assert [r["full_name"] for r in repos] == ["phil/nbs", "acme/notebooks"]
+    assert truncated is False
+
+
+@responses.activate
+def test_list_owners_is_derived_from_repos_so_it_needs_no_read_org():
+    """The reason auth.SCOPE stays "repo": widening it would break every token
+    minted before the upgrade, with no way for the user to notice or self-heal."""
+    responses.add(
+        responses.GET,
+        f"{API_ROOT}/user/repos",
+        json=[_repo("nbs", "phil"), _repo("notebooks", "acme"), _repo("lab", "acme")],
+    )
+    responses.add(responses.GET, f"{API_ROOT}/user/orgs", status=403)
+    owners, _ = account_client().list_owners()
+    assert owners == ["acme", "phil"]
+
+
+@responses.activate
+def test_list_owners_adds_orgs_the_user_has_no_repo_in_yet():
+    responses.add(responses.GET, f"{API_ROOT}/user/repos", json=[_repo("nbs", "phil")])
+    responses.add(responses.GET, f"{API_ROOT}/user/orgs", json=[{"login": "brand-new-org"}])
+    owners, _ = account_client().list_owners()
+    assert owners == ["brand-new-org", "phil"]
+
+
+@responses.activate
+def test_a_403_that_is_not_a_rate_limit_is_typed_as_scope_denied():
+    """So a caller can degrade around one missing capability without a bare
+    `except GitHubError` that would also swallow 500s."""
+    responses.add(responses.GET, f"{API_ROOT}/user/orgs", status=403)
+    with pytest.raises(ScopeDenied):
+        account_client()._paged(f"{API_ROOT}/user/orgs?per_page=100")
+
+
+@responses.activate
+def test_rate_limited_403_still_classifies_as_rate_limited():
+    responses.add(
+        responses.GET,
+        f"{API_ROOT}/user/orgs",
+        status=403,
+        headers={"x-ratelimit-remaining": "0", "x-ratelimit-reset": "99"},
+    )
+    with pytest.raises(RateLimited):
+        account_client()._paged(f"{API_ROOT}/user/orgs?per_page=100")
+
+
+@responses.activate
+def test_create_repo_auto_inits_so_a_branch_head_exists():
+    """An empty repo has no commit and therefore no branch head — every sync path
+    starts by resolving one, so auto_init is not optional here."""
+    responses.add(
+        responses.POST, f"{API_ROOT}/orgs/acme/repos", json=_repo("notebooks", "acme"), status=201
+    )
+    created = account_client().create_repo("notebooks", owner="acme")
+    assert created["full_name"] == "acme/notebooks"
+    body = responses.calls[-1].request.body
+    payload = json.loads(body if isinstance(body, str) else body.decode())
+    assert payload == {"name": "notebooks", "private": True, "auto_init": True}
+
+
+@responses.activate
+def test_create_repo_without_an_owner_goes_under_the_user():
+    responses.add(responses.POST, f"{API_ROOT}/user/repos", json=_repo("scratch", "phil"), status=201)
+    assert account_client().create_repo("scratch")["full_name"] == "phil/scratch"
+
+
+@responses.activate
+def test_account_client_routes_to_enterprise_api_v3():
+    responses.add(
+        responses.GET, "https://ghe.service.group/api/v3/user", json={"login": "a.harrison"}
+    )
+    client = account_client("ghe.service.group")
+    assert client.get_user()["login"] == "a.harrison"
+    assert client.host == "ghe.service.group"  # attributable to its instance

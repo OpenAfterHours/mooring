@@ -5,9 +5,15 @@ code, the user enters it at {host}/login/device, and we poll for the
 resulting token. Works against github.com and GitHub Enterprise alike — the
 flow's endpoints live on the instance's web root. Tokens are stored in the
 OS credential store via keyring (Windows Credential Manager / macOS
-Keychain), with a plaintext-file fallback, keyed by host so a token never
-gets sent to a different GitHub instance; MOORING_TOKEN overrides everything
-for CI and tests.
+Keychain), with a plaintext-file fallback, keyed by ACCOUNT — login@host — so
+two GitHub users can coexist on one instance and a token never gets sent to a
+different GitHub instance; MOORING_TOKEN overrides everything for CI and tests.
+
+This module is deliberately just the OAuth transport and the credential store.
+The sequence that turns a finished device flow into a registered account (poll →
+GET /user → save → write the config record) lives in ``app/accounts.py``, above
+both adapters — keeping it out of here is what stops an L1 identity leaf from
+growing a dependency on ``github`` and ``config_store``.
 """
 
 from __future__ import annotations
@@ -63,12 +69,22 @@ def device_flow_hint(host: str, exc: Exception) -> str:
 
 @dataclass
 class DeviceCode:
+    """One in-flight device flow, carrying everything needed to finish it.
+
+    ``host``, ``client_id`` and ``account`` are captured at START and must be used
+    for the poll and the save rather than re-read from live config: the user can
+    switch repos (and therefore accounts) mid-login, and polling with a different
+    account's client_id returns ``unauthorized_client``.
+    """
+
     device_code: str
     user_code: str
     verification_uri: str
     interval: int
     expires_in: int
     host: str = githost.DEFAULT_HOST
+    client_id: str = ""
+    account: str = ""
 
 
 @dataclass
@@ -88,6 +104,7 @@ def start_device_flow(
     client_id: str,
     session: requests.Session | None = None,
     host: str = githost.DEFAULT_HOST,
+    account: str = "",
 ) -> DeviceCode:
     http = session or requests
     resp = http.post(
@@ -107,6 +124,8 @@ def start_device_flow(
         interval=int(data.get("interval", 5)),
         expires_in=int(data.get("expires_in", 900)),
         host=host,
+        client_id=client_id,
+        account=account,
     )
 
 
@@ -116,13 +135,18 @@ def poll_once(
     interval: int | None = None,
     session: requests.Session | None = None,
 ) -> PollResult:
-    """Single token-poll attempt. Raises AuthError on terminal failures."""
+    """Single token-poll attempt. Raises AuthError on terminal failures.
+
+    The device's OWN client_id wins over the passed one when it has been captured:
+    a caller that re-reads client_id from live config would send the wrong app's id
+    after a mid-login repo switch, and GitHub answers `unauthorized_client`.
+    """
     http = session or requests
     current = interval if interval is not None else device.interval
     resp = http.post(
         token_url(device.host),
         data={
-            "client_id": client_id,
+            "client_id": device.client_id or client_id,
             "device_code": device.device_code,
             "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
         },
@@ -165,21 +189,37 @@ def poll_for_token(
         sleep(interval)
 
 
-# The default host keeps the pre-0.2 key/filename so existing logins survive
-# the upgrade; other hosts get their own slot so a token is never sent to a
+# Storage slots. A token belongs to one ACCOUNT — an identity on an instance —
+# so the slot is keyed by login@host, which is what lets two GitHub users coexist
+# on the same host. `login=""` means the pre-account scheme: the default host
+# keeps the pre-0.2 key/filename so existing logins survive the upgrade, and
+# other hosts get their own host-keyed slot so a token is never sent to a
 # different GitHub instance after the host setting changes.
+#
+# SECURITY: an empty login is *not* a wildcard. Callers must only pass `login=""`
+# when the config has no [accounts] at all; a configured account whose login is
+# still blank (interrupted device flow, GET /user failure) must be treated as
+# NOT logged in, never resolved onto whatever legacy token happens to sit in the
+# host-keyed slot — that would silently push as the previous user. See
+# config.Config.token_login, which is the only place that decision is made.
 
 
-def _keyring_user(host: str) -> str:
-    if host == githost.DEFAULT_HOST:
+def _slot(host: str, login: str = "") -> str:
+    """The account's storage slot: ``login@host``, or bare ``host`` pre-accounts."""
+    return f"{login}@{host}" if login else host
+
+
+def _keyring_user(host: str, login: str = "") -> str:
+    if not login and host == githost.DEFAULT_HOST:
         return KEYRING_USER
-    return f"{KEYRING_USER}@{host}"
+    return f"{KEYRING_USER}@{_slot(host, login)}"
 
 
-def _token_file(host: str) -> Path:
-    if host == githost.DEFAULT_HOST:
+def _token_file(host: str, login: str = "") -> Path:
+    if not login and host == githost.DEFAULT_HOST:
         return paths.user_config_dir() / TOKEN_FILE_NAME
-    return paths.user_config_dir() / f"{TOKEN_FILE_NAME}-{host.replace(':', '_')}"
+    slot = _slot(host, login).replace(":", "_")
+    return paths.user_config_dir() / f"{TOKEN_FILE_NAME}-{slot}"
 
 
 def _keyring():
@@ -194,15 +234,15 @@ def _keyring():
         return None
 
 
-def save_token(token: str, host: str = githost.DEFAULT_HOST) -> None:
+def save_token(token: str, host: str = githost.DEFAULT_HOST, login: str = "") -> None:
     kr = _keyring()
     if kr is not None:
         try:
-            kr.set_password(KEYRING_SERVICE, _keyring_user(host), token)
+            kr.set_password(KEYRING_SERVICE, _keyring_user(host, login), token)
             return
         except Exception:  # pragma: no cover - backend-dependent
             pass
-    path = _token_file(host)
+    path = _token_file(host, login)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(token, "utf-8")
     try:
@@ -212,32 +252,53 @@ def save_token(token: str, host: str = githost.DEFAULT_HOST) -> None:
     print(f"Warning: no OS credential store available; token saved as plain text at {path}.")
 
 
-def get_token(env: Mapping[str, str] | None = None, host: str = githost.DEFAULT_HOST) -> str | None:
+def get_token(
+    env: Mapping[str, str] | None = None,
+    host: str = githost.DEFAULT_HOST,
+    login: str = "",
+) -> str | None:
     env = os.environ if env is None else env
     if env.get("MOORING_TOKEN"):
         return env["MOORING_TOKEN"]
     kr = _keyring()
     if kr is not None:
         try:
-            token = kr.get_password(KEYRING_SERVICE, _keyring_user(host))
+            token = kr.get_password(KEYRING_SERVICE, _keyring_user(host, login))
             if token:
                 return token
         except Exception:  # pragma: no cover - backend-dependent
             pass
-    path = _token_file(host)
+    path = _token_file(host, login)
     if os.path.isfile(path):
         text = open(path, encoding="utf-8").read().strip()
         return text or None
     return None
 
 
-def delete_token(host: str = githost.DEFAULT_HOST) -> None:
+def token_for(
+    slot: tuple[str, str] | None, env: Mapping[str, str] | None = None
+) -> str | None:
+    """The token for a ``Config.token_slot``, or None when the slot is None.
+
+    Takes the resolved ``(host, login)`` pair rather than a Config so this stays a
+    plain identity leaf. Every caller should route through here instead of calling
+    ``get_token`` with a hand-assembled login: a ``None`` slot means "this repo's
+    account cannot have a token", and passing ``login=""`` in that case would read
+    the pre-accounts host-keyed slot and hand back the wrong user's credential.
+    """
+    if slot is None:
+        return None
+    host, login = slot
+    return get_token(env=env, host=host, login=login)
+
+
+def delete_token(host: str = githost.DEFAULT_HOST, login: str = "") -> None:
     kr = _keyring()
     if kr is not None:
         try:
-            kr.delete_password(KEYRING_SERVICE, _keyring_user(host))
+            kr.delete_password(KEYRING_SERVICE, _keyring_user(host, login))
         except Exception:  # pragma: no cover - includes PasswordDeleteError
             pass
-    path = _token_file(host)
+    path = _token_file(host, login)
     if os.path.isfile(path):
         os.remove(path)

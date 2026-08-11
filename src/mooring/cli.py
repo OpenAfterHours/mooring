@@ -910,7 +910,7 @@ def cmd_selftest(app_cfg: config.AppConfig, cfg: config.Config) -> int:
 def _require_token(cfg: config.Config) -> str:
     from mooring import auth
 
-    token = auth.get_token(host=cfg.host)
+    token = auth.token_for(cfg.token_slot)
     if not token:
         sys.exit("Not logged in. Run `mooring login` first.")
     return token

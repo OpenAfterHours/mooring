@@ -38,9 +38,15 @@ def client_for(cfg: Config) -> GitHubClient:
     401-shaped JSON errors. Constructor args are byte-identical to what both
     adapters built before, so sync behavior is untouched.
     """
+    # A broken account binding is reported BEFORE the generic "not configured", so
+    # the user is told their account went missing rather than being sent to set up a
+    # repo they already have. config_for degrades instead of raising (it runs on
+    # every Hub.app_cfg read), which is why the error arrives as a field.
+    if cfg.account_error:
+        raise NotConfigured(cfg.account_error)
     if not cfg.is_configured:
         raise NotConfigured("No team repo configured.")
-    token = auth.get_token(host=cfg.host)
+    token = auth.token_for(cfg.token_slot)
     if not token:
         raise AuthFailed("Not logged in.")
     return GitHubClient(token, cfg.owner, cfg.repo, host=cfg.host)
