@@ -8,6 +8,9 @@ exactly as they would drive a real read-only session, but with no model.
 
 from __future__ import annotations
 
+import threading
+import time
+
 from mooring.ai.chat import ChatBroadcaster, ChatEvent
 from mooring.ai.investigate import (
     BranchJob,
@@ -36,6 +39,36 @@ class ScriptedSession(ChatBroadcaster):
         self.sent.append(text)
         for kind, data in self._events:
             self._broadcast(ChatEvent(kind, data))
+
+    def close(self):
+        self.closed = True
+        super().close()
+
+
+class EchoSession(ChatBroadcaster):
+    """Answers with the question it was asked.
+
+    Used where several branches run at once. Handing out pre-scripted sessions from
+    a shared iterator cannot pin submission order: which worker thread reaches
+    ``open_session`` first is a genuine race, so "the Nth session opened" is not
+    "the Nth branch" — a fixture built that way only passes when the pool happens
+    to start branches in order. An echoing session is identified by its OWN
+    question, so the assertion holds however the threads interleave.
+    """
+
+    def __init__(self, delay_for=None):
+        super().__init__()
+        # Keyed on the QUESTION, not on the session object, so a test can pin how
+        # long a given branch takes without knowing which session served it.
+        self._delay_for = delay_for or (lambda text: 0.0)
+        self.sent: list[str] = []
+        self.closed = False
+
+    def send(self, text, live_schema_text=""):
+        self.sent.append(text)
+        time.sleep(self._delay_for(text))
+        self._broadcast(ChatEvent("message", {"text": f"answer to {text}"}))
+        self._broadcast(ChatEvent("idle", {}))
 
     def close(self):
         self.closed = True
@@ -86,12 +119,18 @@ def _msg(text):
 
 
 def _planner(sessions, *, config=None, pii=None, opened=None, on_progress=None):
+    # Branches open their sessions from worker threads, so handing them out needs a
+    # lock: `opened` would otherwise interleave and two branches could race for the
+    # same slot. Which branch gets which session is still arbitrary — see
+    # EchoSession for why an order-sensitive assertion must not depend on it.
     it = iter(sessions)
+    hand_out = threading.Lock()
 
     def open_session(ctx, nb, model, effort):
-        if opened is not None:
-            opened.append((ctx, nb, model, effort))
-        return next(it)
+        with hand_out:
+            if opened is not None:
+                opened.append((ctx, nb, model, effort))
+            return next(it)
 
     return InvestigatePlanner(
         # max_concurrency=2: the factory resolves AUTO(0) before constructing a planner,
@@ -119,9 +158,26 @@ def test_a_branch_falls_back_to_accumulated_deltas():
 
 
 def test_fan_out_preserves_submission_order():
-    sessions = [ScriptedSession(_msg(f"finding {i}")) for i in range(4)]
-    results = _planner(sessions).run([BranchJob(question=f"q{i}") for i in range(4)])
-    assert [r.finding for r in results] == [f"finding {i}" for i in range(4)]
+    """run() collects via as_completed but writes into results[i], so the caller
+    sees SUBMISSION order.
+
+    The branches are made to finish in exactly REVERSE order (q0 slowest), so a
+    regression that returned completion order would flip the list rather than
+    happening to agree with it.
+    """
+
+    def slowest_first(question: str) -> float:
+        return 0.05 * (4 - int(question[1:]))  # q0 -> 0.20s ... q3 -> 0.05s
+
+    jobs = [BranchJob(question=f"q{i}") for i in range(4)]
+    planner = _planner(
+        [EchoSession(slowest_first) for _ in jobs],
+        # All four at once, so completion order is purely the delay.
+        config=InvestigateConfig(enabled=True, branch_timeout=5, max_concurrency=4),
+    )
+    results = planner.run(jobs)
+    assert [r.question for r in results] == [f"q{i}" for i in range(4)]
+    assert [r.finding for r in results] == [f"answer to q{i}" for i in range(4)]
 
 
 def test_default_notebook_is_used_when_a_branch_names_none():
