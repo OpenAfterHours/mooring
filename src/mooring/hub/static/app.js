@@ -2704,6 +2704,12 @@ function renderRepoSelect(state) {
 
 // -- accounts -----------------------------------------------------------------
 
+// Device codes for account sign-ins, keyed by alias. The flows are alias-keyed
+// server-side so several can be pending at once, and every refresh() rebuilds the
+// account rows — so the code lives here and the row is rendered from it, rather
+// than being written into the DOM once and lost on the next render.
+const pendingLogins = new Map();
+
 function renderAccounts(state) {
   const accounts = state.accounts || [];
   // The card is for managing MULTIPLE identities; with none registered the setup
@@ -2713,6 +2719,7 @@ function renderAccounts(state) {
   list.textContent = "";
   for (const account of accounts) {
     const li = document.createElement("li");
+    li.dataset.account = account.alias;
     const label = document.createElement("span");
     label.textContent = account.label;
     if (account.active) label.textContent += " (default for new repos)";
@@ -2726,8 +2733,12 @@ function renderAccounts(state) {
       : ` — not signed in · ${repos}`;
     li.appendChild(state_);
 
-    if (!account.signed_in) {
-      li.appendChild(accountButton("Sign in", () => startLogin(account.alias)));
+    // While a code is outstanding the row shows it instead of the button, so a
+    // second click can't discard a flow the user is halfway through.
+    if (!account.signed_in && !pendingLogins.has(account.alias)) {
+      const signIn = accountButton("Sign in", () => startLogin(account.alias));
+      signIn.dataset.act = "signin"; // renderPendingLogin pulls it once a code lands
+      li.appendChild(signIn);
     }
     if (!account.active) {
       li.appendChild(
@@ -2745,6 +2756,8 @@ function renderAccounts(state) {
         await action("/api/accounts/remove", { alias: account.alias });
       })
     );
+    const pending = pendingLogins.get(account.alias);
+    if (pending) li.appendChild(loginCodeBox(pending));
     list.appendChild(li);
   }
   renderAccountOptions(state);
@@ -2756,6 +2769,44 @@ function accountButton(text, onClick) {
   btn.textContent = text;
   btn.addEventListener("click", onClick);
   return btn;
+}
+
+// The device code for ONE account, shown on that account's own row. The shared
+// #login-code-box can't serve here: it lives inside #login-card, which refresh()
+// hides whenever the ACTIVE repo is signed in — exactly the case where you sign
+// in to a second account — and it can only ever show one flow at a time.
+function loginCodeBox(pending) {
+  const box = document.createElement("div");
+  box.className = "login-pending";
+  const intro = document.createElement("p");
+  intro.append("Enter this code at ");
+  const link = document.createElement("a");
+  link.href = pending.verification_uri;
+  link.target = "_blank";
+  link.rel = "noopener";
+  link.textContent = pending.verification_uri.replace(/^https:\/\//, "");
+  intro.append(link, ":");
+  const code = document.createElement("div");
+  code.className = "code";
+  code.textContent = pending.user_code;
+  const note = document.createElement("p");
+  note.className = "muted";
+  note.textContent = "Waiting for you to authorize…";
+  box.append(intro, code, note);
+  return box;
+}
+
+// Patch one row in place so the code appears on click, without waiting for the
+// round-trip a full refresh() would cost. A later refresh() re-renders it from
+// pendingLogins, so the two paths agree.
+function renderPendingLogin(alias) {
+  const li = $("accounts-list").querySelector(`li[data-account="${cssAttr(alias)}"]`);
+  if (!li) return;
+  li.querySelector(".login-pending")?.remove();
+  const pending = pendingLogins.get(alias);
+  if (!pending) return;
+  li.querySelector('button[data-act="signin"]')?.remove();
+  li.appendChild(loginCodeBox(pending));
 }
 
 function renderAccountOptions(state) {
@@ -3042,21 +3093,44 @@ async function startLogin(alias = "") {
   const q = alias ? `?account=${encodeURIComponent(alias)}` : "";
   const data = await api(`/api/login/start${q}`, {});
   if (data.error) return showError(data.error);
-  $("login-start").classList.add("hidden");
-  $("login-code-box").classList.remove("hidden");
-  $("login-code").textContent = data.user_code;
-  $("login-link").href = data.verification_uri;
-  $("login-link").textContent = data.verification_uri.replace(/^https:\/\//, "");
+  // The server echoes back which alias the flow is for ("" = the active repo's
+  // own account, on the pre-accounts path). An aliased flow renders on the
+  // account's row; only the bare one uses the login card.
+  const account = data.account || "";
+  if (account) {
+    pendingLogins.set(account, {
+      user_code: data.user_code,
+      verification_uri: data.verification_uri,
+    });
+    renderPendingLogin(account);
+  } else {
+    $("login-start").classList.add("hidden");
+    $("login-code-box").classList.remove("hidden");
+    $("login-code").textContent = data.user_code;
+    $("login-link").href = data.verification_uri;
+    $("login-link").textContent = data.verification_uri.replace(/^https:\/\//, "");
+  }
   window.open(data.verification_uri, "_blank");
-  pollLogin(data.account || "");
+  pollLogin(account);
+}
+
+// Clear a finished flow BEFORE the refresh() that follows, so renderAccounts
+// doesn't paint the spent code back onto the row.
+function endLogin(alias) {
+  if (alias) {
+    pendingLogins.delete(alias);
+    renderPendingLogin(alias);
+    return;
+  }
+  $("login-code-box").classList.add("hidden");
+  $("login-start").classList.remove("hidden");
 }
 
 async function pollLogin(alias = "") {
   const q = alias ? `?account=${encodeURIComponent(alias)}` : "";
   const data = await api(`/api/login/poll${q}`);
   if (data.status === "ok") {
-    $("login-code-box").classList.add("hidden");
-    $("login-start").classList.remove("hidden");
+    endLogin(alias);
     await refresh();
     return;
   }
@@ -3064,8 +3138,8 @@ async function pollLogin(alias = "") {
     // `resumable` means GitHub authorised us but naming the account failed. The
     // token is parked, so retrying does NOT need a new code.
     showError(data.message || "Login failed.");
-    $("login-code-box").classList.add("hidden");
-    $("login-start").classList.remove("hidden");
+    endLogin(alias);
+    if (alias) await refresh(); // the row goes back to offering "Sign in"
     return;
   }
   setTimeout(() => pollLogin(alias), 2500);
@@ -3079,11 +3153,11 @@ async function addAccount() {
     host: $("account-host").value.trim(),
     client_id: $("account-client-id").value.trim(),
   };
-  try {
-    await api("/api/accounts/add", body);
-  } catch (err) {
-    return showError(err.message || String(err));
-  }
+  // api() reports failures in `error` rather than throwing, so a refusal has to be
+  // read off the body — otherwise a rejected add (no client id, bad alias) falls
+  // through to startLogin and the real reason is replaced by "Unknown account".
+  const data = await api("/api/accounts/add", body);
+  if (data.error) return showError(data.error);
   $("account-alias").value = "";
   $("account-client-id").value = "";
   await refresh();
@@ -3299,7 +3373,9 @@ function draftShareSelection(candidates) {
   return { paths: rest.map((f) => f.path), count: rest.length };
 }
 
-$("login-start").addEventListener("click", startLogin);
+// Wrapped, not passed straight through: startLogin's first parameter is an account
+// alias, and a bare listener would hand it the click event instead.
+$("login-start").addEventListener("click", () => startLogin());
 $("btn-refresh").addEventListener("click", refresh);
 $("btn-run-due").addEventListener("click", () => runRefresh(""));
 $("btn-background-on").addEventListener("click", () => setBackground(true));
