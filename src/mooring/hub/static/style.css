@@ -462,6 +462,16 @@ button.small { font-size: 0.8rem; padding: 0.15rem 0.5rem; }
   margin: 0.5rem 0;
 }
 
+/* A device code shown on one account's row in the accounts card. Indented and
+   ruled so it reads as belonging to that account when two are pending at once. */
+.login-pending {
+  margin: 0.35rem 0 0.75rem 1rem;
+  padding-left: 0.75rem;
+  border-left: 2px solid var(--border);
+}
+.login-pending p { margin: 0.25rem 0; }
+.login-pending .code { font-size: 1.5rem; }
+
 table { width: 100%; border-collapse: collapse; }
 th, td { text-align: left; padding: 0.45rem 0.5rem; border-top: 1px solid var(--border); }
 thead th { border-top: none; color: var(--muted); font-weight: 600; font-size: 0.85rem; }
