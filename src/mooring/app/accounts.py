@@ -18,7 +18,7 @@ and ``config_store`` is normal.
 
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
 
 import requests
 
@@ -168,6 +168,137 @@ def sign_in_with_git(
     # re-asks the helper rather than trusting a probe from a second ago.
     auth.forget_borrowed(host)
     return config.Account(alias=target, host=host, login=login, auth=config.AUTH_GIT)
+
+
+@dataclass(frozen=True)
+class BorrowableHost:
+    """A host with a credential mooring could borrow, described without exposing it.
+
+    Value-free throughout: ``kind`` is the token's TYPE PREFIX (``gho_``/``ghp_``/…),
+    which is what lets the UI warn that a personal access token will hit an enterprise
+    lifetime cap, and there is no field anywhere here that could carry the token.
+    """
+
+    host: str
+    kind: str = ""
+    refreshable: bool = False
+    expires_in: int | None = None
+    summary: str = ""
+    # The alias to sign in as: the existing account for this host when there is one,
+    # otherwise a fresh suggestion the adapter can offer as a default.
+    alias: str = ""
+    # Set when an account for this host already exists, so an adapter can present
+    # "re-authenticate" rather than "add", and never offer a duplicate.
+    known: bool = False
+    signed_in: bool = False
+
+
+def discover_git_hosts(
+    app_cfg: config.AppConfig,
+    *,
+    include_default: bool = True,
+) -> list[BorrowableHost]:
+    """Every host mooring can find a borrowable git credential for.
+
+    This exists because sign-in was previously a one-host question: the host came from
+    the active repo or an existing account, so a credential for a host mooring had not
+    been set up for yet was never asked about — not ranked below another, simply never
+    looked for. Discovery turns that around and offers the hosts the machine can
+    actually reach.
+
+    The candidate list is a guess (see :func:`credhelper.candidate_hosts` — the
+    credential protocol cannot enumerate), so this layer supplies the facts that
+    narrow it: the hosts of accounts mooring already has, plus github.com, which is
+    worth one probe on any machine. Every candidate is then canonicalized through
+    ``githost.normalize_host`` and de-duplicated AFTER normalization — without that,
+    ``www.github.com`` from a config entry and ``github.com`` from an account would
+    cost two probes and show up as two offers for one credential.
+
+    Shared by both adapters (``mooring account discover`` and the hub's accounts
+    panel) so the offer is identical in each. Hosts with nothing to borrow are
+    dropped; the caller only ever sees what would work.
+    """
+    known: dict[str, config.Account] = {}
+    for account in app_cfg.accounts:
+        known.setdefault(account.host, account)
+
+    extra = list(known)
+    if include_default and githost.DEFAULT_HOST not in known:
+        extra.append(githost.DEFAULT_HOST)
+
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for raw in credhelper.candidate_hosts(extra):
+        try:
+            host = githost.normalize_host(raw)
+        except ValueError:
+            continue  # a junk config entry costs a candidate, never the whole sweep
+        if host not in seen:
+            seen.add(host)
+            ordered.append(host)
+
+    rows: list[BorrowableHost] = []
+    taken = {a.alias for a in app_cfg.accounts}
+    for found in credhelper.discover(ordered):
+        account = known.get(found.host)
+        if not _looks_like_github(found, account):
+            continue
+        if account is not None:
+            alias = account.alias
+        else:
+            # fresh_alias reads the config's aliases, so two NEW hosts in one sweep
+            # would both be handed the same suggestion; feed it the ones already
+            # spoken for in this pass too.
+            alias = _unused_alias(app_cfg, found.host, taken)
+            taken.add(alias)
+        rows.append(
+            BorrowableHost(
+                host=found.host,
+                kind=found.kind,
+                refreshable=found.refreshable,
+                expires_in=found.expires_in,
+                summary=found.summary,
+                alias=alias,
+                known=account is not None,
+                signed_in=bool(account is not None and account.login),
+            )
+        )
+    return rows
+
+
+def _looks_like_github(found: credhelper.Probe, account: config.Account | None) -> bool:
+    """Whether a discovered credential is plausibly a GitHub one worth offering.
+
+    Discovery casts a wide net — ``credential.<url>.*`` config names every host git
+    stores anything for, and a developer machine routinely holds credentials for
+    Azure DevOps, Heroku or a package registry. Those are real credentials for real
+    hosts, and none of them is a GitHub instance: offering one as an account would
+    produce a sign-in that can only fail at ``GET /user``, with an error blaming the
+    credential rather than the suggestion.
+
+    Two things count as evidence, and only these two:
+
+    - a recognised GitHub token PREFIX (``gho_``/``ghp_``/…), which GitHub stamps on
+      github.com, GHE Cloud and GHE Server tokens alike; or
+    - mooring already having an account on that host, which settles the question.
+
+    Deliberately conservative in one direction: a GHES instance issuing tokens with
+    no recognised prefix is dropped from the SUGGESTIONS. It stays reachable by name
+    (``account add --host … --from-git``), which the docs point at, and a missing
+    suggestion is a far better failure than a confidently wrong one.
+    """
+    return bool(found.kind) or account is not None
+
+
+def _unused_alias(app_cfg: config.AppConfig, host: str, taken: set[str]) -> str:
+    """:func:`fresh_alias`, but also avoiding aliases claimed earlier in this sweep."""
+    alias = fresh_alias(app_cfg, host)
+    if alias not in taken:
+        return alias
+    n = 2
+    while f"{alias}-{n}" in taken:
+        n += 1
+    return f"{alias}-{n}"
 
 
 def resume_login(alias: str, session: requests.Session | None = None) -> config.Account:

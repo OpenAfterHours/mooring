@@ -40,6 +40,10 @@ EXPECTED_ROUTES = {
     # one, and of what type" check the dialog uses to decide whether to offer it.
     ("/api/login/git", ("POST",), "api_login_git"),
     ("/api/login/git/probe", ("GET",), "api_login_git_probe"),
+    # `discover` is the same question asked the other way round: not "can I borrow for
+    # THIS host" but "which hosts can I borrow for at all" — the hosts a user has a
+    # credential for but has never set mooring up against.
+    ("/api/login/git/discover", ("GET",), "api_login_git_discover"),
     ("/api/logout", ("POST",), "api_logout"),
     # The GitHub identities the hub can act as. Reads are account-scoped: the
     # owner/repo pickers ask ONE account what it can reach, never a merged view.

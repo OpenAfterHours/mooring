@@ -280,3 +280,72 @@ def test_repo_create_refuses_when_the_account_is_not_signed_in(monkeypatch):
     with pytest.raises(SystemExit) as exc:
         cli.main(["repo", "create", "acme/nbs", "--account", "work"])
     assert "not signed in" in str(exc.value)
+
+
+# -- `mooring account discover` ------------------------------------------------
+
+
+def _stub_discovery(monkeypatch, rows):
+    from mooring.app import accounts
+
+    monkeypatch.setattr(accounts, "discover_git_hosts", lambda app_cfg, **kw: list(rows))
+
+
+def _row(host, alias, known=False, signed_in=False, kind="gho_"):
+    from mooring.app.accounts import BorrowableHost
+
+    return BorrowableHost(
+        host=host, kind=kind, refreshable=True, alias=alias, known=known, signed_in=signed_in
+    )
+
+
+def test_account_discover_names_the_host_that_is_not_set_up(monkeypatch, capsys):
+    _stub_discovery(
+        monkeypatch,
+        [_row("ghe.service.group", "work", known=True, signed_in=True), _row("github.com", "github")],
+    )
+    assert cli.main(["account", "discover"]) == 0
+    out = capsys.readouterr().out
+    assert "ghe.service.group" in out and "already set up as 'work'" in out
+    assert "github.com" in out and "NOT set up" in out
+    assert "--add" in out  # tells the user how to act on it
+
+
+def test_account_discover_explains_itself_when_it_finds_nothing(monkeypatch, capsys):
+    _stub_discovery(monkeypatch, [])
+    assert cli.main(["account", "discover"]) == 0
+    out = capsys.readouterr().out
+    # The honest bit: a null result does NOT mean there is no credential, because
+    # the credential protocol cannot enumerate. Say so, and give the manual route.
+    assert "--from-git" in out
+
+
+def test_account_discover_add_signs_in_to_the_pending_hosts(monkeypatch, capsys):
+    _stub_discovery(monkeypatch, [_row("ghe.service.group", "svc"), _row("github.com", "github")])
+    signed = []
+    monkeypatch.setattr(
+        cli, "_git_login", lambda alias, host: signed.append((alias, host)) or _account(alias, host)
+    )
+    assert cli.main(["account", "discover", "--add"]) == 0
+    assert signed == [("svc", "ghe.service.group"), ("github", "github.com")]
+
+
+def test_account_discover_add_keeps_going_when_one_host_refuses(monkeypatch, capsys):
+    """One dead host must not take out the rest of the sweep."""
+    _stub_discovery(monkeypatch, [_row("dead.example.com", "dead"), _row("github.com", "github")])
+    signed = []
+
+    def flaky(alias, host):
+        if host == "dead.example.com":
+            raise SystemExit("no credential")
+        signed.append((alias, host))
+        return _account(alias, host)
+
+    monkeypatch.setattr(cli, "_git_login", flaky)
+    assert cli.main(["account", "discover", "--add"]) == 0
+    assert signed == [("github", "github.com")]
+    assert "dead.example.com" in capsys.readouterr().out
+
+
+def _account(alias, host):
+    return config.Account(alias=alias, host=host, login="phil", auth="git")

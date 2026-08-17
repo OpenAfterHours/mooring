@@ -2,7 +2,7 @@
 
 import pytest
 
-from mooring import auth, config, config_store, paths
+from mooring import auth, config, config_store, credhelper, paths
 from mooring.app import accounts
 
 
@@ -358,3 +358,136 @@ def test_signing_out_of_a_borrowed_account_clears_the_login(monkeypatch):
     assert auth.token_for(cfg.token_slot, env={}, method=cfg.auth_method) is None
     # The record survives, so signing back in restores it exactly.
     assert config.load_app_config().account("work").auth == config.AUTH_GIT
+
+
+# -- discovering hosts to borrow for -------------------------------------------
+# Sign-in used to be a one-host question (the host came from the active repo or an
+# existing account), so a credential for a host mooring had not been set up for was
+# never asked about at all. These pin the other direction.
+
+
+def _probe(host, kind="gho_", refreshable=True):
+    return credhelper.Probe(
+        host=host, git_present=True, found=True, kind=kind, refreshable=refreshable
+    )
+
+
+def _discovers(monkeypatch, candidates, probes):
+    """Stub the L0 mechanism; the policy under test is the app layer's."""
+    seen = {}
+    monkeypatch.setattr(credhelper, "candidate_hosts", lambda extra=(): list(candidates))
+
+    def fake_discover(hosts, **kw):
+        seen["hosts"] = list(hosts)
+        return [p for p in probes if p.host in hosts]
+
+    monkeypatch.setattr(credhelper, "discover", fake_discover)
+    return seen
+
+
+def test_discover_offers_a_host_mooring_has_no_account_for(monkeypatch):
+    config_store.add_account("work", "ghe.service.group", login="a.harrison")
+    _discovers(
+        monkeypatch,
+        ["ghe.service.group", "github.com"],
+        [_probe("ghe.service.group"), _probe("github.com")],
+    )
+    rows = accounts.discover_git_hosts(config.load_app_config())
+    by_host = {r.host: r for r in rows}
+
+    # The host already set up is reported as such, under the alias that holds it...
+    assert by_host["ghe.service.group"].known is True
+    assert by_host["ghe.service.group"].signed_in is True
+    assert by_host["ghe.service.group"].alias == "work"
+    # ...and the one that was never set up is the whole point: offered, with a
+    # suggested alias, rather than silently skipped.
+    assert by_host["github.com"].known is False
+    assert by_host["github.com"].signed_in is False
+    assert by_host["github.com"].alias == "github"
+
+
+def test_discover_canonicalizes_before_probing_so_one_credential_is_one_offer(monkeypatch):
+    seen = _discovers(
+        monkeypatch,
+        ["www.github.com", "github.com", "GitHub.com"],
+        [_probe("github.com")],
+    )
+    rows = accounts.discover_git_hosts(config.load_app_config())
+    # Three spellings of one host cost one probe and produce one offer.
+    assert seen["hosts"] == ["github.com"]
+    assert [r.host for r in rows] == ["github.com"]
+
+
+def test_discover_drops_a_junk_candidate_without_losing_the_sweep(monkeypatch):
+    seen = _discovers(
+        monkeypatch,
+        ["not a host!!", "ghe.service.group"],
+        [_probe("ghe.service.group")],
+    )
+    rows = accounts.discover_git_hosts(config.load_app_config())
+    assert seen["hosts"] == ["ghe.service.group"]
+    assert [r.host for r in rows] == ["ghe.service.group"]
+
+
+def test_discover_suggests_distinct_aliases_for_two_new_hosts(monkeypatch):
+    """fresh_alias reads the CONFIG, so without threading the pass's own claims
+    through it both new hosts would be offered the same alias."""
+    _discovers(
+        monkeypatch,
+        ["ghe.example.com", "ghe.other.com"],
+        [_probe("ghe.example.com"), _probe("ghe.other.com")],
+    )
+    rows = accounts.discover_git_hosts(config.load_app_config())
+    aliases = [r.alias for r in rows]
+    assert len(set(aliases)) == 2, aliases
+
+
+def test_discover_reports_a_capped_token_as_such(monkeypatch):
+    """A ghp_ credential inherits the org's PAT lifetime cap; the UI has to be able
+    to say so, which means the TYPE has to survive — and only the type."""
+    _discovers(
+        monkeypatch,
+        ["ghe.service.group"],
+        [_probe("ghe.service.group", kind="ghp_", refreshable=False)],
+    )
+    (row,) = accounts.discover_git_hosts(config.load_app_config())
+    assert (row.kind, row.refreshable) == ("ghp_", False)
+
+
+def test_discover_returns_nothing_when_there_is_nothing_to_borrow(monkeypatch):
+    _discovers(monkeypatch, ["github.com"], [])
+    assert accounts.discover_git_hosts(config.load_app_config()) == []
+
+
+def test_discover_does_not_offer_a_non_github_credential(monkeypatch):
+    """A dev machine holds credentials for Azure DevOps, Heroku, package registries.
+    Offering one as a GitHub account produces a sign-in that can only fail at
+    GET /user, blaming the credential rather than the suggestion that caused it."""
+    _discovers(
+        monkeypatch,
+        ["git.heroku.com", "github.com"],
+        [_probe("git.heroku.com", kind="", refreshable=False), _probe("github.com")],
+    )
+    rows = accounts.discover_git_hosts(config.load_app_config())
+    assert [r.host for r in rows] == ["github.com"]
+
+
+def test_discover_keeps_an_unprefixed_token_on_a_host_we_already_know(monkeypatch):
+    """A GHE Server token with no recognised prefix is still a GitHub credential when
+    mooring already has an account there — that settles what the prefix cannot."""
+    config_store.add_account("work", "ghe.service.group", login="a.harrison")
+    _discovers(
+        monkeypatch,
+        ["ghe.service.group"],
+        [_probe("ghe.service.group", kind="", refreshable=False)],
+    )
+    (row,) = accounts.discover_git_hosts(config.load_app_config())
+    assert row.host == "ghe.service.group" and row.known is True
+
+
+def test_probe_summary_reads_as_english_without_a_known_prefix():
+    from mooring import credhelper
+
+    summary = credhelper.Probe("ghe.example.com", True, True).summary
+    assert "a an" not in summary
+    assert summary == "Found an unrecognised-type credential for ghe.example.com."

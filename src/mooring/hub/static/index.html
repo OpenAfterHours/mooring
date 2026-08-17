@@ -167,11 +167,25 @@
       <ul id="accounts-list" class="plain"></ul>
       <details id="account-add">
         <summary>Add an account</summary>
+        <!-- Hosts this machine can already reach, discovered when the panel opens
+             (app.js) rather than on every refresh — each one costs a subprocess.
+             Value-free: the probe reports the token's TYPE, never the token. Adding
+             from here needs no OAuth client id, which is the whole point: an org
+             that won't approve an OAuth app has none to give. -->
+        <div id="account-discovered" class="hidden">
+          <p class="muted">git already has a credential for these hosts. Signing in this
+            way needs no OAuth app, and mooring stores no copy of the credential.</p>
+          <ul id="account-discovered-list" class="plain"></ul>
+          <p class="muted">Somewhere else? Add it by hand below — a host with no entry in
+            your git config can still be borrowed once you name it.</p>
+        </div>
         <label>Short name <input id="account-alias" placeholder="work"></label>
         <label>GitHub URL <input id="account-host" placeholder="github.com"></label>
         <label>OAuth client id <input id="account-client-id" placeholder="Ov23li..."></label>
         <p class="muted">The client id comes from an OAuth app registered on that
-          host with Device Flow enabled. Ask your admin.</p>
+          host with Device Flow enabled. Ask your admin — or use
+          <button id="account-save-git" class="small" type="button">my git credential</button>
+          instead, which needs no client id.</p>
         <button id="account-save" class="primary">Add and sign in</button>
       </details>
     </section>

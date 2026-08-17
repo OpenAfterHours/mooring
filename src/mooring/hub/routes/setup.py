@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 import tomllib
+from dataclasses import asdict
 
 from starlette.concurrency import run_in_threadpool
 from starlette.requests import Request
@@ -666,7 +667,17 @@ def api_accounts(request: Request) -> JSONResponse:
 
 async def api_account_add(request: Request) -> JSONResponse:
     """Register an account (host + client id). Signing in is a separate step —
-    the caller then starts a device flow against this alias."""
+    the caller then starts a device flow against this alias.
+
+    With ``from_git`` the two steps collapse into one and the client id is not asked
+    for at all. That is the whole point of the flag rather than a shortcut: an OAuth
+    client id exists to run a device flow, borrowing runs none, and demanding one here
+    would have locked the hub's only "add a host" path behind the exact thing the
+    borrowed-credential method exists to route around — an org that won't approve an
+    OAuth app has no client id to give. The CLI has had this since
+    ``account add --from-git``; without it the hub could only ever borrow for a host
+    it already knew.
+    """
     hub = request.app.state.hub
     data = await request.json()
     alias = str(data.get("alias", "")).strip()
@@ -674,6 +685,8 @@ async def api_account_add(request: Request) -> JSONResponse:
     client_id = str(data.get("client_id", "")).strip()
     if not alias:
         return JSONResponse({"error": "alias is required"}, status_code=400)
+    if bool(data.get("from_git")):
+        return await _add_account_from_git(hub, alias, host)
     if not client_id:
         existing = next((a for a in hub.app_cfg.accounts if a.alias == alias), None)
         client_id = existing.client_id if existing else hub.app_cfg.client_id
@@ -692,6 +705,54 @@ async def api_account_add(request: Request) -> JSONResponse:
     hub.reload()
     telemetry.log_event("account_add", alias=alias)
     return JSONResponse({"ok": True, "alias": alias})
+
+
+async def _add_account_from_git(hub, alias: str, host: str) -> JSONResponse:
+    """Register AND sign in an account in one step, borrowing git's credential.
+
+    Registering and signing in stay one gesture because there is nothing to wait for:
+    unlike the device flow there is no code to authorise, so a half-made record with
+    no login would be a state the user never asked for and would have to clear by
+    hand. ``sign_in_with_git`` may also collapse this onto an EXISTING alias when the
+    credential turns out to belong to an identity mooring already knows, so the
+    response reports the alias that actually holds it, not the one that was asked for.
+    """
+    try:
+        account = await run_in_threadpool(accounts.sign_in_with_git, alias, host)
+    except accounts.AccountError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    except ValueError as exc:  # bad alias, or a host normalize_host refuses
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    hub.reload()
+    kind = await run_in_threadpool(lambda: credhelper.probe(account.host).kind)
+    telemetry.log_event("account_add", alias=account.alias, method="git")
+    telemetry.log_event("login", method="git", kind=kind)
+    return JSONResponse(
+        {
+            "ok": True,
+            "alias": account.alias,
+            "user": account.login,
+            "kind": kind,
+            "signed_in": True,
+        }
+    )
+
+
+async def api_login_git_discover(request: Request) -> JSONResponse:
+    """The hosts this machine has a borrowable git credential for.
+
+    Value-free: every row carries the token's TYPE PREFIX and never the token itself
+    (see :class:`accounts.BorrowableHost`). Off the event loop because it shells out
+    to git once per candidate host.
+    """
+    hub = request.app.state.hub
+    rows = await run_in_threadpool(accounts.discover_git_hosts, hub.app_cfg)
+    return JSONResponse(
+        {
+            "git_present": credhelper.available(),
+            "hosts": [asdict(row) for row in rows],
+        }
+    )
 
 
 async def api_account_remove(request: Request) -> JSONResponse:
