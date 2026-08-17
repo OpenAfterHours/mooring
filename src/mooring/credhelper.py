@@ -35,12 +35,27 @@ anywhere but the :class:`Credential` it was asked for.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass
+from urllib.parse import urlsplit
 
 DEFAULT_TIMEOUT = 20.0
+
+# Discovery probes several hosts back-to-back behind a hub route, so it gets a
+# tighter budget than a sign-in the user deliberately asked for, and a ceiling on
+# how many hosts it will try at all.
+DISCOVER_TIMEOUT = 8.0
+MAX_DISCOVER = 8
+
+# hostname labels, optionally followed by :port. Deliberately a copy of githost's
+# rule rather than an import: this module is an L0 leaf and stays stdlib-pure, and
+# here the pattern only has to REJECT junk before it costs a subprocess —
+# canonicalization proper is githost.normalize_host's job, a layer up.
+_HOST_RE = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*(:\d+)?$")
 
 # Every host mooring talks to is HTTPS (see githost.web_root), and a credential
 # helper keys its store on the protocol as well as the host.
@@ -295,6 +310,78 @@ def gh_token(host: str, *, timeout: float = DEFAULT_TIMEOUT) -> str | None:
     return token or None
 
 
+def _config_hosts() -> list[str]:
+    """Hosts named in git's own ``credential.<url>.*`` config entries.
+
+    ``git config --get-regexp`` prints ``credential.https://ghe.example.com.helper
+    manager`` — the key is ``credential.<url>.<subkey>``, and since the URL itself is
+    full of dots the only reliable split is from the RIGHT: drop the one trailing
+    subkey. A bare ``credential.helper`` has no URL left after that and is skipped,
+    which is correct — it says a helper exists, not which hosts it holds.
+
+    Value-free: config KEYS only. The values (``manager``, ``true``) are never read,
+    and a credential never appears in git config in the first place.
+    """
+    proc = _run(["git", "config", "--get-regexp", r"^credential\."], "")
+    if proc is None:
+        return []
+    hosts: list[str] = []
+    for line in proc.stdout.splitlines():
+        key = line.split(None, 1)[0] if line.split() else ""
+        if not key.startswith("credential."):
+            continue
+        url, sep, _subkey = key[len("credential.") :].rpartition(".")
+        if not sep or not url:
+            continue
+        host = _host_of(url)
+        if host:
+            hosts.append(host)
+    return hosts
+
+
+def _host_of(url: str) -> str:
+    """The bare host from a credential-config URL, or ``""``.
+
+    Tolerant by design: this parses whatever a user's git config happens to hold, and
+    anything unrecognised must drop out rather than become a bogus host we then go and
+    probe. Canonicalization is the caller's job (``githost.normalize_host`` lives a
+    layer up), so this only strips the parts a URL can carry.
+    """
+    text = url.strip()
+    if not text:
+        return ""
+    if "//" in text:
+        text = urlsplit(text if "://" in text else f"https://{text}").netloc
+    host = text.split("@")[-1].split("/")[0].strip().lower()
+    # A host with no dot is a LAN name we cannot reach as a GitHub instance, and
+    # bracketed IPv6 or a stray wildcard would only waste a probe.
+    return host if _HOST_RE.match(host) else ""
+
+
+def _gh_hosts() -> list[str]:
+    """Hosts the GitHub CLI reports being signed in to.
+
+    ``gh auth status`` prints each host unindented with its accounts beneath, and is
+    the only enumeration gh offers — there is no ``--json`` form. Parsed leniently
+    from both streams (gh has moved this between stdout and stderr across versions)
+    and treated as a SUGGESTION: every host found here is probed before it is offered,
+    so a format change costs a missing suggestion, never a wrong one.
+    """
+    if shutil.which("gh") is None:
+        return []
+    proc = _run(["gh", "auth", "status"], "")
+    if proc is None:
+        return []
+    hosts: list[str] = []
+    for line in (proc.stdout + "\n" + proc.stderr).splitlines():
+        if line[:1].isspace() or not line.strip():
+            continue
+        candidate = line.strip().lower()
+        if "." in candidate and _HOST_RE.match(candidate):
+            hosts.append(candidate)
+    return hosts
+
+
 @dataclass(frozen=True)
 class Probe:
     """A value-free description of what could be borrowed, for the doctor and the UI.
@@ -317,10 +404,12 @@ class Probe:
             return "git isn't on PATH, so there's no stored credential to borrow."
         if not self.found:
             return f"No stored git credential for {self.host}."
-        kind = self.kind or "an unrecognised type"
+        # The article travels WITH the phrase — "a gho_" but "an unrecognised-type",
+        # which a bare f"a {kind}" gets wrong for the second.
+        described = f"a {self.kind}" if self.kind else "an unrecognised-type"
         if self.refreshable:
-            return f"Found a {kind} credential for {self.host}, which git can refresh."
-        return f"Found a {kind} credential for {self.host}."
+            return f"Found {described} credential for {self.host}, which git can refresh."
+        return f"Found {described} credential for {self.host}."
 
 
 def probe(host: str, *, timeout: float = DEFAULT_TIMEOUT) -> Probe:
@@ -341,3 +430,56 @@ def probe(host: str, *, timeout: float = DEFAULT_TIMEOUT) -> Probe:
         refreshable=cred.refreshable,
         expires_in=expires_in,
     )
+
+
+def candidate_hosts(extra: Sequence[str] = ()) -> list[str]:
+    """Hosts that might have a borrowable credential, best guess first.
+
+    The credential protocol is a LOOKUP — ``fill`` answers for a host you name, and
+    gitcredentials(7) has no "list" verb — so a helper cannot be asked what it holds.
+    Enumeration has to come from elsewhere, and this gathers the two places a host's
+    name shows up in plain sight: git's own ``credential.<url>.*`` config and
+    ``gh auth status``.
+
+    That makes the result a guess-list, and deliberately so. It misses a host whose
+    credential sits in the store with no config entry naming it, which is exactly why
+    ``extra`` comes first: the caller's already-known hosts are facts, not guesses.
+    Reading a helper's store directly would enumerate properly and is the one thing
+    this module will not do — it would tie mooring to GCM or wincred specifically and
+    break every other helper.
+
+    Order is preserved and duplicates dropped, so a host the caller already knows is
+    never probed twice.
+    """
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for host in [*extra, *_config_hosts(), *_gh_hosts()]:
+        key = (host or "").strip().lower()
+        if key and key not in seen:
+            seen.add(key)
+            ordered.append(key)
+    return ordered
+
+
+def discover(
+    hosts: Sequence[str],
+    *,
+    timeout: float = DISCOVER_TIMEOUT,
+    limit: int = MAX_DISCOVER,
+) -> list[Probe]:
+    """Probe ``hosts`` and return a value-free Probe for each one that has a credential.
+
+    Bounded on purpose: each host costs at least one subprocess, this runs behind a hub
+    route, and a helper that ignores the no-prompt settings would otherwise hold the
+    request open once per host. Hence a shorter per-host ``timeout`` than a sign-in the
+    user deliberately asked for, and a hard ``limit`` on how many are tried at all.
+
+    Hosts with nothing to borrow are omitted rather than reported as absent: the caller
+    is building an offer, and "no credential here" is not something to show anyone.
+    """
+    found: list[Probe] = []
+    for host in list(hosts)[: max(0, limit)]:
+        result = probe(host, timeout=timeout)
+        if result.found:
+            found.append(result)
+    return found

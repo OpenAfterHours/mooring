@@ -405,3 +405,96 @@ def test_signing_out_of_a_borrowed_account_actually_signs_out(hub_client, monkey
     cfg = config.load_app_config().config_for("analytics")
     assert cfg.token_slot is None
     assert auth.token_for(cfg.token_slot, env={}, method=cfg.auth_method) is None
+
+
+# -- adding an account on a host the hub doesn't know yet ----------------------
+# The gap this closes: /api/login/git can only target an EXISTING account or the
+# active repo, and /api/accounts/add demanded an OAuth client id. On an org that
+# won't approve an OAuth app there is no client id to give, so the hub had no way
+# to reach a second host at all — the one case borrowing exists for.
+
+
+def test_account_add_from_git_needs_no_oauth_client_id(hub_client, monkeypatch):
+    client, _hub, _tmp = hub_client
+    _fake_borrow(monkeypatch, host="ghe.service.group")
+    monkeypatch.setattr(
+        "mooring.app.accounts.resolve_login", lambda tok, host, session=None: "a.harrison"
+    )
+
+    resp = client.post(
+        "/api/accounts/add",
+        json={"alias": "svc", "host": "ghe.service.group", "from_git": True},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["ok"] and body["signed_in"] and body["user"] == "a.harrison"
+    assert body["kind"] == "gho_" and "gho_abc" not in resp.text
+
+    # Registered AND signed in as one step — there is no code to authorise, so a
+    # record with no login would be a state nobody asked for.
+    account = config.load_app_config().account("svc")
+    assert (account.host, account.login, account.auth) == ("ghe.service.group", "a.harrison", "git")
+
+
+def test_account_add_without_from_git_still_requires_a_client_id(hub_client):
+    """The device flow's requirement is unchanged — from_git is a separate route,
+    not a way around registering an OAuth app when you are actually using one."""
+    client, _hub, _tmp = hub_client
+    resp = client.post("/api/accounts/add", json={"alias": "svc", "host": "ghe.other"})
+    assert resp.status_code == 400
+    assert "client id" in resp.json()["error"]
+
+
+def test_account_add_from_git_reports_a_missing_credential(hub_client, monkeypatch):
+    from mooring import credhelper
+
+    client, _hub, _tmp = hub_client
+    monkeypatch.setattr(credhelper, "available", lambda: True)
+    monkeypatch.setattr(credhelper, "borrow", lambda h, path="", **kw: None)
+
+    resp = client.post(
+        "/api/accounts/add",
+        json={"alias": "svc", "host": "ghe.service.group", "from_git": True},
+    )
+    assert resp.status_code == 400
+    assert "SSH clone" in resp.json()["error"]
+    # A refused sign-in leaves no half-made account behind.
+    with pytest.raises(KeyError):
+        config.load_app_config().account("svc")
+
+
+def test_account_add_from_git_rejects_a_bad_alias(hub_client, monkeypatch):
+    client, _hub, _tmp = hub_client
+    _fake_borrow(monkeypatch, host="ghe.service.group")
+    resp = client.post(
+        "/api/accounts/add",
+        json={"alias": "active", "host": "ghe.service.group", "from_git": True},
+    )
+    assert resp.status_code == 400
+
+
+def test_login_git_discover_lists_borrowable_hosts_value_free(hub_client, monkeypatch):
+    from mooring import credhelper
+
+    client, _hub, _tmp = hub_client
+    monkeypatch.setattr(credhelper, "available", lambda: True)
+    monkeypatch.setattr(
+        credhelper, "candidate_hosts", lambda extra=(): ["ghe.service.group", "github.com"]
+    )
+    monkeypatch.setattr(
+        credhelper,
+        "discover",
+        lambda hosts, **kw: [
+            credhelper.Probe(h, True, True, "gho_", True) for h in hosts
+        ],
+    )
+
+    body = client.get("/api/login/git/discover").json()
+    assert body["git_present"] is True
+    hosts = {h["host"]: h for h in body["hosts"]}
+    # github.com already has an account here ("personal", signed in); the enterprise
+    # host does not — and that is the one the user could not previously reach.
+    assert hosts["github.com"]["signed_in"] is True
+    assert hosts["ghe.service.group"]["signed_in"] is False
+    assert hosts["ghe.service.group"]["alias"]
+    assert "password" not in str(body) and "gho_abc" not in str(body)

@@ -299,3 +299,99 @@ def test_nothing_borrowed_is_ever_written_to_disk(monkeypatch, git_present, tmp_
     written = list((tmp_path / "appdata").rglob("*")) if (tmp_path / "appdata").exists() else []
     assert not [p for p in written if p.is_file()]
     assert auth.get_token(env={}, host="acme.ghe.com", login="phil") is None
+
+
+# -- discovery: finding hosts worth asking about -------------------------------
+# The credential protocol has no "list" verb, so which hosts exist at all has to be
+# inferred from where their NAMES show up in plain sight. These pin the parsing and,
+# above all, that discovery stays a guess that is always confirmed by a real probe.
+
+CONFIG_OUT = (
+    "credential.helper manager\n"
+    "credential.https://dev.azure.com.usehttppath true\n"
+    "credential.https://ghe.service.group.helper manager\n"
+    "credential.https://phil@ghe.service.group/acme/notebooks.helper manager\n"
+)
+
+
+def _cmd(argv, marker):
+    return marker in argv or any(marker in str(a) for a in argv)
+
+
+def _replies(monkeypatch, *, config_out="", gh_out="", fills=()):
+    """Stub subprocess.run for the three commands discovery runs."""
+    calls = []
+    filled = list(fills)
+
+    def fake_run(argv, **kw):
+        calls.append(argv)
+        if "config" in argv:
+            return FakeProc(config_out)
+        if "auth" in argv:
+            return FakeProc(gh_out)
+        if "fill" in argv:
+            return filled.pop(0) if filled else FakeProc(returncode=1)
+        return FakeProc(returncode=1)
+
+    monkeypatch.setattr(credhelper.subprocess, "run", fake_run)
+    return calls
+
+
+def test_config_hosts_reads_the_url_out_of_a_credential_key(monkeypatch, git_present):
+    _replies(monkeypatch, config_out=CONFIG_OUT)
+    hosts = credhelper._config_hosts()
+    # The bare `credential.helper` has no URL and is skipped; the rest keep only the
+    # host, with the user and the repo path stripped.
+    assert hosts == ["dev.azure.com", "ghe.service.group", "ghe.service.group"]
+
+
+def test_config_hosts_survives_junk_entries(monkeypatch, git_present):
+    _replies(monkeypatch, config_out="credential.helper x\ncredential..helper y\ngarbage\n")
+    assert credhelper._config_hosts() == []
+
+
+def test_gh_hosts_takes_the_unindented_lines(monkeypatch, git_present):
+    gh = (
+        "github.com\n"
+        "  ✓ Logged in to github.com account phil (keyring)\n"
+        "ghe.service.group\n"
+        "  ✓ Logged in to ghe.service.group account a.harrison\n"
+    )
+    _replies(monkeypatch, gh_out=gh)
+    assert credhelper._gh_hosts() == ["github.com", "ghe.service.group"]
+
+
+def test_gh_hosts_is_empty_without_gh(monkeypatch):
+    monkeypatch.setattr(credhelper.shutil, "which", lambda name: None)
+    assert credhelper._gh_hosts() == []
+
+
+def test_candidate_hosts_puts_the_callers_facts_first_and_dedupes(monkeypatch, git_present):
+    _replies(monkeypatch, config_out=CONFIG_OUT, gh_out="github.com\n")
+    hosts = credhelper.candidate_hosts(["ghe.service.group"])
+    assert hosts[0] == "ghe.service.group"          # the caller's known host leads
+    assert hosts.count("ghe.service.group") == 1    # and is not probed twice
+    assert set(hosts) == {"ghe.service.group", "dev.azure.com", "github.com"}
+
+
+def test_discover_returns_only_hosts_that_actually_have_a_credential(monkeypatch, git_present):
+    # ghe answers, dev.azure.com does not — and gh_token has nothing either.
+    _replies(monkeypatch, fills=[FakeProc(GHO), FakeProc(returncode=1)])
+    found = credhelper.discover(["ghe.service.group", "dev.azure.com"])
+    assert [p.host for p in found] == ["ghe.service.group"]
+    assert found[0].kind == "gho_" and found[0].refreshable
+
+
+def test_discover_is_bounded(monkeypatch, git_present):
+    calls = _replies(monkeypatch, fills=[FakeProc(GHO)] * 20)
+    credhelper.discover([f"h{i}.example.com" for i in range(20)], limit=3)
+    assert len([c for c in calls if "fill" in c]) == 3
+
+
+def test_discovery_never_reports_a_secret(monkeypatch, git_present):
+    """A Probe carries the token's TYPE and nothing else — the same guarantee the
+    single-host probe makes, held across the sweep."""
+    _replies(monkeypatch, fills=[FakeProc("username=phil\npassword=gho_SECRET_VALUE\n")])
+    found = credhelper.discover(["ghe.service.group"])
+    assert "SECRET_VALUE" not in repr(found)
+    assert "SECRET_VALUE" not in found[0].summary

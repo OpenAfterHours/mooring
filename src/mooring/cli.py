@@ -124,6 +124,15 @@ def _build_parser() -> argparse.ArgumentParser:
         help="borrow the credential git already uses for that host instead of running a "
         "device flow — no OAuth app needed (see `mooring login --from-git`)",
     )
+    acc_discover = account_sub.add_parser(
+        "discover",
+        help="find GitHub hosts this machine already has a git credential for",
+    )
+    acc_discover.add_argument(
+        "--add",
+        action="store_true",
+        help="sign in to every discovered host that isn't set up yet",
+    )
     acc_resume = account_sub.add_parser(
         "resume", help="finish a sign-in whose account lookup failed (no new code needed)"
     )
@@ -1051,6 +1060,60 @@ def _git_login(alias: str, host: str) -> config.Account:
     return account
 
 
+def _account_discover(app_cfg: config.AppConfig, add: bool = False) -> int:
+    """Report the hosts git already holds a credential for, and optionally sign in.
+
+    Sign-in used to be a one-host question — the host came from the active repo or an
+    existing account — so a credential for a host mooring had not been set up for yet
+    was never even asked about. This is the other direction: ask the machine what it
+    can reach, then offer it.
+    """
+    from mooring.app import accounts
+
+    print("Looking for stored git credentials…")
+    rows = accounts.discover_git_hosts(app_cfg)
+    if not rows:
+        print("No borrowable git credentials found.")
+        print(
+            "mooring can only ask git about hosts it can name (the credential protocol "
+            "has no way to list them), so a host with no `credential.<url>.*` entry in "
+            "your git config won't show up here. Name it directly with "
+            "`mooring account add <alias> --host <host> --from-git`."
+        )
+        return 0
+
+    for row in rows:
+        kind = f" ({row.kind}…)" if row.kind else ""
+        if row.signed_in:
+            state = f"already set up as '{row.alias}'"
+        elif row.known:
+            state = f"account '{row.alias}' exists but is not signed in"
+        else:
+            state = f"NOT set up — would be added as '{row.alias}'"
+        print(f"  {row.host:<32}{kind:<16} {state}")
+
+    pending = [r for r in rows if not r.signed_in]
+    if not pending:
+        print("\nEvery host with a credential is already set up.")
+        return 0
+    if not add:
+        print(
+            f"\n{len(pending)} host(s) not signed in. Re-run with `--add` to sign in to "
+            "them, or `mooring account add <alias> --host <host> --from-git` for one."
+        )
+        return 0
+
+    failed = 0
+    for row in pending:
+        print()
+        try:
+            _git_login(row.alias, row.host)
+        except SystemExit as exc:  # _git_login exits on refusal; one host must not
+            failed += 1  # take out the rest of the sweep
+            print(f"Couldn't sign in to {row.host}: {exc}")
+    return 1 if failed and failed == len(pending) else 0
+
+
 def cmd_login(cfg: config.Config, host: str | None = None, from_git: bool = False) -> int:
     """Sign in for the ACTIVE repo — re-authenticating its account when it has one."""
     from mooring import config_store
@@ -1165,6 +1228,9 @@ def cmd_account(app_cfg: config.AppConfig, args: argparse.Namespace) -> int:
             repos = ", ".join(row["repos"]) or "no repos"
             print(f"{mark} {row['alias']:<12} {row['label']:<32} {state}  ({repos})")
         return 0
+
+    if cmd == "discover":
+        return _account_discover(app_cfg, add=getattr(args, "add", False))
 
     if cmd == "add":
         try:

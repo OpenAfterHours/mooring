@@ -3206,6 +3206,61 @@ async function addAccount() {
   await startLogin(alias); // registering and signing in are one gesture for the user
 }
 
+// -- Adding an account on a host mooring doesn't know yet ----------------------
+// Borrowing used to be reachable only for a host already set up, because the host
+// came from the active repo or an existing account. These two do the other half:
+// discover() asks the machine which hosts it can reach, and addAccountFromGit()
+// registers one WITHOUT an OAuth client id — there is no device flow to run, so
+// requiring one would have gated this behind the very thing borrowing exists to
+// avoid. No startLogin() afterwards: the server signs in as it registers.
+async function addAccountFromGit(host, alias) {
+  showError("");
+  const data = await api("/api/accounts/add", { alias, host, from_git: true });
+  if (data.error) return showError(data.error);
+  $("account-alias").value = "";
+  $("account-client-id").value = "";
+  await refresh();
+  await discoverGitHosts(); // the row it came from is now "already set up"
+}
+
+async function discoverGitHosts() {
+  const box = $("account-discovered");
+  const list = $("account-discovered-list");
+  if (!box || !list) return;
+  const data = await api("/api/login/git/discover").catch(() => null);
+  const hosts = (data && data.hosts) || [];
+  // Only hosts that still need signing in are worth a button; a host already set
+  // up would just be a row that does nothing.
+  const offers = hosts.filter((h) => !h.signed_in);
+  list.textContent = "";
+  if (!offers.length) return box.classList.add("hidden");
+  for (const h of offers) {
+    const li = document.createElement("li");
+    const label = document.createElement("span");
+    // The type prefix is the honest bit: a ghp_ credential inherits whatever PAT
+    // lifetime cap the org sets, and the user should know that before relying on it.
+    label.textContent = h.refreshable
+      ? `${h.host} — git can refresh this one`
+      : h.kind
+        ? `${h.host} — looks like a ${h.kind} token, so it expires on your org's schedule`
+        : h.host;
+    const btn = document.createElement("button");
+    btn.className = "small";
+    btn.textContent = h.known ? `Sign in as ${h.alias}` : `Add as ${h.alias}`;
+    btn.addEventListener("click", async () => {
+      btn.disabled = true;
+      try {
+        await addAccountFromGit(h.host, h.alias);
+      } finally {
+        btn.disabled = false;
+      }
+    });
+    li.append(label, " ", btn);
+    list.append(li);
+  }
+  box.classList.remove("hidden");
+}
+
 // -- Copilot sign-in (separate from the GitHub login) -----------------------
 // GitHub Copilot signs in independently of mooring's GitHub login (different
 // OAuth flow, different credential store, possibly a different account). This
@@ -3576,6 +3631,21 @@ $("setup-save").addEventListener("click", async () => {
   }
 });
 $("account-save").addEventListener("click", addAccount);
+// Discovery shells out to git once per candidate host, so it runs when the panel is
+// actually opened rather than on every refresh().
+$("account-add").addEventListener("toggle", (e) => {
+  if (e.target.open) discoverGitHosts();
+});
+// The manual escape hatch: a host with no entry in git's config never shows up in
+// discovery (the credential protocol cannot list what a helper holds), but naming it
+// here still works.
+$("account-save-git").addEventListener("click", () => {
+  const alias = $("account-alias").value.trim();
+  const host = $("account-host").value.trim();
+  if (!alias) return showError("Give the account a short name first.");
+  if (!host) return showError("Give the GitHub URL of the host to borrow a credential for.");
+  return addAccountFromGit(host, alias);
+});
 $("setup-account").addEventListener("change", loadOwners);
 $("setup-owner-select").addEventListener("change", loadRepoChoices);
 for (const id of ["setup-mode-existing", "setup-mode-new"]) {

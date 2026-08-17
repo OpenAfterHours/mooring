@@ -185,6 +185,39 @@ In the hub, the same option appears under the **Log in with GitHub** button as
 - `mooring logout` stops mooring using the credential. It never touches git's own
   stored credential, which is not mooring's to delete.
 
+### Signing in to a host mooring doesn't know yet
+
+The commands above sign in for a host mooring is *already* set up against — the one
+the active repo uses. To borrow for a **different** host, name it:
+
+```bash
+mooring account add svc --host ghe.example.com --from-git
+```
+
+No OAuth client id is needed, which is the point: an org that won't approve an OAuth
+app has none to give. In the hub, the same thing lives under **Add an account** in the
+GitHub accounts panel.
+
+To see which hosts this machine could sign in to at all:
+
+```bash
+mooring account discover          # list them
+mooring account discover --add    # sign in to the ones not set up yet
+```
+
+!!! warning "Discovery is a best effort, not an inventory"
+
+    Nothing can list what a credential helper holds — git's credential protocol is a
+    *lookup* (you name a host, it answers), with no "list" verb, and reading GCM's or
+    wincred's store directly would tie mooring to that one helper. So discovery infers
+    candidates from where host names appear in plain sight: `credential.<url>.*`
+    entries in your git config and `gh auth status`.
+
+    A host with a stored credential but no config entry naming it **will not appear**,
+    and that is the common case for a plain single-helper setup. An empty result means
+    "nothing found to suggest", never "you have no credentials" — name the host
+    directly with `--from-git` and it will still work.
+
 ## GitHub Enterprise
 
 If your GitHub is a **GitHub Enterprise** instance (say
