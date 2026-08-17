@@ -27,12 +27,17 @@ from pathlib import Path
 
 import requests
 
-from mooring import githost, paths
+from mooring import credhelper, githost, paths
 
 SCOPE = "repo"
 KEYRING_SERVICE = "mooring-github"
 KEYRING_USER = "github-token"
 TOKEN_FILE_NAME = "token"
+
+# The one sign-in method whose credential is NOT stored here. The full vocabulary
+# (and its parsing/validation) lives in config.AUTH_METHODS, which owns the config
+# key; this module only has to recognise the borrowed case.
+GIT_METHOD = "git"
 
 
 def device_code_url(host: str = githost.DEFAULT_HOST) -> str:
@@ -275,8 +280,65 @@ def get_token(
     return None
 
 
+# -- Borrowed credentials (the "git" method) -----------------------------------
+# A borrowed credential is deliberately NEVER saved: git's helper stays its owner,
+# which is the whole point — the helper can refresh it and mooring cannot. What we
+# keep is a short in-process cache, because token_for runs on every hub state poll
+# and every sync step, and each miss is a subprocess spawn.
+BORROW_TTL = 60.0
+_borrowed: dict[str, tuple[float, credhelper.Credential]] = {}
+
+
+def borrowed_credential(
+    host: str, path: str = "", *, clock=time.monotonic
+) -> credhelper.Credential | None:
+    """The credential git currently holds for ``host``, cached briefly."""
+    now = clock()
+    cached = _borrowed.get(host)
+    if cached is not None and now < cached[0]:
+        return cached[1]
+    cred = credhelper.borrow(host, path)
+    if cred is None:
+        _borrowed.pop(host, None)
+        return None
+    good_until = now + BORROW_TTL
+    if cred.expires_at is not None:
+        # Never hold it past the helper's own stated expiry, however short.
+        good_until = min(good_until, now + max(0.0, cred.expires_at - time.time()))
+    _borrowed[host] = (good_until, cred)
+    return cred
+
+
+def borrowed_token(host: str, path: str = "") -> str | None:
+    cred = borrowed_credential(host, path)
+    return cred.password if cred is not None else None
+
+
+def forget_borrowed(host: str = "") -> None:
+    """Drop the cache for one host (or all), forcing the next read to re-ask git."""
+    if host:
+        _borrowed.pop(host, None)
+    else:
+        _borrowed.clear()
+
+
+def reject_borrowed(host: str, path: str = "") -> None:
+    """Report a borrowed credential as refused, so git's helper mints a new one.
+
+    This is the borrowed-credential answer to a 401, and it replaces
+    :func:`delete_token` for that method — there is no stored token to delete, and
+    the fix is to make the helper re-authenticate rather than to send the user back
+    through a sign-in mooring cannot perform.
+    """
+    cached = _borrowed.pop(host, None)
+    cred = cached[1] if cached is not None else credhelper.fill(host, path)
+    credhelper.reject(cred, path)
+
+
 def token_for(
-    slot: tuple[str, str] | None, env: Mapping[str, str] | None = None
+    slot: tuple[str, str] | None,
+    env: Mapping[str, str] | None = None,
+    method: str = "device",
 ) -> str | None:
     """The token for a ``Config.token_slot``, or None when the slot is None.
 
@@ -285,10 +347,23 @@ def token_for(
     ``get_token`` with a hand-assembled login: a ``None`` slot means "this repo's
     account cannot have a token", and passing ``login=""`` in that case would read
     the pre-accounts host-keyed slot and hand back the wrong user's credential.
+
+    ``method`` selects the credential SOURCE (``Config.auth_method``). It defaults
+    to the stored-token behaviour, which is fail-closed: a caller that forgets to
+    pass it gets None for a borrowed account — "not signed in" — rather than
+    somebody else's credential. A ``None`` slot still wins over everything, so an
+    account that never finished signing in can't borrow one either.
     """
     if slot is None:
         return None
     host, login = slot
+    env_map = os.environ if env is None else env
+    # MOORING_TOKEN overrides every source, including a borrowed one — it is the
+    # CI/test escape hatch and must behave identically for all methods.
+    if env_map.get("MOORING_TOKEN"):
+        return env_map["MOORING_TOKEN"]
+    if method == GIT_METHOD:
+        return borrowed_token(host)
     return get_token(env=env, host=host, login=login)
 
 

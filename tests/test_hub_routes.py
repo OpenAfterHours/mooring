@@ -35,6 +35,11 @@ EXPECTED_ROUTES = {
     ("/api/settings/reset", ("POST",), "api_reset_settings"),
     ("/api/login/start", ("POST",), "api_login_start"),
     ("/api/login/poll", ("GET",), "api_login_poll"),
+    # Signing in by BORROWING git's stored credential — the method for orgs that
+    # restrict OAuth apps and cap PAT lifetimes. `probe` is the value-free "is there
+    # one, and of what type" check the dialog uses to decide whether to offer it.
+    ("/api/login/git", ("POST",), "api_login_git"),
+    ("/api/login/git/probe", ("GET",), "api_login_git_probe"),
     ("/api/logout", ("POST",), "api_logout"),
     # The GitHub identities the hub can act as. Reads are account-scoped: the
     # owner/repo pickers ask ONE account what it can reach, never a merged view.

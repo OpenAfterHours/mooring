@@ -682,3 +682,59 @@ def test_ai_reasoning_effort_from_config_and_env(tmp_path):
         load_app_config(user_config_path=tmp_path / "missing.toml", env={}).ai_reasoning_effort
         == ""
     )
+
+
+# -- the credential SOURCE an account uses -------------------------------------
+
+
+def test_auth_method_defaults_to_the_device_flow(tmp_path):
+    """Every config written before the method existed must keep its exact meaning."""
+    user = tmp_path / "config.toml"
+    user.write_text(
+        "[accounts.work]\nhost = 'ghe.example'\nlogin = 'a'\nclient_id = 'c'\n"
+        "[repos]\nactive = 'team'\n"
+        "[repos.team]\naccount = 'work'\nowner = 'o'\nrepo = 'r'\n",
+        "utf-8",
+    )
+    app = load_app_config(user_config_path=user, env={})
+    assert app.account("work").auth == "device"
+    assert app.config_for("team").auth_method == "device"
+
+
+def test_a_borrowed_account_needs_no_client_id_to_be_configured(tmp_path):
+    """The 'git' method has no OAuth app at all, so requiring a client id would drop
+    the repo into local mode and make it look like it had vanished."""
+    user = tmp_path / "config.toml"
+    user.write_text(
+        "[accounts.work]\nhost = 'acme.ghe.com'\nlogin = 'acme_phil'\nauth = 'git'\n"
+        "[repos]\nactive = 'team'\n"
+        "[repos.team]\naccount = 'work'\nowner = 'acme'\nrepo = 'nbs'\n",
+        "utf-8",
+    )
+    cfg = load_app_config(user_config_path=user, env={}).config_for("team")
+    assert cfg.client_id == "" and cfg.is_configured
+    assert cfg.auth_method == "git"
+    assert cfg.token_slot == ("acme.ghe.com", "acme_phil")
+
+
+def test_an_unknown_auth_method_falls_back_to_device(tmp_path):
+    """Fail closed on a corrupt or future value: 'device' looks for a STORED token
+    and finds none, which reads as not-signed-in — never 'use anything to hand'."""
+    user = tmp_path / "config.toml"
+    user.write_text(
+        "[accounts.work]\nhost = 'ghe.example'\nlogin = 'a'\nauth = 'telepathy'\n"
+        "[repos]\nactive = 'team'\n"
+        "[repos.team]\naccount = 'work'\nowner = 'o'\nrepo = 'r'\n",
+        "utf-8",
+    )
+    app = load_app_config(user_config_path=user, env={})
+    assert app.account("work").auth == "device"
+
+
+def test_an_unbound_repo_still_needs_a_client_id(tmp_path):
+    """The pre-accounts path has no account record to sign in through, so a client
+    id remains the only thing that makes it usable."""
+    user = tmp_path / "config.toml"
+    user.write_text("[github]\nowner = 'o'\nrepo = 'r'\nclient_id = ''\n", "utf-8")
+    cfg = load_app_config(user_config_path=user, env={}).config_for(None)
+    assert cfg.account == "" and not cfg.is_configured

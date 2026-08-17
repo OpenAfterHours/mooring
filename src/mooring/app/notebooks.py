@@ -46,7 +46,7 @@ def client_for(cfg: Config) -> GitHubClient:
         raise NotConfigured(cfg.account_error)
     if not cfg.is_configured:
         raise NotConfigured("No team repo configured.")
-    token = auth.token_for(cfg.token_slot)
+    token = auth.token_for(cfg.token_slot, method=cfg.auth_method)
     if not token:
         raise AuthFailed("Not logged in.")
     return GitHubClient(token, cfg.owner, cfg.repo, host=cfg.host)

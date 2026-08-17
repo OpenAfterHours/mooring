@@ -58,7 +58,7 @@ def api_whatsnew(request: Request) -> JSONResponse:
     posture), never on every refresh."""
     hub = request.app.state.hub
     cfg = hub.cfg
-    if not cfg.is_configured or not auth.token_for(cfg.token_slot):
+    if not cfg.is_configured or not auth.token_for(cfg.token_slot, method=cfg.auth_method):
         return JSONResponse({"entries": []})
     try:
         report = sync.status(hub.client(), cfg)
@@ -394,7 +394,7 @@ def api_freshness(request: Request) -> JSONResponse:
     opens anyway on error/timeout, so this must never gate anything server-side."""
     hub = request.app.state.hub
     cfg = hub.cfg
-    if not cfg.is_configured or not auth.token_for(cfg.token_slot):
+    if not cfg.is_configured or not auth.token_for(cfg.token_slot, method=cfg.auth_method):
         return JSONResponse({"fresh": True, "head": ""})
     last = hub._state_heads.get(str(cfg.workspace()))
     try:
@@ -418,7 +418,7 @@ def api_discover(request: Request) -> JSONResponse:
     /api/state) so the extra full-tree read stays off the refresh hot path."""
     hub = request.app.state.hub
     cfg = hub.cfg
-    if not cfg.is_configured or not auth.token_for(cfg.token_slot):
+    if not cfg.is_configured or not auth.token_for(cfg.token_slot, method=cfg.auth_method):
         return JSONResponse({"candidates": []})
     try:
         candidates = sync.discover_unsynced_folders(hub.client(), cfg)

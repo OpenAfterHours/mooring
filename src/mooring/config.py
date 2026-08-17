@@ -25,6 +25,30 @@ from mooring.ai_config import AiConfig
 VALID_THEMES = ("light", "dark", "system")
 DEFAULT_THEME = "system"
 
+# How an account proves who it is. Persisted per account as [accounts.<alias>] auth.
+#   "device" — OAuth device flow against an OAuth app's client_id (the default, and
+#              the only method before 0.4.33; an absent key means this)
+#   "token"  — a token the user pasted, stored in the OS credential store
+#   "git"    — no stored credential at all: borrowed from git's credential helper on
+#              every read, so the helper keeps ownership and can refresh it. The
+#              answer for orgs that restrict OAuth apps AND cap PAT lifetimes.
+AUTH_DEVICE = "device"
+AUTH_TOKEN = "token"
+AUTH_GIT = "git"
+AUTH_METHODS = (AUTH_DEVICE, AUTH_TOKEN, AUTH_GIT)
+
+
+def normalize_auth(value: object) -> str:
+    """Coerce a stored ``auth`` value to a known method, else the default.
+
+    Tolerant like :func:`normalize_theme`, and fail-closed with it: an unknown
+    method degrades to ``"device"``, which looks for a STORED token and finds none
+    for a borrowed account. That reads as "not signed in" — the safe reading of a
+    corrupt or future config value, never "use whatever credential is lying about".
+    """
+    text = str(value or "").strip().lower()
+    return text if text in AUTH_METHODS else AUTH_DEVICE
+
 
 def normalize_theme(value: object) -> str:
     """Coerce a config/env/request value to a valid theme, else the default.
@@ -43,17 +67,22 @@ class Account:
 
     Keyed by (host, login) rather than host alone so two users can coexist on the
     same instance. ``client_id`` rides here because each instance needs its own
-    OAuth app: a github.com client id does not work against Enterprise.
+    OAuth app: a github.com client id does not work against Enterprise. It is empty
+    for the non-device methods, which have no OAuth app at all.
 
-    ``login`` is discovered from ``GET /user`` after the device flow, never typed.
-    A blank ``login`` means the flow never finished, and is treated as NOT LOGGED
-    IN — see :meth:`is_signed_in` and ``Config.token_login``.
+    ``login`` is discovered from ``GET /user`` at sign-in, never typed. A blank
+    ``login`` means sign-in never finished, and is treated as NOT LOGGED IN — see
+    :meth:`is_signed_in` and ``Config.token_login``. That holds for every method:
+    a borrowed credential still has to name its owner before the account counts.
     """
 
     alias: str
     host: str = githost.DEFAULT_HOST
     login: str = ""
     client_id: str = ""
+    # Where this account's credential comes from; see AUTH_METHODS. Defaults to the
+    # device flow so every pre-0.4.33 config keeps its exact meaning.
+    auth: str = AUTH_DEVICE
 
     @property
     def is_signed_in(self) -> bool:
@@ -80,6 +109,9 @@ class Config:
     account: str = ""
     account_login: str = ""
     account_error: str = ""
+    # The bound account's credential source (see AUTH_METHODS). Pass it to
+    # auth.token_for alongside token_slot; on its own it decides nothing.
+    auth_method: str = AUTH_DEVICE
     folders: tuple[str, ...] = ("notebooks", "data", "reports")
     exclude: tuple[str, ...] = ()
     warn_file_mb: int = 10
@@ -101,7 +133,17 @@ class Config:
 
     @property
     def is_configured(self) -> bool:
-        return bool(self.client_id and self.owner and self.repo)
+        """Whether there is a team repo to talk to at all (vs. local-only mode).
+
+        A BOUND account is an identity route whatever method it uses, so a client id
+        is only required for an unbound pre-accounts repo, which has nothing else to
+        sign in with. Requiring one unconditionally would drop every token/borrowed
+        account into local mode — they have no OAuth app — and it also made a repo
+        whose account binding broke *look unconfigured* rather than broken, which is
+        the failure the comment in hub/routes/setup.py's api_state warns about. Being
+        "configured" says nothing about being signed in: that is token_slot's job.
+        """
+        return bool(self.owner and self.repo and (self.client_id or self.account))
 
     @property
     def token_slot(self) -> tuple[str, str] | None:
@@ -224,8 +266,8 @@ class AppConfig:
                 return a
         raise KeyError(alias)
 
-    def _identity(self, spec: RepoSpec) -> tuple[str, str, str, str]:
-        """Resolve a repo's (host, client_id, login, error). NEVER raises.
+    def _identity(self, spec: RepoSpec) -> tuple[str, str, str, str, str]:
+        """Resolve a repo's (host, client_id, login, auth_method, error). NEVER raises.
 
         Totality matters here more than anywhere else in this file: Hub.app_cfg is
         a property that calls config_for on EVERY read, so an exception would 500
@@ -235,8 +277,9 @@ class AppConfig:
         error, exactly the way policy.parse records rather than raises.
         """
         if not spec.account:
-            # Unbound: the pre-accounts world, where host/client_id are global.
-            return self.host, self.client_id, "", ""
+            # Unbound: the pre-accounts world, where host/client_id are global and
+            # the only method that ever existed was the device flow.
+            return self.host, self.client_id, "", AUTH_DEVICE, ""
         for a in self.accounts:
             if a.alias == spec.account:
                 if not a.is_signed_in:
@@ -244,10 +287,11 @@ class AppConfig:
                         a.host,
                         a.client_id,
                         "",
+                        a.auth,
                         f"Account {spec.account!r} is not signed in — "
                         f"run `mooring account add {spec.account}`.",
                     )
-                return a.host, a.client_id, a.login, ""
+                return a.host, a.client_id, a.login, a.auth, ""
         dropped = dict(self.ignored_accounts).get(spec.account)
         reason = (
             f"Account {spec.account!r} was dropped from the config: {dropped}"
@@ -255,7 +299,7 @@ class AppConfig:
             else f"Account {spec.account!r} is not configured — "
             f"run `mooring account add {spec.account}`."
         )
-        return githost.DEFAULT_HOST, "", "", reason
+        return githost.DEFAULT_HOST, "", "", AUTH_DEVICE, reason
 
     def config_for(self, alias: str | None = None) -> Config:
         """The single-repo Config for an alias (None = the active repo).
@@ -284,7 +328,7 @@ class AppConfig:
                 )
             alias = self.active_alias
         s = self.spec(alias)
-        host, client_id, login, account_error = self._identity(s)
+        host, client_id, login, auth_method, account_error = self._identity(s)
         return Config(
             client_id=client_id,
             owner=s.owner,
@@ -294,6 +338,7 @@ class AppConfig:
             account=s.account,
             account_login=login,
             account_error=account_error,
+            auth_method=auth_method,
             folders=self.sync_folders,
             exclude=self.exclude,
             warn_file_mb=self.warn_file_mb,
@@ -576,6 +621,7 @@ def account_specs_from_data(
                 host=host,
                 login=str(tbl.get("login", "")),
                 client_id=str(tbl.get("client_id", "")),
+                auth=normalize_auth(tbl.get("auth")),
             )
         )
     active = str(accounts_data.get("active", ""))
