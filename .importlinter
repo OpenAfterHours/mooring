@@ -38,6 +38,7 @@ source_modules =
     mooring.reveal
     mooring.trash
     mooring.activity
+    mooring.credhelper
 forbidden_modules =
     mooring.config
     mooring.config_store
@@ -182,6 +183,7 @@ source_modules =
     mooring.reveal
     mooring.trash
     mooring.activity
+    mooring.credhelper
     mooring.checks
     mooring.verify
     mooring.sweep

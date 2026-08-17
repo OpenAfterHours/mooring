@@ -22,7 +22,7 @@ from dataclasses import replace
 
 import requests
 
-from mooring import auth, config, config_store, githost
+from mooring import auth, config, config_store, credhelper, githost
 from mooring.github import AccountClient, AuthFailed, GitHubClient, GitHubError
 
 # A token is parked here between "GitHub issued it" and "we know whose it is".
@@ -38,6 +38,25 @@ class AccountError(Exception):
 
 def _pending_login(alias: str) -> str:
     return f"{_PENDING}{alias}"
+
+
+def fresh_alias(app_cfg: config.AppConfig, host: str) -> str:
+    """An unused account alias derived from the host (github, ghe, ghe-2, …).
+
+    Needed by BOTH adapters — the CLI's `login` on a pre-accounts repo and the hub's
+    equivalent both have to invent an alias for an account the user never named — so
+    it lives here rather than once in each.
+    """
+    import re
+
+    base = re.sub(r"[^A-Za-z0-9_-]", "-", host.split(":")[0].split(".")[0]) or "github"
+    taken = {a.alias for a in app_cfg.accounts}
+    if base not in taken:
+        return base
+    n = 2
+    while f"{base}-{n}" in taken:
+        n += 1
+    return f"{base}-{n}"
 
 
 def resolve_login(token: str, host: str, session: requests.Session | None = None) -> str:
@@ -91,6 +110,66 @@ def finish_login(
     return _adopt(device.account, device.host, device.client_id, token, session=session)
 
 
+def sign_in_with_git(
+    alias: str,
+    host: str,
+    session: requests.Session | None = None,
+) -> config.Account:
+    """Register an account that BORROWS the credential git already holds for ``host``.
+
+    The escape hatch for an org that restricts OAuth apps (so the device flow cannot
+    run) and caps personal access token lifetimes (so a pasted token is useless): the
+    credential behind the user's daily `git clone` is neither, and git's helper keeps
+    it alive without us.
+
+    Unlike :func:`finish_login` this stores NO token. The account record only says
+    *where the credential comes from*; every read goes back to the helper, which is
+    what makes it refresh for free — and leaves one fewer copy of a credential on the
+    machine than either other method. It follows that there is nothing to park and no
+    :func:`resume_login` equivalent: if the identity lookup fails, re-running this
+    costs the user nothing.
+
+    Like ``_adopt``, an identity that already has a record collapses onto it rather
+    than gaining a second one, so re-running this against an account that used the
+    device flow SWITCHES it to borrowed credentials — which is exactly what someone
+    running it is asking for.
+    """
+    config_store.validate_alias(alias)
+    host = githost.normalize_host(host)
+    if not credhelper.available():
+        raise AccountError(
+            "git isn't on PATH, so there's no stored credential to borrow. Install git, "
+            "or sign in another way."
+        )
+    cred = credhelper.borrow(host)
+    if cred is None:
+        raise AccountError(
+            f"No stored git credential for {host}. Clone a repository from {host} over "
+            "HTTPS first — an SSH clone (git@…) stores no credential that can reach the "
+            "GitHub API — or sign in another way."
+        )
+    try:
+        login = resolve_login(cred.password, host, session=session)
+    except (GitHubError, requests.RequestException) as exc:
+        raise AccountError(
+            f"Found a git credential for {host}, but couldn't read the account name "
+            f"with it: {exc} It may not carry API access — check that you can reach "
+            f"{host} in a browser, then try again."
+        ) from exc
+    if not login:
+        raise AccountError(f"Signed in to {host}, but GitHub returned no account name.")
+
+    # One record per identity (see _adopt), and the alias the caller asked for only
+    # wins when this identity is new.
+    existing = _find(host, login)
+    target = existing.alias if existing is not None else alias
+    config_store.add_account(target, host, login=login, auth=config.AUTH_GIT)
+    # Drop any cache entry from before the account existed so the first real read
+    # re-asks the helper rather than trusting a probe from a second ago.
+    auth.forget_borrowed(host)
+    return config.Account(alias=target, host=host, login=login, auth=config.AUTH_GIT)
+
+
 def resume_login(alias: str, session: requests.Session | None = None) -> config.Account:
     """Finish a login whose token arrived but whose identity lookup failed."""
     app_cfg = config.load_app_config()
@@ -134,7 +213,12 @@ def _adopt(
         config_store.remove_account(alias)
         return existing
 
-    config_store.add_account(alias, host, login=login, client_id=client_id)
+    # auth is passed explicitly so a device flow re-run on an account that had been
+    # switched to borrowed credentials moves it back, instead of storing a token the
+    # "git" method would then ignore.
+    config_store.add_account(
+        alias, host, login=login, client_id=client_id, auth=config.AUTH_DEVICE
+    )
     return config.Account(alias=alias, host=host, login=login, client_id=client_id)
 
 
@@ -159,6 +243,9 @@ def forget(alias: str) -> tuple[str, ...]:
         raise AccountError(f"Unknown account {alias!r}.") from None
     orphaned = config_store.remove_account(alias)
     auth.delete_token(host=account.host, login=_pending_login(alias))
+    # A borrowed account has no stored token to delete, but it may have a cached one
+    # in this process. Dropping it is what makes "remove" take effect immediately.
+    auth.forget_borrowed(account.host)
     # Only drop the identity's token if no OTHER alias still points at it — two
     # aliases can legitimately have collapsed onto one (host, login).
     if account.login and _find(account.host, account.login) is None:
@@ -166,10 +253,39 @@ def forget(alias: str) -> tuple[str, ...]:
     return orphaned
 
 
+def account_token(account: config.Account) -> str | None:
+    """The credential for an account, from whichever source its method names.
+
+    The account-scoped analogue of ``auth.token_for(cfg.token_slot, ...)``: same
+    fail-closed rule (an account that never finished signing in has no credential,
+    whatever its method) with the account rather than a repo as the starting point.
+    """
+    if not account.is_signed_in:
+        return None
+    return auth.token_for((account.host, account.login), method=account.auth)
+
+
+def _signed_in(account: config.Account) -> bool:
+    """Whether this account can produce a credential, cheaply.
+
+    A borrowed account is judged on its RECORD, not by asking git: ``status`` runs on
+    every hub state poll, and a subprocess per account per poll would be a real cost
+    for no gain — a credential that has since gone will surface as the 401 that
+    ``reject_borrowed`` is there to handle.
+    """
+    if not account.login:
+        return False
+    if account.auth == config.AUTH_GIT:
+        return True
+    return bool(auth.get_token(host=account.host, login=account.login))
+
+
 def status(app_cfg: config.AppConfig) -> tuple[dict, ...]:
     """One value-free row per account, for `account list` and the hub panel.
 
-    No token ever leaves here — only whether one exists.
+    No token ever leaves here — only whether one exists, and which SOURCE it comes
+    from, so an adapter can say "borrowed from git" and offer the right repair when a
+    credential stops working.
     """
     return tuple(
         {
@@ -177,7 +293,8 @@ def status(app_cfg: config.AppConfig) -> tuple[dict, ...]:
             "host": a.host,
             "login": a.login,
             "label": a.label,
-            "signed_in": bool(a.login and auth.get_token(host=a.host, login=a.login)),
+            "auth": a.auth,
+            "signed_in": _signed_in(a),
             "active": a.alias == app_cfg.active_account,
             "repos": tuple(s.alias for s in app_cfg.repos if s.account == a.alias),
         }
@@ -191,7 +308,7 @@ def client_for_account(app_cfg: config.AppConfig, alias: str) -> AccountClient:
         account = app_cfg.account(alias)
     except KeyError:
         raise AccountError(f"Unknown account {alias!r}.") from None
-    token = auth.get_token(host=account.host, login=account.login) if account.is_signed_in else None
+    token = account_token(account)
     if not token:
         raise AuthFailed(f"Account {alias!r} is not signed in.")
     return AccountClient(token, account.host)
@@ -209,7 +326,7 @@ def repo_client_for_account(
         account = app_cfg.account(alias)
     except KeyError:
         raise AccountError(f"Unknown account {alias!r}.") from None
-    token = auth.get_token(host=account.host, login=account.login) if account.is_signed_in else None
+    token = account_token(account)
     if not token:
         raise AuthFailed(f"Account {alias!r} is not signed in.")
     return GitHubClient(token, owner, repo, host=account.host)

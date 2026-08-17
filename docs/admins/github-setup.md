@@ -146,6 +146,45 @@ OAuth apps**, the app must be approved before anyone can log in:
     the `MOORING_TOKEN` environment variable (a personal access token works) —
     see [Configuration](configuration.md#environment-variables).
 
+## If your org won't approve an OAuth app
+
+Some organizations don't approve third-party OAuth apps at all, and many of those
+also cap personal access token lifetimes — which blocks the device flow and makes
+a pasted token impractical at the same time.
+
+There is a third way in, and it needs no approval from anyone: **sign in with the
+credential git already uses**. If an analyst can `git clone` the repo over HTTPS,
+their machine already holds a working credential — normally an OAuth token that
+Git Credential Manager keeps refreshing, which is *not* a personal access token
+and so isn't governed by the PAT lifetime policy at all.
+
+```bash
+mooring login --from-git
+```
+
+In the hub, the same option appears under the **Log in with GitHub** button as
+**Use my git credential** — but only when there is actually one to borrow.
+
+!!! info "Mooring stores no copy"
+
+    This is the only sign-in method that saves nothing. Every request asks git's
+    credential helper again, so the credential stays valid exactly as long as the
+    analyst's clone does — including across renewals mooring never sees. It also
+    leaves one fewer copy of a credential on the machine than either other method.
+
+**Requirements and limits:**
+
+- **git must be installed**, and the repo must have been cloned over **HTTPS**.
+  An SSH clone (`git@…`) stores no credential that can reach the GitHub API, so
+  this route is unavailable — check with `git remote get-url origin`.
+- Works with whichever credential helper git is configured with (Git Credential
+  Manager, wincred, libsecret, a corporate helper), because it goes through git's
+  own `credential fill` protocol rather than reading any one store directly.
+- If the helper only holds a **personal access token**, this inherits that token's
+  expiry — the hub says so before you commit to the method.
+- `mooring logout` stops mooring using the credential. It never touches git's own
+  stored credential, which is not mooring's to delete.
+
 ## GitHub Enterprise
 
 If your GitHub is a **GitHub Enterprise** instance (say

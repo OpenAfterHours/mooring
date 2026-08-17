@@ -334,3 +334,74 @@ def test_repo_switch_drops_the_cached_username(hub_client):
     hub._user_login["work"] = "stale"
     client.post("/api/repo/switch", json={"alias": "side"})
     assert hub._user_login == {}
+
+
+# -- signing in with git's stored credential -----------------------------------
+
+
+def _fake_borrow(monkeypatch, secret="gho_abc", host="ghe.example"):
+    from mooring import credhelper
+
+    monkeypatch.setattr(credhelper, "available", lambda: True)
+    monkeypatch.setattr(
+        credhelper,
+        "borrow",
+        lambda h, path="", **kw: credhelper.Credential(h, "phil", secret) if h == host else None,
+    )
+
+
+def test_login_git_signs_in_without_an_oauth_app(hub_client, monkeypatch):
+    client, hub, _tmp = hub_client
+    _fake_borrow(monkeypatch)
+    monkeypatch.setattr(
+        "mooring.app.accounts.resolve_login", lambda tok, host, session=None: "a.harrison"
+    )
+
+    resp = client.post("/api/login/git", json={"account": "work"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] and body["user"] == "a.harrison" and body["account"] == "work"
+    # Value-free: the response names the credential's TYPE, never the credential.
+    assert body["kind"] == "gho_" and "gho_abc" not in resp.text
+
+    assert config.load_app_config().account("work").auth == "git"
+
+
+def test_login_git_reports_a_missing_credential_without_500ing(hub_client, monkeypatch):
+    from mooring import credhelper
+
+    client, _hub, _tmp = hub_client
+    monkeypatch.setattr(credhelper, "available", lambda: True)
+    monkeypatch.setattr(credhelper, "borrow", lambda h, path="", **kw: None)
+
+    resp = client.post("/api/login/git", json={"account": "work"})
+    assert resp.status_code == 400
+    assert "SSH clone" in resp.json()["error"]
+
+
+def test_login_git_probe_is_value_free(hub_client, monkeypatch):
+    client, _hub, _tmp = hub_client
+    _fake_borrow(monkeypatch, secret="ghp_capped")
+
+    body = client.get("/api/login/git/probe?account=work").json()
+    assert body["found"] and body["git_present"]
+    # ghp_ is a personal access token: the thing an enterprise lifetime cap expires.
+    # Saying so lets the dialog warn BEFORE the user commits to this method.
+    assert body["kind"] == "ghp_" and body["refreshable"] is False
+    assert "ghp_capped" not in str(body)
+
+
+def test_signing_out_of_a_borrowed_account_actually_signs_out(hub_client, monkeypatch):
+    """Without a stored token to delete, a naive logout would be a no-op and the
+    next poll would silently re-borrow — a Sign out button that does nothing."""
+    client, hub, _tmp = hub_client
+    _fake_borrow(monkeypatch)
+    monkeypatch.setattr(
+        "mooring.app.accounts.resolve_login", lambda tok, host, session=None: "a.harrison"
+    )
+    client.post("/api/login/git", json={"account": "work"})
+
+    assert client.post("/api/logout").status_code == 200
+    cfg = config.load_app_config().config_for("analytics")
+    assert cfg.token_slot is None
+    assert auth.token_for(cfg.token_slot, env={}, method=cfg.auth_method) is None

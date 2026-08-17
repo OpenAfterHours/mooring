@@ -1262,6 +1262,8 @@ def create_app(hub: Hub) -> Starlette:
             Route("/api/settings/reset", settings.api_reset_settings, methods=["POST"]),
             Route("/api/login/start", setup.api_login_start, methods=["POST"]),
             Route("/api/login/poll", setup.api_login_poll),
+            Route("/api/login/git", setup.api_login_git, methods=["POST"]),
+            Route("/api/login/git/probe", setup.api_login_git_probe),
             Route("/api/logout", setup.api_logout, methods=["POST"]),
             Route("/api/accounts", setup.api_accounts),
             Route("/api/accounts/add", setup.api_account_add, methods=["POST"]),

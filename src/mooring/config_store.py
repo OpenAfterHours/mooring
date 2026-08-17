@@ -87,11 +87,19 @@ def _legacy_account(data: dict) -> dict:
     return {"legacy": {"host": host, "client_id": client_id}}
 
 
-def add_account(alias: str, host: str, login: str = "", client_id: str = "") -> None:
+def add_account(
+    alias: str, host: str, login: str = "", client_id: str = "", auth: str = ""
+) -> None:
     """Create or update an account record, merging into any existing table.
 
     Merging matters: the device flow writes the login *after* the record exists, and
     an overwrite would drop the client_id the flow was started with.
+
+    ``auth`` is written only when given, so an existing record keeps its method —
+    except that switching an account to a NEW method must actually take effect, which
+    is why the caller passes it explicitly on every sign-in rather than relying on the
+    default. The device flow's own value is left implicit (an absent key reads as
+    ``"device"``), so a config written by an older mooring is untouched.
     """
     validate_alias(alias)
     data = _materialized(read_user_data())
@@ -103,9 +111,32 @@ def add_account(alias: str, host: str, login: str = "", client_id: str = "") -> 
         entry["login"] = login
     if client_id:
         entry["client_id"] = client_id
+    if auth and auth != config.AUTH_DEVICE:
+        entry["auth"] = auth
+    elif auth == config.AUTH_DEVICE:
+        entry.pop("auth", None)
     data["accounts"][alias] = entry
     if not data["accounts"].get("active"):
         data["accounts"]["active"] = alias
+    write_user_data(data)
+
+
+def clear_account_login(alias: str) -> None:
+    """Drop an account's ``login``, marking it NOT signed in while keeping the record.
+
+    The borrowed-credential ("git") counterpart to :func:`auth.delete_token`. There is
+    no stored token to delete for that method and deleting git's own credential would
+    be an act of vandalism on the user's git setup, so signing out has to be recorded
+    on mooring's side: a blank login is what ``Config.token_slot`` already reads as
+    "cannot produce a credential". The host, client id and any repo bindings survive,
+    so signing back in restores the account exactly.
+    """
+    data = _materialized(read_user_data())
+    entry = data["accounts"].get(alias)
+    if not isinstance(entry, dict):
+        raise KeyError(alias)
+    entry.pop("login", None)
+    data["accounts"][alias] = entry
     write_user_data(data)
 
 

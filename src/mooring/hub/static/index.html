@@ -220,6 +220,15 @@
         <div id="login-code" class="code"></div>
         <p class="muted">Waiting for you to authorize&hellip;</p>
       </div>
+      <!-- The second way in, for organisations that won't approve a third-party
+           OAuth app (which blocks the button above) and cap personal access token
+           lifetimes (which rules out pasting one). Shown by app.js ONLY when the
+           probe finds a credential to borrow, so it never advertises a route that
+           cannot work on this machine. -->
+      <div id="login-git-box" class="hidden">
+        <p class="muted" id="login-git-note"></p>
+        <button id="login-git">Use my git credential</button>
+      </div>
     </section>
 
     <!-- First-run checklist: teaches the working rhythm (pull → open → duplicate a

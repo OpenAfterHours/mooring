@@ -14,6 +14,7 @@ from mooring import (
     auth,
     config,
     config_store,
+    credhelper,
     githost,
     sync,
     telemetry,
@@ -123,7 +124,7 @@ def api_state(request: Request) -> JSONResponse:
         report = sync.local_report(cfg.workspace(), cfg.folders, cfg.exclude)
         body["files"], body["artifacts"] = hub._files_artifacts(report, cfg.workspace())
         return JSONResponse(body)
-    if not auth.token_for(cfg.token_slot):
+    if not auth.token_for(cfg.token_slot, method=cfg.auth_method):
         return JSONResponse(body)
     try:
         body["user"] = hub.username()
@@ -171,10 +172,23 @@ def api_state(request: Request) -> JSONResponse:
             "as_of": as_of,
         }
     except AuthFailed:
-        auth.delete_token(host=cfg.host, login=cfg.account_login)
-        hub._user_login.pop(cfg.account, None)
-        body["logged_in"] = False
-        body["error"] = "Your GitHub login expired. Please log in again."
+        if cfg.auth_method == config.AUTH_GIT:
+            # A borrowed credential has no stored copy to delete. Report it REFUSED to
+            # git's helper instead, which is what makes the next read re-authenticate
+            # through whatever flow this organisation has already approved — the same
+            # move git makes when a fetch gets a 401. The account stays signed in
+            # because it still names a valid identity; only the credential was stale.
+            auth.reject_borrowed(cfg.host)
+            body["error"] = (
+                "The credential git holds for this host was refused. Mooring has asked "
+                "git to renew it — retry in a moment, or run a `git fetch` in your clone "
+                "to re-authenticate."
+            )
+        else:
+            auth.delete_token(host=cfg.host, login=cfg.account_login)
+            hub._user_login.pop(cfg.account, None)
+            body["logged_in"] = False
+            body["error"] = "Your GitHub login expired. Please log in again."
     except GitHubError as exc:
         telemetry.log_error(exc=exc, op="state")
         body["error"] = str(exc)
@@ -535,11 +549,104 @@ def api_login_poll(request: Request) -> JSONResponse:
     return JSONResponse({"status": "pending"})
 
 
+async def api_login_git(request: Request) -> JSONResponse:
+    """Sign in by BORROWING the credential git already holds for the host.
+
+    The one sign-in that needs no OAuth app and stores no token — for organisations
+    that restrict third-party apps and cap personal access token lifetimes, which
+    blocks the device flow and a pasted token respectively. See
+    ``app.accounts.sign_in_with_git``.
+
+    Runs off the event loop: it shells out to git, and the probe (though
+    non-interactive) is still a subprocess.
+    """
+    hub = request.app.state.hub
+    data = await request.json() if await request.body() else {}
+    requested = str(data.get("account", "")).strip()
+    try:
+        alias, host, _client_id = _login_target(hub, requested)
+    except KeyError:
+        return JSONResponse({"error": f"Unknown account {requested!r}."}, status_code=404)
+    if not alias:
+        # A pre-accounts repo has no account record to attach this to; make one named
+        # after the host, the way `mooring login` does for the same case.
+        alias = accounts.fresh_alias(hub.app_cfg, host)
+    try:
+        account = await run_in_threadpool(accounts.sign_in_with_git, alias, host)
+    except accounts.AccountError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    # Bind the active repo if it was unbound, so the repo stops depending on the
+    # shared host-keyed slot (mirrors cmd_login).
+    cfg = hub.cfg
+    if not cfg.account and cfg.owner and cfg.repo:
+        await run_in_threadpool(
+            _add_repo_bound,
+            hub.app_cfg.active_alias or cfg.repo,
+            cfg.owner,
+            cfg.repo,
+            cfg.branch,
+            account.alias,
+        )
+    hub.reload()
+    kind = await run_in_threadpool(lambda: credhelper.probe(host).kind)
+    telemetry.log_event("login", method="git", kind=kind)
+    return JSONResponse(
+        {"ok": True, "account": account.alias, "user": account.login, "kind": kind}
+    )
+
+
+async def api_login_git_probe(request: Request) -> JSONResponse:
+    """Whether there is a git credential to borrow for a host, and of what TYPE.
+
+    Value-free: reports the token's type PREFIX (``gho_``/``ghp_``/…), never the
+    token. Lets the sign-in dialog offer "use my git credential" only when it would
+    actually work, and warn when the credential is a personal access token that an
+    enterprise lifetime cap would expire."""
+    hub = request.app.state.hub
+    requested = str(request.query_params.get("account", "")).strip()
+    try:
+        _alias, host, _client_id = _login_target(hub, requested)
+    except KeyError:
+        return JSONResponse({"error": f"Unknown account {requested!r}."}, status_code=404)
+    probe = await run_in_threadpool(credhelper.probe, host)
+    return JSONResponse(
+        {
+            "host": probe.host,
+            "git_present": probe.git_present,
+            "found": probe.found,
+            "kind": probe.kind,
+            "refreshable": probe.refreshable,
+            "expires_in": probe.expires_in,
+            "summary": probe.summary,
+        }
+    )
+
+
 def api_logout(request: Request) -> JSONResponse:
+    """Sign the active repo's account out, by whichever route its method allows.
+
+    A borrowed ("git") account has no stored token to delete, and mooring must not
+    touch git's own credential — that belongs to the user's git setup, not to us. So
+    signing out is recorded on mooring's side by clearing the account's login, which
+    ``token_slot`` already reads as "cannot produce a credential". Without this, a
+    borrowed account would silently re-borrow on the next poll and the Sign out button
+    would do nothing at all.
+    """
     hub = request.app.state.hub
     cfg = hub.cfg
-    auth.delete_token(host=cfg.host, login=cfg.account_login)
+    if cfg.auth_method == config.AUTH_GIT:
+        auth.forget_borrowed(cfg.host)
+        if cfg.account:
+            try:
+                config_store.clear_account_login(cfg.account)
+            except KeyError:
+                pass
+    else:
+        auth.delete_token(host=cfg.host, login=cfg.account_login)
     hub._user_login.pop(cfg.account, None)
+    hub.reload()
     telemetry.log_event("logout")
     return JSONResponse({"ok": True})
 

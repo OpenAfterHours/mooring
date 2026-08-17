@@ -93,6 +93,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="GitHub host or URL for GitHub Enterprise (e.g. ghe.example.com); "
         "saved as the global host before logging in",
     )
+    login.add_argument(
+        "--from-git",
+        action="store_true",
+        help="borrow the credential git already uses for this host instead of running "
+        "a device flow (needs an HTTPS clone; no OAuth app to register)",
+    )
     sub.add_parser("logout", help="forget the stored GitHub token")
     sub.add_parser("whoami", help="show the logged-in GitHub user")
     status = sub.add_parser("status", help="show sync status of workspace files")
@@ -111,6 +117,12 @@ def _build_parser() -> argparse.ArgumentParser:
         "--client-id",
         default=None,
         help="OAuth app client id registered ON THAT HOST (with Device Flow enabled)",
+    )
+    acc_add.add_argument(
+        "--from-git",
+        action="store_true",
+        help="borrow the credential git already uses for that host instead of running a "
+        "device flow — no OAuth app needed (see `mooring login --from-git`)",
     )
     acc_resume = account_sub.add_parser(
         "resume", help="finish a sign-in whose account lookup failed (no new code needed)"
@@ -955,7 +967,7 @@ def cmd_selftest(app_cfg: config.AppConfig, cfg: config.Config) -> int:
 def _require_token(cfg: config.Config) -> str:
     from mooring import auth
 
-    token = auth.token_for(cfg.token_slot)
+    token = auth.token_for(cfg.token_slot, method=cfg.auth_method)
     if not token:
         sys.exit("Not logged in. Run `mooring login` first.")
     return token
@@ -1010,7 +1022,36 @@ def _device_login(alias: str, host: str, client_id: str) -> int:
     return 0
 
 
-def cmd_login(cfg: config.Config, host: str | None = None) -> int:
+def _git_login(alias: str, host: str) -> config.Account:
+    """Register/refresh an account that borrows git's credential, and report it.
+
+    Returns the Account rather than an exit code (unlike ``_device_login``) because
+    the identity may collapse onto an EXISTING alias, and the caller has to bind the
+    repo to the alias that actually holds the credential, not the one it asked for.
+    Exits with guidance on any refusal.
+    """
+    from mooring import credhelper
+    from mooring.app import accounts
+
+    print(f"Looking for a stored git credential for {host}…")
+    try:
+        account = accounts.sign_in_with_git(alias, host)
+    except (accounts.AccountError, ValueError) as exc:
+        sys.exit(str(exc))
+    kind = credhelper.probe(host).kind
+    telemetry.set_user(account.login)
+    # Value-free: the credential's TYPE, never the credential.
+    telemetry.log_event("login", method="git", kind=kind)
+    print(f"Signed in as {account.label} (account '{account.alias}').")
+    print(
+        "Using the credential git holds for this host"
+        + (f" ({kind}…)" if kind else "")
+        + " — mooring stores no copy, so it stays valid as long as your clone does."
+    )
+    return account
+
+
+def cmd_login(cfg: config.Config, host: str | None = None, from_git: bool = False) -> int:
     """Sign in for the ACTIVE repo — re-authenticating its account when it has one."""
     from mooring import config_store
 
@@ -1023,6 +1064,9 @@ def cmd_login(cfg: config.Config, host: str | None = None) -> int:
                 f"`mooring account add {alias} --host {host}` instead."
             )
         account = app_cfg.account(alias)
+        if from_git:
+            _git_login(alias, account.host)
+            return 0
         return _device_login(alias, account.host, account.client_id)
 
     # Unbound (pre-accounts) repo: keep the old global-host behaviour, but land the
@@ -1034,13 +1078,22 @@ def cmd_login(cfg: config.Config, host: str | None = None) -> int:
             sys.exit(str(exc))
         print(f"Saved GitHub host: {new_host}")
         cfg = config.load_config()
-    if not cfg.client_id:
-        sys.exit(
-            f"No OAuth client_id configured. Set [github] client_id in {paths.user_config_file()}."
-        )
-    print(f"Requesting device code from {cfg.host}…")
     alias = _fresh_account_alias(app_cfg, cfg.host)
-    code = _device_login(alias, cfg.host, cfg.client_id)
+    if from_git:
+        # No client id needed, and none stored: the whole point is that there is no
+        # OAuth app in this path.
+        alias = _git_login(alias, cfg.host).alias
+        code = 0
+    else:
+        if not cfg.client_id:
+            sys.exit(
+                f"No OAuth client_id configured. Set [github] client_id in "
+                f"{paths.user_config_file()}. If your organisation won't approve an OAuth "
+                f"app, borrow the credential git already uses instead: "
+                f"`mooring login --from-git`."
+            )
+        print(f"Requesting device code from {cfg.host}…")
+        code = _device_login(alias, cfg.host, cfg.client_id)
     if code == 0 and cfg.repo:
         config_store.add_repo(
             config.load_app_config().active_alias,
@@ -1054,23 +1107,33 @@ def cmd_login(cfg: config.Config, host: str | None = None) -> int:
 
 
 def _fresh_account_alias(app_cfg: config.AppConfig, host: str) -> str:
-    """An unused account alias derived from the host (github, ghe, ghe-2, …)."""
-    base = re.sub(r"[^A-Za-z0-9_-]", "-", host.split(":")[0].split(".")[0]) or "github"
-    taken = {a.alias for a in app_cfg.accounts}
-    if base not in taken:
-        return base
-    n = 2
-    while f"{base}-{n}" in taken:
-        n += 1
-    return f"{base}-{n}"
+    """An unused account alias derived from the host. Both adapters need this, so the
+    rule lives in app/accounts; this is the CLI's thin call through to it."""
+    from mooring.app import accounts
+
+    return accounts.fresh_alias(app_cfg, host)
 
 
 def cmd_logout(cfg: config.Config) -> int:
-    from mooring import auth
+    from mooring import auth, config_store
 
+    who = cfg.account_login or cfg.host
+    if cfg.auth_method == config.AUTH_GIT:
+        # Nothing of ours is stored, and git's own credential is not ours to delete —
+        # see config_store.clear_account_login and hub api_logout.
+        auth.forget_borrowed(cfg.host)
+        if cfg.account:
+            try:
+                config_store.clear_account_login(cfg.account)
+            except KeyError:
+                pass
+        telemetry.log_event("logout")
+        print(f"Logged out of {who}. Your git credential is untouched — mooring has")
+        print("simply stopped using it. Sign back in with `mooring login --from-git`.")
+        return 0
     auth.delete_token(host=cfg.host, login=cfg.account_login)
     telemetry.log_event("logout")
-    print(f"Logged out of {cfg.account_login or cfg.host}.")
+    print(f"Logged out of {who}.")
     return 0
 
 
@@ -1097,19 +1160,24 @@ def cmd_account(app_cfg: config.AppConfig, args: argparse.Namespace) -> int:
         for row in rows:
             mark = "*" if row["active"] else " "
             state = "signed in" if row["signed_in"] else "NOT signed in"
+            if row["signed_in"] and row["auth"] == config.AUTH_GIT:
+                state = "signed in (git credential)"
             repos = ", ".join(row["repos"]) or "no repos"
             print(f"{mark} {row['alias']:<12} {row['label']:<32} {state}  ({repos})")
         return 0
 
     if cmd == "add":
-        client_id = args.client_id
-        if client_id is None:
-            existing = next((a for a in app_cfg.accounts if a.alias == args.alias), None)
-            client_id = existing.client_id if existing else app_cfg.client_id
         try:
             host = githost.normalize_host(args.host)
         except ValueError as exc:
             sys.exit(str(exc))
+        if getattr(args, "from_git", False):
+            _git_login(args.alias, host)
+            return 0
+        client_id = args.client_id
+        if client_id is None:
+            existing = next((a for a in app_cfg.accounts if a.alias == args.alias), None)
+            client_id = existing.client_id if existing else app_cfg.client_id
         print(f"Requesting device code from {host}…")
         return _device_login(args.alias, host, client_id)
 
@@ -3974,7 +4042,7 @@ def _dispatch(
         port = getattr(args, "port", None)
         return run_hub(app_cfg, open_browser=not no_browser, port=port)
     if command == "login":
-        return cmd_login(cfg, getattr(args, "host", None))
+        return cmd_login(cfg, getattr(args, "host", None), getattr(args, "from_git", False))
     if command == "logout":
         return cmd_logout(cfg)
     if command == "whoami":

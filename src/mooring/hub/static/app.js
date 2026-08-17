@@ -2943,7 +2943,15 @@ async function refresh() {
   // The header button is the local-mode entry to the form; when a repo is configured
   // the switcher's "+ Add repo…" handles it, and while the form is open it's redundant.
   $("connect-repo").classList.toggle("hidden", state.configured || showAddRepo);
-  $("login-card").classList.toggle("hidden", !state.configured || state.logged_in);
+  const needsLogin = state.configured && !state.logged_in;
+  $("login-card").classList.toggle("hidden", !needsLogin);
+  // Fire-and-forget: the borrowed-credential offer shells out to git, so it must
+  // never hold up the render. It reveals itself if and when the probe finds one.
+  if (needsLogin) {
+    offerGitLogin();
+  } else {
+    $("login-git-box")?.classList.add("hidden");
+  }
   $("files-card").classList.toggle("hidden", !showFiles);
   // The schedules board reads purely local state (no network), so it works offline and in
   // local mode — which matters, since a refresh degrades to "ran against your copy" rather
@@ -3112,6 +3120,40 @@ async function startLogin(alias = "") {
   }
   window.open(data.verification_uri, "_blank");
   pollLogin(account);
+}
+
+// -- Signing in with the credential git already holds --------------------------
+// For organisations that restrict third-party OAuth apps AND cap personal access
+// token lifetimes: the credential behind the user's daily `git clone` is neither,
+// so it is the one route that needs nobody's approval. Offered only when the probe
+// finds one — advertising a method that cannot work here would be worse than
+// silence. The probe is value-free: it reports the token's TYPE, never the token.
+async function offerGitLogin(alias = "") {
+  const box = $("login-git-box");
+  if (!box) return;
+  box.classList.add("hidden");
+  const q = alias ? `?account=${encodeURIComponent(alias)}` : "";
+  const probe = await api(`/api/login/git/probe${q}`).catch(() => null);
+  if (!probe || !probe.found) return;
+  const note = $("login-git-note");
+  note.textContent = probe.refreshable
+    ? `Can't approve an OAuth app? Sign in with the credential git already uses for ${probe.host} — nothing to register, and mooring stores no copy of it.`
+    : `Can't approve an OAuth app? Sign in with the credential git already uses for ${probe.host}. Note it looks like a personal access token, so it will expire whenever your organisation's policy says.`;
+  box.classList.remove("hidden");
+}
+
+async function loginWithGit(alias = "") {
+  showError("");
+  const btn = $("login-git");
+  btn.disabled = true;
+  try {
+    const data = await api("/api/login/git", { account: alias });
+    if (data.error) return showError(data.error);
+    $("login-git-box").classList.add("hidden");
+    await refresh();
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 // Clear a finished flow BEFORE the refresh() that follows, so renderAccounts
@@ -3376,6 +3418,7 @@ function draftShareSelection(candidates) {
 // Wrapped, not passed straight through: startLogin's first parameter is an account
 // alias, and a bare listener would hand it the click event instead.
 $("login-start").addEventListener("click", () => startLogin());
+$("login-git").addEventListener("click", () => loginWithGit());
 $("btn-refresh").addEventListener("click", refresh);
 $("btn-run-due").addEventListener("click", () => runRefresh(""));
 $("btn-background-on").addEventListener("click", () => setBackground(true));
