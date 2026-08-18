@@ -1420,6 +1420,10 @@ button.ghost:hover { color: var(--ink); }
   border-radius: 8px;
   padding: 0.85rem 1rem;
   box-shadow: 0 6px 20px rgba(0, 0, 0, 0.18);
+  /* The page itself never scrolls (.hub-body is overflow:hidden), so a panel taller
+     than the window has no scrollbar to reach it. Cap it and scroll inside instead. */
+  max-height: calc(100vh - 1.5rem);
+  overflow-y: auto;
 }
 :root[data-theme="dark"] .hub-body .rail-menu-panel { background: var(--card); }
 .hub-body .rail-menu-panel p { margin-top: 0; }
@@ -1538,6 +1542,18 @@ button.ghost:hover { color: var(--ink); }
   color: var(--fg-faint);
 }
 .hub-body .rail-foot .rail-menu > summary { font-size: 10.5px; }
+/* margin-top:auto pins the foot to the bottom of a 100vh rail, so a menu anchored
+   BELOW its summary (the rail default) opens straight off the bottom of a page that
+   cannot scroll — the copilot sign-in lost ~90% of its card, device code included.
+   Down here the panel grows upward instead. Only above 1100px: the collapsed rail
+   has its own anchoring (see the responsive section), and below 720px the rail is a
+   top strip where "upward" would be wrong again. */
+@media (min-width: 1101px) {
+  .hub-body .rail-foot .rail-menu-panel {
+    top: auto;
+    bottom: calc(100% + 0.35rem);
+  }
+}
 .hub-body .rail-ws {
   display: block;
   width: 100%;
