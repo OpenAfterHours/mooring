@@ -1932,7 +1932,13 @@ button.ghost:hover { color: var(--ink); }
      "copilot · schema-only" wrapped in a 56px rail helps nobody. */
   .hub-body .rail-foot .rail-menu > summary { font-size: 0; text-align: center; }
   .hub-body .rail-foot .rail-menu > summary::after { content: "●"; font-size: 11px; }
-  .hub-body .rail-menu-panel { left: calc(100% + 0.4rem); top: auto; bottom: 0; }
+  /* Flyouts to the right of the icon strip. Which EDGE they align to has to follow
+     the summary: bottom-aligned for the foot menus (they sit at the bottom of the
+     rail, so anything else runs off the bottom), top-aligned for the rest — the repo
+     menu is at the top, and bottom-aligning it put its identity block and repo
+     switcher 122px above the window. */
+  .hub-body .rail-menu-panel { left: calc(100% + 0.4rem); top: 0; bottom: auto; }
+  .hub-body .rail-foot .rail-menu-panel { top: auto; bottom: 0; }
 }
 
 @media (max-width: 720px) {
@@ -1950,6 +1956,23 @@ button.ghost:hover { color: var(--ink); }
   .hub-body .rail .rail-word { display: inline; }
   .hub-body .rail-nav { flex-direction: row; gap: 0.9rem; }
   .hub-body .rail-foot { margin-top: 0; }
+  /* Here the rail is a strip along the TOP, and it scrolls (overflow-x) — so the
+     collapsed rail's upward anchoring above would open a menu off the top of the
+     window, and the strip's own overflow would clip whatever was left. Both rail
+     menus lost their card that way. Fixed positioning takes the panel out of the
+     strip's scroll box entirely (overflow does not clip a fixed descendant), and a
+     bottom sheet needs no guess at the strip's height — the same "narrow means
+     overlay" move the detail panel already makes at 1100px. */
+  .hub-body .rail-menu-panel {
+    position: fixed;
+    top: auto;
+    bottom: 0.75rem;
+    left: 0.75rem;
+    right: auto;
+    width: min(20rem, calc(100vw - 1.5rem));
+    max-width: none;
+    z-index: 50; /* above the detail drawer (40), which may be open behind it */
+  }
   .hub-body .centre-head { padding: 1.1rem 1rem; }
   .hub-body .headline { font-size: 1.6rem; }
   .hub-body #files-table td,
