@@ -493,6 +493,41 @@ def test_run_due_sweeps_and_records(monkeypatch, tmp_path):
     assert schedule.get(ws, REL).last_run.outcome == schedule.OK
 
 
+def test_the_sweep_does_not_fire_a_one_shot_before_its_date(monkeypatch, tmp_path):
+    # A one-shot booked for next month has no run preceding its window; the sweep must still
+    # leave it alone rather than treating "never run" as "owed a run".
+    #
+    # Dated RELATIVE to now, never to a fixed calendar date: the sweep reads the real clock
+    # (it is the orchestrator, not a predicate taking an injectable `now`), so a literal date
+    # here would pass until it arrived and then fail for good. A month of slack also puts the
+    # assertion out of reach of a run that straddles midnight.
+    ahead = (datetime.now().astimezone() + timedelta(days=30)).strftime("%Y-%m-%d")
+    cfg, ws, _ = _mk(
+        tmp_path, deliver=False, pull=False, cadence="once", date=ahead, at="00:01"
+    )
+    monkeypatch.setattr(notebook_run, "_exec", _fake_exec(0))
+
+    assert refresh.run_due(cfg) == []
+    assert schedule.get(ws, REL).last_run.outcome == ""
+
+
+def test_the_sweep_runs_a_one_shot_once_and_then_leaves_it_alone(monkeypatch, tmp_path):
+    # ...and once its instant has passed it runs EXACTLY once: no next window means no second
+    # run, and no "overdue" nag afterwards either. Relative to now for the same reason as
+    # above — and a month back, so the receipt this run writes lands unambiguously inside the
+    # one-shot's window whatever time of day (or timezone) the suite runs in.
+    behind = (datetime.now().astimezone() - timedelta(days=30)).strftime("%Y-%m-%d")
+    cfg, ws, _ = _mk(tmp_path, deliver=False, pull=False, cadence="once", date=behind)
+    monkeypatch.setattr(notebook_run, "_exec", _fake_exec(0))
+
+    assert [r.notebook for r in refresh.run_due(cfg)] == [REL]
+    done = schedule.get(ws, REL)
+    assert done.last_run.outcome == schedule.OK
+    assert schedule.is_complete(done) is True
+    assert refresh.run_due(cfg) == []
+    assert schedule.is_overdue(done) is False
+
+
 def test_auto_only_skips_the_doubtful(monkeypatch, tmp_path):
     cfg, ws, _ = _mk(
         tmp_path, deliver=False, pull=False, cadence="daily", at="00:01", verified=False

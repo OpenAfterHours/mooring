@@ -56,12 +56,16 @@ def _board(hub) -> dict:
                 "cadence_text": sched.describe_cadence(),
                 "at": sched.at,
                 "day": sched.day,
+                "date": sched.date,
                 "deliver": sched.deliver,
                 "pull": sched.pull,
                 "paused": sched.paused,
                 "verified": verified,
                 "due": schedule.is_due(sched),
                 "overdue": schedule.is_overdue(sched),
+                # A one-shot that has run: finished, not waiting. The UI reads this ahead of
+                # the last outcome so a done job never sits on the board pretending to be live.
+                "complete": schedule.is_complete(sched),
                 "next_due": schedule.next_due(sched).isoformat(timespec="minutes"),
                 "consecutive_failures": sched.consecutive_failures,
                 "last_run": sched.last_run.to_dict(),
@@ -149,9 +153,12 @@ def _add(hub, data: dict) -> JSONResponse:
     if not (receipt and receipt.get("passed")):
         return JSONResponse(
             {
+                # Names the control the panel actually renders — the SCHEDULE block's
+                # "verify & schedule", which does the prerequisite AND reopens this form.
+                # There is no "Actions ▾" menu on a notebook row to send anyone to.
                 "error": (
                     "Verify this notebook first — only a notebook that has run clean can be "
-                    "scheduled. Use Actions ▾ → Verify runs, then schedule it."
+                    "scheduled. Use the panel's “verify & schedule”, which does both."
                 )
             },
             status_code=409,
@@ -160,6 +167,10 @@ def _add(hub, data: dict) -> JSONResponse:
         cadence = schedule.normalize_cadence(str(data.get("cadence", "daily")))
         at = schedule.normalize_at(str(data.get("at") or schedule.DEFAULT_AT))
         day = schedule.normalize_day(str(data.get("day", "mon")))
+        # Only a one-shot carries a date, and for it the date is REQUIRED: validating here
+        # means an unusable "once" is a 400 the user can fix, never a stored schedule that
+        # silently never fires.
+        date = schedule.normalize_date(str(data.get("date", ""))) if cadence == "once" else ""
     except schedule.ScheduleError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
     existing = schedule.get(workspace, rel)
@@ -168,6 +179,7 @@ def _add(hub, data: dict) -> JSONResponse:
         cadence=cadence,
         at=at,
         day=day,
+        date=date,
         deliver=bool(data.get("deliver", True)),
         pull=bool(data.get("pull", True)),
         # Amending clears any auto-pause: the user has just said what they want.

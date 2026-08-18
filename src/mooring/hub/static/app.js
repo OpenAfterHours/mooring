@@ -756,20 +756,48 @@ function scheduleAction(path) {
   const existing = (lastSchedules.schedules || []).find((r) => r.notebook === path);
   $("schedule-form-path").textContent = path;
   $("schedule-cadence").value = existing ? existing.cadence : "daily";
-  $("schedule-at").value = existing ? existing.at : "07:30";
+  const at = existing ? existing.at : "07:30";
+  $("schedule-at").value = at;
   $("schedule-day").value = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"][
     existing ? existing.day : 0
   ];
+  // A one-shot needs a calendar date; anything else ignores it, so an existing schedule's
+  // date only prefills when it has one, and firstUnspentDate stands in otherwise — the
+  // time it is paired with decides which date that is, hence passing `at` rather than
+  // reading the field back. Remembering what we offered is what lets reofferDate revise it
+  // if the time moves; an existing date is the user's, so nothing is remembered for it.
+  offeredDate = (existing && existing.date) ? "" : ScheduleFmt.firstUnspentDate(at);
+  $("schedule-date").value = (existing && existing.date) || offeredDate;
   $("schedule-deliver").checked = existing ? !!existing.deliver : true;
   $("schedule-pull").checked = existing ? !!existing.pull : true;
-  syncScheduleDayVisibility();
+  syncScheduleCadenceFields();
   setCentreView("schedules");
   $("schedule-form").classList.remove("hidden");
 }
 
-// "On <weekday>" is meaningful for a weekly cadence only.
-function syncScheduleDayVisibility() {
-  $("schedule-day-label").classList.toggle("hidden", $("schedule-cadence").value !== "weekly");
+// The offered one-shot date, tracked so a later change to the TIME can revise it — but only
+// while the user has not picked a date of their own. "" once they have.
+let offeredDate = "";
+
+// Re-offer the date when the time it is paired with changes. ScheduleFmt.firstUnspentDate
+// answers "today or tomorrow?" from `at`, so a form opened at 09:00 offering today-at-17:00
+// would otherwise keep offering today after the user moved the time back to 08:00 — handing
+// them the spent instant the helper exists to avoid. Silent while the field still holds what
+// we offered; the moment they type a date themselves it is theirs, and we stop touching it.
+function reofferDate() {
+  const field = $("schedule-date");
+  if (!offeredDate || field.value !== offeredDate) return;
+  offeredDate = ScheduleFmt.firstUnspentDate($("schedule-at").value);
+  field.value = offeredDate;
+}
+
+// Each cadence asks for one extra thing, or nothing: "on <weekday>" is meaningful for
+// weekly only, "on <date>" for the one-shot only. Showing both at once would invite a
+// user to fill in a field the cadence then ignores.
+function syncScheduleCadenceFields() {
+  const cadence = $("schedule-cadence").value;
+  $("schedule-day-label").classList.toggle("hidden", cadence !== "weekly");
+  $("schedule-date-label").classList.toggle("hidden", cadence !== "once");
 }
 
 function closeScheduleForm() {
@@ -784,6 +812,9 @@ async function saveSchedule() {
     cadence: $("schedule-cadence").value,
     at: $("schedule-at").value || "07:30",
     day: $("schedule-day").value,
+    // Sent whatever the cadence — the server keeps it only for "once" and validates it
+    // there, so the client never has to decide which fields a cadence cares about.
+    date: $("schedule-date").value,
     deliver: $("schedule-deliver").checked,
     pull: $("schedule-pull").checked,
   };
@@ -794,6 +825,48 @@ async function saveSchedule() {
     closeScheduleForm();
     applySchedules(data);
   }
+}
+
+// Scheduling is gated on a clean verify (the server answers 409 otherwise), so an
+// unverified notebook does the two steps as one action: verify, and open the form only if
+// it passed. The form stays shut when it didn't, because a form asking when to re-run a
+// notebook that cannot run is a promise mooring can't keep.
+//
+// The refusal is worded HERE, and that is load-bearing — do not delete it on the theory
+// that the ordinary verify feedback covers it. It does not: a failing verify is a 200
+// carrying {path, ok: false, lines}, with no `error`, `warning` or `summary` on it, so
+// every automatic channel stays quiet. showError is never reached (there is no error);
+// showLog fills the hidden log card but only OPENS it for a link or a warning; showOutcome
+// finds neither warning nor summary and returns false. The whole chain therefore ends in
+// silence — a user who waited a minute for a notebook to run sees the form simply not
+// appear, which reads as a broken button rather than a refusal.
+//
+// So we say it in the hub's own outcome idiom rather than a new one: the same showLog +
+// showOutcome pair action() uses, on a copy of the payload carrying the warning the server
+// had no way to know it needed. The warning opens the log card (where the run's own line
+// explains WHAT failed, right above ours explaining what that cost), and leaves the
+// one-line outcome + "details" on the status line for when the user goes back to the list.
+// A route failure (a 502 from a run that could not start, a 400 for a path that is no longer
+// a notebook) needs saying here too, and for a subtler reason: action() DOES set the error
+// banner for it — and then clears it again three lines later, because verify refreshes
+// afterwards and refresh() re-renders the banner from /api/state. So that branch ends in the
+// same silence as ok:false and gets the same treatment; only the wording differs, since one
+// is "it ran and failed" and the other is "it never got to run".
+async function verifyAndSchedule(path) {
+  const data = await verifyAction(path);
+  if (!data) return;
+  if (data.ok && !data.error) return scheduleAction(path);
+  const refused = Object.assign({}, data, {
+    warning: data.error
+      ? `Not scheduled — couldn’t verify ${path}: ${data.error}`
+      : `Not scheduled — ${path} didn’t run clean. Fix what stopped it, ` +
+        "then choose “Verify & schedule…” again.",
+  });
+  // Dropped so showLog/showOutcome read this as the warning it now is rather than an error
+  // with no channel left to reach the user through.
+  delete refused.error;
+  showLog(refused);
+  showOutcome(refused);
 }
 
 // Run one schedule now (or everything due, when path is ""). This EXECUTES the notebook,
@@ -858,13 +931,18 @@ function renderBackground() {
 function renderSchedules() {
   const rows = lastSchedules.schedules || [];
   const formOpen = !$("schedule-form").classList.contains("hidden");
-  // The board POPULATES here but does not decide whether it is on screen: it is a rail
-  // destination, and the rail only offers it once there is a schedule to show — so a
-  // user who never asked for one never sees it, exactly as before.
-  if (!rows.length && !formOpen) {
-    if (centreView === "schedules") setCentreView("list");
-    return;
-  }
+  // The board POPULATES here but does not decide whether it is on screen — the rail owns
+  // that, and it offers this destination whether or not anything is scheduled. So an empty
+  // board must render AS an empty board: it used to bounce the view back to the file list,
+  // which would now throw a user out of the page they had just navigated to on the very
+  // next poll. The empty hint stands down while the form is open — the user is already
+  // being told what this place is for, by filling it in.
+  const empty = !rows.length;
+  $("schedules-empty").classList.toggle("hidden", !empty || formOpen);
+  $("schedules-table").classList.toggle("hidden", empty);
+  // The foot states which clock is running and offers to upgrade it; with nothing
+  // scheduled it would be answering a question nobody has asked yet.
+  $("schedules-foot").classList.toggle("hidden", empty);
   renderBackground();
 
   const banner = $("schedules-banner");
@@ -1588,13 +1666,19 @@ function fileActions(file, opts) {
   if (isNotebook && file.has_local) {
     actions.push(["Run for each…", () => paramsAction(file.path)]);
   }
-  // Schedule a recurring refresh (pull → run → report). Only offered on a notebook that
-  // has run clean — the server enforces that too (a 409), but offering it on an unverified
-  // notebook and then refusing would be a worse first experience than not offering it.
-  if (isNotebook && file.has_local && file.verified && file.verified.passed) {
+  // Schedule a refresh (pull → run → report). ALWAYS offered on a local notebook. It used
+  // to appear only once the notebook had verified clean, which quietly made the feature
+  // undiscoverable: the server's 409 politely explains "Verify this notebook first", and
+  // nobody could ever reach it. So an unverified notebook gets "Verify & schedule…", which
+  // does the required step and then opens the form — the prerequisite becomes one click
+  // instead of a missing menu item.
+  if (isNotebook && file.has_local) {
     const scheduled = (lastSchedules.schedules || []).some((r) => r.notebook === file.path);
-    actions.push([scheduled ? "Edit refresh schedule" : "Schedule refresh…",
-      () => scheduleAction(file.path)]);
+    const verified = !!(file.verified && file.verified.passed);
+    const label = scheduled ? "Edit refresh schedule" : "Schedule refresh…";
+    actions.push(verified
+      ? [label, () => scheduleAction(file.path)]
+      : ["Verify & schedule…", () => verifyAndSchedule(file.path)]);
   }
   // A plain helper module (non-marimo .py) can't open in marimo (it would be rewritten
   // into notebook form), so instead of Open it gets Reveal — open it in the file manager
@@ -2249,11 +2333,17 @@ function renderRailNav() {
       count: lastReview ? 1 : 0, tone: "review",
       title: "Review teammates' proposed changes" });
   }
-  const sched = (lastSchedules.schedules || []).length;
-  if (sched) {
+  // The board is a DESTINATION, not a notification: it is offered wherever there are
+  // notebooks, including before the first schedule exists — otherwise the one place that
+  // explains scheduled refreshes is reachable only by people who already use them. A zero
+  // count renders no badge at all (railItem skips a falsy count), so an empty board is
+  // quiet rather than nagging.
+  if (filesVisible) {
+    const sched = (lastSchedules.schedules || []).length;
     items.push({ id: "schedules", label: "schedules", glyph: "↻",
       count: lastSchedules.overdue || sched,
       tone: lastSchedules.overdue ? "bad" : "faint",
+      title: "Scheduled refreshes: what re-runs by itself, and how the last run went",
       onClick: () => setCentreView("schedules") });
   }
   items.push({ id: "activity", label: "activity", href: "/activity", glyph: "⏱",
@@ -2564,7 +2654,9 @@ function newNotebook() {
 // -- the detail panel: everything about the selected notebook ----------------
 
 // Panel action labels that are NOT part of the "more" menu, because they belong to a
-// block of their own: the STATE block's sync verbs, and the SCHEDULE & HISTORY links.
+// block of their own: the STATE block's sync verbs, the SCHEDULE block's, and HISTORY's.
+// Every label here MUST be rendered by the block that claims it — a label taken out of the
+// list and then never appended vanishes from the UI altogether.
 const STATE_ACTIONS = {
   "Review changes…": "review",
   "Push": "push",
@@ -2574,9 +2666,19 @@ const STATE_ACTIONS = {
   "Keep both": "keep both",
   "Push as copy": "push as copy",
 };
+// Scheduling, in whichever of its three shapes fileActions offered (see there: the verify
+// prerequisite becomes part of the action rather than hiding it).
+const SCHEDULE_ACTIONS = {
+  "Schedule refresh…": "schedule refresh",
+  "Edit refresh schedule": "edit schedule",
+  "Verify & schedule…": "verify & schedule",
+};
+// History is its own block: "what changed last week" is a different question from "will
+// this still be fresh tomorrow", and the two used to share a heading that announced
+// scheduling and then offered a parameter sweep. "Run for each…" is a RUN action, so it
+// went back to the "more" menu beside Deliver and Verify runs where the other ones live.
 const HISTORY_ACTIONS = {
   "History…": "history",
-  "Run for each…": "run for each",
 };
 
 // ScheduleFmt's tone names -> the panel's colour tokens.
@@ -2648,6 +2750,11 @@ function renderPanel() {
     const pair = take(label);
     if (pair) stateLinks.push([STATE_ACTIONS[label], pair[1]]);
   }
+  const scheduleLinks = [];
+  for (const label of Object.keys(SCHEDULE_ACTIONS)) {
+    const pair = take(label);
+    if (pair) scheduleLinks.push([SCHEDULE_ACTIONS[label], pair[1]]);
+  }
   const historyLinks = [];
   for (const label of Object.keys(HISTORY_ACTIONS)) {
     const pair = take(label);
@@ -2716,20 +2823,31 @@ function renderPanel() {
     panel.appendChild(block);
   }
 
-  // --- SCHEDULE & HISTORY ---------------------------------------------------
+  // --- SCHEDULE -------------------------------------------------------------
+  // Whether this notebook re-runs by itself, and how to change that. A block of its own:
+  // it is the only part of the panel that talks about the FUTURE, and the answer is worth
+  // reading even when it is "no schedule yet" — which is why the block appears as soon as
+  // there is a scheduling action to offer, not only once a schedule exists.
   const sched = (lastSchedules.schedules || []).find((r) => r.notebook === file.path);
-  // "in your last push" is what /api/state can honestly say about this file's
-  // history without a round trip: the manifest records WHICH files the last push
-  // wrote, not when or by whom. History… has the dated detail.
-  const inLastPush = canRecall && recallPaths.includes(file.path);
-  if (sched || inLastPush || historyLinks.length) {
+  if (sched && !ScheduleFmt.isDone(sched)) {
+    // Run now belongs with the schedule, not in the "more" menu: it is the manual half of
+    // the same idea — the button you reach for when the board says this one is due. Gated
+    // on isDone for that reason: offering it under a badge reading "done" would advertise a
+    // refresh this schedule no longer owes. Re-running a finished one-off is still possible,
+    // via Verify runs or by re-dating it — this link just stops claiming to be the schedule.
+    scheduleLinks.push(["run now", () => runRefresh(file.path)]);
+  }
+  // Either half earns the block on its own: a finished one-shot may contribute no link at
+  // all, and its badge is still the answer to "does this refresh itself?".
+  if (sched || scheduleLinks.length) {
     const block = document.createElement("div");
     block.className = "panel-block";
-    block.appendChild(panelLabel("SCHEDULE & HISTORY"));
+    block.appendChild(panelLabel("SCHEDULE"));
     if (sched) {
       // ScheduleFmt already decides the tone, and its ordering is the load-bearing
-      // part (paused and overdue outrank "it ran clean on Monday") — so the wording
-      // and the severity both come from there, only the token names are mapped.
+      // part (paused and overdue outrank "it ran clean on Monday", and a finished
+      // one-shot outranks both) — so the wording and the severity both come from
+      // there, only the token names are mapped.
       const state = ScheduleFmt.state(sched);
       const row = document.createElement("div");
       row.append(`${sched.cadence_text} · `);
@@ -2739,6 +2857,19 @@ function renderPanel() {
       row.appendChild(tone);
       block.appendChild(row);
     }
+    if (scheduleLinks.length) block.appendChild(panelLinks(scheduleLinks));
+    panel.appendChild(block);
+  }
+
+  // --- HISTORY --------------------------------------------------------------
+  // "in your last push" is what /api/state can honestly say about this file's
+  // history without a round trip: the manifest records WHICH files the last push
+  // wrote, not when or by whom. History… has the dated detail.
+  const inLastPush = canRecall && recallPaths.includes(file.path);
+  if (inLastPush || historyLinks.length) {
+    const block = document.createElement("div");
+    block.className = "panel-block";
+    block.appendChild(panelLabel("HISTORY"));
     if (inLastPush) {
       const row = document.createElement("div");
       row.className = "panel-faint";
@@ -3745,9 +3876,13 @@ $("btn-background-off").addEventListener("click", () => setBackground(false));
 $("schedule-save").addEventListener("click", saveSchedule);
 $("schedule-cancel").addEventListener("click", () => {
   closeScheduleForm();
-  renderSchedules(); // the card hides itself again when there are no schedules to show
+  renderSchedules(); // re-reveals the empty hint the open form was standing in for
 });
-$("schedule-cadence").addEventListener("change", syncScheduleDayVisibility);
+$("schedule-cadence").addEventListener("change", syncScheduleCadenceFields);
+// The offered date is derived from the time, so it follows the time until the user takes
+// ownership of it. "input" on the date field is what marks that handover.
+$("schedule-at").addEventListener("change", reofferDate);
+$("schedule-date").addEventListener("input", () => { offeredDate = ""; });
 $("params-start").addEventListener("click", startParamsRun);
 $("params-cancel").addEventListener("click", cancelParamsRun);
 $("params-close").addEventListener("click", closeParamsCard);
