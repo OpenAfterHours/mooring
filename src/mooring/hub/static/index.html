@@ -19,91 +19,65 @@
   <link rel="stylesheet" href="/static/style.css">
   <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
 </head>
-<body class="has-scene">
-  <!-- Decorative day/night-sea backdrop: a warm sun + pale sky in light themes,
-       the docs night sea (crescent moon + starfield) in dark themes. aria-hidden +
-       pointer-events:none — purely ornamental, never a tab stop or click target.
-       The boat sails in once and moors on the right via scene.js; without JS it is
-       a static moored boat. Ported from the docs landing scene (landing.css /
-       overrides/home.html) — keep visually in sync if the docs boat changes. -->
-  <div class="hub-scene" aria-hidden="true">
-    <div class="hub-stars" data-count="120" data-seed="7"></div>
-    <svg class="hub-sun" viewBox="0 0 200 200">
-      <defs>
-        <radialGradient id="hubSunGlow" cx="50%" cy="50%" r="50%">
-          <stop offset="0%" stop-color="#ffe6ae" stop-opacity="0.55"/>
-          <stop offset="38%" stop-color="#ffb74d" stop-opacity="0.22"/>
-          <stop offset="100%" stop-color="#ffb74d" stop-opacity="0"/>
-        </radialGradient>
-        <radialGradient id="hubSunDisc" cx="50%" cy="44%" r="55%">
-          <stop offset="0%" stop-color="#ffe7b3"/>
-          <stop offset="62%" stop-color="#ffb43c"/>
-          <stop offset="100%" stop-color="#ff9100"/>
-        </radialGradient>
-      </defs>
-      <circle cx="100" cy="100" r="98" fill="url(#hubSunGlow)"/>
-      <circle cx="100" cy="100" r="42" fill="url(#hubSunDisc)"/>
-    </svg>
-    <svg class="hub-moon" viewBox="0 0 200 200">
-      <defs>
-        <radialGradient id="hubMoonGlow" cx="50%" cy="50%" r="50%">
-          <stop offset="0%" stop-color="#fff6e0" stop-opacity="0.45"/>
-          <stop offset="40%" stop-color="#ffd98a" stop-opacity="0.16"/>
-          <stop offset="100%" stop-color="#ffd98a" stop-opacity="0"/>
-        </radialGradient>
-        <mask id="hubMoonCrescent">
-          <circle cx="100" cy="100" r="34" fill="#fff"/>
-          <circle cx="116" cy="93" r="32" fill="#000"/>
-        </mask>
-      </defs>
-      <circle cx="100" cy="100" r="98" fill="url(#hubMoonGlow)"/>
-      <circle cx="100" cy="100" r="34" fill="#f3ecdc" mask="url(#hubMoonCrescent)"/>
-    </svg>
+<!-- The hub is a "chart room": three panes (rail / notebook list / detail panel),
+     hairline rules instead of card boxes, and the brand orange spent ONCE per
+     screen on the single most useful action. Every new style rule is scoped to
+     .hub-body so the terminal surfaces (chat, workbench, batch) are untouched;
+     settings, activity and reviews wear the same shell. -->
+<body class="hub-body">
+  <main class="hub-shell">
 
-    <div class="hub-water"></div>
-    <div class="hub-reflection"></div>
-    <div class="hub-wave hub-wave-1"></div>
-    <div class="hub-wave hub-wave-2"></div>
-
-    <div class="hub-boat" data-hub-boat>
-      <div class="hub-rope" data-hub-rope></div>
-      <div class="hub-anchor" data-hub-anchor>
-        <svg width="30" height="36" viewBox="0 0 30 36" fill="none" stroke="var(--boat-metal)" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
-          <circle cx="15" cy="5" r="3.2"/>
-          <line x1="15" y1="8.2" x2="15" y2="30"/>
-          <line x1="8" y1="14" x2="22" y2="14"/>
-          <path d="M5 23 C5 31 11 33 15 33 C19 33 25 31 25 23"/>
-          <path d="M3 21 L5 23 L8 22"/>
-          <path d="M27 21 L25 23 L22 22"/>
-        </svg>
-      </div>
-      <div class="hub-bob">
-        <svg width="160" height="100" viewBox="0 0 160 100" fill="none">
-          <rect x="86" y="6" width="3" height="64" fill="var(--boat-metal)"/>
-          <path d="M89 7 L104 11 L89 15 Z" fill="#ff9100"/>
-          <path d="M83 14 L83 68 L130 68 Z" fill="#e7e1d4"/>
-          <path d="M80 18 L80 68 L44 68 Z" fill="#ff9100" opacity="0.92"/>
-          <path d="M16 70 L144 70 L132 90 Q128 94 120 94 L40 94 Q32 94 28 90 Z" fill="#c9442a"/>
-          <rect x="16" y="70" width="128" height="5" fill="#ffc857"/>
-          <path d="M16 75 L144 75 L132 90 Q128 94 120 94 L40 94 Q32 94 28 90 Z" fill="#000" opacity="0.18"/>
-        </svg>
-      </div>
+  <!-- ====================================================================
+       RAIL — who you are, where you are, and everything you only
+       occasionally need. Standing state, never the work itself.
+       ==================================================================== -->
+  <nav class="rail" aria-label="Workspace">
+    <div class="rail-brand">
+      <svg class="brand-mark" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 6v16M19 13l2-1a9 9 0 0 1-18 0l2 1M9 11h6"/><circle cx="12" cy="4" r="2"/></svg>
+      <span class="rail-word">mooring</span>
     </div>
-  </div>
 
-  <header>
-    <h1><svg class="brand-mark" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 6v16M19 13l2-1a9 9 0 0 1-18 0l2 1M9 11h6"/><circle cx="12" cy="4" r="2"/></svg>mooring</h1>
-    <div id="repo-info"></div>
-    <!-- Right-hand controls, grouped so the whole cluster WRAPS to a second row on a
-         narrow window instead of overflowing. Standing controls (repo switch, Copilot,
-         appearance) stay on the bar; occasional pages (Reviews/Activity/Settings) and
-         the account/Log out fold into the single account menu on the far right. -->
-    <div class="header-actions">
-      <select id="repo-select" class="hidden" title="Switch repo" aria-label="Switch repo"></select>
-      <button id="connect-repo" class="small hidden" title="Connect a team repo to sync &amp; share">&#9875; Connect a repo</button>
-      <details id="copilot-menu" class="header-menu hidden">
-        <summary title="AI copilot sign-in">&#129302; Copilot</summary>
-        <div class="header-menu-panel">
+    <!-- Repo block: the identity this workspace syncs as. A <details> menu-button
+         (never a <select> as an action menu — the documented Windows ArrowDown
+         footgun) holding the repo switcher, the signed-in identity + Log out, and
+         the ways to connect another repo or account. -->
+    <details id="repo-menu" class="rail-menu">
+      <summary class="rail-repo" title="Repo, account &amp; sign-in">
+        <span class="rail-label">REPO</span>
+        <span id="repo-info"></span>
+      </summary>
+      <div class="rail-menu-panel">
+        <div id="user-info" class="account-identity"></div>
+        <label class="rail-menu-label">Switch repo
+          <select id="repo-select" class="hidden" title="Switch repo" aria-label="Switch repo"></select>
+        </label>
+        <div class="toolbar">
+          <button id="connect-repo" class="small hidden" title="Connect a team repo to sync &amp; share">&#9875; Connect a repo</button>
+          <button id="btn-accounts" class="small" title="GitHub accounts, sign-in and repo setup">GitHub accounts&hellip;</button>
+        </div>
+      </div>
+    </details>
+
+    <!-- Destinations. Built by renderRail() in app.js: the active item carries the
+         accent caret, each carries a count coloured by severity. -->
+    <div id="rail-nav" class="rail-nav"></div>
+
+    <!-- The folder navigator: what the centre pane can be focused on, plus the
+         team-curation controls that used to live on each folder row (the ☆/★
+         feature star and the ◆/◇ AI-context toggle) and the adopt prompt. -->
+    <div id="rail-folders" class="rail-folders"></div>
+
+    <!-- Per-user AI context subscription: when the repo OFFERS context folders and
+         this machine has AI + [ai] context on, pick which offered folders THIS
+         copilot reads (the synced offer stays the ceiling). renderContextSubscription. -->
+    <div id="context-sub" class="context-sub hidden"></div>
+
+    <div class="rail-foot">
+      <!-- Copilot sign-in: independent of the GitHub login (it can even be a
+           different account), so it keeps its own disclosure rather than a card. -->
+      <details id="copilot-menu" class="rail-menu hidden">
+        <summary id="copilot-summary" title="AI copilot sign-in"></summary>
+        <div class="rail-menu-panel">
           <p class="muted">The copilot uses GitHub Copilot, which signs in
             <b>separately</b> from your GitHub login &mdash; it can even be a
             different account.</p>
@@ -128,422 +102,423 @@
           </div>
         </div>
       </details>
-      <select id="theme-select" title="Appearance (hub, chat &amp; notebooks)" aria-label="Appearance (hub, chat &amp; notebooks)">
-        <option value="light">&#9728; Light</option>
-        <option value="dark">&#9789; Dark</option>
-        <option value="system">&#9681; System</option>
-      </select>
-      <!-- Account & pages menu: identity + Log out (filled in by refresh()) plus the
-           occasional-use page links. A <details> menu-button, never a <select> as an
-           action menu (the documented Windows single-ArrowDown footgun). -->
-      <details id="account-menu" class="header-menu">
-        <summary id="account-summary" title="Account &amp; pages" aria-label="Account and pages menu">&#9776; Menu</summary>
-        <div class="header-menu-panel">
-          <div id="user-info" class="account-identity"></div>
-          <nav class="menu-nav" aria-label="Pages">
-            <a id="reviews-link" class="header-menu-item hidden" href="/reviews" title="Review teammates' proposed changes">&#9998; Reviews</a>
-            <a id="activity-link" class="header-menu-item" href="/activity" title="Recent activity &amp; trash (local to this machine)">&#9201; Activity</a>
-            <a id="settings-link" class="header-menu-item" href="/settings" title="Settings &amp; preferences">&#9881; Settings</a>
-          </nav>
-        </div>
-      </details>
+      <!-- The workspace path doubles as the way into the workspace view (packages,
+           health check) — the old footer disclosures, one click away. -->
+      <button id="rail-workspace" class="rail-ws" title="Workspace, notebook packages &amp; health check"></button>
     </div>
-  </header>
+  </nav>
 
-  <main>
-    <!-- Errors surface at the top of the workspace, above whichever card is
-         showing, so a failure appears where you're looking — not marooned below
-         the fold. Kept OUTSIDE #files-card (global) so login errors still show
-         while the files card is hidden behind the login wall. -->
+  <!-- ====================================================================
+       CENTRE — the one sentence that matters, then the notebooks.
+       ==================================================================== -->
+  <section class="centre">
+    <!-- Decorative: the brand anchor at display size, clipped by the pane. Never a
+         tab stop or a click target. -->
+    <svg class="hub-watermark" viewBox="0 0 24 24" fill="none" stroke="#ff9100" stroke-width="1.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 6v16M19 13l2-1a9 9 0 0 1-18 0l2 1M9 11h6"/><circle cx="12" cy="4" r="2"/></svg>
+
+    <!-- Errors surface at the top of the workspace, above whichever view is showing,
+         so a failure appears where you're looking — and OUTSIDE the header block, so
+         it survives on a detail view and behind the login wall. Deliberately the
+         loudest thing on the page. -->
     <div id="error-banner" class="notice notice-error hidden"></div>
 
-    <!-- Accounts: the GitHub identities this machine can act as. Reachable at any
-         time (not only before the first repo is configured), because adding a
-         second identity is a normal thing to do long after setup. -->
-    <section id="accounts-card" class="card hidden">
-      <h2>GitHub accounts</h2>
-      <p class="muted">Each repo syncs as one of these. Switching repos switches
-        account, so you can't push under the wrong identity.</p>
-      <ul id="accounts-list" class="plain"></ul>
-      <details id="account-add">
-        <summary>Add an account</summary>
-        <!-- Hosts this machine can already reach, discovered when the panel opens
-             (app.js) rather than on every refresh — each one costs a subprocess.
-             Value-free: the probe reports the token's TYPE, never the token. Adding
-             from here needs no OAuth client id, which is the whole point: an org
-             that won't approve an OAuth app has none to give. -->
-        <div id="account-discovered" class="hidden">
-          <p class="muted">git already has a credential for these hosts. Signing in this
-            way needs no OAuth app, and mooring stores no copy of the credential.</p>
-          <ul id="account-discovered-list" class="plain"></ul>
-          <p class="muted">Somewhere else? Add it by hand below — a host with no entry in
-            your git config can still be borrowed once you name it.</p>
-        </div>
-        <label>Short name <input id="account-alias" placeholder="work"></label>
-        <label>GitHub URL <input id="account-host" placeholder="github.com"></label>
-        <label>OAuth client id <input id="account-client-id" placeholder="Ov23li..."></label>
-        <p class="muted">The client id comes from an OAuth app registered on that
-          host with Device Flow enabled. Ask your admin — or use
-          <button id="account-save-git" class="small" type="button">my git credential</button>
-          instead, which needs no client id.</p>
-        <button id="account-save" class="primary">Add and sign in</button>
-      </details>
-    </section>
-
-    <section id="setup-card" class="card hidden">
-      <h2>Connect a team repo</h2>
-      <p id="setup-intro">Connect to a team repo to sync and share your notebooks. Ask your
-        admin for these values:</p>
-      <label id="setup-account-label">Sign in as
-        <select id="setup-account"></select>
-      </label>
-      <label id="setup-client-id-label">OAuth client id <input id="setup-client-id" placeholder="Ov23li..."></label>
-      <label id="setup-host-label">GitHub URL (only for GitHub Enterprise) <input id="setup-host" placeholder="github.com"></label>
-      <div id="setup-browse" class="hidden">
-        <label>Owner
-          <select id="setup-owner-select"></select>
-        </label>
-        <label><input type="radio" name="setup-mode" id="setup-mode-existing" checked> Use an existing repo</label>
-        <label id="setup-existing-label">Repo
-          <select id="setup-repo-select"></select>
-        </label>
-        <label><input type="radio" name="setup-mode" id="setup-mode-new"> Create a new repo</label>
-        <div id="setup-new-fields" class="hidden">
-          <label>New repo name <input id="setup-new-name" placeholder="notebooks"></label>
-          <label><input type="checkbox" id="setup-private" checked> Private</label>
-          <label><input type="checkbox" id="setup-seed" checked> Add notebooks/ and data/ folders</label>
-        </div>
-      </div>
-      <div id="setup-manual">
-        <label>Repo owner <input id="setup-owner" placeholder="your-org"></label>
-        <label>Repo name <input id="setup-repo" placeholder="notebooks"></label>
-      </div>
-      <label>Branch <input id="setup-branch" value="main"></label>
-      <label>Short name (optional) <input id="setup-alias" placeholder="defaults to repo name"></label>
-      <button id="setup-save" class="primary">Save</button>
-      <button id="setup-cancel" class="hidden">Cancel</button>
-    </section>
-
-    <section id="login-card" class="card hidden">
-      <h2>Connect to GitHub</h2>
-      <button id="login-start" class="primary">Log in with GitHub</button>
-      <div id="login-code-box" class="hidden">
-        <p>Enter this code at
-          <a id="login-link" href="#" target="_blank" rel="noopener">your GitHub sign-in page</a>:
-        </p>
-        <div id="login-code" class="code"></div>
-        <p class="muted">Waiting for you to authorize&hellip;</p>
-      </div>
-      <!-- The second way in, for organisations that won't approve a third-party
-           OAuth app (which blocks the button above) and cap personal access token
-           lifetimes (which rules out pasting one). Shown by app.js ONLY when the
-           probe finds a credential to borrow, so it never advertises a route that
-           cannot work on this machine. -->
-      <div id="login-git-box" class="hidden">
-        <p class="muted" id="login-git-note"></p>
-        <button id="login-git">Use my git credential</button>
-      </div>
-    </section>
-
-    <!-- First-run checklist: teaches the working rhythm (pull → open → duplicate a
-         draft → push/propose) by ticking itself off as each step happens. Client-side
-         only: progress lives in localStorage per repo; two items re-derive from the
-         /api/state rows. Hidden once complete or dismissed, in local (no-repo) mode,
-         and behind the login wall. Rendered by renderChecklist in app.js. -->
-    <section id="checklist-card" class="card hidden">
-      <div class="checklist-head">
-        <h3>Getting started</h3>
-        <button id="checklist-dismiss" class="small" title="Hide this checklist for this repo">Dismiss</button>
-      </div>
-      <ul id="checklist-items" class="checklist"></ul>
-    </section>
-
-    <section id="files-card" class="card hidden">
-      <div class="toolbar">
-        <button id="btn-refresh">&#8635; Refresh</button>
-        <button id="btn-pull" class="primary">&#8595; Pull</button>
-        <button id="btn-whatsnew" title="Who changed what on the team branch since your last sync">&#128240; What&#8217;s new</button>
-        <button id="btn-push" class="primary">&#8593; Push all</button>
-        <button id="btn-propose" title="Upload changes to a review branch and open a pull request on GitHub">&#8599; Propose</button>
-        <button id="btn-recall" class="hidden" title="Undo your last push on GitHub (writes the previous versions back; history keeps the pushed commit)">&#8617; Recall push</button>
-        <button id="btn-new">+ New notebook</button>
-        <!-- No check-glyph: a ✓ on the label reads as "everything is fine" before the
-             check has run, and this is the surface that must not overclaim. -->
-        <button id="btn-sweep" title="Run every notebook once on this machine and report which still run (slow — one notebook at a time)">Check all notebooks run&hellip;</button>
-        <button id="btn-batch" class="hidden" title="Build several notebooks at once from a list of briefs (the AI copilot proposes each; you review and apply)">&#9889; Batch build&hellip;</button>
-      </div>
+    <!-- The header block is about the WORKSPACE, so it stands down on a detail view
+         (syncCentre) — on those, the question it answers is not the one being asked. -->
+    <div id="centre-head" class="centre-head">
+      <div id="meta-line" class="meta-line"></div>
+      <!-- The headline REPLACES the old stack of status notices: offline,
+           freshness, open-proposal and conflict state all resolve into one
+           sentence (Headline.derive) with one primary action beside it. -->
+      <h2 id="headline" class="headline"></h2>
+      <div id="action-row" class="action-row"></div>
+      <!-- The workspace caption ("N in sync, M to push") and, after an operation, its
+           one-line outcome with a way into the full text. -->
+      <div id="summary" class="status-line"></div>
       <input id="file-search" class="file-search hidden" type="search"
-             placeholder="&#128269; Search notebooks by name, title, or content&hellip;"
+             placeholder="Search notebooks by name, title, or content&hellip;"
              aria-label="Search notebooks by name, title, or content" autocomplete="off">
-      <!-- Status notices — one visual language (icon + coloured left rule) for the
-           files-card alerts, most-urgent first: offline > open-proposal > adopt >
-           freshness. Each is toggled independently by app.js. #summary below is the
-           table's quiet caption ("N notebooks, M changed"), not an alert. -->
-      <div id="offline-banner" class="notice notice-offline hidden" role="status"></div>
-      <div id="review-banner" class="notice notice-review hidden"></div>
-      <div id="adopt-banner" class="notice notice-adopt hidden"></div>
-      <div id="freshness-banner" class="notice notice-fresh hidden" role="status"></div>
-      <div id="summary" class="muted files-summary"></div>
-      <!-- The sweep's live progress. Deliberately OUTSIDE the busy-disabled toolbar
-           (and setBusy exempts the button): a check that runs every notebook takes many
-           minutes, so Cancel has to be reachable throughout — app.js polls /api/sweep
-           rather than blocking on it, and re-attaches to a running check after a reload. -->
-      <div id="sweep-progress" class="notice notice-fresh hidden" role="status">
-        <span id="sweep-progress-text"></span>
-        <button id="btn-sweep-cancel" class="small">Cancel</button>
-      </div>
-      <!-- Per-user AI context subscription: when the repo offers context folders and this
-           machine has AI + [ai] context on, pick which offered folders THIS copilot reads
-           (the synced offer stays the ceiling). Rendered by renderContextSubscription. -->
-      <div id="context-sub" class="context-sub hidden"></div>
-      <!-- Folder browser bar: the "focus one folder" breadcrumb (climb back out /
-           reset to All folders) with a live "N of M files" count, plus Expand-all /
-           Collapse-all. Rendered by renderFolderControls; hidden at the repo root
-           unless there are multiple collapsible sections to steer. -->
-      <div id="folder-controls" class="folder-controls hidden"></div>
-      <table id="files-table">
-        <thead><tr><th>File</th><th>Status</th><th>Actions</th></tr></thead>
-        <tbody></tbody>
-      </table>
-      <div id="empty-hint" class="muted hidden">
-        No notebooks yet &mdash; click <b>New notebook</b> to create one, or <b>Pull</b> to
-        fetch your team's notebooks.
-      </div>
-    </section>
+    </div>
 
-    <!-- Scheduled refresh: the morning status board. The card only appears once there is
-         at least one schedule (or the form is open), so a user who never asked for this
-         never sees it. Rendered by renderSchedules. -->
-    <section id="schedules-card" class="card hidden">
-      <div class="schedules-head">
-        <h3>Scheduled refreshes</h3>
-        <button id="btn-run-due" class="small" title="Run every schedule that is currently due">&#8635; Run what&#8217;s due</button>
-      </div>
-      <div id="schedules-banner" class="notice notice-fresh hidden" role="status"></div>
-      <div id="schedule-form" class="schedule-form hidden">
-        <div class="schedule-form-title">Refresh <b id="schedule-form-path"></b></div>
-        <div class="schedule-form-row">
-          <label>Repeat
-            <select id="schedule-cadence">
-              <option value="daily">Daily</option>
-              <option value="weekdays">Every weekday</option>
-              <option value="weekly">Weekly</option>
-              <option value="hourly">Hourly</option>
-            </select>
-          </label>
-          <label id="schedule-day-label" class="hidden">On
-            <select id="schedule-day">
-              <option value="mon">Monday</option>
-              <option value="tue">Tuesday</option>
-              <option value="wed">Wednesday</option>
-              <option value="thu">Thursday</option>
-              <option value="fri">Friday</option>
-              <option value="sat">Saturday</option>
-              <option value="sun">Sunday</option>
-            </select>
-          </label>
-          <label>At <input id="schedule-at" type="time" value="07:30"></label>
+    <!-- The sweep's live progress. OUTSIDE the header block on purpose, twice over: it
+         survives a trip to a detail view, and it sits outside the busy-disabled group
+         (setBusy exempts the button) — a check that runs every notebook takes many
+         minutes, so Cancel has to be reachable the whole time. -->
+    <div id="sweep-progress" class="status-line status-run hidden" role="status">
+      <span id="sweep-progress-text"></span>
+      <button id="btn-sweep-cancel" class="small">Cancel</button>
+    </div>
+
+    <div class="centre-body">
+      <!-- Every view but the list is reached from here and returns here. -->
+      <button id="centre-back" class="centre-back hidden">&#8592; back to notebooks</button>
+
+      <!-- --- the notebook list (the default view) ------------------------- -->
+      <section id="files-card" class="view hidden">
+        <table id="files-table">
+          <thead><tr>
+            <th id="files-head" scope="col">NOTEBOOKS</th>
+            <th class="col-state" scope="col">STATE</th>
+          </tr></thead>
+          <tbody></tbody>
+        </table>
+        <!-- The other folders, one quiet line: "data/ 26 · reports/ 6 · more 3". -->
+        <div id="files-foot" class="folder-summary"></div>
+        <div id="empty-hint" class="muted hidden">
+          No notebooks yet &mdash; click <b>New notebook</b> to create one, or <b>Pull</b> to
+          fetch your team's notebooks.
         </div>
-        <label class="schedule-check"><input id="schedule-pull" type="checkbox" checked>
-          Pull the team&#8217;s latest first (falls back to your copy if it can&#8217;t)</label>
-        <label class="schedule-check"><input id="schedule-deliver" type="checkbox" checked>
-          Save an HTML snapshot to your local outbox each time</label>
+      </section>
+
+      <!-- --- accounts / repo setup / sign-in ------------------------------ -->
+      <section id="accounts-view" class="view hidden">
+        <!-- Accounts: the GitHub identities this machine can act as. Reachable at any
+             time (not only before the first repo is configured), because adding a
+             second identity is a normal thing to do long after setup. -->
+        <section id="accounts-card" class="block hidden">
+          <h3>GitHub accounts</h3>
+          <p class="muted">Each repo syncs as one of these. Switching repos switches
+            account, so you can't push under the wrong identity.</p>
+          <ul id="accounts-list" class="plain"></ul>
+          <details id="account-add">
+            <summary>Add an account</summary>
+            <!-- Hosts this machine can already reach, discovered when the panel opens
+                 (app.js) rather than on every refresh — each one costs a subprocess.
+                 Value-free: the probe reports the token's TYPE, never the token. Adding
+                 from here needs no OAuth client id, which is the whole point: an org
+                 that won't approve an OAuth app has none to give. -->
+            <div id="account-discovered" class="hidden">
+              <p class="muted">git already has a credential for these hosts. Signing in this
+                way needs no OAuth app, and mooring stores no copy of the credential.</p>
+              <ul id="account-discovered-list" class="plain"></ul>
+              <p class="muted">Somewhere else? Add it by hand below — a host with no entry in
+                your git config can still be borrowed once you name it.</p>
+            </div>
+            <label>Short name <input id="account-alias" placeholder="work"></label>
+            <label>GitHub URL <input id="account-host" placeholder="github.com"></label>
+            <label>OAuth client id <input id="account-client-id" placeholder="Ov23li..."></label>
+            <p class="muted">The client id comes from an OAuth app registered on that
+              host with Device Flow enabled. Ask your admin — or use
+              <button id="account-save-git" class="small" type="button">my git credential</button>
+              instead, which needs no client id.</p>
+            <button id="account-save" class="primary">Add and sign in</button>
+          </details>
+        </section>
+
+        <section id="setup-card" class="block hidden">
+          <h3>Connect a team repo</h3>
+          <p id="setup-intro">Connect to a team repo to sync and share your notebooks. Ask your
+            admin for these values:</p>
+          <label id="setup-account-label">Sign in as
+            <select id="setup-account"></select>
+          </label>
+          <label id="setup-client-id-label">OAuth client id <input id="setup-client-id" placeholder="Ov23li..."></label>
+          <label id="setup-host-label">GitHub URL (only for GitHub Enterprise) <input id="setup-host" placeholder="github.com"></label>
+          <div id="setup-browse" class="hidden">
+            <label>Owner
+              <select id="setup-owner-select"></select>
+            </label>
+            <label><input type="radio" name="setup-mode" id="setup-mode-existing" checked> Use an existing repo</label>
+            <label id="setup-existing-label">Repo
+              <select id="setup-repo-select"></select>
+            </label>
+            <label><input type="radio" name="setup-mode" id="setup-mode-new"> Create a new repo</label>
+            <div id="setup-new-fields" class="hidden">
+              <label>New repo name <input id="setup-new-name" placeholder="notebooks"></label>
+              <label><input type="checkbox" id="setup-private" checked> Private</label>
+              <label><input type="checkbox" id="setup-seed" checked> Add notebooks/ and data/ folders</label>
+            </div>
+          </div>
+          <div id="setup-manual">
+            <label>Repo owner <input id="setup-owner" placeholder="your-org"></label>
+            <label>Repo name <input id="setup-repo" placeholder="notebooks"></label>
+          </div>
+          <label>Branch <input id="setup-branch" value="main"></label>
+          <label>Short name (optional) <input id="setup-alias" placeholder="defaults to repo name"></label>
+          <button id="setup-save" class="primary">Save</button>
+          <button id="setup-cancel" class="hidden">Cancel</button>
+        </section>
+
+        <section id="login-card" class="block hidden">
+          <h3>Connect to GitHub</h3>
+          <button id="login-start" class="primary">Log in with GitHub</button>
+          <div id="login-code-box" class="hidden">
+            <p>Enter this code at
+              <a id="login-link" href="#" target="_blank" rel="noopener">your GitHub sign-in page</a>:
+            </p>
+            <div id="login-code" class="code"></div>
+            <p class="muted">Waiting for you to authorize&hellip;</p>
+          </div>
+          <!-- The second way in, for organisations that won't approve a third-party
+               OAuth app (which blocks the button above) and cap personal access token
+               lifetimes (which rules out pasting one). Shown by app.js ONLY when the
+               probe finds a credential to borrow, so it never advertises a route that
+               cannot work on this machine. -->
+          <div id="login-git-box" class="hidden">
+            <p class="muted" id="login-git-note"></p>
+            <button id="login-git">Use my git credential</button>
+          </div>
+        </section>
+      </section>
+
+      <!-- --- first-run checklist ------------------------------------------ -->
+      <!-- Teaches the working rhythm (pull → open → duplicate a draft →
+           push/propose) by ticking itself off as each step happens. Client-side
+           only: progress lives in localStorage per repo; two items re-derive from
+           the /api/state rows. Reached from the rail while it is unfinished. -->
+      <section id="checklist-card" class="view hidden">
+        <div class="checklist-head">
+          <h3>Getting started</h3>
+          <button id="checklist-dismiss" class="small" title="Hide this checklist for this repo">Dismiss</button>
+        </div>
+        <ul id="checklist-items" class="checklist"></ul>
+      </section>
+
+      <!-- --- scheduled refresh: the morning status board ------------------- -->
+      <section id="schedules-card" class="view hidden">
+        <div class="schedules-head">
+          <h3>Scheduled refreshes</h3>
+          <button id="btn-run-due" class="small" title="Run every schedule that is currently due">&#8635; Run what&#8217;s due</button>
+        </div>
+        <div id="schedules-banner" class="notice notice-fresh hidden" role="status"></div>
+        <div id="schedule-form" class="schedule-form hidden">
+          <div class="schedule-form-title">Refresh <b id="schedule-form-path"></b></div>
+          <div class="schedule-form-row">
+            <label>Repeat
+              <select id="schedule-cadence">
+                <option value="daily">Daily</option>
+                <option value="weekdays">Every weekday</option>
+                <option value="weekly">Weekly</option>
+                <option value="hourly">Hourly</option>
+              </select>
+            </label>
+            <label id="schedule-day-label" class="hidden">On
+              <select id="schedule-day">
+                <option value="mon">Monday</option>
+                <option value="tue">Tuesday</option>
+                <option value="wed">Wednesday</option>
+                <option value="thu">Thursday</option>
+                <option value="fri">Friday</option>
+                <option value="sat">Saturday</option>
+                <option value="sun">Sunday</option>
+              </select>
+            </label>
+            <label>At <input id="schedule-at" type="time" value="07:30"></label>
+          </div>
+          <label class="schedule-check"><input id="schedule-pull" type="checkbox" checked>
+            Pull the team&#8217;s latest first (falls back to your copy if it can&#8217;t)</label>
+          <label class="schedule-check"><input id="schedule-deliver" type="checkbox" checked>
+            Save an HTML snapshot to your local outbox each time</label>
+          <div class="toolbar">
+            <button id="schedule-save" class="primary small">Save schedule</button>
+            <button id="schedule-cancel" class="small">Cancel</button>
+          </div>
+        </div>
+        <table id="schedules-table">
+          <thead><tr><th>Notebook</th><th>Repeats</th><th>Status</th><th>Actions</th></tr></thead>
+          <tbody></tbody>
+        </table>
+        <!-- Which clock is actually running. The tier IS the freshness guarantee, so it is
+             stated rather than left to assumption; renderSchedules fills it. -->
+        <div class="schedules-foot">
+          <span id="schedules-tier" class="muted"></span>
+          <button id="btn-background-on" class="small hidden"
+                  title="Run refreshes even when the hub is closed. No admin rights needed.">Run in the background</button>
+          <button id="btn-background-off" class="small hidden"
+                  title="Stop background refresh; schedules are kept">Stop background refresh</button>
+          <div id="schedules-tier-reason" class="muted schedule-detail hidden"></div>
+          <div class="muted schedule-detail">A refresh never pushes; any snapshot stays in your local outbox.</div>
+        </div>
+      </section>
+
+      <!-- --- attended parameterised runs ---------------------------------- -->
+      <!-- One notebook, once per region/entity/month. Opened from the panel's
+           "Run for each…". A view rather than a modal, for the same reason the
+           schedules board is: this is where the per-value result shows up. -->
+      <section id="params-card" class="view hidden">
+        <div class="schedules-head">
+          <h3>Run for each value</h3>
+          <button id="params-close" class="small" title="Close this view">Close</button>
+        </div>
+        <div class="schedule-form">
+          <div class="schedule-form-title">Run <b id="params-path"></b></div>
+          <div class="schedule-form-row">
+            <label style="flex:1">For
+              <input id="params-for" type="text" placeholder="region=EMEA,APAC,AMER"
+                     style="width:100%"
+                     aria-label="parameter name and values, e.g. region=EMEA,APAC,AMER">
+            </label>
+          </div>
+          <div id="params-preview" class="muted schedule-detail"></div>
+          <label class="schedule-check"><input id="params-deliver" type="checkbox" checked>
+            Save an HTML snapshot per value to your local outbox</label>
+          <div class="toolbar">
+            <button id="params-start" class="primary small">Start</button>
+            <button id="params-cancel" class="small hidden">Cancel run</button>
+          </div>
+        </div>
+        <div id="params-banner" class="notice notice-fresh hidden" role="status"></div>
+        <table id="params-table" class="hidden">
+          <thead><tr><th>Value</th><th>Status</th><th>Artifact / reason</th></tr></thead>
+          <tbody></tbody>
+        </table>
+        <div class="schedules-foot">
+          <div class="muted schedule-detail">Values run one at a time, and one failing value
+            never stops the others. Nothing is pushed &mdash; artifacts stay in your local outbox.</div>
+        </div>
+      </section>
+
+      <!-- --- last operation ----------------------------------------------- -->
+      <section id="log-card" class="view hidden">
+        <h3>Last operation</h3>
+        <pre id="log"></pre>
+        <div id="log-link" class="hidden"><a target="_blank" rel="noopener" aria-label="Create or view the pull request on GitHub">Create / view the pull request on GitHub</a></div>
+      </section>
+
+      <!-- --- version history ---------------------------------------------- -->
+      <!-- Every pushed version of one file, from the repo's own history (the
+           git-free time machine). View/Diff are read-only; Restore defaults to a
+           sibling copy, and restore-over banks the current bytes first
+           (undo/trash) and flows through normal sync — never silent. -->
+      <section id="history-card" class="view hidden">
+        <h3 id="history-title">History</h3>
+        <div class="muted">Read-only: old versions are never opened in the editor or run.</div>
+        <table id="history-table">
+          <thead><tr><th>Version</th><th>Actions</th></tr></thead>
+          <tbody></tbody>
+        </table>
         <div class="toolbar">
-          <button id="schedule-save" class="primary small">Save schedule</button>
-          <button id="schedule-cancel" class="small">Cancel</button>
+          <button id="history-older" class="small">Show older</button>
+          <button id="history-close" class="small">Close</button>
         </div>
-      </div>
-      <table id="schedules-table">
-        <thead><tr><th>Notebook</th><th>Repeats</th><th>Status</th><th>Actions</th></tr></thead>
-        <tbody></tbody>
-      </table>
-      <!-- Which clock is actually running. The tier IS the freshness guarantee, so it is
-           stated rather than left to assumption; renderSchedules fills it. -->
-      <div class="schedules-foot">
-        <span id="schedules-tier" class="muted"></span>
-        <button id="btn-background-on" class="small hidden"
-                title="Run refreshes even when the hub is closed. No admin rights needed.">Run in the background</button>
-        <button id="btn-background-off" class="small hidden"
-                title="Stop background refresh; schedules are kept">Stop background refresh</button>
-        <div id="schedules-tier-reason" class="muted schedule-detail hidden"></div>
-        <div class="muted schedule-detail">A refresh never pushes; any snapshot stays in your local outbox.</div>
-      </div>
-    </section>
+        <pre id="history-view" class="hidden"></pre>
+      </section>
 
-    <!-- Attended parameterised runs: one notebook, once per region/entity/month. Opened
-         from a notebook's Actions ▾ → "Run for each…". Deliberately a card rather than a
-         modal, for the same reason the schedules card is: this is where the per-value
-         result shows up, so it is where the run is started. -->
-    <section id="params-card" class="card hidden">
-      <div class="schedules-head">
-        <h3>Run for each value</h3>
-        <button id="params-close" class="small" title="Close this card">Close</button>
-      </div>
-      <div class="schedule-form">
-        <div class="schedule-form-title">Run <b id="params-path"></b></div>
-        <div class="schedule-form-row">
-          <label style="flex:1">For
-            <input id="params-for" type="text" placeholder="region=EMEA,APAC,AMER"
-                   style="width:100%"
-                   aria-label="parameter name and values, e.g. region=EMEA,APAC,AMER">
-          </label>
+      <!-- --- review changes ------------------------------------------------ -->
+      <!-- A read-only, cell-aware diff of your local copy against the last-synced
+           version — "what exactly am I about to push?" — plus an optional one-line
+           note that becomes the commit message for THIS file's Push/Propose.
+           Local-only display on 127.0.0.1; nothing here reaches the AI. -->
+      <section id="review-card" class="view hidden">
+        <h3 id="review-title">Review changes</h3>
+        <div id="review-summary" class="muted"></div>
+        <div id="review-cells"></div>
+        <pre id="review-view" class="hidden"></pre>
+        <div class="toolbar review-note-row">
+          <input id="review-note" type="text" maxlength="200"
+                 placeholder="What changed? (optional — becomes the commit message)">
+          <button id="review-push" class="primary small">Push this file</button>
+          <button id="review-propose" class="small" title="Upload to a review branch and open a pull request instead of pushing directly">Propose this file</button>
+          <button id="review-close" class="small">Close</button>
         </div>
-        <div id="params-preview" class="muted schedule-detail"></div>
-        <label class="schedule-check"><input id="params-deliver" type="checkbox" checked>
-          Save an HTML snapshot per value to your local outbox</label>
+      </section>
+
+      <!-- --- merge cell by cell -------------------------------------------- -->
+      <!-- The per-cell resolution of ONE conflicted notebook. A genuine three-way
+           merge (last-synced / your copy / the team's), so a cell only one of you
+           touched is already merged and only the cells you BOTH changed ask
+           anything. Writing is local — the merged file becomes a normal modified
+           file you push yourself — and the pre-merge bytes go to the trash first,
+           so the Undo toast covers it. No option is preselected: a default here
+           would be exactly the silent loss this panel prevents. -->
+      <section id="merge-card" class="view hidden">
+        <h3 id="merge-title">Merge cell by cell</h3>
+        <div id="merge-summary" class="muted"></div>
+        <div id="merge-frame" class="muted hidden"></div>
+        <div id="merge-cells"></div>
         <div class="toolbar">
-          <button id="params-start" class="primary small">Start</button>
-          <button id="params-cancel" class="small hidden">Cancel run</button>
+          <button id="merge-apply" class="primary small">Write the merged notebook</button>
+          <button id="merge-close" class="small">Close</button>
         </div>
-      </div>
-      <div id="params-banner" class="notice notice-fresh hidden" role="status"></div>
-      <table id="params-table" class="hidden">
-        <thead><tr><th>Value</th><th>Status</th><th>Artifact / reason</th></tr></thead>
-        <tbody></tbody>
-      </table>
-      <div class="schedules-foot">
-        <div class="muted schedule-detail">Values run one at a time, and one failing value
-          never stops the others. Nothing is pushed &mdash; artifacts stay in your local outbox.</div>
-      </div>
-    </section>
+        <div id="merge-hint" class="muted">Nothing is published — after merging, push
+          the file like any other change.</div>
+      </section>
 
-    <section id="log-card" class="card hidden">
-      <h3>Last operation</h3>
-      <pre id="log"></pre>
-      <div id="log-link" class="hidden"><a target="_blank" rel="noopener" aria-label="Create or view the pull request on GitHub">Create / view the pull request on GitHub</a></div>
-    </section>
+      <!-- --- what's new ---------------------------------------------------- -->
+      <!-- The pull digest — every synced file changed on the team branch since
+           YOUR last sync (the manifest horizon), with who/when/why. Populated on
+           demand and automatically after a Pull. Read-only by design: conflicts
+           appear marked and are resolved from the detail panel, never from here. -->
+      <section id="whatsnew-card" class="view hidden">
+        <h3 id="whatsnew-title">What's new</h3>
+        <div id="whatsnew-note" class="muted"></div>
+        <div id="whatsnew-groups" class="muted whatsnew-groups"></div>
+        <table id="whatsnew-table">
+          <thead><tr><th>File</th><th>Status</th><th>Changed</th></tr></thead>
+          <tbody></tbody>
+        </table>
+        <div class="toolbar">
+          <button id="whatsnew-close" class="small">Close</button>
+        </div>
+      </section>
 
-    <!-- Version history: every pushed version of one file, from the repo's own
-         history (the git-free time machine). View/Diff are read-only; Restore
-         defaults to a sibling copy, and restore-over banks the current bytes
-         first (undo/trash) and flows through normal sync — never silent. -->
-    <section id="history-card" class="card hidden">
-      <h3 id="history-title">History</h3>
-      <div class="muted">Read-only: old versions are never opened in the editor or run.</div>
-      <table id="history-table">
-        <thead><tr><th>Version</th><th>Actions</th></tr></thead>
-        <tbody></tbody>
-      </table>
-      <div class="toolbar">
-        <button id="history-older" class="small">Show older</button>
-        <button id="history-close" class="small">Close</button>
-      </div>
-      <pre id="history-view" class="hidden"></pre>
-    </section>
+      <!-- --- workspace (the old footer disclosures) ------------------------ -->
+      <section id="workspace-card" class="view hidden">
+        <h3>Workspace</h3>
+        <div id="workspace-info" class="muted"></div>
+        <div id="workspace-hint" class="hint hidden"></div>
+        <details><summary>Notebook packages</summary>
+          <div id="env-summary" class="muted"></div>
+          <pre id="packages" class="pkglist"></pre>
+          <div id="env-add-hint" class="muted env-add-hint"></div>
+        </details>
+        <details><summary>Health check</summary>
+          <p class="muted">Checks your setup in plain English — network, login,
+            config files, notebook packages. Nothing runs until you click.</p>
+          <div class="toolbar">
+            <button id="health-run" class="small">Run health check</button>
+            <button id="health-copy" class="small hidden" title="A redacted report, safe to paste into a support ticket">Copy report</button>
+          </div>
+          <ul id="health-results" class="health-list"></ul>
+        </details>
+      </section>
+    </div>
+  </section>
 
-    <!-- Review changes: a read-only, cell-aware diff of your local copy against
-         the last-synced version — "what exactly am I about to push?" — plus an
-         optional one-line note that becomes the commit message for THIS file's
-         Push/Propose. Local-only display on 127.0.0.1; nothing here reaches the
-         AI. Read-only by design: the note field and the footer buttons are the
-         only inputs (resolving hunks in place would be a merge tool). -->
-    <section id="review-card" class="card hidden">
-      <h3 id="review-title">Review changes</h3>
-      <div id="review-summary" class="muted"></div>
-      <div id="review-cells"></div>
-      <pre id="review-view" class="hidden"></pre>
-      <div class="toolbar review-note-row">
-        <input id="review-note" type="text" maxlength="200"
-               placeholder="What changed? (optional — becomes the commit message)">
-        <button id="review-push" class="primary small">Push this file</button>
-        <button id="review-propose" class="small" title="Upload to a review branch and open a pull request instead of pushing directly">Propose this file</button>
-        <button id="review-close" class="small">Close</button>
-      </div>
-    </section>
+  <!-- ====================================================================
+       PANEL — the selected notebook: what it is, what state it's in,
+       what it can prove about itself, and everything you can do to it.
+       aria-live so a selection change is announced once.
+       ==================================================================== -->
+  <aside id="panel" class="panel" aria-live="polite" aria-label="Selected notebook"></aside>
 
-    <!-- Merge cell by cell: the per-cell resolution of ONE conflicted notebook.
-         A genuine three-way merge (last-synced / your copy / the team's), so a
-         cell only one of you touched is already merged and only the cells you
-         BOTH changed ask anything. Writing is local — the merged file becomes a
-         normal modified file you push yourself — and the pre-merge bytes go to
-         the trash first, so the Undo toast covers it. No option is preselected:
-         a default here would be exactly the silent loss this panel prevents. -->
-    <section id="merge-card" class="card hidden">
-      <h3 id="merge-title">Merge cell by cell</h3>
-      <div id="merge-summary" class="muted"></div>
-      <div id="merge-frame" class="muted hidden"></div>
-      <div id="merge-cells"></div>
-      <div class="toolbar">
-        <button id="merge-apply" class="primary small">Write the merged notebook</button>
-        <button id="merge-close" class="small">Close</button>
-      </div>
-      <div id="merge-hint" class="muted">Nothing is published — after merging, push
-        the file like any other change.</div>
-    </section>
-
-    <!-- What's new: the pull digest — every synced file changed on the team
-         branch since YOUR last sync (the manifest horizon), with who/when/why.
-         Populated on demand from the toolbar button and automatically after a
-         Pull (the pull response carries the digest of what just landed).
-         Read-only by design: conflicts appear marked and are resolved from the
-         file row's actions, never from here. -->
-    <section id="whatsnew-card" class="card hidden">
-      <h3 id="whatsnew-title">What's new</h3>
-      <div id="whatsnew-note" class="muted"></div>
-      <div id="whatsnew-groups" class="muted whatsnew-groups"></div>
-      <table id="whatsnew-table">
-        <thead><tr><th>File</th><th>Status</th><th>Changed</th></tr></thead>
-        <tbody></tbody>
-      </table>
-      <div class="toolbar">
-        <button id="whatsnew-close" class="small">Close</button>
-      </div>
-    </section>
-
-    <!-- Open-time staleness confirm: shown only when the row's remote moved
-         (remote changed / deleted remotely / conflict). Three explicit buttons —
-         deliberately a <dialog>, not confirm(): the safe action gets focus and
-         no stray keypress can fire the destructive choice (the actionsMenu
-         lesson). Copy and button visibility are set per-state in app.js. -->
-    <dialog id="stale-dialog">
-      <p id="stale-message"></p>
-      <div class="toolbar">
-        <button id="stale-pull" class="primary">Pull latest and open</button>
-        <button id="stale-open">Open my copy anyway</button>
-        <button id="stale-cancel">Cancel</button>
-      </div>
-    </dialog>
-
-    <!-- Push-guard confirm: the scan found something that looks like a secret,
-         structured PII, or a bulk data export in files about to publish. The
-         flagged files were WITHHELD (clean files already went); "Push anyway"
-         re-sends with per-file confirm tokens. Hidden in block mode. -->
-    <dialog id="guard-dialog">
-      <p id="guard-message"></p>
-      <ul id="guard-findings" class="guard-findings"></ul>
-      <p id="guard-hint" class="muted"></p>
-      <div class="toolbar">
-        <button id="guard-anyway">Push anyway</button>
-        <button id="guard-cancel" class="primary">Go back and fix</button>
-      </div>
-    </dialog>
   </main>
 
-  <footer>
-    <div id="workspace-info" class="muted"></div>
-    <div id="workspace-hint" class="hint hidden"></div>
-    <details><summary>Notebook packages</summary>
-      <div id="env-summary" class="muted"></div>
-      <pre id="packages" class="pkglist"></pre>
-      <div id="env-add-hint" class="muted env-add-hint"></div>
-    </details>
-    <details><summary>Health check</summary>
-      <p class="muted">Checks your setup in plain English — network, login,
-        config files, notebook packages. Nothing runs until you click.</p>
-      <div class="toolbar">
-        <button id="health-run" class="small">Run health check</button>
-        <button id="health-copy" class="small hidden" title="A redacted report, safe to paste into a support ticket">Copy report</button>
-      </div>
-      <ul id="health-results" class="health-list"></ul>
-    </details>
-  </footer>
+  <!-- Open-time staleness confirm: shown only when the row's remote moved
+       (remote changed / deleted remotely / conflict). Three explicit buttons —
+       deliberately a <dialog>, not confirm(): the safe action gets focus and
+       no stray keypress can fire the destructive choice (the actionsMenu
+       lesson). Copy and button visibility are set per-state in app.js. -->
+  <dialog id="stale-dialog">
+    <p id="stale-message"></p>
+    <div class="toolbar">
+      <button id="stale-pull" class="primary">Pull latest and open</button>
+      <button id="stale-open">Open my copy anyway</button>
+      <button id="stale-cancel">Cancel</button>
+    </div>
+  </dialog>
+
+  <!-- Push-guard confirm: the scan found something that looks like a secret,
+       structured PII, or a bulk data export in files about to publish. The
+       flagged files were WITHHELD (clean files already went); "Push anyway"
+       re-sends with per-file confirm tokens. Hidden in block mode. -->
+  <dialog id="guard-dialog">
+    <p id="guard-message"></p>
+    <ul id="guard-findings" class="guard-findings"></ul>
+    <p id="guard-hint" class="muted"></p>
+    <div class="toolbar">
+      <button id="guard-anyway">Push anyway</button>
+      <button id="guard-cancel" class="primary">Go back and fix</button>
+    </div>
+  </dialog>
 
   <!-- Pure helpers (ChatCore.parseDeviceLogin for the Copilot sign-in); loaded
-       before app.js so the global is ready. No DOM/side effects on load. -->
+       before app.js so the globals are ready. No DOM/side effects on load. -->
   <script src="/static/chat_core.js"></script>
   <script src="/static/files_tree.js"></script>
   <script src="/static/freshness.js"></script>
   <script src="/static/lineage_fmt.js"></script>
+  <script src="/static/receipts_fmt.js"></script>
+  <script src="/static/headline.js"></script>
   <script src="/static/guard_fmt.js"></script>
   <script src="/static/history_fmt.js"></script>
   <script src="/static/diff_fmt.js"></script>
@@ -554,11 +529,9 @@
   <script src="/static/checklist.js"></script>
   <!-- Shared appearance module (applyTheme + cross-tab follower). Before app.js,
        which aliases window.MooringTheme. The zero-flash pre-paint stays inline in
-       <head>; this only carries the runtime bits every page shares. -->
+       <head>; this only carries the runtime bits every page shares. The appearance
+       control itself lives on /settings — the hub follows whatever it sets. -->
   <script src="/static/theme.js"></script>
   <script src="/static/app.js"></script>
-  <!-- Decorative backdrop: deterministic starfield + the one-time boat voyage.
-       Last in <body> so the scene is already parsed; no DOM/side effects elsewhere. -->
-  <script src="/static/scene.js"></script>
 </body>
 </html>

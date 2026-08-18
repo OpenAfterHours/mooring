@@ -10,6 +10,19 @@
   src: url("/static/fonts/space-grotesk.woff2") format("woff2");
 }
 
+/* JetBrains Mono (structure: rails, paths, state cells, the receipt ledger) —
+   self-hosted for the same reason as Space Grotesk: the app NEVER fetches fonts
+   at runtime. One variable woff2 covers the 400-700 axis. Vendored by
+   scripts/vendor_fonts.py; SIL OFL 1.1 (see fonts/OFL-JetBrainsMono.txt).
+   --mono falls back to Consolas / Cascadia Mono if it is ever absent. */
+@font-face {
+  font-family: "JetBrains Mono";
+  font-style: normal;
+  font-weight: 400 700;
+  font-display: swap;
+  src: url("/static/fonts/jetbrains-mono.woff2") format("woff2");
+}
+
 /* ==========================================================================
    OpenAfterHours brand palette — the single source of truth for the app's
    look, mirrored from the docs theme (docs/assets/stylesheets/oah-theme.css):
@@ -51,6 +64,9 @@
 
   /* Type — Space Grotesk display headings, system UI fallback */
   --oah-font-display: "Space Grotesk", "Segoe UI", system-ui, sans-serif;
+  /* The structural monospace face. Referenced since the schedules board shipped
+     (.schedule-name) but never defined until the chart-room hub needed it. */
+  --mono: "JetBrains Mono", Consolas, "Cascadia Mono", monospace;
 }
 
 /* --- Semantic tokens: LIGHT scheme (clean, orange-accented) --------------- */
@@ -71,24 +87,16 @@
   --review: #8250df;
   --banner-bad-bg: #ffebe9;
 
-  /* Night/day-sea backdrop (.hub-scene, hub + settings only). These DAY-palette
-     defaults paint a warm-sun daytime scene in light themes; the two dark blocks
-     below flip every --scene-* token to the docs NIGHT scene (moon + stars). The
-     flip rides the same data-theme gating as the semantic tokens above. */
-  --scene-sky: linear-gradient(180deg, #bcd6ec 0%, #d4e3ef 44%, #f1e9d8 100%);
-  --scene-water: linear-gradient(180deg, #a7c6dc 0%, #92b4cb 55%, #82a6bf 100%);
-  --scene-water-edge: rgba(255, 145, 0, 0.16);
-  --scene-reflection: linear-gradient(180deg, rgba(255, 201, 92, 0.5), rgba(255, 201, 92, 0));
-  --scene-wave: rgba(22, 48, 74, 0.07);
-  --scene-wave-soft: rgba(22, 48, 74, 0.05);
-  --scene-sun-display: block;
-  --scene-moon-display: none;
-  --scene-stars-display: none;
-  --scene-bar: rgba(244, 248, 251, 0.74); /* glass header over the scene */
-  --scene-scrim: rgba(244, 248, 251, 0.66); /* footer panel over the scene */
-  --scene-veil: transparent; /* day scene is already calm — no veil */
-  --scene-card-shadow: 0 8px 24px rgba(28, 50, 82, 0.12);
-  --boat-metal: #56697e; /* mast + anchor: darker for contrast on light water */
+  /* Chart-room hub: two rule weights (a structural rule between panes, a hairline
+     between rows), the supplementary caps/qualifier ink, and the row washes. Only
+     the hub shell (.hub-body) reads these. */
+  --rule-strong: #1f2430;
+  --rule-row: #e6eaef;
+  --fg-faint: #8a93a3;
+  --row-sel: rgba(255, 145, 0, 0.06);
+  --row-hover: rgba(28, 50, 82, 0.03);
+  --watermark: 0.07;
+
   color-scheme: light;
 }
 
@@ -114,22 +122,14 @@
   --review: #a371f7;
   --banner-bad-bg: #2d1417;
 
-  /* NIGHT scene (the docs night-sea palette): dark sky/water, crescent moon +
-     starfield, cream moon-glitter reflection. Flips the day defaults above. */
-  --scene-sky: linear-gradient(180deg, #090a0d 0%, var(--oah-slate-900) 55%, #101218 100%);
-  --scene-water: linear-gradient(180deg, #0f1117 0%, #14171f 45%, #181c25 100%);
-  --scene-water-edge: rgba(255, 145, 0, 0.1);
-  --scene-reflection: linear-gradient(180deg, rgba(243, 236, 220, 0.3), rgba(243, 236, 220, 0));
-  --scene-wave: rgba(216, 222, 233, 0.07);
-  --scene-wave-soft: rgba(216, 222, 233, 0.05);
-  --scene-sun-display: none;
-  --scene-moon-display: block;
-  --scene-stars-display: block;
-  --scene-bar: rgba(13, 14, 17, 0.72);
-  --scene-scrim: rgba(13, 14, 17, 0.56);
-  --scene-veil: rgba(8, 9, 12, 0.12);
-  --scene-card-shadow: 0 8px 26px rgba(0, 0, 0, 0.45);
-  --boat-metal: #cbd0d8;
+  /* Chart-room hub rules/washes (mirrors the light block above). */
+  --rule-strong: rgba(216, 222, 233, 0.28);
+  --rule-row: rgba(216, 222, 233, 0.08);
+  --fg-faint: #64748b;
+  --row-sel: rgba(255, 145, 0, 0.10);
+  --row-hover: rgba(216, 222, 233, 0.04);
+  --watermark: 0.10;
+
 }
 :root[data-theme="dark"] .chat-body {
   --term-bg: var(--oah-slate-900);
@@ -159,21 +159,14 @@
     --review: #a371f7;
     --banner-bad-bg: #2d1417;
 
-    /* NIGHT scene under system-dark (mirrors the [data-theme="dark"] block). */
-    --scene-sky: linear-gradient(180deg, #090a0d 0%, var(--oah-slate-900) 55%, #101218 100%);
-    --scene-water: linear-gradient(180deg, #0f1117 0%, #14171f 45%, #181c25 100%);
-    --scene-water-edge: rgba(255, 145, 0, 0.1);
-    --scene-reflection: linear-gradient(180deg, rgba(243, 236, 220, 0.3), rgba(243, 236, 220, 0));
-    --scene-wave: rgba(216, 222, 233, 0.07);
-    --scene-wave-soft: rgba(216, 222, 233, 0.05);
-    --scene-sun-display: none;
-    --scene-moon-display: block;
-    --scene-stars-display: block;
-    --scene-bar: rgba(13, 14, 17, 0.72);
-    --scene-scrim: rgba(13, 14, 17, 0.56);
-    --scene-veil: rgba(8, 9, 12, 0.12);
-    --scene-card-shadow: 0 8px 26px rgba(0, 0, 0, 0.45);
-    --boat-metal: #cbd0d8;
+    /* Chart-room hub rules/washes (mirrors the light block above). */
+    --rule-strong: rgba(216, 222, 233, 0.28);
+    --rule-row: rgba(216, 222, 233, 0.08);
+    --fg-faint: #64748b;
+    --row-sel: rgba(255, 145, 0, 0.10);
+    --row-hover: rgba(216, 222, 233, 0.04);
+    --watermark: 0.10;
+
   }
   :root[data-theme="system"] .chat-body {
     --term-bg: var(--oah-slate-900);
@@ -217,19 +210,6 @@ h1 { letter-spacing: -0.02em; }
   letter-spacing: normal;
 }
 
-header {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 1rem;
-  row-gap: 0.5rem; /* tighter when the action cluster wraps below the brand row */
-  padding: 0.8rem 1.5rem;
-  background: var(--card);
-  border-bottom: 1px solid var(--border);
-}
-
-header h1 { font-size: 1.2rem; margin: 0; display: flex; align-items: center; gap: 0.4rem; }
-
 /* The orange line-art anchor brand mark. The inline SVG uses stroke=currentColor
    so it follows the active accent — readable --oah-orange-hover on light, bright
    --oah-orange on the dark/night-sky surfaces. */
@@ -241,20 +221,15 @@ header h1 { font-size: 1.2rem; margin: 0; display: flex; align-items: center; ga
   vertical-align: -0.16em;
   flex: none;
 }
-/* The standing status line. flex-grows to absorb slack on a wide bar, but truncates
-   with an ellipsis (full text on the title attr, set in refresh()) rather than
-   shoving the action cluster off-screen — the header used to have no such slack and
-   would overflow / trigger body horizontal-scroll on a narrow window. */
+/* The repo line in the rail. Truncates with an ellipsis (full text on the title
+   attr, set in refresh()) rather than widening the rail. */
 #repo-info {
   color: var(--muted);
-  flex: 1 1 10rem;
-  min-width: 6rem;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-#repo-select,
-#theme-select {
+#repo-select {
   font: inherit;
   font-size: 0.85rem;
   padding: 0.25rem 0.4rem;
@@ -264,62 +239,8 @@ header h1 { font-size: 1.2rem; margin: 0; display: flex; align-items: center; ga
   color: var(--ink);
 }
 
-/* Copilot sign-in lives in a header dropdown so it's out of the way until needed. */
-.header-menu { position: relative; }
-.header-menu > summary {
-  font: inherit;
-  font-size: 0.85rem;
-  padding: 0.25rem 0.5rem;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: var(--card);
-  color: var(--ink);
-  cursor: pointer;
-  user-select: none;
-  list-style: none; /* drop the default disclosure triangle; we add our own caret */
-}
-.header-menu > summary::-webkit-details-marker { display: none; }
-.header-menu > summary::after { content: " \25BE"; color: var(--muted); }
-.header-menu[open] > summary { background: var(--bg); }
-.header-menu-panel {
-  position: absolute;
-  right: 0;
-  top: calc(100% + 0.35rem);
-  z-index: 20;
-  width: 22rem;
-  max-width: 80vw;
-  background: var(--card);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 0.85rem 1rem;
-  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.18);
-}
-.header-menu-panel p { margin-top: 0; }
-
-/* The right-hand control cluster (repo switch, Copilot, appearance, account menu).
-   Wraps as ONE group to a second row on a narrow window — and its own pills reflow
-   again if still tight — so the header never overflows horizontally. */
-.header-actions {
-  display: flex;
-  align-items: center;
-  gap: 0.6rem;
-  flex-wrap: wrap;
-}
-
-/* Full-width rows inside the account menu panel (the page links). */
-.menu-nav { display: flex; flex-direction: column; gap: 0.1rem; }
-.header-menu-item {
-  display: block;
-  padding: 0.4rem 0.5rem;
-  border-radius: 6px;
-  color: var(--ink);
-  text-decoration: none;
-  white-space: nowrap;
-}
-.header-menu-item:hover { background: var(--bg); }
-
-/* Identity block at the top of the account panel ("Signed in as @user" + Log out),
-   set off from the page links by a divider. Empty (and borderless) when logged out. */
+/* Identity block at the top of the rail's repo menu ("Signed in as @user" + Log
+   out), set off by a divider. Empty (and borderless) when logged out. */
 .account-identity:not(:empty) {
   padding-bottom: 0.6rem;
   margin-bottom: 0.4rem;
@@ -775,12 +696,8 @@ button.ctx-folder.on { color: var(--accent); }
 .review-file:first-child { border-top: 0; padding-top: 0; margin-top: 0.3rem; }
 #review-note-text { width: 100%; box-sizing: border-box; margin-top: 0.25rem; }
 
-/* Activity page: the ledger list + its per-entry relative time. */
-.activity-list { list-style: none; padding: 0; margin: 0.6rem 0 0; }
-.activity-list li { padding: 0.3rem 0; border-bottom: 1px solid var(--border); }
-.activity-list li:last-child { border-bottom: none; }
-.activity-time { display: inline-block; min-width: 8.5rem; }
-#activity-filter { flex: 1; min-width: 12rem; }
+/* Activity page: the ledger list is styled with the rest of the chart room, below. */
+.activity-list { list-style: none; padding: 0; }
 
 /* Files-card status notices — one visual language for every alert line. Each is
    [icon][message (+ inline action)] with a coloured left rule; severity is carried
@@ -860,12 +777,6 @@ pre {
   padding: 0.6rem;
   font-size: 0.85rem;
   overflow-x: auto;
-}
-
-footer {
-  max-width: 60rem;
-  margin: 0 auto 2rem;
-  padding: 0 1rem;
 }
 
 .hint {
@@ -1286,24 +1197,9 @@ footer {
 
 /* -- Settings page + header entry ----------------------------------------- */
 
-/* A small quiet bordered link that sits inside header/toolbar rows (e.g. the
-   reviews page's "View on GitHub" link). */
-.header-link {
-  font-size: 0.85rem;
-  padding: 0.25rem 0.4rem;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  color: var(--ink);
-  text-decoration: none;
-  white-space: nowrap;
-}
-.header-link:hover { background: var(--bg); }
-
-/* Sub-page brand-as-home: the ⚓ mooring brand in the settings/activity/reviews
-   header links back to the hub (the conventional logo-as-home), with the page
-   name trailing as a quiet breadcrumb — this replaced a separate "← Back to hub"
-   link on each page. The "/" separator absorbs the h1's own 0.4rem flex gap on
-   its left, so the spacing reads even around it. */
+/* Sub-page brand-as-home: the ⚓ mooring lockup at the top of the settings /
+   activity / reviews rail links back to the hub (the conventional logo-as-home).
+   The rail marks which page you are on, so it needs no breadcrumb of its own. */
 .brand-home {
   display: inline-flex;
   align-items: center;
@@ -1312,7 +1208,6 @@ footer {
   text-decoration: none;
 }
 .brand-home:hover { color: var(--accent); }
-.page-crumb::before { content: "/"; color: var(--muted); margin: 0 0.45rem 0 0.1rem; }
 
 /* General severity badges (the chat scopes its own; the settings rows need them
    page-wide). */
@@ -1365,7 +1260,6 @@ button.ghost:hover { color: var(--ink); }
 .settings-control input:disabled,
 .settings-control select:disabled { opacity: 0.55; cursor: not-allowed; }
 
-.admin-card { opacity: 0.92; }
 .admin-table td { font-size: 0.85rem; }
 .admin-value { color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 
@@ -1409,199 +1303,913 @@ button.ghost:hover { color: var(--ink); }
 .switch input:disabled + .slider { opacity: 0.55; cursor: not-allowed; }
 
 /* ==========================================================================
-   Night/day-sea backdrop — hub (index.html) + settings.html only, gated by the
-   body.has-scene class. One composition, two palettes: a warm-sun DAY scene in
-   light themes and the docs NIGHT scene (crescent moon + starfield) in dark
-   themes, flipping via the --scene-* tokens declared in the theme blocks above.
-   The boat sails in once and moors on the right (scene.js); without JS, or under
-   reduced motion, it is a static moored boat. Ported/adapted from
-   docs/assets/stylesheets/landing.css + overrides/home.html — keep visually in
-   sync if the docs boat changes. The .chat-body terminals never get .has-scene.
+   THE CHART ROOM — the hub's three-pane shell (rail / notebook list / detail
+   panel). Every rule here is scoped to `.hub-body` — the hub and the three
+   sub-pages carry it; the terminal surfaces (chat, workbench, batch) do not, and
+   keep the look they were designed with.
+
+   The visual language: hairline rules instead of card boxes, JetBrains Mono for
+   structure (paths, state, the receipt ledger, the rail), Space Grotesk at
+   display size for titles, and the brand orange spent ONCE per screen — on the
+   single most useful action. Two rule weights carry the hierarchy: --rule-strong
+   between panes and above the STATE block, --rule-row between list rows.
    ========================================================================== */
 
-/* Content layers sit above the fixed scene. The body keeps its opaque --bg as the
-   over-scroll/fallback colour; the fixed .hub-scene (a positioned child) paints
-   over that bg but below the z-index:1 content — robust without a transparent
-   body (which a future opaque-bg change could silently un-hide the scene under). */
-.has-scene header,
-.has-scene main,
-.has-scene footer { position: relative; z-index: 1; }
-/* A last-row actions menu opens downward and can overflow the card into the footer's
-   band; lift main above the z-index:1 footer so its floating panels paint on top. Still
-   above the fixed .hub-scene (z-index:0), so the backdrop layering is unaffected. */
-.has-scene main { z-index: 2; }
-/* Header popups (the Copilot sign-in menu) open DOWNWARD over the cards in main.
-   Sibling stacking contexts trump any z-index INSIDE them, so the panel's own
-   z-index:20 can't save it — the header itself must sit above main, or its menus
-   paint behind the notebooks card (the regression the main:2 lift introduced).
-   Nothing in main ever needs to paint over the header bar (row menus open
-   downward, toward the footer), so the ladder is
-   header(3) > main(2) > footer(1) > scene(0). */
-.has-scene header { z-index: 3; }
-
-.hub-scene {
-  position: fixed;
-  inset: 0;
-  z-index: 0;
-  overflow: hidden;
-  pointer-events: none;
-  background: var(--scene-sky);
-  /* celestial geometry, shared by the sun, the moon and the reflection below them */
-  --scene-cel-right: clamp(8px, 7vw, 132px);
-  --scene-cel-w: clamp(168px, 22vw, 300px);
-  /* moored spot: just right of the centred 60rem card column, clamped so the boat
-     never leaves the viewport on narrow windows. scene.js sails it in to here. */
-  --boat-moor: min(calc(50% + 34.5rem), calc(100% - 5.5rem));
+.hub-body {
+  background: var(--card); /* the page IS the surface — no cards on a grey ground */
+  color: var(--ink);
+  height: 100vh;
+  overflow: hidden; /* the centre and the panel scroll independently, not the page */
 }
-/* a faint veil so the scene recedes behind the content gutters (night only;
-   the day --scene-veil is transparent). Painted above the scene's own parts. */
-.hub-scene::after {
-  content: "";
+:root[data-theme="dark"] .hub-body { background: var(--bg); }
+@media (prefers-color-scheme: dark) {
+  :root[data-theme="system"] .hub-body { background: var(--bg); }
+}
+
+/* The shell replaces <main>'s old centred column entirely. */
+.hub-body main.hub-shell {
+  display: flex;
+  max-width: none;
+  height: 100vh;
+  margin: 0;
+  padding: 0;
+}
+
+.hub-body .mono,
+.hub-body .rail,
+.hub-body .meta-line,
+.hub-body .cell-state,
+.hub-body #files-head,
+.hub-body #files-foot,
+.hub-body .row-sub,
+.hub-body .panel {
+  font-family: var(--mono);
+  font-feature-settings: "calt" 0; /* no ligatures: a path is not code to read as one */
+}
+
+/* Colour-by-role, shared by the state words, the receipt codes and the rail counts.
+   Every one of these is paired with a WORD or a three-letter code — colour never
+   carries a meaning on its own here. */
+.hub-body .tone-ok, .hub-body .state-synced { color: var(--ok); }
+.hub-body .tone-warn, .hub-body .state-pull { color: var(--warn); }
+.hub-body .tone-bad, .hub-body .state-conflict { color: var(--bad); }
+.hub-body .tone-accent, .hub-body .state-push { color: var(--accent); }
+.hub-body .tone-review, .hub-body .state-review { color: var(--review); }
+.hub-body .tone-muted, .hub-body .state-local { color: var(--muted); }
+.hub-body .state-mixed { color: var(--warn); }
+
+/* -- rail ------------------------------------------------------------------ */
+
+.hub-body .rail {
+  width: 13.5rem;
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+  padding: 1.4rem 1.1rem;
+  border-right: 1px solid var(--rule-strong);
+  /* NOT a scroll container: the repo and copilot dropdowns are 20rem wide and have to
+     escape a 13.5rem rail, and any overflow other than visible would clip them. The
+     folder list carries its own cap instead, so a repo with fifty folders still fits. */
+  overflow: visible;
+}
+
+.hub-body .rail-brand { display: flex; align-items: center; gap: 0.5rem; }
+/* The brand mark is --ink here, not accent: the accent is spent on the one action. */
+.hub-body .rail-brand .brand-mark { width: 20px; height: 20px; color: var(--ink); }
+.hub-body .rail-word {
+  font-family: var(--oah-font-display);
+  font-size: 1.1rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--ink);
+}
+
+/* The mono caps labels: REPO, FOLDERS, SELECTED, STATE, RECEIPTS. Supplementary by
+   design — nothing a user must read to act is set in --fg-faint at 10px. */
+.hub-body .rail-label,
+.hub-body .panel-label {
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  color: var(--fg-faint);
+  margin-bottom: 0.35rem;
+}
+
+/* A <details> menu-button in the rail (the repo block, the copilot block). Same
+   idiom as the row menus — never a <select> used as an action menu. */
+.hub-body .rail-menu { position: relative; }
+.hub-body .rail-menu > summary {
+  list-style: none;
+  cursor: pointer;
+  border-radius: 6px;
+  padding: 0.15rem 0.2rem;
+  margin: 0 -0.2rem;
+}
+.hub-body .rail-menu > summary::-webkit-details-marker { display: none; }
+.hub-body .rail-menu > summary:hover { background: var(--row-hover); }
+.hub-body .rail-menu-panel {
   position: absolute;
-  inset: 0;
-  z-index: 4;
-  background: var(--scene-veil);
-}
-
-/* Glass header + footer scrim keep their text legible over the scene. */
-.has-scene header {
-  background: var(--scene-bar);
-  backdrop-filter: blur(8px);
-}
-.has-scene footer {
-  background: var(--scene-scrim);
+  left: 0;
+  top: calc(100% + 0.35rem);
+  z-index: 30;
+  width: 20rem;
+  max-width: 70vw;
+  font-family: "Segoe UI", system-ui, sans-serif;
+  background: var(--card);
   border: 1px solid var(--border);
-  border-radius: var(--oah-radius-lg);
-  padding: 0.7rem 1rem;
-  backdrop-filter: blur(3px);
+  border-radius: 8px;
+  padding: 0.85rem 1rem;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.18);
 }
-/* lift the cards so they read as panels floating over the scene */
-.has-scene .card { box-shadow: var(--scene-card-shadow); }
+:root[data-theme="dark"] .hub-body .rail-menu-panel { background: var(--card); }
+.hub-body .rail-menu-panel p { margin-top: 0; }
+.hub-body .rail-menu-label { font-size: 0.82rem; color: var(--muted); }
+.hub-body .rail-menu-label select { width: 100%; margin-top: 0.2rem; }
 
-/* --- celestial body: warm sun (day) / crescent moon (night) ---------------- */
-.hub-sun,
-.hub-moon {
+.hub-body .rail-repo { font-size: 11px; line-height: 1.8; color: var(--muted); }
+.hub-body #repo-info { display: block; }
+.hub-body .repo-slug,
+.hub-body .repo-who {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.hub-body .repo-slug { color: var(--muted); }
+.hub-body .repo-who { color: var(--fg-faint); }
+
+/* Destinations. Lower case is deliberate in this treatment — the rail is a margin
+   note, not a set of headings. */
+.hub-body .rail-nav { display: flex; flex-direction: column; gap: 0.55rem; }
+.hub-body .rail-item {
+  display: flex;
+  align-items: center;
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  text-decoration: none;
+  border: none;
+  background: none;
+  padding: 0;
+  color: var(--muted);
+  cursor: pointer;
+}
+.hub-body .rail-item:hover { color: var(--ink); }
+.hub-body .rail-item.active { color: var(--ink); font-weight: 600; }
+.hub-body .rail-caret {
+  width: 1.1rem;
+  flex: none;
+  color: var(--accent);
+  font-size: 10px;
+}
+.hub-body .rail-item-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hub-body .rail-icon,
+.hub-body .rail-dot { display: none; }
+.hub-body .rail-count { margin-left: auto; padding-left: 0.4rem; font-size: 11px; }
+.hub-body .rail-faint { color: var(--fg-faint); }
+.hub-body .rail-ok { color: var(--ok); }
+.hub-body .rail-bad { color: var(--bad); }
+.hub-body .rail-accent { color: var(--accent); }
+.hub-body .rail-review { color: var(--review); }
+
+/* The folder navigator. The ☆/★ feature star and the ◆/◇ AI-context toggle live
+   here now; they are always shown when SET (state must never be hover-only) and
+   revealed on hover/focus otherwise, so a 13.5rem rail stays readable. */
+.hub-body .rail-folder-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  max-height: 40vh;
+  overflow-y: auto;
+}
+.hub-body .rail-folder {
+  display: flex;
+  align-items: center;
+  gap: 0.15rem;
+  font-size: 11.5px;
+}
+.hub-body .rail-folder-name {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  text-align: left;
+  border: none;
+  background: none;
+  padding: 0;
+  color: var(--muted);
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.hub-body .rail-folder-name:hover { color: var(--accent); }
+.hub-body .rail-folder.active .rail-folder-name { color: var(--ink); font-weight: 600; }
+.hub-body .rail-folder.gone .rail-folder-name { color: var(--fg-faint); font-style: italic; }
+.hub-body .rail-glyph {
+  border: 1px solid transparent;
+  background: none;
+  color: var(--muted);
+  padding: 0 0.15rem;
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity var(--dur-fast, 120ms) cubic-bezier(0.4, 0, 0.2, 1);
+}
+.hub-body .rail-glyph.on { opacity: 1; color: var(--accent); }
+.hub-body .rail-folder:hover .rail-glyph,
+.hub-body .rail-folder:focus-within .rail-glyph { opacity: 1; }
+.hub-body .rail-glyph:hover { color: var(--accent); }
+
+.hub-body .rail-adopt { margin-top: 0.6rem; font-size: 11px; }
+.hub-body .rail-adopt > summary { color: var(--accent); cursor: pointer; }
+.hub-body .rail-adopt-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  margin-top: 0.4rem;
+  font-family: "Segoe UI", system-ui, sans-serif;
+}
+
+.hub-body .rail-foot {
+  margin-top: auto;
+  font-size: 10.5px;
+  line-height: 1.9;
+  color: var(--fg-faint);
+}
+.hub-body .rail-foot .rail-menu > summary { font-size: 10.5px; }
+.hub-body .rail-ws {
+  display: block;
+  width: 100%;
+  font: inherit;
+  text-align: left;
+  border: none;
+  background: none;
+  padding: 0;
+  color: var(--fg-faint);
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.hub-body .rail-ws:hover { color: var(--muted); }
+
+.hub-body .context-sub {
+  border: none;
+  border-radius: 0;
+  padding: 0;
+  margin: 0;
+  background: none;
+  font-size: 11px;
+}
+.hub-body .context-sub-head { color: var(--fg-faint); cursor: pointer; margin: 0; }
+.hub-body .context-sub-list { flex-direction: column; gap: 0.2rem; margin-top: 0.3rem; }
+.hub-body .context-sub-item { font-size: 11px; color: var(--muted); }
+
+/* -- centre ---------------------------------------------------------------- */
+
+.hub-body .centre {
+  flex: 1;
+  min-width: 0;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden; /* clips the watermark */
+}
+
+.hub-body .hub-watermark {
   position: absolute;
-  z-index: 1;
-  top: clamp(-22px, 1vw, 28px);
-  right: var(--scene-cel-right);
-  width: var(--scene-cel-w);
-  height: var(--scene-cel-w);
+  right: -60px;
+  top: 40px;
+  width: 420px;
+  height: 420px;
+  opacity: var(--watermark);
   pointer-events: none;
 }
-.hub-sun { display: var(--scene-sun-display); }
-.hub-moon { display: var(--scene-moon-display); }
 
-/* --- starfield (dark themes only) ------------------------------------------ */
-.hub-stars {
-  position: absolute;
-  inset: 0;
-  z-index: 1;
-  display: var(--scene-stars-display);
-  pointer-events: none;
-}
-.hub-stars i {
-  position: absolute;
-  width: 2px;
-  height: 2px;
-  border-radius: 50%;
-  background: #fff;
-  opacity: 0.55;
-  box-shadow: 0 0 4px rgba(255, 255, 255, 0.5);
-  animation: hub-twinkle var(--hub-tw-duration, 3s) ease-in-out var(--hub-tw-delay, 0s) infinite;
-}
-.hub-stars i.lg { width: 3px; height: 3px; }
-.hub-stars i.amber { background: var(--oah-star-amber); box-shadow: 0 0 5px rgba(255, 200, 87, 0.6); }
-@keyframes hub-twinkle {
-  0%, 100% { opacity: 0.3; }
-  50% { opacity: 0.8; }
+.hub-body .centre-head {
+  position: relative;
+  flex: none;
+  padding: 1.6rem 1.6rem 1.3rem;
+  border-bottom: 1px solid var(--rule-strong);
 }
 
-/* --- the sea: water band, shimmering reflection, two wave hairlines --------- */
-.hub-water {
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  height: 138px;
-  z-index: 2;
-  background: var(--scene-water);
-  border-top: 1px solid var(--scene-water-edge);
-}
-.hub-reflection {
-  position: absolute;
-  bottom: 0;
-  right: calc(var(--scene-cel-right) + 0.5 * var(--scene-cel-w) - 23px);
-  width: 46px;
-  height: 138px;
-  z-index: 2;
-  background: var(--scene-reflection);
-  animation: hub-shimmer 5s ease-in-out infinite;
-}
-.hub-wave {
-  position: absolute;
-  left: 0;
-  right: 0;
-  height: 1px;
-  z-index: 2;
-}
-.hub-wave-1 { bottom: 98px; background: var(--scene-wave); }
-.hub-wave-2 { bottom: 60px; background: var(--scene-wave-soft); }
-@keyframes hub-shimmer {
-  0%, 100% { opacity: 0.5; transform: scaleX(1); }
-  50% { opacity: 0.8; transform: scaleX(1.18); }
+.hub-body .meta-line {
+  font-size: 10.5px;
+  letter-spacing: 0.14em;
+  color: var(--fg-faint);
+  margin-bottom: 0.6rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
-/* --- the boat: sails in once and moors on the right (scene.js); a static
-       moored boat under reduced motion / without JS. Scaled about its waterline
-       so the hull stays on the sea; scene.js only animates `left`. ----------- */
-.hub-boat {
-  position: absolute;
-  z-index: 3;
-  bottom: 84px;
-  left: var(--boat-moor);
-  transform: translateX(-50%) scale(0.86);
-  transform-origin: 50% 100%;
-  width: 160px;
-  height: 118px;
-  pointer-events: none;
-  will-change: left;
+/* The one sentence that replaced four notice boxes. */
+.hub-body .headline {
+  margin: 0;
+  font-family: var(--oah-font-display);
+  font-size: 2.1rem;
+  line-height: 1.08;
+  font-weight: 700;
+  letter-spacing: -0.035em;
+  color: var(--ink);
 }
-.hub-rope {
-  position: absolute;
-  left: 50%;
-  top: 80px;
-  transform: translateX(-50%);
-  width: 3px;
-  height: 152px; /* resting state: anchor dropped (moored) */
-  z-index: 1;
-  border-radius: 2px;
-  background: repeating-linear-gradient(180deg, #8a93a3 0 5px, transparent 5px 9px);
-}
-.hub-anchor {
-  position: absolute;
-  left: 50%;
-  top: 74px;
-  transform: translateX(-50%) translateY(152px); /* resting state: dropped */
-  z-index: 1;
-}
-.hub-bob {
-  position: absolute;
-  left: 0;
-  top: 0;
-  z-index: 2;
-  transform-origin: center bottom;
-  animation: hub-bob 4.6s ease-in-out infinite;
-}
-@keyframes hub-bob {
-  0%, 100% { transform: translateY(0) rotate(-1.1deg); }
-  50% { transform: translateY(-5px) rotate(1.1deg); }
+:root[data-theme="dark"] .hub-body .headline { color: #fff; }
+@media (prefers-color-scheme: dark) {
+  :root[data-theme="system"] .hub-body .headline { color: #fff; }
 }
 
+.hub-body .action-row {
+  display: flex;
+  align-items: center;
+  gap: 1.2rem;
+  flex-wrap: wrap;
+  margin-top: 1.1rem;
+}
+.hub-body .action-row > button.primary { padding: 0.45rem 1.3rem; border-radius: 8px; }
+
+/* A mono text link: a real <button>, never a styled <div>, so it is focusable and
+   fires only on an explicit click/Enter. The underline is the row rule until hover,
+   when it takes the accent. No transform, no scale on press. */
+.hub-body .mono-link {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--ink);
+  background: none;
+  border: none;
+  border-bottom: 1px solid var(--border);
+  border-radius: 0;
+  padding: 0 0 1px;
+  cursor: pointer;
+  transition: color 120ms cubic-bezier(0.4, 0, 0.2, 1),
+    border-color 200ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+.hub-body .mono-link:hover { background: none; border-bottom-color: var(--accent); }
+
+/* The header's "more" disclosure reuses the row-menu idiom, dressed as a mono link. */
+.hub-body .action-row .row-menu > summary,
+.hub-body .panel-actions .row-menu > summary {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  border: none;
+  border-bottom: 1px solid var(--border);
+  border-radius: 0;
+  padding: 0 0 1px;
+  background: none;
+  color: var(--ink);
+}
+.hub-body .action-row .row-menu[open] > summary,
+.hub-body .panel-actions .row-menu[open] > summary { border-bottom-color: var(--accent); }
+.hub-body .action-row .row-menu-panel { left: 0; right: auto; }
+
+.hub-body .status-line {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--muted);
+  margin-top: 0.7rem;
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  min-height: 1.2em;
+}
+.hub-body .status-line:empty { display: none; }
+.hub-body .status-warn { color: var(--warn); }
+.hub-body #file-search {
+  margin-top: 0.7rem;
+  font-family: var(--mono);
+  font-size: 12px;
+}
+.hub-body #file-search.view-hidden { display: none; }
+
+.hub-body .centre-body {
+  flex: 1;
+  min-width: 0;
+  overflow-y: auto;
+  position: relative;
+}
+
+.hub-body .centre-back {
+  display: block;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--muted);
+  background: none;
+  border: none;
+  padding: 0.8rem 1.6rem 0;
+  cursor: pointer;
+}
+.hub-body .centre-back:hover { color: var(--accent); background: none; }
+
+/* Every view but the list keeps the card's readable measure and padding; the list
+   itself runs the full width of the pane. */
+.hub-body .view { padding: 1.2rem 1.6rem 2rem; }
+.hub-body #files-card { padding: 0 0 2rem; }
+.hub-body .view h3 { margin-top: 0; }
+.hub-body .block { margin-bottom: 1.6rem; }
+.hub-body .block:last-child { margin-bottom: 0; }
+
+/* -- the notebook list ----------------------------------------------------- */
+
+.hub-body #files-table { border-collapse: collapse; table-layout: fixed; }
+.hub-body #files-table thead th {
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 400;
+  letter-spacing: 0.12em;
+  color: var(--fg-faint);
+  text-transform: none;
+  padding: 0.55rem 1.6rem;
+  border-top: none;
+  border-bottom: 1px solid var(--rule-row);
+}
+.hub-body #files-table thead th.col-state { width: 7rem; padding-left: 0; }
+.hub-body #files-table td {
+  border-top: none;
+  border-bottom: 1px solid var(--rule-row);
+  padding: 0.8rem 1.6rem;
+  vertical-align: middle;
+}
+.hub-body #files-table td.cell-state { width: 7rem; padding-left: 0; }
+
+.hub-body #files-head .crumb {
+  font: inherit;
+  letter-spacing: inherit;
+  color: var(--fg-faint);
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+}
+.hub-body #files-head .crumb:hover { color: var(--accent); background: none; }
+.hub-body #files-head .crumb.current { color: var(--muted); cursor: default; }
+.hub-body #files-head .crumb-sep { color: var(--fg-faint); padding: 0 0.25rem; }
+
+.hub-body tr.nb-row { cursor: default; transition: background 120ms cubic-bezier(0.4, 0, 0.2, 1); }
+.hub-body tr.nb-row:hover { background: var(--row-hover); }
+.hub-body tr.nb-row.selected { background: var(--row-sel); }
+.hub-body tr.nb-row.selected td.cell-main { box-shadow: inset 3px 0 0 var(--accent); }
+.hub-body tr.nb-row.selected .row-title { color: var(--ink); }
+:root[data-theme="dark"] .hub-body tr.nb-row.selected .row-title { color: #fff; }
+@media (prefers-color-scheme: dark) {
+  :root[data-theme="system"] .hub-body tr.nb-row.selected .row-title { color: #fff; }
+}
+.hub-body tr.nb-row.member td.cell-main { padding-left: 2.8rem; }
+
+.hub-body .row-title {
+  font-family: var(--oah-font-display);
+  font-size: 1.02rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--ink);
+}
+.hub-body .row-sub {
+  font-size: 11px;
+  color: var(--muted);
+  margin-top: 0.15rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* The one hazard that stays on the row: a filename that shadows an importable module. */
+.hub-body .row-shadow { color: var(--warn); }
+
+.hub-body .cell-state { font-size: 11px; line-height: 1.5; }
+.hub-body .state-word { font-size: 11px; }
+.hub-body .state-qualifier { color: var(--fg-faint); }
+
+.hub-body .artifact-header .row-artifact { display: flex; align-items: center; gap: 0.2rem; }
+.hub-body .artifact-header .row-menu { margin-top: 0.35rem; }
+
+.hub-body #files-foot {
+  font-size: 11px;
+  color: var(--fg-faint);
+  padding: 0.9rem 1.6rem;
+}
+.hub-body .folder-jump {
+  font: inherit;
+  color: var(--fg-faint);
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+}
+.hub-body .folder-jump:hover { color: var(--accent); background: none; }
+
+.hub-body #empty-hint { padding: 1.2rem 1.6rem; }
+
+/* -- detail panel ---------------------------------------------------------- */
+
+.hub-body .panel {
+  width: 20rem;
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 1.2rem;
+  padding: 1.6rem 1.3rem;
+  border-left: 1px solid var(--rule-strong);
+  overflow-y: auto;
+  font-size: 11.5px;
+  line-height: 1.95;
+  color: var(--muted);
+}
+
+.hub-body .panel-title {
+  font-family: var(--oah-font-display);
+  font-size: 1.2rem;
+  font-weight: 700;
+  line-height: 1.2;
+  letter-spacing: -0.02em;
+  color: var(--ink);
+}
+.hub-body .panel-path { font-size: 11px; color: var(--muted); margin-top: 0.3rem; word-break: break-all; }
+.hub-body .panel-empty { color: var(--muted); }
+
+.hub-body .panel-actions {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.hub-body .panel-actions > button.primary { font-size: 0.9rem; padding: 0.4rem 1.15rem; border-radius: 8px; }
+
+/* The STATE block is set off by the STRUCTURAL rule; the quieter blocks below it by
+   the row hairline — the same two weights that separate the panes and the rows. */
+.hub-body .panel-block { border-top: 1px solid var(--rule-row); padding-top: 0.9rem; }
+.hub-body .panel-block-strong { border-top-color: var(--rule-strong); }
+.hub-body .panel-state { margin-bottom: 0.1rem; }
+.hub-body .panel-faint { color: var(--fg-faint); }
+.hub-body .panel-links { display: flex; flex-wrap: wrap; gap: 0.9rem; margin-top: 0.35rem; }
+
+/* The receipt ledger: a three-character code, then the claim. The code carries the
+   meaning without the colour, so the ledger survives a monochrome screen. */
+.hub-body .receipt { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.hub-body .receipt-code { white-space: pre; }
+
+/* -- shared chrome inside the shell ---------------------------------------- */
+
+/* The error banner and the sweep's progress line sit between the header block and
+   the view container, so both survive a view change (a failure and a long-running
+   check must not vanish because you looked at something else). */
+.hub-body #error-banner { margin: 1rem 1.6rem 0; }
+.hub-body #sweep-progress { margin: 0.7rem 1.6rem 0; }
+.hub-body .notice { font-size: 0.85rem; }
+
+/* The old card chrome has no place inside the panes. */
+.hub-body .card {
+  background: none;
+  border: none;
+  border-radius: 0;
+  padding: 0;
+  margin: 0;
+}
+
+/* -- responsive ------------------------------------------------------------ */
+
+@media (max-width: 1400px) {
+  .hub-body .panel { width: 18rem; }
+  .hub-body .rail { width: 12.5rem; }
+  .hub-body #files-table td,
+  .hub-body #files-table thead th { padding-left: 1.2rem; padding-right: 1.2rem; }
+  .hub-body .headline { font-size: 1.85rem; }
+}
+
+/* Below 1100px the panel becomes a right-anchored overlay drawer: selecting a row
+   opens it, Esc or the close link dismisses it. */
+@media (max-width: 1100px) {
+  .hub-body .panel {
+    position: fixed;
+    right: 0;
+    top: 0;
+    bottom: 0;
+    z-index: 40;
+    width: min(22rem, 92vw);
+    background: var(--card);
+    box-shadow: -8px 0 30px rgba(0, 0, 0, 0.28);
+    transform: translateX(101%);
+    transition: transform 200ms cubic-bezier(0.4, 0, 0.2, 1);
+  }
+  :root[data-theme="dark"] .hub-body .panel { background: var(--bg); }
+  .hub-body.drawer-open .panel { transform: none; }
+  .hub-body .rail { width: 3.5rem; padding: 1.4rem 0.5rem; align-items: center; }
+  .hub-body .rail .rail-word,
+  .hub-body .rail .rail-label,
+  .hub-body .rail #repo-info,
+  .hub-body .rail .rail-item-label,
+  .hub-body .rail .rail-folders,
+  .hub-body .rail .context-sub,
+  .hub-body .rail .rail-ws { display: none; }
+  /* The collapsed strip: one glyph per destination, and a severity dot for the ones
+     that are actually asking for something. The label rides the title attribute. */
+  .hub-body .rail-item { justify-content: center; position: relative; }
+  .hub-body .rail-caret { display: none; }
+  .hub-body .rail-icon { display: inline; font-size: 14px; }
+  .hub-body .rail-count { display: none; }
+  .hub-body .rail-dot {
+    display: inline;
+    position: absolute;
+    top: -2px;
+    right: 0.35rem;
+    font-size: 7px;
+    line-height: 1;
+  }
+  /* The copilot state keeps its colour but gives up its words — three lines of
+     "copilot · schema-only" wrapped in a 56px rail helps nobody. */
+  .hub-body .rail-foot .rail-menu > summary { font-size: 0; text-align: center; }
+  .hub-body .rail-foot .rail-menu > summary::after { content: "●"; font-size: 11px; }
+  .hub-body .rail-menu-panel { left: calc(100% + 0.4rem); top: auto; bottom: 0; }
+}
+
+@media (max-width: 720px) {
+  .hub-body main.hub-shell { flex-direction: column; }
+  .hub-body .rail {
+    width: 100%;
+    flex-direction: row;
+    align-items: center;
+    gap: 0.9rem;
+    padding: 0.6rem 0.9rem;
+    border-right: none;
+    border-bottom: 1px solid var(--rule-strong);
+    overflow-x: auto;
+  }
+  .hub-body .rail .rail-word { display: inline; }
+  .hub-body .rail-nav { flex-direction: row; gap: 0.9rem; }
+  .hub-body .rail-foot { margin-top: 0; }
+  .hub-body .centre-head { padding: 1.1rem 1rem; }
+  .hub-body .headline { font-size: 1.6rem; }
+  .hub-body #files-table td,
+  .hub-body #files-table thead th { padding-left: 1rem; padding-right: 1rem; }
+}
+
+/* There is nothing animating here beyond colour, so this is mostly a promise to
+   keep it that way — the drawer's slide is the one exception, and it stops. */
 @media (prefers-reduced-motion: reduce) {
-  .hub-stars i,
-  .hub-bob,
-  .hub-reflection { animation: none; }
+  .hub-body .panel,
+  .hub-body .rail-glyph,
+  .hub-body tr.nb-row,
+  .hub-body .mono-link { transition: none; }
+}
+
+/* -- The sub-pages, in the chart room ---------------------------------------
+   settings.html, activity.html and reviews.html each carry `hub-body` (the shell,
+   the rail, the header block, the mono links, the two rule weights) plus
+   `page-body` (what all three share). Settings adds `settings-body` for the row
+   rhythm that is its own. Nothing here restates the chart room; it only adds the
+   parts each page genuinely needs.
+
+   Their rails come from subpage.js, so the page list and the scroll spy exist
+   once for all three. */
+
+.hub-body.page-body .centre-body { padding-bottom: 3rem; }
+.hub-body.page-body .hub-watermark {
+  width: 320px;
+  height: 320px;
+  right: -50px;
+  top: 56px;
+  opacity: calc(var(--watermark) * 0.7);
+}
+
+/* The sub-pages' explanatory line under the headline. Prose, not the hub's flex
+   status row — inline <code> in a flex container becomes a flex ITEM and the
+   sentence comes apart around it. */
+.hub-body .page-intro {
+  max-width: 64rem;
+  margin-top: 0.7rem;
+  font-size: 0.85rem;
+  line-height: 1.55;
+  color: var(--muted);
+}
+.hub-body .page-intro code {
+  font-family: var(--mono);
+  font-size: 0.9em;
+}
+/* The filter box is a control in the action row, not a full-width field. */
+.hub-body .action-row .file-search,
+.hub-body .action-row input[type="search"],
+.hub-body .action-row input[type="text"] {
+  width: auto;
+  flex: 0 1 26rem;
+  min-width: 12rem;
+  margin: 0;
+}
+
+.hub-body .rail-sections { display: flex; flex-direction: column; gap: 0.55rem; }
+.hub-body .rail-sections .rail-item { font-size: 12px; }
+
+/* A group of settings. The label is the same mono caps device the detail panel
+   uses for SELECTED / STATE / RECEIPTS, so the two pages read as one product. */
+/* A settings row needs a MEASURE, so the whole column is capped. The notebook list
+   can run the full width of the pane because its two columns are read together; a
+   label whose control has drifted a thousand pixels to the right is not a row any
+   more. Capping the GROUP (rather than each child) also keeps the divider aligned
+   with the rows above it, and leaves the right margin for the watermark. */
+.hub-body .page-section {
+  max-width: calc(64rem + 3.2rem);
+  padding: 1.9rem 1.6rem 0.4rem;
+  /* The hairline, not the structural rule: three near-black full-width lines would
+     be heavier than the card edges they replaced. The mono caps label does the
+     separating; the rule only confirms it. */
+  border-bottom: 1px solid var(--rule-row);
+}
+.hub-body .page-section:first-child { padding-top: 1.4rem; }
+.hub-body .page-section:last-child { border-bottom: none; }
+/* The explanatory paragraph some sections carry, held to the same measure as the
+   rows beneath it. */
+.hub-body .section-note {
+  margin: 0 0 0.9rem;
+  max-width: 46rem;
+  font-size: 0.85rem;
+  line-height: 1.5;
+  color: var(--muted);
+}
+.hub-body .page-section:last-child { border-bottom: none; }
+.hub-body .page-section > .panel-label { margin-bottom: 0.7rem; }
+/* The two read-only blocks (team policy, admin) are reference, not controls —
+   quieter, and set on the page's own ground rather than a card. */
+.hub-body .page-section.read-only { color: var(--muted); }
+.hub-body .page-section.read-only p { margin: 0 0 0.6rem; font-size: 0.85rem; }
+.hub-body .page-section.read-only ul { margin: 0 0 0.8rem; padding-left: 1.1rem; }
+
+.hub-body .settings-row {
+  padding: 0.75rem 0;
+  border-top: 1px solid var(--rule-row);
+  gap: 1.4rem;
+}
+.hub-body .settings-row:first-of-type { border-top: none; }
+.hub-body .settings-label > label {
+  display: inline-block;
+  margin: 0 0.5rem 0 0;
+  font-family: var(--oah-font-display);
+  font-size: 0.95rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--ink);
+}
+.hub-body .settings-help {
+  font-size: 0.82rem;
+  line-height: 1.5;
+  max-width: 46rem;
+}
+/* The severity tags keep their words; only the pill chrome goes, so they sit in
+   the line of type rather than floating on it. */
+.hub-body .settings-label .badge {
+  border: none;
+  border-radius: 0;
+  padding: 0;
+  margin-left: 0.5rem;
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.hub-body .settings-control input[type="text"],
+.hub-body .settings-control input[type="number"],
+.hub-body .settings-control select {
+  font-family: var(--mono);
+  font-size: 12px;
+  border-radius: 6px;
+  background: transparent;
+}
+.hub-body .settings-control button.ghost {
+  font-family: var(--mono);
+  font-size: 11px;
+  border: none;
+  border-bottom: 1px solid var(--border);
+  border-radius: 0;
+  padding: 0 0 1px;
+  background: none;
+}
+.hub-body .settings-control button.ghost:hover {
+  background: none;
+  border-bottom-color: var(--accent);
+  color: var(--ink);
+}
+.hub-body .settings-control button.ghost:disabled { border-bottom-color: transparent; }
+
+.hub-body .admin-table { margin-top: 0.2rem; }
+.hub-body .admin-table td {
+  border-top: 1px solid var(--rule-row);
+  padding: 0.4rem 0.5rem 0.4rem 0;
+  font-size: 0.85rem;
+}
+.hub-body .admin-table tr:first-child td { border-top: none; }
+.hub-body .admin-value { font-family: var(--mono); font-size: 11px; }
+
+/* -- Activity: the ledger and the trash -------------------------------------
+   The ledger is a run of hairline rows, each led by a mono timestamp column so the
+   times form a readable edge rather than floating in the sentence. */
+.hub-body .activity-list { margin: 0; max-width: 64rem; }
+.hub-body .activity-list li {
+  display: flex;
+  gap: 0.9rem;
+  align-items: baseline;
+  padding: 0.5rem 0;
+  border-bottom: 1px solid var(--rule-row);
+  font-size: 0.88rem;
+}
+.hub-body .activity-list li:last-child { border-bottom: none; }
+.hub-body .activity-time {
+  flex: none;
+  min-width: 7.5rem;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--fg-faint);
+}
+
+.hub-body #trash-table { max-width: 64rem; }
+.hub-body #trash-table thead th {
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 400;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--fg-faint);
+  border-top: none;
+  border-bottom: 1px solid var(--rule-row);
+  padding: 0.4rem 0.5rem 0.4rem 0;
+}
+.hub-body #trash-table td {
+  border-top: none;
+  border-bottom: 1px solid var(--rule-row);
+  padding: 0.55rem 0.5rem 0.55rem 0;
+  font-size: 0.85rem;
+}
+.hub-body #trash-table tr:last-child td { border-bottom: none; }
+.hub-body #trash-table td.path { font-family: var(--mono); font-size: 11px; }
+
+/* -- Reviews: the inbox rows and one open review ----------------------------
+   A row is the whole target — a button, so it is focusable and keyboard-operable
+   with no wiring of its own. Same shape as a notebook row: title, mono detail,
+   state on the right. */
+.hub-body .reviews-list { list-style: none; margin: 0; padding: 0; max-width: 64rem; }
+.hub-body .review-row {
+  display: flex;
+  width: 100%;
+  gap: 1rem;
+  align-items: center;
+  text-align: left;
+  padding: 0.8rem 0;
+  border: none;
+  border-bottom: 1px solid var(--rule-row);
+  border-radius: 0;
+  background: none;
+  cursor: pointer;
+  transition: background 120ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+.hub-body .review-row:hover { background: var(--row-hover); }
+.hub-body .review-row-main { flex: 1; min-width: 0; }
+.hub-body .review-row-main .row-title,
+.hub-body .review-row-main .row-sub { display: block; }
+.hub-body .review-row-state { flex: none; width: 8rem; font-size: 11px; }
+
+.hub-body .detail-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+  max-width: 64rem;
+}
+.hub-body .detail-head h3 { margin: 0; }
+.hub-body #detail-files { max-width: 64rem; margin-top: 0.9rem; }
+.hub-body .review-note-label {
+  display: block;
+  margin-top: 1rem;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+.hub-body #review-note-text {
+  width: 100%;
+  max-width: 64rem;
+  box-sizing: border-box;
+  margin-top: 0.25rem;
+  padding: 0.5rem 0.6rem;
+  font: inherit;
+  font-size: 0.88rem;
+  color: var(--ink);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+.hub-body #review-note-text:focus { outline: none; border-color: var(--accent); }
+
+@media (max-width: 1100px) {
+  /* In the collapsed icon strip the section list has no room for its labels, and a
+     column of bare carets would say nothing — the sections are still one scroll away.
+     The footnote goes too: at 56px it wraps to four lines to say what the meta line
+     ("THIS MACHINE") already says. */
+  .hub-body .rail-sections,
+  .hub-body.page-body #rail-note { display: none; }
+}
+@media (max-width: 720px) {
+  /* Back in the top bar there is room for it again, beside the glyphs. */
+  .hub-body.page-body #rail-note { display: block; }
+}
+@media (max-width: 720px) {
+  .hub-body .page-section { padding-left: 1rem; padding-right: 1rem; }
+  .hub-body .settings-row { flex-direction: column; align-items: stretch; gap: 0.5rem; }
+  .hub-body .settings-control { justify-content: flex-start; }
+  .hub-body .activity-list li { flex-direction: column; gap: 0.15rem; }
+  .hub-body .review-row { flex-direction: column; align-items: flex-start; gap: 0.3rem; }
+  .hub-body .review-row-state { width: auto; }
 }
 
 /* ==========================================================================
