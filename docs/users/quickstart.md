@@ -81,7 +81,8 @@ Edit in the marimo editor, then back in the hub:
 ## 5. Ask the AI safely
 
 With the `copilot` extra installed (step 1) and your org's Copilot policy enabled,
-sign in to Copilot — the hub's **🤖 Copilot** menu, or `mooring ai login` — and the
+sign in to Copilot — the **copilot** line at the foot of the hub's left rail, or
+`mooring ai login` — and the
 **AI** button opens a chat beside any notebook. The copilot is **on by default**;
 there's no setting to flip for the copilot itself.
 

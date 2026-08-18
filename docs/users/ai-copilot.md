@@ -34,8 +34,8 @@ uvx "mooring[copilot]"               # …or a one-off run (doesn't stay install
 Then sign in to GitHub Copilot. You can do it **from the hub** or from the
 command line — either works:
 
-- **In the hub** — open the **🤖 Copilot** menu in the header to see whether
-  Copilot is connected (and as which account). Click **Sign in to Copilot** to
+- **In the hub** — the **copilot** line at the foot of the left rail says whether
+  Copilot is connected (and as which account); open it for the controls. Click **Sign in to Copilot** to
   authorise in a browser; **Switch account** changes which account is used. If you
   open the chat before signing in, it shows a **Sign in to Copilot** button right
   there too.

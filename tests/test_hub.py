@@ -40,9 +40,14 @@ def test_index_serves_html(unconfigured_client):
     resp = client.get("/")
     assert resp.status_code == 200
     assert "mooring" in resp.text
-    # The offline banner's DOM slot ships with the page (app.js renders into it
-    # whenever /api/state carries an `offline` payload).
-    assert 'id="offline-banner"' in resp.text
+    # The three panes of the hub shell ship with the page; app.js renders into them.
+    # (The offline/freshness/review/adopt notice boxes were retired here: their state
+    # now drives the headline, the meta line and the rail — see headline.js.)
+    assert '<main class="hub-shell">' in resp.text
+    for slot in ('id="rail-nav"', 'id="headline"', 'id="files-table"', 'id="panel"'):
+        assert slot in resp.text
+    # A hard failure must still have a loud, always-present home at the top.
+    assert 'id="error-banner"' in resp.text
 
 
 def test_state_unconfigured(unconfigured_client):
@@ -3134,21 +3139,31 @@ def test_api_doctor_appends_copilot_probe_when_ai_enabled(configured, monkeypatc
     assert "@phil" in body["results"][0]["detail"]
 
 
-def test_appjs_element_ids_all_exist_in_index_html():
-    """Wiring pin: every element id app.js looks up must exist in index.html.
+@pytest.mark.parametrize(
+    ("script", "page"),
+    [
+        ("app.js", "index.html"),
+        ("settings.js", "settings.html"),
+        ("activity.js", "activity.html"),
+        ("reviews.js", "reviews.html"),
+    ],
+)
+def test_page_element_ids_all_exist_in_its_html(script, page):
+    """Wiring pin: every element id a page script looks up must exist in its HTML.
     A load-time addEventListener on a missing element throws and kills the whole
-    hub frontend, so this catches renamed/forgotten ids before a browser does."""
+    page, so this catches renamed/forgotten ids before a browser does. Covers every
+    page/script pair, not just the hub — a re-skin moves ids on the sub-pages too."""
     import re
     from importlib import resources
 
     static = resources.files("mooring.hub").joinpath("static")
-    app_js = (static / "app.js").read_text("utf-8")
-    index_html = (static / "index.html").read_text("utf-8")
-    ids = set(re.findall(r'\$\("([A-Za-z0-9_-]+)"\)', app_js))
+    src = (static / script).read_text("utf-8")
+    html = (static / page).read_text("utf-8")
+    ids = set(re.findall(r'\$\("([A-Za-z0-9_-]+)"\)', src))
     assert ids  # the pattern must keep matching if $() changes shape
-    created = set(re.findall(r'\.id = "([A-Za-z0-9_-]+)"', app_js))  # built by app.js itself
-    missing = [i for i in sorted(ids - created) if f'id="{i}"' not in index_html]
-    assert not missing, f"app.js references ids missing from index.html: {missing}"
+    created = set(re.findall(r'\.id = "([A-Za-z0-9_-]+)"', src))  # built by the script itself
+    missing = [i for i in sorted(ids - created) if f'id="{i}"' not in html]
+    assert not missing, f"{script} references ids missing from {page}: {missing}"
 
 
 def test_resolve_push_copy_goes_through_the_guard(configured):

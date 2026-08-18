@@ -26,7 +26,6 @@ function showError(msg) {
   const el = $("error-banner");
   el.textContent = msg;
   el.classList.toggle("hidden", !msg);
-  if (msg) el.scrollIntoView({ block: "nearest" });
 }
 
 let MODELS = []; // [{id, name, multiplier}] from /api/ai/models (empty if AI off)
@@ -183,14 +182,12 @@ function render(payload) {
   const byGroup = {};
   for (const spec of payload.editable) (byGroup[spec.group] ||= []).push(spec);
 
+  const sections = [];  // {id, label} for the rail, in page order
   for (const group of payload.groups) {
     const specs = byGroup[group.id] || [];
     if (!specs.length) continue;
-    const card = document.createElement("section");
-    card.className = "card";
-    const h = document.createElement("h2");
-    h.textContent = group.label;
-    card.appendChild(h);
+    const card = SubPage.section(group.id, group.label);
+    sections.push({ id: group.id, label: group.label });
     // A live, value-free status line for the PII guard.
     if (group.id === "pii" && payload.pii) {
       const s = payload.pii;
@@ -210,11 +207,9 @@ function render(payload) {
   // [policy] rules this client actually applies (and any it had to ignore).
   const pol = payload.policy;
   if (pol && (pol.in_force || pol.unreadable)) {
-    const card = document.createElement("section");
-    card.className = "card admin-card";
-    const h = document.createElement("h2");
-    h.textContent = "Set by your team (policy)";
-    card.appendChild(h);
+    const card = SubPage.section("policy", "Set by your team");
+    card.classList.add("read-only");
+    sections.push({ id: "policy", label: "Set by your team" });
     const p = document.createElement("p");
     p.className = "muted";
     p.textContent =
@@ -234,11 +229,9 @@ function render(payload) {
   }
 
   if (payload.admin && payload.admin.length) {
-    const card = document.createElement("section");
-    card.className = "card admin-card";
-    const h = document.createElement("h2");
-    h.textContent = "Managed by your admin";
-    card.appendChild(h);
+    const card = SubPage.section("admin", "Managed by your admin");
+    card.classList.add("read-only");
+    sections.push({ id: "admin", label: "Managed by your admin" });
     const p = document.createElement("p");
     p.className = "muted";
     p.textContent = "Set when your app was built, by your team, or via environment variables. Change these with `mooring config` or ask your admin.";
@@ -261,6 +254,9 @@ function render(payload) {
     root.appendChild(card);
   }
 
+  SubPage.sections(sections);
+  renderMeta(payload);
+
   if (activeId) {
     const el = document.getElementById(activeId);
     if (el) {
@@ -272,9 +268,24 @@ function render(payload) {
   }
 }
 
+// The meta line: what this page is, how much of it there is, and where it saves.
+// Three segments, like the hub's, so it never wraps.
+function renderMeta(payload) {
+  const n = (payload.editable || []).length;
+  $("meta-line").textContent =
+    ["SETTINGS", `${n} PREFERENCE${n === 1 ? "" : "S"}`, "THIS MACHINE"].join("\u00a0 / \u00a0");
+}
+
 // Apply a fresh server payload: pull the model list if AI just became available,
 // then re-render.
+//
+// Reconcile the appearance first. The pre-paint script in <head> paints from
+// localStorage ("last used"), but the SERVER is the source of truth — the hub does
+// this in refresh(), and without the same step here the page that OWNS the theme
+// control could sit there dark with its own select reading "Light".
 async function show(payload) {
+  const theme = (payload.editable || []).find((s) => s.key === "ui.theme");
+  if (theme && theme.value) applyTheme(theme.value);
   if (payload.ai_enabled && !modelsLoaded) await loadModels();
   render(payload);
 }

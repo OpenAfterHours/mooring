@@ -17,50 +17,82 @@
   <link rel="stylesheet" href="/static/style.css">
   <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
 </head>
-<body class="settings-body">
-  <header>
-    <!-- Brand-as-home (see settings.html): ⚓ mooring links to the hub; the page
-         name follows as a breadcrumb crumb, replacing a separate back link. -->
-    <h1><a class="brand-home" href="/" title="Back to the hub"><svg class="brand-mark" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 6v16M19 13l2-1a9 9 0 0 1-18 0l2 1M9 11h6"/><circle cx="12" cy="4" r="2"/></svg>mooring</a><span class="page-crumb">Activity</span></h1>
-  </header>
+<!-- Activity wears the hub's chart room, like settings and reviews: `hub-body`
+     brings the shell, the rail, the header block and the two rule weights;
+     `page-body` the bits every sub-page shares. `data-page` is what subpage.js
+     reads to mark this page in the rail. -->
+<body class="hub-body page-body" data-page="activity">
+  <main class="hub-shell">
 
-  <main>
-    <p class="muted">
-      What mooring did in this workspace — pulls, pushes, deletes, reverts, and
-      copilot applies. This journal is saved <b>on this machine only</b> (in the
-      workspace's <code>.mooring</code> folder); it never syncs to the team repo
-      and is separate from any central logging your admin may have enabled.
-    </p>
-    <div id="error-banner" class="hidden"></div>
+  <nav class="rail" aria-label="Pages">
+    <!-- Brand-as-home: the ⚓ mooring lockup links back to the hub. -->
+    <a class="rail-brand brand-home" href="/" title="Back to the hub">
+      <svg class="brand-mark" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 6v16M19 13l2-1a9 9 0 0 1-18 0l2 1M9 11h6"/><circle cx="12" cy="4" r="2"/></svg>
+      <span class="rail-word">mooring</span>
+    </a>
+    <div id="rail-nav" class="rail-nav"></div>
+    <div id="section-nav" class="rail-sections"></div>
+    <div class="rail-foot">
+      <div id="rail-note">never leaves this machine</div>
+    </div>
+  </nav>
 
-    <section class="card">
-      <h2>Recent activity</h2>
-      <div class="toolbar">
-        <input id="activity-filter" placeholder="Filter by file path (e.g. notebooks/sales.py)">
-        <button id="activity-refresh" class="small">&#8635; Refresh</button>
+  <section class="centre">
+    <svg class="hub-watermark" viewBox="0 0 24 24" fill="none" stroke="#ff9100" stroke-width="1.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 6v16M19 13l2-1a9 9 0 0 1-18 0l2 1M9 11h6"/><circle cx="12" cy="4" r="2"/></svg>
+
+    <div id="error-banner" class="notice notice-error hidden"></div>
+
+    <div class="centre-head">
+      <div id="meta-line" class="meta-line"></div>
+      <!-- Derived from the ledger itself (see activity.js), so the page opens by
+           telling you whether there is anything here rather than describing itself. -->
+      <h2 id="headline" class="headline"></h2>
+      <div class="action-row">
+        <input id="activity-filter" class="file-search"
+               placeholder="Filter by file path (e.g. notebooks/sales.py)"
+               aria-label="Filter activity by file path" autocomplete="off">
+        <button id="activity-refresh" class="mono-link">refresh</button>
       </div>
-      <ul id="activity-list" class="activity-list"></ul>
-      <div id="activity-empty" class="muted hidden">Nothing recorded yet.</div>
-    </section>
+      <div class="page-intro">
+        Pulls, pushes, deletes, reverts and copilot applies. This journal is saved in
+        the workspace&#8217;s <code>.mooring</code> folder, never syncs to the team repo,
+        and is separate from any central logging your admin may have enabled.
+      </div>
+    </div>
 
-    <section class="card">
-      <h2>Trash</h2>
-      <p class="muted">
-        Before mooring overwrites or removes a local file (a conflict's "Use
-        remote", pull updates, delete, a data-file revert), the file's previous
-        bytes are saved here. Restore puts them back; if the file has changed
-        again since, the restore refuses rather than overwrite newer work.
-      </p>
-      <table id="trash-table" class="hidden">
-        <thead><tr><th>File</th><th>Saved</th><th>Why</th><th></th></tr></thead>
-        <tbody></tbody>
-      </table>
-      <div id="trash-empty" class="muted hidden">The trash is empty.</div>
-    </section>
+    <div class="centre-body">
+      <section class="page-section" id="section-activity">
+        <div class="panel-label">RECENT ACTIVITY</div>
+        <ul id="activity-list" class="activity-list"></ul>
+        <div id="activity-empty" class="muted hidden">Nothing recorded yet.</div>
+      </section>
+
+      <!-- The trash: the pre-image of every file mooring was about to overwrite or
+           remove. Restore is token-exact — if the file has changed again since, it
+           refuses rather than overwrite newer work. -->
+      <section class="page-section" id="section-trash">
+        <div class="panel-label">TRASH</div>
+        <p class="section-note">
+          Before mooring overwrites or removes a local file (a conflict&#8217;s &#8220;Use
+          remote&#8221;, pull updates, delete, a data-file revert), the file&#8217;s previous
+          bytes are saved here. Restore puts them back; if the file has changed
+          again since, the restore refuses rather than overwrite newer work.
+        </p>
+        <table id="trash-table" class="hidden">
+          <thead><tr><th>File</th><th>Saved</th><th>Why</th><th></th></tr></thead>
+          <tbody></tbody>
+        </table>
+        <div id="trash-empty" class="muted hidden">The trash is empty.</div>
+      </section>
+    </div>
+  </section>
+
   </main>
 
   <!-- Pure helpers first (bare globals), then the page script. -->
   <script src="/static/theme.js"></script>
+  <script src="/static/headline.js"></script>
+  <script src="/static/subpage.js"></script>
   <script src="/static/activity_fmt.js"></script>
   <script src="/static/activity.js"></script>
 </body>

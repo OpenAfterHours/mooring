@@ -19,94 +19,69 @@
   <link rel="stylesheet" href="/static/style.css">
   <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
 </head>
-<body class="settings-body has-scene">
-  <!-- Decorative day/night-sea backdrop (shared with the hub; see index.html).
-       aria-hidden + pointer-events:none; the boat sails in once via scene.js. -->
-  <div class="hub-scene" aria-hidden="true">
-    <div class="hub-stars" data-count="120" data-seed="7"></div>
-    <svg class="hub-sun" viewBox="0 0 200 200">
-      <defs>
-        <radialGradient id="hubSunGlow" cx="50%" cy="50%" r="50%">
-          <stop offset="0%" stop-color="#ffe6ae" stop-opacity="0.55"/>
-          <stop offset="38%" stop-color="#ffb74d" stop-opacity="0.22"/>
-          <stop offset="100%" stop-color="#ffb74d" stop-opacity="0"/>
-        </radialGradient>
-        <radialGradient id="hubSunDisc" cx="50%" cy="44%" r="55%">
-          <stop offset="0%" stop-color="#ffe7b3"/>
-          <stop offset="62%" stop-color="#ffb43c"/>
-          <stop offset="100%" stop-color="#ff9100"/>
-        </radialGradient>
-      </defs>
-      <circle cx="100" cy="100" r="98" fill="url(#hubSunGlow)"/>
-      <circle cx="100" cy="100" r="42" fill="url(#hubSunDisc)"/>
-    </svg>
-    <svg class="hub-moon" viewBox="0 0 200 200">
-      <defs>
-        <radialGradient id="hubMoonGlow" cx="50%" cy="50%" r="50%">
-          <stop offset="0%" stop-color="#fff6e0" stop-opacity="0.45"/>
-          <stop offset="40%" stop-color="#ffd98a" stop-opacity="0.16"/>
-          <stop offset="100%" stop-color="#ffd98a" stop-opacity="0"/>
-        </radialGradient>
-        <mask id="hubMoonCrescent">
-          <circle cx="100" cy="100" r="34" fill="#fff"/>
-          <circle cx="116" cy="93" r="32" fill="#000"/>
-        </mask>
-      </defs>
-      <circle cx="100" cy="100" r="98" fill="url(#hubMoonGlow)"/>
-      <circle cx="100" cy="100" r="34" fill="#f3ecdc" mask="url(#hubMoonCrescent)"/>
-    </svg>
+<!-- Settings wears the hub's "chart room": the same rail, the same header block, the
+     same hairlines instead of card boxes. It carries `hub-body` so it inherits that
+     whole layer rather than restating it, plus `settings-body` for the row rhythm
+     that is its own. Two panes, not three — a settings row already carries its
+     control on the right, so there is no third thing to put in a detail panel. -->
+<body class="hub-body page-body settings-body" data-page="settings">
+  <main class="hub-shell">
 
-    <div class="hub-water"></div>
-    <div class="hub-reflection"></div>
-    <div class="hub-wave hub-wave-1"></div>
-    <div class="hub-wave hub-wave-2"></div>
+  <!-- ====================================================================
+       RAIL — where you are in the app, and where you are on this page.
+       ==================================================================== -->
+  <nav class="rail" aria-label="Settings">
+    <!-- Brand-as-home: the ⚓ mooring lockup is the way back to the hub (the
+         conventional logo-as-home), as it has been on every sub-page. -->
+    <a class="rail-brand brand-home" href="/" title="Back to the hub">
+      <svg class="brand-mark" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 6v16M19 13l2-1a9 9 0 0 1-18 0l2 1M9 11h6"/><circle cx="12" cy="4" r="2"/></svg>
+      <span class="rail-word">mooring</span>
+    </a>
 
-    <div class="hub-boat" data-hub-boat>
-      <div class="hub-rope" data-hub-rope></div>
-      <div class="hub-anchor" data-hub-anchor>
-        <svg width="30" height="36" viewBox="0 0 30 36" fill="none" stroke="var(--boat-metal)" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
-          <circle cx="15" cy="5" r="3.2"/>
-          <line x1="15" y1="8.2" x2="15" y2="30"/>
-          <line x1="8" y1="14" x2="22" y2="14"/>
-          <path d="M5 23 C5 31 11 33 15 33 C19 33 25 31 25 23"/>
-          <path d="M3 21 L5 23 L8 22"/>
-          <path d="M27 21 L25 23 L22 22"/>
-        </svg>
-      </div>
-      <div class="hub-bob">
-        <svg width="160" height="100" viewBox="0 0 160 100" fill="none">
-          <rect x="86" y="6" width="3" height="64" fill="var(--boat-metal)"/>
-          <path d="M89 7 L104 11 L89 15 Z" fill="#ff9100"/>
-          <path d="M83 14 L83 68 L130 68 Z" fill="#e7e1d4"/>
-          <path d="M80 18 L80 68 L44 68 Z" fill="#ff9100" opacity="0.92"/>
-          <path d="M16 70 L144 70 L132 90 Q128 94 120 94 L40 94 Q32 94 28 90 Z" fill="#c9442a"/>
-          <rect x="16" y="70" width="128" height="5" fill="#ffc857"/>
-          <path d="M16 75 L144 75 L132 90 Q128 94 120 94 L40 94 Q32 94 28 90 Z" fill="#000" opacity="0.18"/>
-        </svg>
+    <!-- The pages any machine can reach. Built by subpage.js from the `data-page`
+         attribute on <body>, so the list lives in one place for all three. -->
+    <div id="rail-nav" class="rail-nav"></div>
+
+    <!-- The sections of this page. Built by settings.js from the server's group
+         list (so a group with nothing in it never gets an entry), and marked
+         active by subpage.js's scroll spy. -->
+    <div id="section-nav" class="rail-sections"></div>
+
+    <div class="rail-foot">
+      <div id="rail-note">saved on this machine only</div>
+    </div>
+  </nav>
+
+  <!-- ====================================================================
+       CENTRE — one sentence about what this page is, then the settings.
+       ==================================================================== -->
+  <section class="centre">
+    <svg class="hub-watermark" viewBox="0 0 24 24" fill="none" stroke="#ff9100" stroke-width="1.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 6v16M19 13l2-1a9 9 0 0 1-18 0l2 1M9 11h6"/><circle cx="12" cy="4" r="2"/></svg>
+
+    <!-- Outside the header block, exactly as on the hub, so a failed save stays on
+         screen no matter where you have scrolled to. -->
+    <div id="error-banner" class="notice notice-error hidden"></div>
+
+    <div class="centre-head">
+      <div id="meta-line" class="meta-line"></div>
+      <!-- The headline states the one fact that governs everything below it: these
+           are YOUR machine's preferences, not the team's. -->
+      <h2 class="headline">Preferences for this machine.</h2>
+      <div id="settings-intro" class="page-intro">
+        Repositories are managed from the hub&#8217;s repo menu; team-wide and admin
+        settings are shown read-only below.
       </div>
     </div>
-  </div>
 
-  <header>
-    <!-- The brand (⚓ mooring) is the home link back to the hub — the conventional
-         logo-as-home, replacing a separate "← Back to hub" link. The page name
-         follows as a quiet breadcrumb crumb. -->
-    <h1><a class="brand-home" href="/" title="Back to the hub"><svg class="brand-mark" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 6v16M19 13l2-1a9 9 0 0 1-18 0l2 1M9 11h6"/><circle cx="12" cy="4" r="2"/></svg>mooring</a><span class="page-crumb">Settings</span></h1>
-  </header>
+    <div class="centre-body">
+      <div id="settings-root"></div>
+    </div>
+  </section>
 
-  <main>
-    <p id="settings-intro" class="muted">
-      These preferences are saved on <b>this machine only</b> (your user config).
-      Repositories are managed from the hub header; team-wide and admin settings are
-      shown read-only below.
-    </p>
-    <div id="error-banner" class="hidden"></div>
-    <div id="settings-root"></div>
   </main>
 
   <script src="/static/theme.js"></script>
+  <script src="/static/subpage.js"></script>
   <script src="/static/settings.js"></script>
-  <!-- Decorative backdrop (starfield + the one-time boat voyage). Last in <body>. -->
-  <script src="/static/scene.js"></script>
 </body>
 </html>

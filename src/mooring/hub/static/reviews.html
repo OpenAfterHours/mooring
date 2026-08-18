@@ -17,51 +17,76 @@
   <link rel="stylesheet" href="/static/style.css">
   <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
 </head>
-<body class="settings-body">
-  <header>
-    <!-- Brand-as-home (see settings.html): ⚓ mooring links to the hub; the page
-         name follows as a breadcrumb crumb, replacing a separate back link. -->
-    <h1><a class="brand-home" href="/" title="Back to the hub"><svg class="brand-mark" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 6v16M19 13l2-1a9 9 0 0 1-18 0l2 1M9 11h6"/><circle cx="12" cy="4" r="2"/></svg>mooring</a><span class="page-crumb">Reviews</span></h1>
-  </header>
+<!-- The reviewer inbox in the hub's chart room. It is the hub's own shape — a list
+     you pick from, then a detail that replaces it with a way back — so it uses the
+     same "centre view" idiom rather than stacking the detail under the list. -->
+<body class="hub-body page-body" data-page="reviews">
+  <main class="hub-shell">
 
-  <main>
-    <p class="muted">
-      Approve a teammate's proposed changes without leaving mooring. These are the open
-      <b>Propose</b> requests on review branches — <b>not your own</b> (GitHub won't let you
-      approve your own). The diff is cell-aware and value-free; Approve / Request changes
-      posts a review on GitHub.
-    </p>
-    <div id="error-banner" class="hidden"></div>
+  <nav class="rail" aria-label="Pages">
+    <a class="rail-brand brand-home" href="/" title="Back to the hub">
+      <svg class="brand-mark" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 6v16M19 13l2-1a9 9 0 0 1-18 0l2 1M9 11h6"/><circle cx="12" cy="4" r="2"/></svg>
+      <span class="rail-word">mooring</span>
+    </a>
+    <div id="rail-nav" class="rail-nav"></div>
+    <div class="rail-foot">
+      <div id="rail-note">posts a review on GitHub</div>
+    </div>
+  </nav>
 
-    <section class="card">
-      <div class="toolbar">
-        <h2 style="margin:0">Awaiting your review</h2>
-        <button id="reviews-refresh" class="small">&#8635; Refresh</button>
-      </div>
-      <ul id="reviews-list" class="activity-list"></ul>
-      <div id="reviews-empty" class="muted hidden">No proposals are waiting for your review.</div>
-    </section>
+  <section class="centre">
+    <svg class="hub-watermark" viewBox="0 0 24 24" fill="none" stroke="#ff9100" stroke-width="1.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 6v16M19 13l2-1a9 9 0 0 1-18 0l2 1M9 11h6"/><circle cx="12" cy="4" r="2"/></svg>
 
-    <section id="review-detail" class="card hidden">
-      <div class="toolbar">
-        <h2 id="detail-title" style="margin:0">Review</h2>
-        <a id="detail-gh" class="header-link" href="#" target="_blank" rel="noopener noreferrer">View on GitHub &#8599;</a>
+    <div id="error-banner" class="notice notice-error hidden"></div>
+
+    <div id="centre-head" class="centre-head">
+      <div id="meta-line" class="meta-line"></div>
+      <!-- Derived from the inbox (see reviews.js): how many proposals are waiting
+           for YOU, which is the only thing this page exists to answer. -->
+      <h2 id="headline" class="headline"></h2>
+      <div class="action-row">
+        <button id="reviews-refresh" class="mono-link">refresh</button>
       </div>
-      <div id="detail-author" class="muted"></div>
-      <div id="detail-files"></div>
-      <label for="review-note-text" class="muted" style="display:block;margin-top:0.75rem">
-        Note <span class="muted">(required to request changes)</span>
-      </label>
-      <textarea id="review-note-text" rows="3" placeholder="One note for the whole change…"></textarea>
-      <div class="toolbar">
-        <button id="btn-approve" class="small">&#10003; Approve</button>
-        <button id="btn-request" class="small">&#9998; Request changes</button>
+      <div class="page-intro">
+        These are teammates&#8217; open <b>Propose</b> requests &mdash; not your own
+        (GitHub won&#8217;t let you approve those). The diff is cell-aware and value-free.
       </div>
-    </section>
+    </div>
+
+    <div class="centre-body">
+      <!-- The detail replaces the list, exactly as a notebook's panels do on the hub. -->
+      <button id="centre-back" class="centre-back hidden">&#8592; back to reviews</button>
+
+      <section id="reviews-card" class="view">
+        <ul id="reviews-list" class="reviews-list"></ul>
+        <div id="reviews-empty" class="muted hidden">No proposals are waiting for your review.</div>
+      </section>
+
+      <section id="review-detail" class="view hidden">
+        <div class="detail-head">
+          <h3 id="detail-title">Review</h3>
+          <a id="detail-gh" class="mono-link" href="#" target="_blank" rel="noopener noreferrer">view on GitHub &#8599;</a>
+        </div>
+        <div id="detail-author" class="muted"></div>
+        <div id="detail-files"></div>
+        <label for="review-note-text" class="review-note-label">
+          Note <span class="muted">(required to request changes)</span>
+        </label>
+        <textarea id="review-note-text" rows="3" placeholder="One note for the whole change&hellip;"></textarea>
+        <div class="toolbar">
+          <button id="btn-approve" class="primary small">&#10003; Approve</button>
+          <button id="btn-request" class="small">&#9998; Request changes</button>
+        </div>
+      </section>
+    </div>
+  </section>
+
   </main>
 
-  <!-- Pure diff helpers first (bare global), then the page script. -->
+  <!-- Pure diff helpers first (bare globals), then the page script. -->
   <script src="/static/theme.js"></script>
+  <script src="/static/headline.js"></script>
+  <script src="/static/subpage.js"></script>
   <script src="/static/diff_fmt.js"></script>
   <script src="/static/reviews.js"></script>
 </body>

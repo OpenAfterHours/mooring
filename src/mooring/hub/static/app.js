@@ -27,6 +27,9 @@ const applyTheme = window.MooringTheme.applyTheme;
 
 let busy = false;
 let showAddRepo = false;
+// The accounts/setup/sign-in view was opened deliberately from the rail (rather than
+// forced by a login wall), so refresh() knows not to close it under the user.
+let showAccountsView = false;
 let lastFiles = [];
 let lastArtifacts = [];
 let lastFolders = [];
@@ -34,16 +37,24 @@ let lastReview = null;
 // The catalog search box's current text — filters the file listing client-side. Kept
 // across /api/state re-renders so a poll doesn't clear an in-progress filter.
 let fileQuery = "";
-// The "focus one folder" view + the default-collapse memory. `focusPrefix` narrows the
-// whole listing to one folder subtree ("" = All folders); `folderExpand` maps a folder
-// to an explicit open/closed choice that overrides the crowded() default. Both are
-// display-only and persist PER WORKSPACE in localStorage on the stable hub origin (see
-// loadFolderView). `currentNodePaths` is every folder node in the last-rendered tree —
-// the Expand/Collapse-all escape hatch pins exactly those.
+// The "focus one folder" view. `focusPrefix` narrows the whole listing to one folder
+// subtree ("" = every notebook); `moreOpen` is the folder summary line's personal
+// "show the rest" fold. Display-only, and persisted PER WORKSPACE in localStorage on
+// the stable hub origin (see loadFolderView) alongside the selection.
 let focusPrefix = "";
-let folderExpand = {};
 let folderViewKey = null;
-let currentNodePaths = [];
+// The one row the detail panel is about. Persisted per workspace beside the focus,
+// and NEVER set automatically — see setSelected.
+let selectedPath = "";
+// Which pane the centre shows: the notebook list, or one of the panels that used to
+// be a stacked card below it. See CENTRE_VIEWS / setCentreView.
+let centreView = "list";
+// Whether the notebook surface is usable at all (logged in, or local mode) — the
+// rail and the header read it, so it is mirrored here from refresh().
+let filesVisible = false;
+let lastMode = "local";
+let canRecall = false;
+let aiBatchEnabled = false;
 // Repo-curated "featured folders" (synced mooring.toml [hub]): the starred folders show
 // first and the rest fold under a "More folders" disclosure. `lastFeatured` mirrors
 // /api/state; `canFeature` gates the star control to repo mode (it curates for the team);
@@ -95,9 +106,13 @@ function showError(message) {
   }
 }
 
+// The result of the last operation. It used to be a card permanently parked below
+// the file table; now the one-line outcome rides the header's status line and the
+// full text is a centre view. The view OPENS BY ITSELF only when the operation
+// produced something you must act on — a pull-request link, or a warning — because
+// yanking the list away after every routine push would be its own kind of noise.
 function showLog(data) {
   if (!data || (!data.lines && !data.summary && !data.warning)) return;
-  $("log-card").classList.remove("hidden");
   const lines = (data.lines || []).slice();
   if (data.warning) lines.push("⚠ " + data.warning);
   if (data.summary) lines.push("", data.summary);
@@ -107,6 +122,7 @@ function showLog(data) {
   const linkBox = $("log-link");
   const link = data.pull_url || data.compare_url;
   linkBox.classList.toggle("hidden", !link);
+  if (link || data.warning) setCentreView("log");
   if (link) {
     const a = linkBox.querySelector("a");
     a.href = link;
@@ -127,6 +143,25 @@ function setBusy(value) {
   // an action is in flight, but that greying is faint — .busy adds a progress
   // cursor (+ a subtle dim, in CSS) so even a fast op looks like it did something.
   document.body.classList.toggle("busy", value);
+}
+
+// The quiet outcome line under the headline: what the last operation did, with a way
+// into its full text. Written AFTER any refresh, since refresh() resets #summary to
+// the workspace caption and would otherwise wipe the result the instant it appeared.
+// Returns whether it had anything to say.
+function showOutcome(data) {
+  const text = data && (data.warning ? "⚠ " + data.warning : data.summary);
+  if (!text) return false;
+  const status = $("summary");
+  status.textContent = "";
+  status.classList.toggle("status-warn", !!data.warning);
+  status.append(text + " ");
+  const more = document.createElement("button");
+  more.className = "mono-link";
+  more.textContent = "details";
+  more.addEventListener("click", () => setCentreView("log"));
+  status.appendChild(more);
+  return true;
 }
 
 async function action(path, body, refreshAfter = true, status = "") {
@@ -159,10 +194,11 @@ async function action(path, body, refreshAfter = true, status = "") {
     if (data.url) window.open(data.url, "_blank");
     if (data.trashed && data.trashed.length) showUndoToast(data.trashed);
     if (refreshAfter) await refresh();
+    // The outcome goes on AFTER the refresh, or the refresh's caption would erase it.
+    if (!showOutcome(data) && summaryEl && !refreshAfter) summaryEl.textContent = prevSummary;
     return data;
   } finally {
     setBusy(false);
-    if (summaryEl && !refreshAfter) summaryEl.textContent = prevSummary;
     if (guardData) showGuardDialog(guardData, path, body || {});
   }
 }
@@ -237,7 +273,7 @@ function showGuardDialog(data, apiPath, body) {
       // open showing a stale diff with a live "Push this file" button.
       if (apiPath === "/api/push" || apiPath === "/api/propose") checklistSet("pushed");
       if (reviewPath && (body.paths || []).includes(reviewPath)) {
-        $("review-card").classList.add("hidden");
+        closeCentreView("review");
         reviewPath = null;
       }
     });
@@ -600,9 +636,8 @@ function paramsAction(path) {
   $("params-deliver").checked = true;
   $("params-table").classList.add("hidden");
   $("params-banner").classList.add("hidden");
-  $("params-card").classList.remove("hidden");
+  setCentreView("params");
   renderParamsPreview();
-  $("params-card").scrollIntoView({ behavior: "smooth", block: "nearest" });
   $("params-for").focus();
 }
 
@@ -665,7 +700,6 @@ async function cancelParamsRun() {
 
 function renderParamsRun(snap) {
   if (!snap) return;
-  $("params-card").classList.remove("hidden");
   $("params-path").textContent = snap.notebook || paramsPath;
   const banner = $("params-banner");
   banner.textContent = ParamsFmt.summary(snap);
@@ -704,7 +738,7 @@ function renderParamsRun(snap) {
 function closeParamsCard() {
   stopParamsPolling();
   paramsPath = "";
-  $("params-card").classList.add("hidden");
+  closeCentreView("params");
 }
 
 // -- scheduled refresh -------------------------------------------------------
@@ -729,9 +763,8 @@ function scheduleAction(path) {
   $("schedule-deliver").checked = existing ? !!existing.deliver : true;
   $("schedule-pull").checked = existing ? !!existing.pull : true;
   syncScheduleDayVisibility();
-  $("schedules-card").classList.remove("hidden");
+  setCentreView("schedules");
   $("schedule-form").classList.remove("hidden");
-  $("schedules-card").scrollIntoView({ behavior: "smooth", block: "nearest" });
 }
 
 // "On <weekday>" is meaningful for a weekly cadence only.
@@ -786,6 +819,7 @@ function applySchedules(data) {
     background: data.background || null,
   };
   renderSchedules();
+  renderRailNav();  // the rail carries the board's overdue/where-to-find-it count
 }
 
 // Turn background refresh (the OS task / sign-in agent) on or off. The response says which
@@ -823,12 +857,14 @@ function renderBackground() {
 
 function renderSchedules() {
   const rows = lastSchedules.schedules || [];
-  const card = $("schedules-card");
   const formOpen = !$("schedule-form").classList.contains("hidden");
-  // The card exists only once it has something to say — a user who never asked for a
-  // schedule never sees it.
-  card.classList.toggle("hidden", !rows.length && !formOpen);
-  if (!rows.length && !formOpen) return;
+  // The board POPULATES here but does not decide whether it is on screen: it is a rail
+  // destination, and the rail only offers it once there is a schedule to show — so a
+  // user who never asked for one never sees it, exactly as before.
+  if (!rows.length && !formOpen) {
+    if (centreView === "schedules") setCentreView("list");
+    return;
+  }
   renderBackground();
 
   const banner = $("schedules-banner");
@@ -1059,8 +1095,7 @@ async function restoreVersion(path, sha, asCopy) {
 }
 
 function renderHistory(path, versions, page) {
-  const card = $("history-card");
-  card.classList.remove("hidden");
+  setCentreView("history");
   $("history-title").textContent = `History — ${path}`;
   $("history-view").classList.add("hidden");
   const tbody = $("history-table").querySelector("tbody");
@@ -1107,7 +1142,7 @@ $("history-older").addEventListener("click", () => {
   if (historyPath) historyAction(historyPath, historyPage + 1);
 });
 $("history-close").addEventListener("click", () => {
-  $("history-card").classList.add("hidden");
+  closeCentreView("history");
   historyPath = null;
 });
 
@@ -1125,8 +1160,7 @@ async function reviewAction(path) {
 }
 
 function renderReview(path, result) {
-  const card = $("review-card");
-  card.classList.remove("hidden");
+  setCentreView("review");
   $("review-title").textContent = `Review changes — ${path}`;
   $("review-summary").textContent = DiffFmt.summary(result);
   const cellsBox = $("review-cells");
@@ -1173,7 +1207,7 @@ function reviewSend(apiPath) {
   action(apiPath, body).then((data) => {
     if (data && !data.error && !data.needs_confirm) {
       checklistSet("pushed");
-      $("review-card").classList.add("hidden");
+      closeCentreView("review");
       reviewPath = null;
     }
   });
@@ -1182,7 +1216,7 @@ function reviewSend(apiPath) {
 $("review-push").addEventListener("click", () => reviewSend("/api/push"));
 $("review-propose").addEventListener("click", () => reviewSend("/api/propose"));
 $("review-close").addEventListener("click", () => {
-  $("review-card").classList.add("hidden");
+  closeCentreView("review");
   reviewPath = null;
 });
 
@@ -1216,8 +1250,7 @@ async function mergeAction(path) {
 }
 
 function renderMerge() {
-  const card = $("merge-card");
-  card.classList.remove("hidden");
+  setCentreView("merge");
   $("merge-title").textContent = `Merge cell by cell — ${mergePath}`;
   $("merge-summary").textContent = MergeFmt.summary(mergePlan);
   const frame = MergeFmt.frameNote(mergePlan);
@@ -1298,7 +1331,7 @@ function mergeApply() {
 }
 
 function closeMerge() {
-  $("merge-card").classList.add("hidden");
+  closeCentreView("merge");
   mergePath = null;
   mergePlan = null;
   mergeChoices = {};
@@ -1338,7 +1371,7 @@ function toggleWatch(path) {
     // best-effort persistence; the in-memory set still drives this session
   }
   renderFiles(lastFiles, lastArtifacts, lastFolders); // re-badge + relabel the menus
-  if (lastWhatsnew && !$("whatsnew-card").classList.contains("hidden")) {
+  if (lastWhatsnew && centreView === "whatsnew") {
     renderWhatsnew(lastWhatsnew, lastWhatsnewTitle); // re-sort watched-first
   }
 }
@@ -1383,8 +1416,7 @@ async function whatsnewDetail(entry, slot, btn) {
 function renderWhatsnew(digest, title) {
   lastWhatsnew = digest;
   lastWhatsnewTitle = title || lastWhatsnewTitle;
-  const card = $("whatsnew-card");
-  card.classList.remove("hidden");
+  setCentreView("whatsnew");
   $("whatsnew-title").textContent = lastWhatsnewTitle;
   const now = Date.now();
   const note = $("whatsnew-note");
@@ -1446,9 +1478,8 @@ function renderWhatsnew(digest, title) {
   card.scrollIntoView({ block: "nearest" });
 }
 
-$("btn-whatsnew").addEventListener("click", whatsnewAction);
 $("whatsnew-close").addEventListener("click", () => {
-  $("whatsnew-card").classList.add("hidden");
+  closeCentreView("whatsnew");
 });
 
 function fileActions(file, opts) {
@@ -1613,13 +1644,13 @@ function fileActions(file, opts) {
 // that silently discards local edits) with no confirm. Here each action is a real
 // <button> that fires ONLY on an explicit click/Enter, and setBusy() disables them all
 // during a sync. The [text, handler] pairs are exactly what the buttons carried before.
-function actionsMenu(actions, label) {
+function actionsMenu(actions, label, summaryText) {
   const details = document.createElement("details");
   details.className = "row-menu";
 
   const summary = document.createElement("summary");
   summary.className = "row-menu-summary";
-  summary.textContent = "Actions";
+  summary.textContent = summaryText || "Actions";
   summary.setAttribute("aria-label", label ? `Actions for ${label}` : "File actions");
   details.appendChild(summary);
 
@@ -1639,183 +1670,119 @@ function actionsMenu(actions, label) {
   return details;
 }
 
-function buildRow(pathCell, state, actions, label) {
+// One row of the notebook list. Title-first: the notebook's own harvested title is
+// the thing you read, its filename the mono line beneath. Two cells — what it is,
+// and what state it is in — with hairlines instead of card chrome.
+//
+// Still a real <table>: every row is the same two columns, which is what a table is
+// for, and it gives assistive tech the row/column semantics the old badge soup never
+// had. The row is a `role=row` in a `role=grid` list (see renderFiles) so arrow keys
+// move a roving selection.
+//
+// The row carries NO actions. Everything a file can do now lives in the detail panel
+// for the SELECTED row, so merely browsing the list can never put a Push — or a
+// conflict's "Use remote", which discards local edits — one stray click away.
+function buildRow(mainNodes, state, opts) {
+  opts = opts || {};
   const tr = document.createElement("tr");
+  tr.className = "nb-row";
 
-  const pathTd = document.createElement("td");
-  pathTd.className = "path";
-  if (typeof pathCell === "string") {
-    pathTd.textContent = pathCell;
-  } else {
-    pathTd.append(...pathCell);
-  }
+  const mainTd = document.createElement("td");
+  mainTd.className = "cell-main";
+  mainTd.append(...mainNodes);
 
   const stateTd = document.createElement("td");
-  const badge = document.createElement("span");
-  badge.className = `badge ${STATE_BADGES[state] || ""}`;
-  badge.textContent = state;
-  stateTd.appendChild(badge);
+  stateTd.className = "cell-state";
+  // The state word is carried VERBATIM (synced / modified / conflict / …) and coloured
+  // by its family. Meaning is in the word as well as the colour — never colour alone.
+  const word = document.createElement("div");
+  word.className = `state-word state-${STATE_BADGES[state] || "local"}`;
+  word.textContent = state;
+  stateTd.appendChild(word);
+  if (opts.qualifier) {
+    const q = document.createElement("div");
+    q.className = "state-qualifier";
+    q.textContent = opts.qualifier;
+    stateTd.appendChild(q);
+  }
 
-  const actionsTd = document.createElement("td");
-  if (actions.length) actionsTd.appendChild(actionsMenu(actions, label));
-
-  tr.append(pathTd, stateTd, actionsTd);
+  tr.append(mainTd, stateTd);
   return tr;
 }
 
-function shadowBadge(name) {
+// The one fact a row earns beside its filename — at most one, or the subtitle becomes
+// the badge cluster it replaced. Ordered by how much it changes what you'd do with the
+// file: it isn't a notebook at all > other notebooks depend on it > you asked to watch it.
+function rowFact(file) {
+  if (file.is_module) return "module";
+  if (file.lineage && file.lineage.readers) {
+    const n = file.lineage.readers;
+    return `${n} notebook${n === 1 ? "" : "s"} read${n === 1 ? "s" : ""} this`;
+  }
+  if (watchedPaths.has(file.path)) return "watched";
+  return "";
+}
+
+// The state cell's second line: a short qualifier that says something the state word
+// alone doesn't. Only states with an honest, free answer get one — a "modified" row
+// would need a cell-level diff to say "3 cells", and inventing a number here would be
+// exactly the overclaiming the receipts are careful to avoid.
+const STATE_QUALIFIERS = {
+  "new local": "not shared",
+  "new remote": "not pulled yet",
+  "deleted locally": "deleted here",
+  "deleted remotely": "deleted by the team",
+  "conflict": "both changed",
+  "mixed": "both ways",
+  "in review": "on your review branch",
+};
+function rowQualifier(file) {
+  return STATE_QUALIFIERS[file.state] || "";
+}
+
+function shadowBadge(name, lead) {
   const span = document.createElement("span");
-  span.className = "badge warn";
-  span.textContent = `shadows ${name}`;
+  span.className = "row-shadow";
+  span.textContent = `${lead ? " · " : ""}shadows ${name}`;
   span.title =
     `“import ${name}” would load this notebook instead of the ${name} module — ` +
     "rename it; otherwise every notebook in this folder can fail to import.";
   return span;
 }
 
-function moduleBadge() {
-  const span = document.createElement("span");
-  span.className = "badge module";
-  span.textContent = "module";
-  span.title =
-    "A Python module imported by notebooks — not a runnable marimo notebook, so it " +
-    "isn't opened in the editor (the workspace root is on the notebook's import path). " +
-    "Use Reveal to open it in your own editor.";
-  return span;
-}
-
-// A green/red tie-out badge from the value-free .mooring/checks receipts a notebook
-// wrote via `import mooring_checks`. Counts only — never a data value; local, never
-// synced.
-function checksBadge(checks) {
-  const span = document.createElement("span");
-  const failed = checks.failed || 0;
-  const total = checks.total || 0;
-  if (failed > 0) {
-    span.className = "badge checks-fail";
-    span.textContent = `✗ ${failed} failing`;
-    span.title = `${failed} of ${total} tie-out check(s) are failing — open the notebook to see which.`;
-  } else {
-    span.className = "badge checks-ok";
-    span.textContent = `✓ ${total} check${total === 1 ? "" : "s"}`;
-    span.title = `${total} tie-out check(s) passing (mooring_checks). Value-free and never pushed.`;
-  }
-  return span;
-}
-
-// A green/red trust badge from the value-free .mooring/verify receipt a Verify run
-// wrote: did the notebook run clean end-to-end on this machine. The server only sends
-// `verified` when the receipt still matches the file's current content SHA, so this is
-// gone the moment the notebook is edited — a stale "verified" never rides edited code.
-function verifiedBadge(v) {
-  const span = document.createElement("span");
-  const when = v.ran_at ? ` (${v.ran_at.slice(0, 10)})` : "";
-  if (v.passed) {
-    span.className = "badge verify-ok";
-    span.textContent = "✓ ran clean";
-    span.title = `This notebook ran clean end-to-end when last verified${when}. ` +
-      "Value-free and local; clears when you edit it.";
-  } else {
-    span.className = "badge verify-fail";
-    const cells = v.cells_failed
-      ? `${v.cells_failed} cell${v.cells_failed === 1 ? "" : "s"} failed`
-      : "failed to run";
-    span.textContent = `⚠ ${cells}`;
-    span.title = `This notebook did not run clean when last verified${when} — open it to ` +
-      "see which cell failed.";
-  }
-  return span;
-}
-
-// A reproducibility badge from the value-free .mooring/inputs receipts a notebook wrote
-// via `import mooring_inputs`. Green when every pinned input matches the previous run,
-// amber when one changed under you (content hash / row count / schema). Counts only —
-// never a data value; local, never synced.
-function inputsBadge(inp) {
-  const span = document.createElement("span");
-  const changed = inp.changed || 0;
-  const total = inp.total || 0;
-  const outputs = inp.outputs || 0;
-  const outputsChanged = inp.outputs_changed || 0;
-  const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
-  // An output that moved is the same alarm as an input that moved — the numbers this
-  // notebook PUBLISHES are no longer the ones it published last run — so either goes amber.
-  if (changed > 0 || outputsChanged > 0) {
-    const bits = [];
-    if (changed) bits.push(plural(changed, "input"));
-    if (outputsChanged) bits.push(plural(outputsChanged, "output"));
-    span.className = "badge inputs-changed";
-    span.textContent = `⚠ ${bits.join(" + ")} changed`;
-    span.title = `Of this notebook's ${total} pinned input(s) and ${outputs} recorded ` +
-      `output(s), ${changed + outputsChanged} changed since the last run (content, row ` +
-      "count, or schema) — check the numbers still hold. Value-free and local.";
-  } else {
-    const bits = [];
-    if (total) bits.push(`${plural(total, "input")} pinned`);
-    if (outputs) bits.push(plural(outputs, "output"));
-    span.className = "badge inputs-ok";
-    span.textContent = `⛓ ${bits.join(", ")}`;
-    span.title = `${total} input(s) and ${outputs} output(s) fingerprinted (content hash + ` +
-      "shape + schema), unchanged since the last run. Value-free and never pushed.";
-  }
-  return span;
-}
-
-// "3 notebooks read this" for a file others depend on, derived from the value-free
-// mooring_inputs receipts (one notebook's recorded output path = another's input path).
-// The wording — which is entirely positive claims, each dated — lives in LineageFmt so it
-// can be unit-tested; a null there means the payload supports no claim, so no badge.
-function lineageBadge(lin) {
-  const parts = LineageFmt.badge(lin);
-  if (!parts) return null;
-  const span = document.createElement("span");
-  span.className = lin.stale ? "badge lineage stale" : "badge lineage";
-  span.textContent = parts.text;
-  span.title = parts.title;
-  return span;
-}
-
 function buildFileRow(file, opts) {
   opts = opts || {};
-  // Inside a folder section the row shows its folder-relative path (`rel`); elsewhere
-  // the full path. A notebook whose filename shadows an importable package (e.g.
-  // polars.py) gets an amber badge so the sys.path[0] trap is visible before it
-  // becomes a kernel traceback; a plain helper module gets a "module" badge.
+  // Inside a focused folder the row shows its folder-relative path (`rel`); elsewhere
+  // the full path. The title leads — a repo of q3_recon_v2.py files is unreadable by
+  // filename — falling back to the filename for a module or an untitled notebook.
   const display = opts.rel && file.rel != null ? file.rel : file.path;
-  const extras = [];
-  if (file.shadows) extras.push(" ", shadowBadge(file.shadows));
-  if (file.is_module) extras.push(" ", moduleBadge());
-  if (file.checks && file.checks.total) extras.push(" ", checksBadge(file.checks));
-  // The trust badge from a Verify run (present only while it matches the file's SHA).
-  if (file.verified) extras.push(" ", verifiedBadge(file.verified));
-  // The input-fingerprint badge: N inputs pinned, amber if one changed since last run.
-  if (file.inputs && (file.inputs.total || file.inputs.outputs)) {
-    extras.push(" ", inputsBadge(file.inputs));
-  }
-  // Recorded lineage: who else reads this file. Present only when there IS a reader
-  // or writer — the row never claims a file is unused.
-  if (file.lineage) {
-    const lin = lineageBadge(file.lineage);
-    if (lin) extras.push(" ", lin);
-  }
-  // A watched file with a teammate change waiting gets its promotion badge —
-  // quiet otherwise (watching an in-sync file must not add row noise).
-  if (watchedPaths.has(file.path) && PULL_STATES.has(file.state)) {
-    extras.push(" ", watchBadge());
-  }
-  // The notebook's own title (harvested value-free from its first markdown cell) as a
-  // muted subtitle under the filename, so a repo of q3_recon_v2.py files is legible.
-  if (file.title) extras.push(titleHint(file.title));
-  const pathCell = extras.length ? [display, ...extras] : display;
-  return buildRow(pathCell, file.state, fileActions(file, opts), file.path);
-}
+  const base = display.split("/").pop();
+  const title = document.createElement("div");
+  title.className = "row-title";
+  title.textContent = file.title || base;
 
-// A muted, block-level subtitle showing a notebook's harvested title beneath its path.
-function titleHint(title) {
-  const span = document.createElement("span");
-  span.className = "file-title";
-  span.textContent = title;
-  return span;
+  // The subtitle never repeats the title. With a harvested title the filename goes
+  // beneath it (that is the whole point of leading with the title); without one the
+  // title IS the filename, so the line beneath carries where it lives and its one
+  // fact instead — "module · 4 notebooks read this" — rather than saying it twice.
+  const sub = document.createElement("div");
+  sub.className = "row-sub";
+  const bits = [];
+  if (file.title) bits.push(display);
+  else if (display.length > base.length) bits.push(display.slice(0, -base.length));
+  const fact = rowFact(file);
+  if (fact) bits.push(fact);
+  sub.append(bits.join(" · "));
+  // A notebook whose filename shadows an importable package (polars.py) is a HAZARD,
+  // not a receipt: every other badge moved to the panel, but this one stays on the row
+  // in amber, because it is the one that bites before you ever select the file.
+  if (file.shadows) sub.appendChild(shadowBadge(file.shadows, bits.length > 0));
+
+  const main = bits.length || file.shadows ? [title, sub] : [title];
+  const row = buildRow(main, file.state, { qualifier: rowQualifier(file) });
+  row.dataset.path = file.path;
+  if (opts.member) row.classList.add("member");
+  return row;
 }
 
 function buildArtifactRows(artifact, files) {
@@ -1824,8 +1791,8 @@ function buildArtifactRows(artifact, files) {
     .map((path) => byPath.get(path))
     .filter(Boolean)
     .map((file) => {
-      const row = buildFileRow(file, { member: true });
-      row.classList.add("member", "hidden");
+      const row = buildFileRow(file, { member: true, rel: false });
+      row.classList.add("hidden");
       return row;
     });
 
@@ -1888,17 +1855,25 @@ function buildArtifactRows(artifact, files) {
       action("/api/ai/model/toggle", { model: artifact.key, disabled: !artifact.ai_model_disabled })]);
   }
 
-  const header = buildRow([caret, name, detail], artifact.state, actions, artifact.name);
+  const head = document.createElement("div");
+  head.className = "row-title row-artifact";
+  head.append(caret, name);
+  const menu = document.createElement("div");
+  menu.className = "row-sub";
+  menu.append(detail);
+  // The artifact header is a GROUP, not a file, so it has no detail panel of its own to
+  // move its actions into — it keeps the <details> menu (never a <select>: the Windows
+  // single-ArrowDown footgun) that every row used to carry.
+  const header = buildRow(
+    actions.length ? [head, menu, actionsMenu(actions, artifact.name)] : [head, menu],
+    artifact.state,
+    {},
+  );
+  header.classList.add("artifact-header");
   return [header, ...memberRows];
 }
 
-// Create a notebook inside a specific folder (the section's "New here" button).
-function newNotebookIn(folder) {
-  const name = prompt(`Notebook name in ${folder}/\n(e.g. sales-analysis):`);
-  if (name) action("/api/new", { name: `${folder}/${name}` });
-}
-
-// -- folder view: focus + per-folder collapse (persisted per workspace) ------
+// -- folder view: focus + selection (persisted per workspace) ----------------
 // Display-only, client-side. Keyed by the repo slug when connected, else the
 // workspace path (local mode), so two workspaces sharing the stable hub origin's
 // localStorage don't collide on one key. Best-effort like the theme/watch mirrors:
@@ -1918,21 +1893,21 @@ function loadFolderView(id) {
     raw = folderViewKey ? localStorage.getItem(folderViewKey) : null;
   } catch {
     // Storage is blocked (not just empty): keep the in-memory view rather than wiping a
-    // focus/collapse the user set this session — private mode only forgets BETWEEN launches.
+    // focus/selection the user set this session — private mode only forgets BETWEEN launches.
     return;
   }
   focusPrefix = "";
-  folderExpand = {};
   moreOpen = false;
+  selectedPath = "";
   try {
     if (raw) {
       const data = JSON.parse(raw) || {};
       focusPrefix = FilesTree.norm(data.focus || "");
-      folderExpand = data.exp && typeof data.exp === "object" ? data.exp : {};
       moreOpen = !!data.more;
+      selectedPath = typeof data.sel === "string" ? data.sel : "";
     }
   } catch {
-    // corrupt JSON — start at All folders with every folder at its default.
+    // corrupt JSON — start at All folders with nothing selected.
   }
 }
 
@@ -1941,7 +1916,7 @@ function saveFolderView() {
     if (folderViewKey) {
       localStorage.setItem(
         folderViewKey,
-        JSON.stringify({ focus: focusPrefix, exp: folderExpand, more: moreOpen }),
+        JSON.stringify({ focus: focusPrefix, more: moreOpen, sel: selectedPath }),
       );
     }
   } catch {
@@ -1949,237 +1924,487 @@ function saveFolderView() {
   }
 }
 
-// Narrow the whole listing to one folder subtree (or "" to reset to All folders).
+// Narrow the whole listing to one folder subtree (or "" to reset to all notebooks).
 function setFocus(prefix) {
   focusPrefix = FilesTree.norm(prefix || "");
   saveFolderView();
-  renderFiles(lastFiles, lastArtifacts, lastFolders);
+  setCentreView("list");
+  renderWorkspace();
 }
 
-function setFolderExpanded(folder, expanded) {
-  folderExpand[folder] = expanded;
+// -- selection: the one row the detail panel is about ------------------------
+// New state, and deliberately never automatic: an auto-selected row would make the
+// panel's Push / "Use remote" ambient — a thing that is simply there, aimed at a file
+// you did not choose. Selecting is always an act.
+
+function selectedFile() {
+  return selectedPath ? lastFiles.find((f) => f.path === selectedPath) || null : null;
+}
+
+function setSelected(path, opts) {
+  selectedPath = path || "";
   saveFolderView();
+  renderFileSelection();
+  renderPanel();
+  // Below the panel breakpoint the panel is an overlay drawer: selecting opens it.
+  if ((opts || {}).open !== false && selectedPath) openDrawer();
 }
 
-// Whether a folder renders expanded: an explicit remembered choice (keyed by its path)
-// wins; otherwise it follows the view's default (collapsed only when the level is crowded).
-function nodeExpanded(key, collapseDefault) {
-  if (Object.prototype.hasOwnProperty.call(folderExpand, key)) return !!folderExpand[key];
-  return !collapseDefault;
+function clearSelection() {
+  setSelected("");
+  closeDrawer();
 }
 
-// The Expand/Collapse-all escape hatch: pin every folder node in the current tree open or
-// closed (and the "More folders" fold with them), then re-render.
-function setAllExpanded(expanded) {
-  for (const key of currentNodePaths) folderExpand[key] = expanded;
-  moreOpen = expanded;
-  saveFolderView();
-  renderFiles(lastFiles, lastArtifacts, lastFolders);
+// -- the notebook list -------------------------------------------------------
+
+// Files at or under the current focus, with `rel` relative to it. The focus narrows
+// RECURSIVELY (not just to the folder's own files): the folder summary line and the
+// rail let you drill deeper for convenience, but no file is ever unreachable from
+// where you are — a "focus" that hid files in sub-folders would be a trap.
+function scopedFiles(files, focus) {
+  const f = FilesTree.norm(focus || "");
+  return FilesTree.scope(files, f)
+    .map((file) => Object.assign({}, file, {
+      rel: f && file.path.length > f.length ? file.path.slice(f.length + 1) : file.path,
+    }))
+    .sort((a, b) => (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0));
 }
 
-// Indent a tree row by its depth (a folder and its files step in together). Capped so a
-// very deep path can't push the row off-screen — the path cell ellipsis-truncates anyway.
-function treeIndent(depth) {
-  return `${0.5 + Math.min(depth, 6) * 1.3}rem`;
+function renderFiles(files, artifacts, declaredFolders) {
+  const table = $("files-table");
+  const tbody = table.querySelector("tbody");
+  tbody.textContent = "";
+  const q = fileQuery.trim();
+  const declared = declaredFolders || [];
+  // PBIP artifacts keep their own collapsible grouping; everything else is one list.
+  const nonArtifact = files.filter((f) => !f.artifact);
+  // Catalog presence (UNFILTERED): declared-but-empty folders still count, so the
+  // table/empty-hint toggles keep the original "structure is visible" behaviour.
+  const hasCatalog = FilesTree.group(nonArtifact, declared).length > 0 || artifacts.length > 0;
+  table.classList.toggle("hidden", !hasCatalog);
+  $("empty-hint").classList.toggle("hidden", hasCatalog);
+  $("files-foot").classList.toggle("hidden", !hasCatalog);
+
+  const searching = !!q;
+  const focus = searching ? "" : focusPrefix;
+  // While searching, matches come from the WHOLE repo with their full paths, so a hit
+  // under a folder you aren't focused on is never hidden by the focus.
+  const rows = searching
+    ? nonArtifact.filter((f) => FilesTree.matches(f, q))
+    : scopedFiles(nonArtifact, focus);
+  const shownArtifacts = searching
+    ? artifacts.filter((a) => FilesTree.matches({ path: a.pointer || a.name || a.key }, q))
+    : (focus
+      ? artifacts.filter((a) =>
+        FilesTree.scope([{ path: a.pointer || a.name || a.key }], focus).length > 0)
+      : artifacts.slice());
+
+  renderFilesHead({ searching, query: q, focus, count: rows.length + shownArtifacts.length,
+    total: nonArtifact.length });
+
+  for (const artifact of shownArtifacts) {
+    for (const row of buildArtifactRows(artifact, files)) tbody.appendChild(row);
+  }
+  for (const file of rows) tbody.appendChild(buildFileRow(file, { rel: !searching }));
+
+  if (!rows.length && !shownArtifacts.length && hasCatalog) {
+    const tr = document.createElement("tr");
+    const td = document.createElement("td");
+    td.colSpan = 2;
+    td.className = "muted";
+    td.textContent = searching
+      ? `No notebooks match “${q}”.`
+      : "Nothing in this folder yet.";
+    tr.appendChild(td);
+    tbody.appendChild(tr);
+  }
+
+  renderFolderSummary(nonArtifact, declared, searching ? "" : focus, searching);
+  wireFileRows();
+  renderFileSelection();
 }
 
-// Toggling a tree caret (or Expand/Collapse-all) re-renders the whole table, which drops
-// keyboard focus to <body>. After the re-render, put focus back on the control's freshly
-// rebuilt twin (matched by its data-attribute) so a keyboard/AT user keeps their place.
-function refocus(selector) {
-  const el = document.querySelector(selector);
-  if (el && typeof el.focus === "function") el.focus();
+// The list's column header. Its left cell carries the breadcrumb that replaced the
+// old #folder-controls bar: where you are, and every level you can climb back to.
+function renderFilesHead(o) {
+  const head = $("files-head");
+  head.textContent = "";
+  if (o.searching) {
+    head.append(`MATCHING “${o.query}” · ${o.count} OF ${o.total}`);
+    return;
+  }
+  const crumb = (label, prefix) => {
+    const b = document.createElement("button");
+    b.className = "crumb";
+    b.textContent = label;
+    b.title = prefix ? `Focus ${prefix}/` : "Show every notebook";
+    b.addEventListener("click", () => setFocus(prefix));
+    return b;
+  };
+  if (!o.focus) {
+    head.append(`ALL NOTEBOOKS · ${o.count}`);
+    return;
+  }
+  head.appendChild(crumb("ALL", ""));
+  const parts = FilesTree.crumbs(o.focus);
+  parts.forEach((c, i) => {
+    const sep = document.createElement("span");
+    sep.className = "crumb-sep";
+    sep.textContent = "/";
+    head.appendChild(sep);
+    if (i === parts.length - 1) {
+      const cur = document.createElement("span");
+      cur.className = "crumb current";
+      cur.textContent = c.label.toUpperCase() + "/";
+      head.appendChild(cur);
+    } else {
+      head.appendChild(crumb(c.label.toUpperCase(), c.prefix));
+    }
+  });
+  head.append(` · ${o.count}`);
 }
+
+// The quiet last line of the list: the folders you are NOT looking at, with their
+// counts — "data/ 26 · reports/ 6 · more 3". Clicking one focuses it. Featured
+// folders lead; the rest fold behind "more N" (the same personal, persisted fold the
+// old "More folders" disclosure used).
+const SUMMARY_VISIBLE = 6;
+function renderFolderSummary(files, declared, focus, searching) {
+  const foot = $("files-foot");
+  foot.textContent = "";
+  if (searching) return;
+  const t = FilesTree.tree(files, declared, focus);
+  const part = !focus && lastFeatured.length
+    ? FilesTree.partitionFeatured(t.folders, lastFeatured)
+    : { featured: [], rest: t.folders };
+  const ordered = part.featured.concat(part.rest);
+  if (!ordered.length) return;
+  const shown = moreOpen ? ordered : ordered.slice(0, SUMMARY_VISIBLE);
+  shown.forEach((node, i) => {
+    if (i) foot.append(" · ");
+    const b = document.createElement("button");
+    b.className = "folder-jump";
+    b.textContent = `${node.name}/ ${node.count}`;
+    b.title = `Focus ${node.path}/`;
+    b.addEventListener("click", () => setFocus(node.path));
+    foot.appendChild(b);
+  });
+  if (ordered.length > SUMMARY_VISIBLE) {
+    foot.append(" · ");
+    const more = document.createElement("button");
+    more.className = "folder-jump";
+    more.textContent = moreOpen ? "fewer" : `more ${ordered.length - SUMMARY_VISIBLE}`;
+    more.addEventListener("click", () => {
+      moreOpen = !moreOpen;
+      saveFolderView();
+      renderWorkspace();
+    });
+    foot.appendChild(more);
+  }
+}
+
+// Click / keyboard on the list. A roving-tabindex grid: ↑/↓ move the selection,
+// Enter opens, Space selects without opening. Real buttons inside a row (the PBIP
+// caret, its actions menu) keep their own behaviour — the row handler ignores them.
+function wireFileRows() {
+  const rows = Array.from($("files-table").querySelectorAll("tr.nb-row[data-path]"));
+  rows.forEach((row) => {
+    row.tabIndex = -1;
+    row.setAttribute("role", "row");
+    row.addEventListener("click", (e) => {
+      if (e.target.closest("button, a, summary, input")) return;
+      setSelected(row.dataset.path);
+    });
+    row.addEventListener("dblclick", (e) => {
+      if (e.target.closest("button, a, summary, input")) return;
+      openSelected();
+    });
+    row.addEventListener("keydown", (e) => {
+      const i = rows.indexOf(row);
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        e.preventDefault();
+        const next = rows[i + (e.key === "ArrowDown" ? 1 : -1)];
+        if (next) {
+          next.focus();
+          setSelected(next.dataset.path, { open: false });
+        }
+      } else if (e.key === "Enter") {
+        e.preventDefault();
+        setSelected(row.dataset.path);
+        openSelected();
+      } else if (e.key === " ") {
+        e.preventDefault();
+        setSelected(row.dataset.path);
+      }
+    });
+  });
+}
+
+// Paint the selection onto the rows. Separate from building them so a selection
+// change costs a class flip rather than a re-render of the whole list.
+function renderFileSelection() {
+  const rows = $("files-table").querySelectorAll("tr.nb-row[data-path]");
+  let first = null;
+  rows.forEach((row) => {
+    const on = row.dataset.path === selectedPath;
+    row.classList.toggle("selected", on);
+    row.setAttribute("aria-selected", on ? "true" : "false");
+    row.tabIndex = on ? 0 : -1;
+    if (!first) first = row;
+  });
+  // Keep exactly one row in the tab order even with nothing selected, so Tab reaches
+  // the list and the arrow keys take over from there.
+  if (!selectedPath && first) first.tabIndex = 0;
+}
+
+// Select (and scroll to) the first conflicted row — the "Resolve" primary action.
+function selectFirstConflict() {
+  const hit = lastFiles.find((f) => f.state === "conflict");
+  if (!hit) return;
+  setFocus("");
+  setSelected(hit.path);
+  const row = $("files-table").querySelector(`tr.nb-row[data-path="${cssAttr(hit.path)}"]`);
+  if (row) row.scrollIntoView({ behavior: "smooth", block: "nearest" });
+}
+
 function cssAttr(value) {
   return window.CSS && CSS.escape ? CSS.escape(String(value)) : String(value).replace(/["\\]/g, "\\$&");
 }
 
-// One file row inside the recursive tree, indented to its depth.
-function buildTreeFileRow(file, depth) {
-  const row = buildFileRow(file, { rel: true });
-  row.classList.add("member");
-  const cell = row.querySelector("td.path");
-  if (cell) cell.style.paddingLeft = treeIndent(depth);
+// -- the rail: destinations, folders, and what is offered to the copilot -----
+
+// One rail nav item. `count` is rendered right-aligned and coloured by severity, so
+// "1 review waiting" and "1 refresh overdue" read differently at a glance. Each item
+// also carries a glyph, which is all that survives when the rail collapses to a 56px
+// icon strip on a narrow window — the glyphs are the ones these destinations already
+// used on their old header links (✎ Reviews, ⏱ Activity, ⚙ Settings).
+function railItem(o) {
+  const el = document.createElement(o.href ? "a" : "button");
+  el.className = "rail-item" + (o.active ? " active" : "");
+  if (o.href) {
+    el.href = o.href;
+  } else {
+    el.type = "button";
+    el.addEventListener("click", o.onClick);
+  }
+  const caret = document.createElement("span");
+  caret.className = "rail-caret";
+  caret.textContent = o.active ? "▶" : "";
+  caret.setAttribute("aria-hidden", "true");
+  const glyph = document.createElement("span");
+  glyph.className = "rail-icon";
+  glyph.textContent = o.glyph || "·";
+  glyph.setAttribute("aria-hidden", "true");
+  const label = document.createElement("span");
+  label.className = "rail-item-label";
+  label.textContent = o.label;
+  el.append(caret, glyph, label);
+  if (o.count) {
+    const n = document.createElement("span");
+    n.className = `rail-count rail-${o.tone || "faint"}`;
+    n.textContent = String(o.count);
+    el.appendChild(n);
+    // The collapsed strip has no room for the number, so severity travels as a dot.
+    // Only a count that MEANS something (a waiting review, an overdue refresh) gets
+    // one — a plain file count would just be decoration.
+    if (o.tone && o.tone !== "faint") {
+      const dot = document.createElement("span");
+      dot.className = `rail-dot rail-${o.tone}`;
+      dot.textContent = "●";
+      dot.setAttribute("aria-hidden", "true");
+      el.appendChild(dot);
+    }
+  }
+  // The label is hidden in the collapsed strip, so the title carries it there.
+  el.title = o.title || o.label;
+  return el;
+}
+
+function renderRailNav() {
+  const nav = $("rail-nav");
+  nav.textContent = "";
+  const items = [];
+  // Notebook destinations need a notebook surface; Activity (machine-local) and
+  // Settings (per-machine config) are added below whatever the login state — they are
+  // exactly where you go when the login itself is what's wrong.
+  if (filesVisible) {
+    items.push({ id: "list", label: "notebooks", glyph: "▤",
+      count: lastFiles.filter((f) => !f.artifact).length,
+      onClick: () => { setCentreView("list"); } });
+  }
+  // The first-run checklist is a rail destination while it is unfinished — it used to
+  // be a card everyone scrolled past, including people who had finished it.
+  if (checklistKey) {
+    const stored = checklistStored();
+    const items4 = Checklist.derive(lastFiles, lastReview, stored);
+    const done = items4.filter((i) => i.done).length;
+    if (!stored.dismissed && !Checklist.isDone(items4)) {
+      items.push({ id: "checklist", label: "getting started", glyph: "◎",
+        count: `${done}/${items4.length}`, tone: "accent",
+        onClick: () => setCentreView("checklist") });
+    }
+  }
+  if (lastLoggedIn) {
+    items.push({ id: "reviews", label: "reviews", href: "/reviews", glyph: "✎",
+      count: lastReview ? 1 : 0, tone: "review",
+      title: "Review teammates' proposed changes" });
+  }
+  const sched = (lastSchedules.schedules || []).length;
+  if (sched) {
+    items.push({ id: "schedules", label: "schedules", glyph: "↻",
+      count: lastSchedules.overdue || sched,
+      tone: lastSchedules.overdue ? "bad" : "faint",
+      onClick: () => setCentreView("schedules") });
+  }
+  items.push({ id: "activity", label: "activity", href: "/activity", glyph: "⏱",
+    title: "Recent activity & trash (local to this machine)" });
+  items.push({ id: "settings", label: "settings", href: "/settings", glyph: "⚙",
+    title: "Settings & preferences (including appearance)" });
+  for (const item of items) {
+    nav.appendChild(railItem(Object.assign({ active: centreView === item.id }, item)));
+  }
+}
+
+// The folder navigator. Each row focuses a folder; the ☆/★ feature star (which
+// curates the team's synced display order) and the ◆/◇ AI-context toggle (which
+// governs what the copilot may READ) moved here from the old per-folder table rows.
+// Both keep their endpoints and their meaning; they are shown when set and revealed
+// on hover/focus otherwise, so the narrow rail stays legible without hiding state.
+function renderRailFolders(declared) {
+  const box = $("rail-folders");
+  box.textContent = "";
+  if (!filesVisible) return;
+  const nonArtifact = lastFiles.filter((f) => !f.artifact);
+  const t = FilesTree.tree(nonArtifact, declared || [], "");
+  const part = lastFeatured.length
+    ? FilesTree.partitionFeatured(t.folders, lastFeatured)
+    : { featured: [], rest: t.folders };
+  const nodes = part.featured.concat(part.rest);
+  if (!nodes.length && !lastFeatured.length && !lastContextFolders.length) return;
+
+  const label = document.createElement("div");
+  label.className = "rail-label";
+  label.textContent = "FOLDERS";
+  box.appendChild(label);
+
+  const list = document.createElement("div");
+  list.className = "rail-folder-list";
+  const featuredSet = new Set(lastFeatured.map(FilesTree.norm));
+  const contextSet = new Set(lastContextFolders.map(FilesTree.norm));
+  for (const node of nodes) {
+    list.appendChild(railFolderRow(node.path, node.name, node.count, featuredSet, contextSet));
+  }
+  // A featured / offered folder that no longer exists in the repo has no node of its
+  // own, so without a row here the dead entry would linger in the synced mooring.toml
+  // forever with no control left to clear it.
+  const live = new Set(FilesTree.allFolderPaths(t));
+  const stale = new Set();
+  for (const raw of lastFeatured.concat(lastContextFolders)) {
+    const p = FilesTree.norm(raw);
+    if (!p || live.has(p) || stale.has(p)) continue;
+    if (FilesTree.focusLive(nonArtifact, declared || [], p)) continue;
+    stale.add(p);
+    list.appendChild(railFolderRow(p, p, 0, featuredSet, contextSet, true));
+  }
+  box.appendChild(list);
+  renderAdopt(box);
+}
+
+function railFolderRow(path, name, count, featuredSet, contextSet, gone) {
+  const row = document.createElement("div");
+  row.className = "rail-folder" + (focusPrefix === path ? " active" : "") + (gone ? " gone" : "");
+
+  const jump = document.createElement("button");
+  jump.className = "rail-folder-name";
+  jump.textContent = `${name}/`;
+  jump.title = gone ? `${path}/ is no longer in the repo` : `Focus ${path}/`;
+  jump.disabled = !!gone;
+  jump.addEventListener("click", () => setFocus(path));
+  row.appendChild(jump);
+
+  // ☆/★ curates the team's display order. Repo mode only — starring is a team act,
+  // and a local-only user has nobody to share an order with.
+  if (canFeature) {
+    const featured = featuredSet.has(path);
+    const star = document.createElement("button");
+    star.className = "rail-glyph feature-star" + (featured ? " on" : "");
+    star.textContent = featured ? "★" : "☆";
+    star.title = gone
+      ? "This folder no longer exists — click to un-star it for the team"
+      : featured
+        ? "Featured for the team — click to un-star"
+        : "Feature this folder for the team (pins it to the top)";
+    star.setAttribute("aria-pressed", featured ? "true" : "false");
+    star.setAttribute("aria-label", `Feature ${path} for the team`);
+    star.addEventListener("click", () =>
+      action("/api/hub/feature", { folder: path, featured: !featured }));
+    row.appendChild(star);
+  }
+  // ◆/◇ offers the folder as team copilot context. Independent of the star: this
+  // governs what the model reads, not display order.
+  if (canCurateContext) {
+    const offered = contextSet.has(path);
+    const b = document.createElement("button");
+    b.className = "rail-glyph ctx-folder" + (offered ? " on" : "");
+    b.textContent = offered ? "◆" : "◇";
+    b.title = gone
+      ? "This folder no longer exists — click to withdraw it from the team AI context"
+      : offered
+        ? "Offered as team AI context — click to withdraw"
+        : "Offer this folder as team AI context (the copilot reads it; reading needs [ai] context on)";
+    b.setAttribute("aria-pressed", offered ? "true" : "false");
+    b.setAttribute("aria-label", `Offer ${path} as team AI context`);
+    b.addEventListener("click", () =>
+      action("/api/hub/context-folder", { folder: path, offered: !offered }));
+    row.appendChild(b);
+  }
+  if (!gone) {
+    const n = document.createElement("span");
+    n.className = "rail-count rail-faint";
+    n.textContent = String(count);
+    row.appendChild(n);
+  }
   return row;
 }
 
-// One folder header row in the tree: caret (collapse in place) + name (drills IN to focus
-// this sub-folder; the breadcrumb climbs back out) + subtree count + "New here" (and a
-// ☆/★ Feature star on top-level folders, plus a ◆ AI-context toggle at any depth, in repo
-// mode). An empty declared leaf gets a disabled caret and the "here's where notebooks go" nub.
-function buildFolderHeader(node, depth, expanded, ctx) {
-  const caret = document.createElement("button");
-  caret.className = "small caret";
-  caret.dataset.folder = node.path; // so focus can return here after the re-render
-  if (node.empty) {
-    caret.textContent = "·";
-    caret.disabled = true;
-  } else {
-    caret.textContent = expanded ? "▾" : "▸";
-    caret.title = expanded ? "Collapse" : "Expand";
-    // A node's descendants are built on demand, so a toggle persists the new state and
-    // re-renders rather than flipping the visibility of already-built rows.
-    caret.addEventListener("click", () => {
-      setFolderExpanded(node.path, !expanded);
-      renderFiles(lastFiles, lastArtifacts, lastFolders);
-      refocus(`.caret[data-folder="${cssAttr(node.path)}"]`);
-    });
+// The adopt prompt: notebook folders the repo keeps OUTSIDE the synced set. It used
+// to be a fourth notice box at the top of the page; it is the same offer with the
+// same per-folder labels and the same adoptFolders() call, in the rail under the
+// folders it is about.
+let adoptCandidates = [];
+function renderAdopt(box) {
+  if (!adoptCandidates.length) return;
+  const wrap = document.createElement("details");
+  wrap.className = "rail-adopt";
+  const sum = document.createElement("summary");
+  sum.textContent = `adopt ${adoptCandidates.length} folder${adoptCandidates.length === 1 ? "" : "s"}`;
+  sum.title = "Folders with files outside your synced folders — adopt them to sync " +
+    "their notebooks (and helper modules) for the team.";
+  wrap.appendChild(sum);
+  const panel = document.createElement("div");
+  panel.className = "rail-adopt-panel";
+  for (const c of adoptCandidates) {
+    const btn = document.createElement("button");
+    btn.className = "small";
+    btn.textContent = `Adopt ${c.folder} (${c.py_files} .py)`;
+    btn.addEventListener("click", () => adoptFolders([c.folder]));
+    panel.append(btn);
   }
-
-  const name = document.createElement("button");
-  name.className = "folder-drill";
-  name.textContent = ` ${node.name}/ `;
-  name.title = `Focus ${node.path}/`;
-  name.addEventListener("click", () => setFocus(node.path));
-
-  const detail = document.createElement("span");
-  detail.className = "muted";
-  detail.textContent = node.empty ? "— empty" : `— ${node.count} file(s)`;
-
-  const tr = document.createElement("tr");
-  tr.className = "folder-header";
-  const headTd = document.createElement("td");
-  headTd.className = "path";
-  headTd.colSpan = 2;
-  headTd.style.paddingLeft = treeIndent(depth);
-  headTd.append(caret, name, detail);
-  const actionsTd = document.createElement("td");
-  // Feature star: only on TOP-LEVEL folders in the browse (unfocused) view, repo mode —
-  // starring curates the team's synced display order. ★ = featured (click to un-star).
-  if (ctx && ctx.featureable && depth === 0) {
-    const featured = ctx.featuredSet.has(node.path);
-    const star = document.createElement("button");
-    star.className = "small feature-star" + (featured ? " on" : "");
-    star.textContent = featured ? "★" : "☆";
-    star.title = featured
-      ? "Featured for the team — click to un-star"
-      : "Feature this folder for the team (pins it to the top)";
-    star.setAttribute("aria-pressed", featured ? "true" : "false");
-    star.addEventListener("click", () =>
-      action("/api/hub/feature", { folder: node.path, featured: !featured }));
-    actionsTd.append(star);
+  if (adoptCandidates.length > 1) {
+    const all = document.createElement("button");
+    all.className = "small primary";
+    all.textContent = "Adopt all";
+    all.addEventListener("click", () => adoptFolders(adoptCandidates.map((c) => c.folder)));
+    panel.append(all);
   }
-  // "AI context" toggle: offer/withdraw a folder as team copilot context. Repo mode + AI on
-  // only. Independent of the ☆ star — this governs what the model reads, not display order.
-  // Rendered at EVERY depth (and inside a focus), unlike the star: the offer is a path, and
-  // `node.path` is always the full repo-root-relative one, so `reports/finance` round-trips
-  // through /api/hub/context-folder untouched. Reach a deep folder by expanding or drilling in.
-  if (ctx && ctx.contextCurateable) {
-    const offered = ctx.contextSet.has(node.path);
-    const b = document.createElement("button");
-    b.className = "small ctx-folder" + (offered ? " on" : "");
-    b.textContent = offered ? "◆ AI context" : "◇ AI context";
-    b.title = offered
-      ? "Offered as team AI context — click to withdraw"
-      : "Offer this folder as team AI context (the copilot reads it; reading needs [ai] context on)";
-    b.setAttribute("aria-pressed", offered ? "true" : "false");
-    b.addEventListener("click", () =>
-      action("/api/hub/context-folder", { folder: node.path, offered: !offered }));
-    actionsTd.append(b);
-  }
-  const btn = document.createElement("button");
-  btn.className = "small";
-  btn.textContent = "New here";
-  btn.title = `Create a notebook in ${node.path}/`;
-  btn.addEventListener("click", () => newNotebookIn(node.path));
-  actionsTd.append(btn);
-  tr.append(headTd, actionsTd);
-  return tr;
+  wrap.appendChild(panel);
+  box.appendChild(wrap);
 }
 
-// The "More folders (N)" disclosure header — folds the non-featured top-level folders
-// beneath the curator's featured ones. Its own open/closed state (moreOpen) persists per
-// workspace like a focus. Depth 0; no drill/New-here of its own.
-function buildMoreHeader(count) {
-  const caret = document.createElement("button");
-  caret.className = "small caret";
-  caret.dataset.moreToggle = "more"; // so focus can return here after the re-render
-  caret.textContent = moreOpen ? "▾" : "▸";
-  caret.title = moreOpen ? "Hide the other folders" : "Show the other folders";
-  caret.addEventListener("click", () => {
-    moreOpen = !moreOpen;
-    saveFolderView();
-    renderFiles(lastFiles, lastArtifacts, lastFolders);
-    refocus('[data-more-toggle="more"]');
-  });
-  const name = document.createElement("b");
-  name.textContent = " More folders ";
-  const detail = document.createElement("span");
-  detail.className = "muted";
-  detail.textContent = `— ${count} folder${count === 1 ? "" : "s"}`;
-  const tr = document.createElement("tr");
-  tr.className = "folder-header more-folders";
-  const headTd = document.createElement("td");
-  headTd.className = "path";
-  headTd.colSpan = 2;
-  headTd.style.paddingLeft = treeIndent(0);
-  headTd.append(caret, name, detail);
-  tr.append(headTd, document.createElement("td"));
-  return tr;
-}
-
-// A featured folder that no longer exists in the repo (renamed/deleted): it has no tree
-// node, so without this row there'd be no ★ to un-star it and the dead entry would linger
-// in the synced mooring.toml forever. Shown (repo mode only) with a live un-star button.
-function buildStaleFeatured(path) {
-  const name = document.createElement("span");
-  name.className = "muted";
-  name.textContent = ` ${path}/ `;
-  const note = document.createElement("span");
-  note.className = "muted";
-  note.textContent = "— featured, but no longer in the repo";
-  const star = document.createElement("button");
-  star.className = "small feature-star on";
-  star.textContent = "★";
-  star.title = "This folder no longer exists — click to un-star it for the team";
-  star.addEventListener("click", () =>
-    action("/api/hub/feature", { folder: path, featured: false }));
-  const tr = document.createElement("tr");
-  tr.className = "folder-header more-folders";
-  const headTd = document.createElement("td");
-  headTd.className = "path";
-  headTd.colSpan = 2;
-  headTd.style.paddingLeft = treeIndent(0);
-  headTd.append(name, note);
-  const actionsTd = document.createElement("td");
-  actionsTd.append(star);
-  tr.append(headTd, actionsTd);
-  return tr;
-}
-
-// An OFFERED AI-context folder that no longer exists in the repo (renamed/deleted): like
-// buildStaleFeatured, it has no tree node, so this row keeps a live withdraw button so the
-// dead entry never lingers in the synced [ai] context_folders. Repo mode + AI on only.
-function buildStaleContext(path) {
-  const name = document.createElement("span");
-  name.className = "muted";
-  name.textContent = ` ${path}/ `;
-  const note = document.createElement("span");
-  note.className = "muted";
-  note.textContent = "— offered as AI context, but no longer in the repo";
-  const b = document.createElement("button");
-  b.className = "small ctx-folder on";
-  b.textContent = "◆ AI context";
-  b.title = "This folder no longer exists — click to withdraw it from the team AI context";
-  b.addEventListener("click", () =>
-    action("/api/hub/context-folder", { folder: path, offered: false }));
-  const tr = document.createElement("tr");
-  tr.className = "folder-header more-folders";
-  const headTd = document.createElement("td");
-  headTd.className = "path";
-  headTd.colSpan = 2;
-  headTd.style.paddingLeft = treeIndent(0);
-  headTd.append(name, note);
-  const actionsTd = document.createElement("td");
-  actionsTd.append(b);
-  tr.append(headTd, actionsTd);
-  return tr;
-}
-
-// The per-user AI context subscription checklist: which of the repo's OFFERED context
-// folders THIS machine's copilot reads (the synced offer stays the ceiling). Shown only in
-// repo mode with AI + [ai] context on and a non-empty offer. Toggling a box POSTs a per-user
-// subscription change (a light refresh, not a hub reload — it changes READ scope only).
+// The per-user AI context subscription: which of the repo's OFFERED context folders
+// THIS machine's copilot reads (the synced offer stays the ceiling). Shown only in
+// repo mode with AI + [ai] context on and a non-empty offer. Toggling a box POSTs a
+// per-user subscription change — it changes READ scope only.
 function renderContextSubscription() {
   const panel = $("context-sub");
   if (!panel) return;
@@ -2189,12 +2414,13 @@ function renderContextSubscription() {
   panel.textContent = "";
   if (!show) return;
   const reading = new Set(lastSelectedContext);
-  const head = document.createElement("div");
+  const wrap = document.createElement("details");
+  const head = document.createElement("summary");
   head.className = "context-sub-head";
-  head.textContent =
-    `🧭 Copilot context for this repo — reading ${reading.size} of ` +
-    `${offer.length} offered folder${offer.length === 1 ? "" : "s"}`;
-  panel.appendChild(head);
+  head.textContent = `copilot context · ${reading.size} of ${offer.length}`;
+  head.title = `The copilot reads ${reading.size} of the ${offer.length} folder(s) this ` +
+    "repo offers as context.";
+  wrap.appendChild(head);
   const list = document.createElement("div");
   list.className = "context-sub-list";
   for (const folder of offer) {
@@ -2210,326 +2436,383 @@ function renderContextSubscription() {
     label.append(box, span);
     list.appendChild(label);
   }
-  panel.appendChild(list);
+  wrap.appendChild(list);
+  panel.appendChild(wrap);
 }
 
-// A folder node and, when expanded, its contents — child folders first, then its own
-// files — each recursively.
-function buildFolderNode(node, depth, ctx) {
-  const expanded = nodeExpanded(node.path, ctx.collapseDefault);
-  const rows = [buildFolderHeader(node, depth, expanded, ctx)];
-  if (expanded && !node.empty) rows.push(...buildTreeRows(node.children, node.files, depth + 1, ctx));
-  return rows;
-}
+// -- the header block: one sentence, one action ------------------------------
 
-// Render one tree level: its sub-folders (recursively) then its own files.
-function buildTreeRows(folders, files, depth, ctx) {
-  const rows = [];
-  for (const node of folders) rows.push(...buildFolderNode(node, depth, ctx));
-  for (const file of files) rows.push(buildTreeFileRow(file, depth));
-  return rows;
-}
+// When this tab started, and whether it started in the morning — the two inputs
+// Headline.derive needs to decide whether incoming work "came in overnight" or is
+// simply "waiting". A claim about WHEN work arrived has to be earned.
+const sessionMorning = new Date().getHours() < 12;
+let pullWaitedAtStart = null;
 
-// A flat, force-expanded folder section — used ONLY for search results (matches grouped
-// under their top-level folder). The recursive tree above handles the browse view.
-function buildFolderSection(section) {
-  const memberRows = section.files.map((file) => {
-    const row = buildFileRow(file, { rel: true });
-    row.classList.add("member");
-    return row;
+function renderHeaderBlock() {
+  // Meta line: three segments, so it never wraps.
+  const meta = $("meta-line");
+  const now = new Date();
+  const months = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN",
+                  "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"];
+  const parts = [`${now.getDate()} ${months[now.getMonth()]} ${now.getFullYear()}`];
+  const total = lastFiles.filter((f) => !f.artifact).length;
+  if (filesVisible) parts.push(`${total} FILE${total === 1 ? "" : "S"}`);
+  if (lastStateAt != null) {
+    // Reuse Freshness.ageText — the age wording is unit-tested there and must not be
+    // re-derived here, where it would quietly drift.
+    parts.push(`CHECKED ${Freshness.ageText(Date.now() - lastStateAt).toUpperCase()}`);
+  }
+  meta.textContent = parts.join("\u00a0 / \u00a0");
+
+  if (pullWaitedAtStart === null && lastLoggedIn) {
+    pullWaitedAtStart = Freshness.pullCount(lastFiles) > 0;
+  }
+  const block = Headline.derive({
+    mode: lastMode,
+    loggedIn: lastLoggedIn,
+    offline: offlineMode,
+    files: lastFiles,
+    review: lastReview,
+    pullWaitedAtStart: !!pullWaitedAtStart,
+    morning: sessionMorning,
   });
-  const caret = document.createElement("button");
-  caret.className = "small caret";
-  caret.textContent = "▾";
-  caret.title = "Collapse";
-  caret.addEventListener("click", () => {
-    const open = caret.textContent === "▾";
-    caret.textContent = open ? "▸" : "▾";
-    memberRows.forEach((row) => row.classList.toggle("hidden", open));
-  });
-  const name = document.createElement("b");
-  name.textContent = section.folder === "" ? " repo root " : ` ${section.folder}/ `;
-  const detail = document.createElement("span");
-  detail.className = "muted";
-  detail.textContent = `— ${section.files.length} file(s)`;
-  const tr = document.createElement("tr");
-  tr.className = "folder-header";
-  const headTd = document.createElement("td");
-  headTd.className = "path";
-  headTd.colSpan = 2;
-  headTd.append(caret, name, detail);
-  const actionsTd = document.createElement("td");
-  if (section.folder !== "") {
+  $("headline").textContent = block.text;
+
+  const row = $("action-row");
+  row.textContent = "";
+  if (block.primary) {
     const btn = document.createElement("button");
-    btn.className = "small";
-    btn.textContent = "New here";
-    btn.title = `Create a notebook in ${section.folder}/`;
-    btn.addEventListener("click", () => newNotebookIn(section.folder));
-    actionsTd.append(btn);
+    btn.className = "primary";
+    btn.textContent = block.primary.label;
+    btn.addEventListener("click", HEADLINE_ACTIONS[block.primary.id]);
+    row.appendChild(btn);
   }
-  tr.append(headTd, actionsTd);
-  return [tr, ...memberRows];
+  for (const link of block.links) {
+    const a = document.createElement("button");
+    a.className = "mono-link";
+    a.textContent = link.label;
+    a.addEventListener("click", HEADLINE_ACTIONS[link.id]);
+    row.appendChild(a);
+  }
+  // Everything else the workspace can do, in one <details> menu — the nine-button
+  // toolbar's contents, with their existing labels and confirm flows.
+  row.appendChild(actionsMenu(workspaceActions(), "workspace", "more"));
 }
 
-// The folder-browser toolbar above the table: a breadcrumb when a folder is focused
-// (climb back out or reset to All folders) plus a live "N of M files" count, and
-// Expand-all / Collapse-all whenever there's more than one collapsible section.
-function renderFolderControls(o) {
-  const bar = $("folder-controls");
-  bar.innerHTML = "";
-  const hasCatalog = !$("files-table").classList.contains("hidden");
-  const showCrumbs = !!o.focus && !o.searching;
-  // Expand/Collapse-all is worth showing once there's more than one folder node to steer.
-  const showToggles = !o.searching && o.collapsibleCount > 1;
-  bar.classList.toggle("hidden", !hasCatalog || (!showCrumbs && !showToggles));
-  if (bar.classList.contains("hidden")) return;
-
-  if (showCrumbs) {
-    const nav = document.createElement("nav");
-    nav.className = "folder-scope";
-    nav.setAttribute("aria-label", "Folder path");
-    const root = document.createElement("button");
-    root.className = "folder-crumb";
-    root.textContent = "All folders";
-    root.title = "Show every folder";
-    root.addEventListener("click", () => setFocus(""));
-    nav.appendChild(root);
-    for (const c of FilesTree.crumbs(o.focus)) {
-      const sep = document.createElement("span");
-      sep.className = "folder-crumb-sep";
-      sep.textContent = "›";
-      nav.appendChild(sep);
-      if (c.prefix === o.focus) {
-        const cur = document.createElement("span");
-        cur.className = "folder-crumb current";
-        cur.textContent = c.label;
-        nav.appendChild(cur);
-      } else {
-        const crumb = document.createElement("button");
-        crumb.className = "folder-crumb";
-        crumb.textContent = c.label;
-        crumb.title = `Focus ${c.prefix}/`;
-        crumb.addEventListener("click", () => setFocus(c.prefix));
-        nav.appendChild(crumb);
-      }
+// Every workspace-level action, whatever the headline chose to promote. Kept
+// unconditional in shape (rather than appearing and disappearing) so the menu is a
+// place you can learn; only genuinely unavailable actions are omitted.
+function workspaceActions() {
+  const acts = [["Refresh", refresh]];
+  if (lastLoggedIn && !offlineMode) {
+    acts.push(
+      ["Pull", pullAll],
+      ["What’s new", whatsnewAction],
+      ["Push all", pushAll],
+      ["Propose", proposeAll],
+    );
+    if (canRecall) acts.push(["Recall push", recallAction]);
+  }
+  if (filesVisible) {
+    acts.push(["New notebook", newNotebook], ["Check all notebooks run…", sweepAction]);
+    if (aiBatchEnabled) {
+      acts.push(["Batch build…", () => window.open("/ai/batch", "mooringBatch")]);
     }
-    const count = document.createElement("span");
-    count.className = "folder-count muted";
-    count.textContent = `${o.shownFiles} of ${o.totalFiles} file${o.totalFiles === 1 ? "" : "s"}`;
-    nav.appendChild(count);
-    bar.appendChild(nav);
   }
-
-  if (showToggles) {
-    const toggles = document.createElement("div");
-    toggles.className = "folder-toggles";
-    const ex = document.createElement("button");
-    ex.className = "small";
-    ex.textContent = "Expand all";
-    ex.dataset.folderToggle = "expand";
-    // setAllExpanded re-renders (rebuilding this bar), so put focus back on the twin.
-    ex.addEventListener("click", () => {
-      setAllExpanded(true);
-      refocus('[data-folder-toggle="expand"]');
-    });
-    const co = document.createElement("button");
-    co.className = "small";
-    co.textContent = "Collapse all";
-    co.dataset.folderToggle = "collapse";
-    co.addEventListener("click", () => {
-      setAllExpanded(false);
-      refocus('[data-folder-toggle="collapse"]');
-    });
-    toggles.append(ex, co);
-    bar.appendChild(toggles);
-  }
+  acts.push(["Last operation", () => setCentreView("log")]);
+  acts.push(["Workspace, packages & health", () => setCentreView("workspace")]);
+  return acts;
 }
 
-function renderFiles(files, artifacts, declaredFolders) {
-  const tbody = $("files-table").querySelector("tbody");
-  tbody.innerHTML = "";
-  const q = fileQuery.trim();
-  const declared = declaredFolders || [];
-  // PBIP artifacts keep their own collapsible grouping; the rest group by folder so the
-  // structure (incl. an adopted/declared folder that is still empty) is visible.
-  const nonArtifact = files.filter((f) => !f.artifact);
-  // Catalog presence (UNFILTERED): declared-but-empty folders still count, so the
-  // table/empty-hint/search toggles keep the original "structure is visible" behaviour.
-  const baseSections = FilesTree.group(nonArtifact, declared);
-  const hasCatalog = baseSections.length > 0 || artifacts.length > 0;
-  $("files-table").classList.toggle("hidden", !hasCatalog);
-  // The empty-hint and the table are mutually exclusive: declared folders seed empty
-  // folder sections (each with its own "New here"), so once any row renders the hint
-  // would just duplicate that nudge — show it only when there's truly nothing.
-  $("empty-hint").classList.toggle("hidden", hasCatalog);
-  // The search box appears once there's a catalog to filter (find a notebook by name/title).
-  $("file-search").classList.toggle("hidden", !hasCatalog);
+const HEADLINE_ACTIONS = {
+  pull: () => pullAll(),
+  push: () => pushAll(),
+  propose: () => proposeAll(),
+  new: () => newNotebook(),
+  search: () => toggleSearch(),
+  resolve: () => selectFirstConflict(),
+  "review-pr": () => lastReview && openExternal(lastReview.compare_url),
+};
 
-  const searching = !!q;
-  const focus = searching ? "" : focusPrefix;
+// The search box reveals itself on demand (and stays open while a query is live) so
+// the header keeps its rhythm on the ordinary "I know which notebook I want" morning.
+function toggleSearch() {
+  const box = $("file-search");
+  const open = box.classList.contains("hidden");
+  box.classList.toggle("hidden", !open);
+  if (open) return box.focus();
+  // Closing the box CLEARS the filter. A hidden box with a live query would leave the
+  // list quietly filtered with nothing on screen saying so — the one failure mode a
+  // reveal-on-demand search box can have.
+  box.value = "";
+  fileQuery = "";
+  renderWorkspace();
+}
 
-  if (searching) {
-    // Flat, force-expanded matches across the WHOLE repo (the focus is ignored while
-    // searching), so a hit under a collapsed/out-of-focus folder is never hidden.
-    currentNodePaths = [];
-    const sections = FilesTree.group(nonArtifact.filter((f) => FilesTree.matches(f, q)), declared)
-      .filter((s) => s.files.length);
-    const shownArtifacts = artifacts.filter((a) =>
-      FilesTree.matches({ path: a.pointer || a.name || a.key }, q));
-    renderFolderControls({ focus: "", searching: true, collapsibleCount: 0,
-      totalFiles: nonArtifact.length, shownFiles: nonArtifact.length });
-    for (const artifact of shownArtifacts) {
-      for (const row of buildArtifactRows(artifact, files)) tbody.appendChild(row);
-    }
-    for (const section of sections) {
-      for (const row of buildFolderSection(section)) tbody.appendChild(row);
-    }
-    const shown = shownArtifacts.length + sections.reduce((n, s) => n + s.files.length, 0);
-    if (shown === 0) {
-      const tr = document.createElement("tr");
-      const td = document.createElement("td");
-      td.colSpan = 3;
-      td.className = "muted";
-      td.textContent = `No notebooks match “${q}”.`;
-      tr.appendChild(td);
-      tbody.appendChild(tr);
-    }
+// Create a notebook. A focused folder becomes the default location — the "New here"
+// button each folder row used to carry, without the row.
+function newNotebook() {
+  const where = focusPrefix ? ` in ${focusPrefix}/` : "";
+  const name = prompt(
+    `Notebook name or path${where}\n(e.g. sales-analysis, or packages/finance/notebooks/sales):`,
+  );
+  if (!name) return;
+  const full = focusPrefix && !name.includes("/") ? `${focusPrefix}/${name}` : name;
+  return action("/api/new", { name: full });
+}
+
+// -- the detail panel: everything about the selected notebook ----------------
+
+// Panel action labels that are NOT part of the "more" menu, because they belong to a
+// block of their own: the STATE block's sync verbs, and the SCHEDULE & HISTORY links.
+const STATE_ACTIONS = {
+  "Review changes…": "review",
+  "Push": "push",
+  "Propose": "propose",
+  "Merge cell by cell…": "merge cell by cell",
+  "Use remote": "use remote",
+  "Keep both": "keep both",
+  "Push as copy": "push as copy",
+};
+const HISTORY_ACTIONS = {
+  "History…": "history",
+  "Run for each…": "run for each",
+};
+
+// ScheduleFmt's tone names -> the panel's colour tokens.
+const SCHEDULE_TONES = { good: "ok", warn: "warn", bad: "bad", idle: "muted" };
+
+function panelLabel(text) {
+  const el = document.createElement("div");
+  el.className = "panel-label";
+  el.textContent = text;
+  return el;
+}
+
+function panelLinks(pairs) {
+  const row = document.createElement("div");
+  row.className = "panel-links";
+  for (const [label, handler] of pairs) {
+    const b = document.createElement("button");
+    b.className = "mono-link";
+    b.textContent = label;
+    b.addEventListener("click", handler);
+    row.appendChild(b);
+  }
+  return row;
+}
+
+function openSelected() {
+  const file = selectedFile();
+  if (!file) return;
+  const pair = fileActions(file, {}).find(([t]) => t === "Open" || t === "Reveal");
+  if (pair) pair[1]();
+}
+
+function renderPanel() {
+  const panel = $("panel");
+  panel.textContent = "";
+  const file = selectedFile();
+
+  const head = document.createElement("div");
+  head.appendChild(panelLabel("SELECTED"));
+  if (!file) {
+    // No disabled buttons: an empty panel says what to do, it doesn't mime the full
+    // one with everything greyed out.
+    const hint = document.createElement("div");
+    hint.className = "panel-empty";
+    hint.textContent = "select a notebook";
+    head.appendChild(hint);
+    panel.appendChild(head);
     return;
   }
+  const title = document.createElement("div");
+  title.className = "panel-title";
+  title.textContent = file.title || file.path.split("/").pop();
+  const path = document.createElement("div");
+  path.className = "panel-path";
+  path.textContent = file.path;
+  head.append(title, path);
+  panel.appendChild(head);
 
-  // Browse view: a recursive folder tree rooted at the focus, so deep sub-folders nest as
-  // their own collapsible nodes instead of flattening. Crowded levels open collapsed; a
-  // focus narrows to one subtree (Power BI projects scoped to it by pointer path).
-  const t = FilesTree.tree(nonArtifact, declared, focus);
-  currentNodePaths = FilesTree.allFolderPaths(t);
-  const shownFiles = FilesTree.scope(nonArtifact, focus).length;
-  const ctx = {
-    collapseDefault: FilesTree.crowdedCount(t.folders.length, shownFiles),
-    // The ☆/★ star curates the team's order — only on top-level folders in the browse
-    // (unfocused) view, repo mode. `featuredSet` tells a header filled vs hollow.
-    featureable: !focus && canFeature,
-    featuredSet: new Set(lastFeatured),
-    // The "AI context" toggle offers a folder to the team copilot. Independent of the ☆ star
-    // (governance, not display order) — rendered on every folder node at every depth, and
-    // NOT suppressed by a focus, since drilling in is how you reach a deep folder.
-    contextCurateable: canCurateContext,
-    contextSet: new Set(lastContextFolders),
+  // --- actions: the open cluster leads, exactly as fileActions orders it -----
+  const all = fileActions(file, {});
+  const take = (label) => {
+    const i = all.findIndex(([t]) => t === label);
+    return i === -1 ? null : all.splice(i, 1)[0];
   };
-  const shownArtifacts = focus
-    ? artifacts.filter((a) => FilesTree.scope([{ path: a.pointer || a.name || a.key }], focus).length > 0)
-    : artifacts.slice();
-  renderFolderControls({ focus, searching: false, collapsibleCount: FilesTree.expandableCount(t),
-    totalFiles: nonArtifact.length, shownFiles });
-  for (const artifact of shownArtifacts) {
-    for (const row of buildArtifactRows(artifact, files)) tbody.appendChild(row);
+  const open = take("Open") || take("Reveal");
+  const withAi = take("Open with AI");
+  const stateLinks = [];
+  for (const label of Object.keys(STATE_ACTIONS)) {
+    const pair = take(label);
+    if (pair) stateLinks.push([STATE_ACTIONS[label], pair[1]]);
+  }
+  const historyLinks = [];
+  for (const label of Object.keys(HISTORY_ACTIONS)) {
+    const pair = take(label);
+    if (pair) historyLinks.push([HISTORY_ACTIONS[label], pair[1]]);
   }
 
-  // At the root, the curator's featured folders pin to the top and the rest fold under a
-  // "More folders" disclosure (additive — no featured folders → the ordinary tree). A
-  // focus zooms past all of this.
-  const rows = [];
-  const part = !focus && lastFeatured.length
-    ? FilesTree.partitionFeatured(t.folders, lastFeatured)
-    : { featured: [], rest: t.folders };
-  for (const node of part.featured) rows.push(...buildFolderNode(node, 0, ctx));
-  // Stale featured entries (folder renamed/deleted) — keep them un-starrable so a dead
-  // entry never gets stuck in the synced list. Repo mode only; truly-gone paths only.
-  if (ctx.featureable) {
-    const live = new Set(part.featured.map((n) => n.path));
-    const seen = new Set();
-    for (const raw of lastFeatured) {
-      const p = FilesTree.norm(raw);
-      if (p && !live.has(p) && !seen.has(p) && !FilesTree.focusLive(nonArtifact, declared, p)) {
-        seen.add(p);
-        rows.push(buildStaleFeatured(p));
-      }
-    }
+  const actions = document.createElement("div");
+  actions.className = "panel-actions";
+  if (open) {
+    const btn = document.createElement("button");
+    btn.className = "primary";
+    btn.textContent = open[0];
+    btn.addEventListener("click", open[1]);
+    actions.appendChild(btn);
   }
-  // Stale AI-context offers (folder renamed/deleted): keep them withdrawable. A folder that
-  // exists but is folded under "More folders" — or NESTED several levels down — is still
-  // live: currentNodePaths is allFolderPaths(t), every node at every depth regardless of
-  // fold state, so only truly-gone offered paths surface here. Root view only: under a focus
-  // the tree holds just that subtree, so every offer outside it would look gone.
-  if (ctx.contextCurateable && !focus) {
-    const liveFolders = new Set(currentNodePaths);
-    const seenCtx = new Set();
-    for (const raw of lastContextFolders) {
-      const p = FilesTree.norm(raw);
-      if (p && !liveFolders.has(p) && !seenCtx.has(p) &&
-          !FilesTree.focusLive(nonArtifact, declared, p)) {
-        seenCtx.add(p);
-        rows.push(buildStaleContext(p));
-      }
-    }
+  if (withAi) {
+    const b = document.createElement("button");
+    b.className = "mono-link";
+    b.textContent = "open with AI";
+    b.addEventListener("click", withAi[1]);
+    actions.appendChild(b);
   }
-  if (part.featured.length) {
-    // Featured are pinned; fold everything else under "More folders".
-    if (part.rest.length) {
-      rows.push(buildMoreHeader(part.rest.length));
-      if (moreOpen) for (const node of part.rest) rows.push(...buildFolderNode(node, 0, ctx));
-    }
-  } else {
-    for (const node of part.rest) rows.push(...buildFolderNode(node, 0, ctx));
+  if (all.length) actions.appendChild(actionsMenu(all, file.path, "more"));
+  if (actions.childNodes.length) panel.appendChild(actions);
+
+  // --- STATE ----------------------------------------------------------------
+  const stateBlock = document.createElement("div");
+  stateBlock.className = "panel-block panel-block-strong";
+  stateBlock.appendChild(panelLabel("STATE"));
+  const line = document.createElement("div");
+  line.className = "panel-state";
+  const word = document.createElement("span");
+  word.className = `state-word state-${STATE_BADGES[file.state] || "local"}`;
+  word.textContent = file.state;
+  line.appendChild(word);
+  const qual = rowQualifier(file);
+  if (qual) {
+    const q = document.createElement("span");
+    q.className = "state-qualifier";
+    q.textContent = " " + qual;
+    line.appendChild(q);
   }
-  for (const file of t.files) rows.push(buildTreeFileRow(file, 0));
-  for (const row of rows) tbody.appendChild(row);
+  stateBlock.appendChild(line);
+  if (stateLinks.length) stateBlock.appendChild(panelLinks(stateLinks));
+  panel.appendChild(stateBlock);
+
+  // --- RECEIPTS: the value-free ledger -------------------------------------
+  // The same claims the row badges made, in the same words, with the same caveats
+  // on their title text. A receipt with no payload contributes no line at all —
+  // never a placeholder, never a reassuring "nothing to report".
+  const receipts = ReceiptsFmt.lines(file, LineageFmt);
+  if (receipts.length) {
+    const block = document.createElement("div");
+    block.className = "panel-block";
+    block.appendChild(panelLabel("RECEIPTS"));
+    for (const r of receipts) {
+      const row = document.createElement("div");
+      row.className = "receipt";
+      row.title = r.title;
+      const code = document.createElement("span");
+      code.className = `receipt-code tone-${r.tone}`;
+      code.textContent = r.code;
+      row.append(code, r.text);
+      block.appendChild(row);
+    }
+    panel.appendChild(block);
+  }
+
+  // --- SCHEDULE & HISTORY ---------------------------------------------------
+  const sched = (lastSchedules.schedules || []).find((r) => r.notebook === file.path);
+  // "in your last push" is what /api/state can honestly say about this file's
+  // history without a round trip: the manifest records WHICH files the last push
+  // wrote, not when or by whom. History… has the dated detail.
+  const inLastPush = canRecall && recallPaths.includes(file.path);
+  if (sched || inLastPush || historyLinks.length) {
+    const block = document.createElement("div");
+    block.className = "panel-block";
+    block.appendChild(panelLabel("SCHEDULE & HISTORY"));
+    if (sched) {
+      // ScheduleFmt already decides the tone, and its ordering is the load-bearing
+      // part (paused and overdue outrank "it ran clean on Monday") — so the wording
+      // and the severity both come from there, only the token names are mapped.
+      const state = ScheduleFmt.state(sched);
+      const row = document.createElement("div");
+      row.append(`${sched.cadence_text} · `);
+      const tone = document.createElement("span");
+      tone.className = `tone-${SCHEDULE_TONES[state.tone] || "muted"}`;
+      tone.textContent = state.text;
+      row.appendChild(tone);
+      block.appendChild(row);
+    }
+    if (inLastPush) {
+      const row = document.createElement("div");
+      row.className = "panel-faint";
+      row.textContent = "in your last push · recall available";
+      block.appendChild(row);
+    }
+    if (historyLinks.length) block.appendChild(panelLinks(historyLinks));
+    panel.appendChild(block);
+  }
 }
 
-// "Last checked 3 hours ago — 2 teammate update(s) waiting. Refresh". Quiet by
-// design: hidden unless updates are waiting or the view is old enough (>= 30 min)
-// that its numbers shouldn't be trusted. Re-rendered on an interval so the age
-// stays honest while the tab sits open (text only — no network).
-function renderFreshnessBanner() {
-  const banner = $("freshness-banner");
-  const waiting = Freshness.pullCount(lastFiles);
-  const age = lastStateAt == null ? null : Date.now() - lastStateAt;
-  const show = lastLoggedIn && age != null && (waiting > 0 || age >= 30 * 60_000);
-  banner.classList.toggle("hidden", !show);
-  if (!show) return;
-  banner.innerHTML = "";
-  banner.append(
-    waiting > 0
-      ? `Last checked ${Freshness.ageText(age)} — ${waiting} teammate update(s) waiting. `
-      : `Last checked ${Freshness.ageText(age)}. `,
-  );
-  const btn = document.createElement("button");
-  btn.className = "small";
-  btn.textContent = "Refresh";
-  btn.addEventListener("click", refresh);
-  banner.appendChild(btn);
+// -- centre views ------------------------------------------------------------
+// Every panel the hub had as a stacked card now OPENS IN THE CENTRE, replacing the
+// list, with one "← back to notebooks" link at the top. The detail panel stays put,
+// so the context of what you were looking at survives the trip.
+
+const CENTRE_VIEWS = {
+  list: "files-card",
+  accounts: "accounts-view",
+  checklist: "checklist-card",
+  schedules: "schedules-card",
+  params: "params-card",
+  log: "log-card",
+  history: "history-card",
+  review: "review-card",
+  merge: "merge-card",
+  whatsnew: "whatsnew-card",
+  workspace: "workspace-card",
+};
+
+function setCentreView(name) {
+  centreView = CENTRE_VIEWS[name] ? name : "list";
+  syncCentre();
+  renderRailNav();
 }
 
-// "GitHub unreachable — showing sync state as of N min ago." Loud and amber:
-// the rows below are the last OBSERVED remote view (server-cached), not live.
-// `offline` is /api/state's payload: { reason: "tls"|"network", as_of: ISO|"" }.
-function renderOfflineBanner(offline) {
-  const banner = $("offline-banner");
-  banner.classList.toggle("hidden", !offline);
-  if (!offline) return;
-  const what = offline.reason === "tls"
-    ? "Couldn't make a secure connection to GitHub (a proxy may be interfering)"
-    : "GitHub is unreachable";
-  const asOf = offline.as_of ? Date.parse(offline.as_of) : NaN;
-  const shown = Number.isNaN(asOf)
-    ? "no cached sync state yet"
-    // Math.max: clock skew must not blank the age ("just now" is honest enough).
-    : `showing sync state as of ${Freshness.ageText(Math.max(0, Date.now() - asOf))}`;
-  banner.textContent = `${what} — ${shown}. ` +
-    "Editing works normally; push and pull resume when you're back online.";
+// Close ONE view if it happens to be the one showing (used when its data goes away —
+// e.g. going offline closes Review and History). Never yanks an unrelated view.
+function closeCentreView(name) {
+  if (centreView === name) setCentreView("list");
 }
 
-function renderReviewBanner(review) {
-  const banner = $("review-banner");
-  banner.innerHTML = "";
-  banner.classList.toggle("hidden", !review);
-  if (!review) return;
-  banner.append(`Proposal open on ${review.branch} — `);
-  const a = document.createElement("a");
-  a.href = review.compare_url;
-  a.target = "_blank";
-  a.rel = "noopener";
-  a.textContent = "create / view the pull request";
-  banner.appendChild(a);
+function syncCentre() {
+  for (const [view, id] of Object.entries(CENTRE_VIEWS)) {
+    const el = $(id);
+    if (!el) continue;
+    const show = view === centreView && (view !== "list" || filesVisible);
+    el.classList.toggle("hidden", !show);
+  }
+  $("centre-back").classList.toggle("hidden", centreView === "list");
+  // The header block is about the WORKSPACE; on a detail view it would be answering a
+  // question you have stopped asking. The error banner and the sweep's progress line
+  // live outside it and are never hidden by a view change.
+  $("centre-head").classList.toggle("hidden", centreView !== "list");
+}
+
+// -- the responsive panel drawer --------------------------------------------
+// Below the panel breakpoint the panel becomes a right-anchored overlay: selecting a
+// row opens it, Esc and the close link dismiss it.
+
+function openDrawer() {
+  document.body.classList.add("drawer-open");
+}
+function closeDrawer() {
+  document.body.classList.remove("drawer-open");
+}
+
+// Re-render everything that derives from the last /api/state rows, without re-fetching.
+function renderWorkspace() {
+  renderFiles(lastFiles, lastArtifacts, lastFolders);
+  renderRailNav();
+  renderRailFolders(lastFolders);
+  renderHeaderBlock();
+  renderPanel();
 }
 
 // -- first-run checklist (the self-ticking ramp; pure derivation in checklist.js) --
@@ -2564,16 +2847,16 @@ function checklistSet(flag) {
 }
 
 function renderChecklist() {
-  const card = $("checklist-card");
-  if (!checklistKey) {
-    card.classList.add("hidden");
+  // The checklist is a rail destination now (renderRailNav offers it only while it is
+  // unfinished and undismissed), so this populates it and steps aside if the
+  // destination has just disappeared under the user.
+  const stored = checklistStored();
+  const items = checklistKey ? Checklist.derive(lastFiles, lastReview, stored) : [];
+  const gone = !checklistKey || !!stored.dismissed || Checklist.isDone(items);
+  if (gone) {
+    if (centreView === "checklist") setCentreView("list");
     return;
   }
-  const stored = checklistStored();
-  const items = Checklist.derive(lastFiles, lastReview, stored);
-  const hide = !!stored.dismissed || Checklist.isDone(items);
-  card.classList.toggle("hidden", hide);
-  if (hide) return;
   const list = $("checklist-items");
   list.innerHTML = "";
   for (const item of items) {
@@ -2587,13 +2870,16 @@ function renderChecklist() {
   }
 }
 
-$("checklist-dismiss").addEventListener("click", () => checklistSet("dismissed"));
+$("checklist-dismiss").addEventListener("click", () => {
+  checklistSet("dismissed");
+  setCentreView("list");
+});
 
 // Catalog search: filter the file listing as you type (client-side, no network). Re-render
 // from the last /api/state rows so the filter is instant and survives background polls.
 $("file-search").addEventListener("input", (event) => {
   fileQuery = event.target.value || "";
-  renderFiles(lastFiles, lastArtifacts, lastFolders);
+  renderWorkspace();
 });
 
 // The repo identity discovery last ran for. Discovery costs a full-tree fetch on
@@ -2602,77 +2888,31 @@ $("file-search").addEventListener("input", (event) => {
 let lastDiscoverRepo = null;
 
 async function maybeDiscover(state) {
-  const banner = $("adopt-banner");
-  if (!state.logged_in) {
-    banner.classList.add("hidden");
+  const clear = () => {
+    adoptCandidates = [];
     lastDiscoverRepo = null;
-    return;
-  }
+    renderRailFolders(lastFolders);
+  };
+  if (!state.logged_in) return clear();
   if (offlineMode) {
     // Offline mode keeps logged_in true, so without this the one-per-repo-session
     // shot would be burnt on a discovery that cannot succeed — and the adopt
-    // banner would then never appear after connectivity returns. Re-arm instead.
-    banner.classList.add("hidden");
-    lastDiscoverRepo = null;
-    return;
+    // prompt would then never appear after connectivity returns. Re-arm instead.
+    return clear();
   }
   if (state.repo === lastDiscoverRepo) return;  // already checked this repo this session
   lastDiscoverRepo = state.repo;
   try {
     const data = await api("/api/discover");
-    renderAdoptBanner(data.candidates || []);
+    adoptCandidates = data.candidates || [];
+    renderRailFolders(lastFolders);
   } catch {
-    banner.classList.add("hidden");  // discovery is a non-essential prompt; never block
+    clear();  // discovery is a non-essential prompt; never block
   }
-}
-
-function renderAdoptBanner(candidates) {
-  const banner = $("adopt-banner");
-  banner.innerHTML = "";
-  banner.classList.toggle("hidden", candidates.length === 0);
-  if (!candidates.length) return;
-
-  const names = candidates.map((c) => c.folder);
-  const summary = document.createElement("div");
-  // Discovery surfaces any folder with syncable files, which can include data-only
-  // folders (0 .py) — so the copy says "files", not "Python files" (the per-folder
-  // button shows each folder's .py count for the notebook signal).
-  summary.append(
-    `Found ${candidates.length} folder(s) with files outside your synced folders: `,
-  );
-  names.forEach((name, i) => {
-    const b = document.createElement("b");
-    b.textContent = name;
-    summary.append(b, i < names.length - 1 ? ", " : ". ");
-  });
-  summary.append("Adopt them to sync their notebooks (and helper modules) for the team.");
-
-  const actions = document.createElement("div");
-  actions.className = "adopt-actions";
-  for (const c of candidates) {
-    const btn = document.createElement("button");
-    btn.className = "small";
-    btn.textContent = `Adopt ${c.folder} (${c.py_files} .py)`;
-    btn.addEventListener("click", () => adoptFolders([c.folder]));
-    actions.append(btn, " ");
-  }
-  if (candidates.length > 1) {
-    const all = document.createElement("button");
-    all.className = "small primary";
-    all.textContent = "Adopt all";
-    all.addEventListener("click", () => adoptFolders(names));
-    actions.append(all);
-  }
-  // Wrap in .notice-content so the summary + action buttons stack (block) beside
-  // the leading icon rather than becoming inline flex items next to it.
-  const content = document.createElement("div");
-  content.className = "notice-content";
-  content.append(summary, actions);
-  banner.append(content);
 }
 
 function adoptFolders(folders) {
-  // Force a re-check after the adopt (action() refreshes) so the banner reflects the
+  // Force a re-check after the adopt (action() refreshes) so the rail reflects the
   // now-narrowed candidate set — the adopted folders drop out, leaving any others.
   lastDiscoverRepo = null;
   return action("/api/adopt", { folders });
@@ -2878,16 +3118,16 @@ async function refresh() {
   lastStateAt = Date.now();
   lastLoggedIn = !!state.logged_in;
   offlineMode = !!state.offline;
-  renderOfflineBanner(state.offline);
   showError(state.error || "");
-  if (state.ui_theme) {
-    applyTheme(state.ui_theme);
-    $("theme-select").value = state.ui_theme;
-  }
+  // Appearance is set on /settings now; the hub only follows what it (or another
+  // tab, via theme.js) chose. The server stays the source of truth.
+  if (state.ui_theme) applyTheme(state.ui_theme);
   // Local mode (no repo configured): the notebook surface is usable without a
   // login; only sync needs a repo. The server reports state.mode === "local".
   const localMode = state.mode === "local";
   const showFiles = state.logged_in || localMode;
+  lastMode = state.mode || "local";
+  filesVisible = showFiles;
 
   // Identity is per-repo, so the badge names the ACCOUNT this repo syncs as, not a
   // single installation-wide host. The host is only worth showing when it isn't
@@ -2897,13 +3137,27 @@ async function refresh() {
     activeRow.host && activeRow.host !== "github.com" ? ` · ${activeRow.host}` : "";
   const manyAccounts = (state.accounts || []).length > 1;
   const whoSuffix = manyAccounts && activeRow.account_label ? ` · ${activeRow.account_label}` : "";
+  // Two mono lines in the rail: the repo slug, then branch · account (the design's
+  // "acme-analytics/notebooks / main · @priya"). The full string stays on the title
+  // attribute, since both lines ellipsis-truncate in a 13.5rem rail.
   const repoInfoText = state.repo
     ? `${state.repo} @ ${state.branch}${hostSuffix}${whoSuffix}`
-    : (localMode ? "Local workspace — not connected to a repo" : "");
+    : (localMode ? "Local workspace — not connected to a repo" : "Not connected");
   const repoInfoEl = $("repo-info");
-  repoInfoEl.textContent = repoInfoText;
-  repoInfoEl.title = repoInfoText; // the line ellipsis-truncates when the bar is tight
+  repoInfoEl.textContent = "";
+  repoInfoEl.title = repoInfoText;
+  const slugLine = document.createElement("span");
+  slugLine.className = "repo-slug";
+  slugLine.textContent = state.repo || (localMode ? "local workspace" : "not connected");
+  const whoLine = document.createElement("span");
+  whoLine.className = "repo-who";
+  whoLine.textContent = state.repo
+    ? `${state.branch}${hostSuffix}${state.user ? ` · @${state.user}` : ""}`
+    : (localMode ? "not connected to a repo" : "");
+  repoInfoEl.append(slugLine, whoLine);
 
+  $("rail-workspace").textContent = state.workspace;
+  $("rail-workspace").title = `Workspace: ${state.workspace}`;
   $("workspace-info").textContent = `Workspace: ${state.workspace}`;
   const hint = $("workspace-hint");
   hint.textContent = state.workspace_hint || "";
@@ -2926,7 +3180,7 @@ async function refresh() {
   if (state.account_error) {
     showError(state.account_error);
   }
-  // The connect-repo form opens on demand — the header "Connect a repo" button in
+  // The connect-repo form opens on demand — the rail menu's "Connect a repo" in
   // local mode, or the switcher's "+ Add repo…" when configured — so it's never
   // forced on a local-only user who has no intention of connecting a repo.
   $("setup-card").classList.toggle("hidden", !showAddRepo);
@@ -2945,6 +3199,14 @@ async function refresh() {
   $("connect-repo").classList.toggle("hidden", state.configured || showAddRepo);
   const needsLogin = state.configured && !state.logged_in;
   $("login-card").classList.toggle("hidden", !needsLogin);
+  // Sign-in and repo setup take over the centre while they are the thing to do, and
+  // give it back the moment they aren't — so nobody is stranded on a blank list
+  // behind a login wall, and nobody has a setup form parked under their notebooks.
+  if (needsLogin || showAddRepo) {
+    setCentreView("accounts");
+  } else if (centreView === "accounts" && !showAccountsView) {
+    setCentreView("list");
+  }
   // Fire-and-forget: the borrowed-credential offer shells out to git, so it must
   // never hold up the render. It reveals itself if and when the probe finds one.
   if (needsLogin) {
@@ -2952,7 +3214,7 @@ async function refresh() {
   } else {
     $("login-git-box")?.classList.add("hidden");
   }
-  $("files-card").classList.toggle("hidden", !showFiles);
+  syncCentre();
   // The schedules board reads purely local state (no network), so it works offline and in
   // local mode — which matters, since a refresh degrades to "ran against your copy" rather
   // than failing when GitHub is unreachable. Fire-and-forget: a board that can't load must
@@ -2968,6 +3230,7 @@ async function refresh() {
   // user has to scroll past. Status is fetched cached (no CLI spawn).
   const showCopilot = aiChatEnabled && showFiles;
   const copilotMenu = $("copilot-menu");
+  $("copilot-summary").textContent = "copilot";
   copilotMenu.classList.toggle("hidden", !showCopilot);
   if (showCopilot) {
     refreshCopilotStatus(false);
@@ -2977,20 +3240,17 @@ async function refresh() {
 
   // Pull / Push all / Propose (and the pull digest) only make sense against a
   // connected, logged-in repo that is REACHABLE. In local mode the notebooks are
-  // usable but there's nothing to sync to; offline the network controls hide
-  // behind the amber banner (the per-file rows already omit their network
-  // actions — see fileActions).
-  for (const id of ["btn-pull", "btn-whatsnew", "btn-push", "btn-propose"]) {
-    $(id).classList.toggle("hidden", !state.logged_in || offlineMode);
-  }
+  // usable but there's nothing to sync to; offline the network actions drop out of
+  // the header block and its menu (workspaceActions), and the panel omits them for
+  // the same reason (see fileActions) — the headline says why.
   if (!state.logged_in || offlineMode) {
-    $("whatsnew-card").classList.add("hidden");
+    closeCentreView("whatsnew");
     // An already-open Review/History panel keeps live "Push this file"/"Restore"
     // buttons, each of which needs GitHub — close them too, like the rows that
     // stop offering Review/History while the amber banner shows.
-    $("review-card").classList.add("hidden");
+    closeCentreView("review");
     reviewPath = null;
-    $("history-card").classList.add("hidden");
+    closeCentreView("history");
     historyPath = null;
   }
   // The per-file watch set is keyed by repo; local mode has no digest to watch.
@@ -2999,11 +3259,9 @@ async function refresh() {
   // confirm names exactly which files it would revert (a stale record is the
   // trap — this is how the user catches one).
   recallPaths = state.recall_paths || [];
-  $("btn-recall").classList.toggle(
-    "hidden", !(state.logged_in && state.can_recall && !offlineMode),
-  );
+  canRecall = !!(state.logged_in && state.can_recall && !offlineMode);
   // Workspace-level "Batch build" — only when the opt-in orchestrator is enabled.
-  $("btn-batch").classList.toggle("hidden", !state.ai_batch);
+  aiBatchEnabled = !!state.ai_batch;
   // No team Pull in local mode, so don't dangle it in the empty-state hint.
   $("empty-hint").innerHTML = localMode
     ? "No notebooks yet &mdash; click <b>New notebook</b> to create one."
@@ -3018,13 +3276,8 @@ async function refresh() {
   lastReview = (state.logged_in && state.review) || null;
 
   // Reviews only makes sense against a logged-in repo; Activity (machine-local) and
-  // Settings (per-machine config) stay reachable everywhere, so only Reviews is gated.
-  $("reviews-link").classList.toggle("hidden", !state.logged_in);
-  const accountSummary = $("account-summary");
+  // Settings (per-machine config) stay reachable everywhere — renderRailNav gates it.
   if (state.logged_in) {
-    // The @handle labels the account menu; the panel repeats it with the Log out it
-    // acts on. (This replaced a second, redundant @username → /settings link.)
-    accountSummary.textContent = `@${state.user}`;
     const userInfo = $("user-info");
     userInfo.innerHTML = "";
     const who = document.createElement("div");
@@ -3042,12 +3295,10 @@ async function refresh() {
     });
     userInfo.append(who, logoutBtn);
     $("summary").textContent = state.summary || "";
-    renderReviewBanner(state.review);
+    $("summary").classList.remove("status-warn");
   } else {
-    accountSummary.textContent = "☰ Menu";
     $("user-info").textContent = "";
     $("summary").textContent = "";
-    renderReviewBanner(null);
   }
   if (showFiles) {
     lastFiles = state.files || [];
@@ -3073,8 +3324,6 @@ async function refresh() {
       focusPrefix = "";
       saveFolderView();
     }
-    renderFiles(lastFiles, lastArtifacts, lastFolders);
-    renderContextSubscription();
   } else {
     lastFiles = [];  // no file surface (login wall) — don't leave stale push/propose targets
     lastArtifacts = [];
@@ -3087,7 +3336,8 @@ async function refresh() {
     lastSelectedContext = [];
   }
   renderChecklist();  // after lastFiles lands: two of the items derive from the rows
-  renderFreshnessBanner();
+  renderContextSubscription();
+  renderWorkspace();  // list + rail + headline + panel, all from the rows above
   // Prompt to adopt any notebook folders the repo keeps outside the synced folders.
   // Runs once per repo-session (see maybeDiscover), so it never rides the refresh loop.
   await maybeDiscover(state);
@@ -3269,6 +3519,16 @@ async function discoverGitHosts() {
 
 let aiProvider = "copilot";
 
+// The rail footer's one-line copilot state — signed in and schema-only, or the
+// reason it isn't. "schema-only" is the promise the copilot is built on (it sees
+// column names and authored code, never a value), so the rail states it rather
+// than leaving the user to remember it.
+function copilotSummary(text, tone) {
+  const el = $("copilot-summary");
+  el.textContent = text;
+  el.className = `rail-ai tone-${tone}`;
+}
+
 function renderCopilotStatus(s) {
   if (s && s.provider) aiProvider = s.provider;
   const isOpenai = aiProvider === "openai";
@@ -3292,10 +3552,12 @@ function renderCopilotStatus(s) {
         : "GitHub Copilot isn't available in this build (install the mooring[copilot] extra).");
     connectBtn.classList.add("hidden");
     switchBtn.classList.add("hidden");
+    copilotSummary("copilot · unavailable", "muted");
     return;
   }
   if (!s.checked) {
     statusEl.textContent = "Sign-in status not checked yet.";
+    copilotSummary("copilot · not checked", "muted");
     connectBtn.textContent = connectLabel;
     connectBtn.classList.remove("hidden");
     switchBtn.classList.add("hidden");
@@ -3310,6 +3572,7 @@ function renderCopilotStatus(s) {
     connectBtn.classList.add("hidden");
     switchBtn.textContent = isOpenai ? "Change API key" : "Switch account";
     switchBtn.classList.remove("hidden");
+    copilotSummary("copilot · schema-only", "ok");
   } else {
     statusEl.textContent = isOpenai
       ? s.detail || "No OpenAI API key configured."
@@ -3317,6 +3580,7 @@ function renderCopilotStatus(s) {
     connectBtn.textContent = connectLabel;
     connectBtn.classList.remove("hidden");
     switchBtn.classList.add("hidden");
+    copilotSummary("copilot · sign in", "muted");
   }
 }
 
@@ -3387,11 +3651,12 @@ async function pollCopilotLogin() {
 }
 
 // A native <details> stays open until its summary is clicked again; close any open
-// menu when the user clicks outside it, the way a menu should. This covers the header
-// menus (Copilot + account) and every per-row actions menu — and, because clicking one
-// menu's summary runs here too, opening a menu closes any other menu left open.
+// menu when the user clicks outside it, the way a menu should. This covers the rail
+// menus (repo + Copilot) and every actions menu — the row ones, the header's "more",
+// and the panel's — and, because clicking one menu's summary runs here too, opening a
+// menu closes any other menu left open.
 document.addEventListener("click", (e) => {
-  for (const menu of document.querySelectorAll("details.header-menu[open], details.row-menu[open]")) {
+  for (const menu of document.querySelectorAll("details.rail-menu[open], details.row-menu[open]")) {
     if (!menu.contains(e.target)) menu.open = false;
   }
 });
@@ -3474,7 +3739,6 @@ function draftShareSelection(candidates) {
 // alias, and a bare listener would hand it the click event instead.
 $("login-start").addEventListener("click", () => startLogin());
 $("login-git").addEventListener("click", () => loginWithGit());
-$("btn-refresh").addEventListener("click", refresh);
 $("btn-run-due").addEventListener("click", () => runRefresh(""));
 $("btn-background-on").addEventListener("click", () => setBackground(true));
 $("btn-background-off").addEventListener("click", () => setBackground(false));
@@ -3508,7 +3772,7 @@ function confirmPullImpact() {
   );
 }
 
-$("btn-pull").addEventListener("click", async () => {
+async function pullAll() {
   if (!confirmPullImpact()) return;
   const data = await action("/api/pull", {});
   // The pull response carries the digest of what just landed, computed against
@@ -3517,8 +3781,9 @@ $("btn-pull").addEventListener("click", async () => {
   if (data && !data.error && data.whatsnew && (data.whatsnew.entries || []).length) {
     renderWhatsnew(data.whatsnew, "What just landed");
   }
-});
-$("btn-push").addEventListener("click", () => {
+}
+
+function pushAll() {
   const candidates = lastFiles.filter((f) => PUSH_STATES.has(f.state));
   const sel = draftShareSelection(candidates);
   if (!sel.count) {
@@ -3528,8 +3793,9 @@ $("btn-push").addEventListener("click", () => {
     return;
   }
   return pushAction(sel.paths, sel.count);
-});
-$("btn-propose").addEventListener("click", () => {
+}
+
+function proposeAll() {
   const candidates = lastFiles.filter((f) => PUSH_STATES.has(f.state));
   const sel = draftShareSelection(candidates);
   if (!sel.count) {
@@ -3537,10 +3803,11 @@ $("btn-propose").addEventListener("click", () => {
     return;
   }
   return proposeAction(sel.paths, sel.count);
-});
+}
+
 let recallPaths = [];
 
-$("btn-recall").addEventListener("click", () => {
+function recallAction() {
   const shown = recallPaths.slice(0, 8).join("\n  ");
   const more = recallPaths.length > 8 ? `\n  …and ${recallPaths.length - 8} more` : "";
   const ok = confirm(
@@ -3552,24 +3819,26 @@ $("btn-recall").addEventListener("click", () => {
     "a conflict instead of overwriting their work."
   );
   if (ok) action("/api/recall", {});
-});
-$("btn-new").addEventListener("click", () => {
-  const name = prompt(
-    "Notebook name or path\n(e.g. sales-analysis, or packages/finance/notebooks/sales):",
-  );
-  if (name) action("/api/new", { name });
-});
-$("btn-sweep").addEventListener("click", sweepAction);
+}
+
 $("btn-sweep-cancel").addEventListener("click", cancelSweep);
-// Batch build opens the workspace-level page in its own (reused) tab, beside the hub.
-$("btn-batch").addEventListener("click", () => {
-  window.open("/ai/batch", "mooringBatch");
-});
 $("connect-repo").addEventListener("click", () => {
   showAddRepo = true;
-  // reveals #setup-card (and Cancel) and hides the button, then fills the pickers
+  // reveals #setup-card (and Cancel), then fills the pickers
   refresh().then(openRepoForm);
 });
+// The rail's way into sign-in / repo setup, so managing identities is reachable at
+// any time and not only behind a login wall.
+$("btn-accounts").addEventListener("click", () => {
+  showAccountsView = true;
+  $("repo-menu").open = false;
+  setCentreView("accounts");
+});
+$("centre-back").addEventListener("click", () => {
+  showAccountsView = false;
+  setCentreView("list");
+});
+$("rail-workspace").addEventListener("click", () => setCentreView("workspace"));
 
 // Populating owner/repo costs GitHub round trips, so it happens when the form is
 // actually opened rather than on every /api/state poll.
@@ -3660,27 +3929,10 @@ $("setup-cancel").addEventListener("click", () => {
   refresh();
 });
 
-// Appearance toggle: apply locally at once, then persist server-side (which
-// also re-themes the notebooks' .marimo.toml). Deliberately not routed through
-// action(): an appearance change shouldn't disable the toolbar or refresh.
-$("theme-select").addEventListener("change", async (event) => {
-  const theme = event.target.value;
-  applyTheme(theme);
-  const data = await api("/api/ui/theme", { theme });
-  if (data.error) showError(data.error);
-});
+// Appearance is set on /settings; theme.js applies a cross-tab change to <html>
+// for us, and refresh() reconciles with the server value. Nothing to do here.
 
-// theme.js applies a cross-tab appearance change to <html>; the hub just keeps
-// its Appearance select in sync with it.
-window.addEventListener("mooring:theme", (event) => {
-  $("theme-select").value = event.detail;
-});
-
-// Match the toggle to the theme the pre-paint script already applied, so it's
-// never momentarily out of sync; refresh() reconciles with the server value.
-$("theme-select").value = document.documentElement.dataset.theme || "system";
-
-// -- health check (mooring doctor in the footer) -----------------------------
+// -- health check (mooring doctor, in the workspace view) --------------------
 // On-demand only: nothing probes at startup or on refresh. The Copy report is
 // the server's redacted, paste-safe text (no tokens/hostnames/usernames).
 
@@ -3734,8 +3986,22 @@ function maybeFocusRefresh() {
 }
 window.addEventListener("focus", maybeFocusRefresh);
 document.addEventListener("visibilitychange", maybeFocusRefresh);
-// Keep the banner's age text honest while the tab sits open (no network).
-setInterval(renderFreshnessBanner, 60_000);
+// Keep the meta line's "CHECKED 14 MIN AGO" honest while the tab sits open (no
+// network) — the job the freshness banner used to do, in the line that replaced it.
+setInterval(() => { if (lastStateAt != null) renderHeaderBlock(); }, 60_000);
+
+// Esc, innermost thing first: close the search box, then the detail drawer on a
+// narrow window, then let go of the selection. The panel's actions are always aimed
+// at something you chose, so putting it down has to be one keystroke. A native
+// <dialog> handles its own Esc (and closes on the safe choice), so this stands aside
+// whenever one is open rather than acting behind it.
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "Escape") return;
+  if (document.querySelector("dialog[open]")) return;
+  if (document.activeElement === $("file-search")) toggleSearch();
+  else if (document.body.classList.contains("drawer-open")) closeDrawer();
+  else if (selectedPath) clearSelection();
+});
 
 refresh();
 // Re-attach to a sweep already running on the server (a reload mid-check).

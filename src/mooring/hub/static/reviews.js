@@ -3,9 +3,50 @@
 // The reviewer inbox: list teammates' open proposals, show a cell-aware diff of one,
 // and Approve / Request-changes (posts a GitHub PR review). All diff text is set via
 // textContent — notebook source is untrusted and must never inject markup into the hub.
+//
+// The page is the hub's own shape — a list you pick from, then a detail that REPLACES
+// it with a way back — so it uses the same centre-view idiom. The chart-room chrome
+// (the rail's page list) comes from subpage.js.
 
 const $ = (id) => document.getElementById(id);
 let current = null; // the PR number of the open review, or null
+
+// Show either the list or one review, never both. The header block is about the
+// INBOX, so it stands down on a detail — the question it answers is not the one
+// being asked there.
+function showList() {
+  current = null;
+  $("reviews-card").classList.remove("hidden");
+  $("review-detail").classList.add("hidden");
+  $("centre-back").classList.add("hidden");
+  $("centre-head").classList.remove("hidden");
+}
+
+function showDetail() {
+  $("reviews-card").classList.add("hidden");
+  $("review-detail").classList.remove("hidden");
+  $("centre-back").classList.remove("hidden");
+  $("centre-head").classList.add("hidden");
+}
+
+// One sentence about the inbox: how many proposals are waiting for YOU, which is the
+// only thing this page exists to answer.
+function renderHead(items) {
+  const n = items.length;
+  const word = Headline.count(n);
+  $("headline").textContent = n === 0
+    ? "Nothing is waiting for your review."
+    : `${word.charAt(0).toUpperCase() + word.slice(1)} proposal${n === 1 ? "" : "s"} ` +
+      `${n === 1 ? "is" : "are"} waiting for your review.`;
+  const now = new Date();
+  const months = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN",
+                  "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"];
+  $("meta-line").textContent = [
+    "REVIEWS",
+    `${n} WAITING`,
+    `${now.getDate()} ${months[now.getMonth()]} ${now.getFullYear()}`,
+  ].join("\u00a0 / \u00a0");
+}
 
 async function api(path, body) {
   const opts = body
@@ -37,18 +78,33 @@ function renderList(items) {
   const list = $("reviews-list");
   list.textContent = "";
   $("reviews-empty").classList.toggle("hidden", items.length > 0);
+  renderHead(items);
   for (const r of items) {
+    // The whole row opens the review — a button inside a row you can already click
+    // is one target too many. It IS a <button>, so it is focusable and keyboard-
+    // operable without any of its own wiring.
     const li = document.createElement("li");
-    const btn = document.createElement("button");
-    btn.className = "small";
-    btn.textContent = `Review #${r.number}`;
-    btn.addEventListener("click", () => openReview(r));
+    const row = document.createElement("button");
+    row.className = "review-row";
+    row.addEventListener("click", () => openReview(r));
+
+    const main = document.createElement("span");
+    main.className = "review-row-main";
     const title = document.createElement("span");
-    title.textContent = ` ${r.title || "(no title)"}`;
-    const who = document.createElement("span");
-    who.className = "muted";
-    who.textContent = ` — ${r.author || "unknown"}${r.updated ? " · " + r.updated.slice(0, 10) : ""}`;
-    li.append(btn, title, who);
+    title.className = "row-title";
+    title.textContent = r.title || "(no title)";
+    const sub = document.createElement("span");
+    sub.className = "row-sub";
+    sub.textContent = `#${r.number} · ${r.author || "unknown"}` +
+      (r.updated ? ` · ${r.updated.slice(0, 10)}` : "");
+    main.append(title, sub);
+
+    const state = document.createElement("span");
+    state.className = "review-row-state state-word state-review";
+    state.textContent = "awaiting you";
+
+    row.append(main, state);
+    li.appendChild(row);
     list.appendChild(li);
   }
 }
@@ -56,7 +112,7 @@ function renderList(items) {
 async function openReview(r) {
   showError("");
   current = r.number;
-  $("review-detail").classList.remove("hidden");
+  showDetail();
   $("detail-title").textContent = `#${r.number} ${r.title || ""}`;
   $("detail-gh").href = r.url || "#";
   $("detail-author").textContent = r.author ? `Proposed by ${r.author}` : "";
@@ -70,7 +126,6 @@ async function openReview(r) {
     showError(e.message);
     box.textContent = "";
   }
-  $("review-detail").scrollIntoView({ block: "nearest" });
 }
 
 function renderFiles(files) {
@@ -127,8 +182,7 @@ async function submit(event) {
   for (const b of [$("btn-approve"), $("btn-request")]) b.disabled = true;
   try {
     await api("/api/reviews/submit", { number: current, event, body: note });
-    $("review-detail").classList.add("hidden");
-    current = null;
+    showList();
     await loadList(); // the reviewed PR drops off the inbox
   } catch (e) {
     showError(e.message);
@@ -139,6 +193,11 @@ async function submit(event) {
 
 document.addEventListener("DOMContentLoaded", () => {
   $("reviews-refresh").addEventListener("click", loadList);
+  $("centre-back").addEventListener("click", showList);
+  // Esc backs out of a review, like the hub's detail drawer.
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && current !== null) showList();
+  });
   $("btn-approve").addEventListener("click", () => submit("APPROVE"));
   $("btn-request").addEventListener("click", () => submit("REQUEST_CHANGES"));
   loadList();

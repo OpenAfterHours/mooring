@@ -10,6 +10,14 @@ just Python 3.12 or newer. Everything below happens in the **hub** (the browser
 page that opens when you run the app). The same actions are available from the
 [command line](cli.md) if you prefer a terminal.
 
+The hub has three columns. On the **left** is the rail: which repo you are in, the
+folders you can narrow to, and the other pages (reviews, schedules, activity,
+settings). The **middle** is your notebooks, under one line that says what has
+changed and one button for the most useful thing to do about it. **Select** a
+notebook and the **right-hand panel** fills with everything about it — what state
+it is in, what it can prove about itself, and every action you can take on it,
+with the long tail under **more**.
+
 !!! tip "Analyse your data with a copilot that never sees it"
 
     Open any notebook and click **AI** to chat with a schema-only assistant — it
@@ -33,7 +41,7 @@ page that opens when you run the app). The same actions are available from the
 | **Open** | Open a notebook in the bundled marimo editor (a new browser tab), or a Power BI project in **Power BI Desktop** — see [Power BI reports](power-bi.md). |
 | **New notebook** | Create a fresh marimo notebook from a template and open it. A bare name lands in `notebooks/`; type a path (e.g. `packages/finance/notebooks/sales`) to place it in a sub-folder — mooring registers that folder so it syncs for the team. |
 | **Deliver** | Render a notebook to a **self-contained HTML snapshot** (code hidden) you can email a stakeholder who won't open marimo. See [Delivering a result](#delivering-a-result-for-a-stakeholder). |
-| **Verify runs** | Smoke-run the notebook once on your machine and badge the row with whether it **ran clean** — the "does this still run before I share it?" check. See [Verifying a notebook runs](#verifying-a-notebook-runs). |
+| **Verify runs** | Smoke-run the notebook once on your machine and record whether it **ran clean** on the notebook's receipts — the "does this still run before I share it?" check. See [Verifying a notebook runs](#verifying-a-notebook-runs). |
 | **Check all notebooks run** | The same check for **every** notebook in the workspace, one at a time, with a summary of what still runs. Slow, and cancellable. See [Checking that everything still runs](#checking-that-everything-still-runs). |
 | **Run for each…** | Run this notebook **once per region / entity / month** and save one snapshot per value — the month-end "same pack, six times" loop. See [Running one notebook for each value](#running-one-notebook-for-each-value). |
 | **Schedule refresh…** | Re-run a notebook on a cadence (pull → run → report), so you stop having to remember. Appears once the notebook has verified clean. See [Refreshing a notebook on a schedule](#refreshing-a-notebook-on-a-schedule). |
@@ -93,7 +101,8 @@ Your manager wants the number and the chart — not a `.py`. **Deliver** renders
 notebook to a **self-contained HTML file** (the outputs, with the code hidden)
 that you can double-click or attach to an email or Teams message.
 
-1. On a notebook's **Actions ▾** menu, choose **Deliver**. Mooring runs the
+1. Select the notebook, then choose **Deliver** on the panel's **more** menu.
+   Mooring runs the
    notebook once **on your machine** and saves the result to a local outbox
    (`.mooring/outbox/<notebook>/<name>-<date>.html`), then reveals it in your file
    manager and opens it for preview.
@@ -122,7 +131,8 @@ md.table(summary, "Summary")        # one sheet per call
 md.table(by_region, "By region")
 ```
 
-Then choose **Deliver as Excel** on the notebook's **Actions ▾** menu (or
+Then select the notebook and choose **Deliver as Excel** on the panel's **more**
+menu (or
 [`mooring deliver <path> --excel`](cli.md)). Mooring runs the notebook and writes
 one `.xlsx` to the same local outbox, with your sheets in the order you named them
 plus a **Provenance** sheet carrying the same repo / commit / notebook / date /
@@ -180,12 +190,13 @@ mc.not_null(loans, "balance")               # no missing balances
 ```
 
 Each check prints a pass/fail line in your notebook and records a **value-free**
-receipt (the check name and whether it passed — **never a data value**). The hub
-shows a green **✓ N checks** badge on the notebook's row, or a red **✗ M failing**
-badge if something doesn't tie out; `mooring checks` lists them from the terminal.
+receipt (the check name and whether it passed — **never a data value**). Select the
+notebook in the hub and its **Receipts** read `ok 12 tie-out checks pass`, or
+`!! 2 of 3 tie-out checks failing` if something doesn't tie out; `mooring checks`
+lists them from the terminal.
 
-The badge reflects your **last run**. Starting the cell with `mc.reset()` keeps it
-current; if you remove the checks cell entirely, clear the leftover badge with
+The receipt reflects your **last run**. Starting the cell with `mc.reset()` keeps it
+current; if you remove the checks cell entirely, clear the leftover receipt with
 `mooring checks --clear` (or `--clear <path>` for one notebook).
 
 !!! tip "Let the copilot write them"
@@ -200,14 +211,15 @@ A notebook you inherited — or one you haven't opened in weeks — might not ru
 a dependency moved, an input path changed, a cell was left half-edited. Before you share
 its number, **Verify** it.
 
-1. On a notebook's **Actions ▾** menu, choose **Verify runs**. Mooring runs the whole
+1. Select the notebook and choose **Verify runs** on the panel's **more** menu.
+   Mooring runs the whole
    notebook once **on your machine**, top to bottom, in the same locked environment the
    editor uses, and records the outcome.
-2. The row then shows a green **✓ ran clean** badge, or an amber **⚠ … failed to run**
-   badge if a cell errored — open the notebook to see which one. On the command line
+2. The notebook's **Receipts** then read `ok ran clean · 12 Aug`, or `!! 3 cells
+   failed` if a cell errored — open the notebook to see which one. On the command line
    this is [`mooring verify <path>`](cli.md).
-3. The badge is tied to the notebook's **current contents**: the moment you edit the
-   file, the badge **clears itself**, because "it ran clean" is no longer a claim about
+3. The receipt is tied to the notebook's **current contents**: the moment you edit the
+   file, it **clears itself**, because "it ran clean" is no longer a claim about
    the code that's now there. Re-verify after your edits.
 
 !!! info "Value-free, local, and never committed"
@@ -217,7 +229,7 @@ its number, **Verify** it.
     contain values) is written to the `.mooring` folder and deleted straight away, and
     the receipt stays on your machine — it never syncs and the AI never sees it.
 
-!!! warning "A green badge means it *ran*, not that the number is *right*"
+!!! warning "A green receipt means it *ran*, not that the number is *right*"
 
     Verify proves the notebook executes without error. It can't tell you the answer is
     correct — for that, tie your numbers out with
@@ -241,10 +253,10 @@ reports:
 * **failed** — it ran, but a cell errored. Open it to see which.
 * **could not run** — it never started, usually because the environment is broken (a
   package the lock file no longer provides). That's not the notebook's fault, so it
-  doesn't get a red badge — but it does mean nobody can use it right now.
+  doesn't count against the notebook — but it does mean nobody can use it right now.
 
 A broken notebook never stops the sweep, and each notebook records exactly the same
-**✓ ran clean** badge a hand Verify does — so the rows badge as normal, and each badge
+**ran clean** receipt a hand Verify does — so the receipts read as normal, and each one
 still clears itself the moment you edit that file. `--resume` finishes a run you stopped
 halfway: it skips only the notebooks the **last check** ran clean, and only while nothing
 about the environment has moved since — change the packages, or edit one of them, and
@@ -258,7 +270,7 @@ resume quietly runs the lot rather than inheriting an answer that no longer appl
     counted as fine. Once it's checked one repo it can tell you roughly how long the next
     check will take.
 
-!!! warning "The summary ages the same way a badge does"
+!!! warning "The summary ages the same way a receipt does"
 
     "10 ran clean" is a claim about the exact notebooks that ran. Edit one and it drops
     out of the count (`1 edited since (no longer covered)`) instead of sitting there
@@ -283,10 +295,10 @@ gets you through, deliberately, so the decision is yours and it's on the record.
 holds even where your team has set `[policy] push_guard = "block"`: that policy is about
 files containing something *sensitive*, and it never becomes a wall around a lock file.
 
-!!! info "Why a green Verify badge isn't enough here"
+!!! info "Why a green Verify receipt isn't enough here"
 
-    A badge is tied to the *notebook's* contents, not to `uv.lock`. Change the packages
-    and every badge stays green over an environment nothing has been run against. So the
+    A receipt is tied to the *notebook's* contents, not to `uv.lock`. Change the packages
+    and every receipt stays green over an environment nothing has been run against. So the
     check is tied to the exact lock file it was run against — swap the lock and mooring
     asks again rather than trusting a check that never saw it. (That's also why
     `--resume` won't skip across a package change.)
@@ -328,8 +340,8 @@ sales = pl.read_parquet(f"sales_{region}.parquet")
 
 ### 2. Run it for each value
 
-On the notebook's **Actions ▾** menu, choose **Run for each…**, type the parameter and its
-values, and press **Start**:
+Select the notebook and choose **Run for each…** on the panel's **more** menu, type
+the parameter and its values, and press **Start**:
 
 ```
 region=EMEA,APAC,AMER
@@ -390,9 +402,9 @@ mooring run notebooks/board.py --for region=EMEA,APAC,AMER
 A month-end board pack, a daily reconciliation, a weekly exception report — the same
 notebook run against new data, on a cadence. **Schedule** it and stop having to remember.
 
-On a notebook's **Actions ▾** menu, choose **Schedule refresh…**, pick how often
-(daily / every weekday / weekly / hourly) and at what time, and save. A **Scheduled
-refreshes** card then appears below your files.
+Select the notebook and choose **Schedule refresh…** on the panel's **more** menu,
+pick how often (daily / every weekday / weekly / hourly) and at what time, and save.
+A **schedules** entry then appears in the left rail, and opens the board.
 
 Each refresh **pulls the team's latest**, runs the notebook on your machine, and reports
 three things — none of which is a data value:
@@ -466,15 +478,15 @@ mi.output(monthly, "monthly", path="data/monthly.csv")
 Each call records a **value-free** fingerprint — the file's **content hash**, its
 **shape** (row/column counts), and its **schema** (column names + types), **never a data
 value** — and compares it to the previous run. If something changed under you (different
-content, more rows, a new column), the cell prints `[CHANGED] …` and the hub shows an
-amber **⚠ 1 input changed** badge on the notebook's row; otherwise a green **⛓ N inputs
-pinned** badge. An output that moved goes amber too — the numbers this notebook publishes
+content, more rows, a new column), the cell prints `[CHANGED] …` and the notebook's
+**Receipts** read an amber `chg 1 of 3 pinned inputs changed`; otherwise a green
+`ok 3 inputs pinned`. An output that moved goes amber too — the numbers this notebook publishes
 are no longer the ones it published last run. `mooring inputs` lists them from the
 terminal, and `mooring inputs --clear` resets them.
 
 Always pass **`path=`** to the file — that's what gives the *content* guarantee (the file
 hash catches a same-shape value change). Without a `path`, only the shape and schema are
-compared. Starting the cell with `mi.reset()` keeps the badge honest if you later rename
+compared. Starting the cell with `mi.reset()` keeps the receipt honest if you later rename
 or drop an input.
 
 Because `mi.fingerprint(...)` returns falsy when the input changed, you can even make it a
@@ -504,9 +516,9 @@ Once notebooks record both sides, mooring can join them: one notebook's `mi.outp
 answer no notebook tool usually gives you — *who else is relying on this file?* — without
 anyone drawing a diagram.
 
-In the hub, a data file others depend on carries a **⇄ 3 notebooks read this** badge on
-its row; a file one of your notebooks *generates* is badged **⇄ generated by 1** so you
-know not to hand-edit it. And before anything destructive lands on such a file — **Pull**
+In the hub, a data file others depend on says **3 notebooks read this** under its name
+in the list, and `lin 3 notebooks read this` in its receipts; a file one of your
+notebooks *generates* reads **generated by 1** so you know not to hand-edit it. And before anything destructive lands on such a file — **Pull**
 replacing or deleting it, **Delete**, **Discard my changes**, **Restore** — mooring names
 what depends on it first, so you can re-run those notebooks rather than find out later
 from a number that quietly moved.
@@ -531,7 +543,7 @@ confirmed since"* rather than stated as current fact.
     only means nobody wrote it down.
 
     mooring is built so it cannot accidentally tell you otherwise: a file with no recorded
-    reader gets **no badge at all** rather than a "0 readers" one, and the CLI prints the
+    reader gets **no line at all** rather than a "0 readers" one, and the CLI prints the
     caveat on every run. (It is also why mooring never infers dependencies by reading your
     code — a guessed edge would make the whole graph un-trustable.)
 
@@ -694,12 +706,12 @@ instead of Push:
    inbox](#reviewing-a-teammates-changes) automatically — nobody has to touch
    GitHub. (Prefer to open it yourself? Turn off **Open the pull request on
    Propose** in Settings, and you'll get the compare link instead.)
-3. Proposed files show an *in review* badge. They are left out of **Push all**
-   so you can't accidentally bypass the review.
+3. Proposed files read *in review* in the **State** column. They are left out of
+   **Push all** so you can't accidentally bypass the review.
 4. Need to update the proposal after feedback? Edit the file and **Propose**
    again — it goes to the same branch and the open pull request updates
    itself.
-5. When the pull request is **merged**, the badge clears on its own and a
+5. When the pull request is **merged**, that state clears on its own and a
    normal **Pull** brings your workspace in line. If the pull request is
    closed and its branch deleted instead, the files simply go back to
    *modified* — nothing is lost, and your next Propose starts a fresh branch.
@@ -712,20 +724,20 @@ instead of Push:
 
 !!! note "If a reviewer edits the pull request"
 
-    The *in review* badge clears when your exact change lands on the shared
+    The *in review* state clears when your exact change lands on the shared
     branch. If a reviewer amends the PR before merging, the merged version
-    differs from yours — the badge clears once the review branch is deleted
+    differs from yours — it clears once the review branch is deleted
     (GitHub offers this right after merging), and the reviewer's version
     arrives with your next pull.
 
 ## Reviewing a teammate's changes
 
 When someone on your team **Proposes** a change, you can approve it **without leaving
-mooring** — no GitHub UI, no git. Open **Reviews** in the header:
+mooring** — no GitHub UI, no git. Open **reviews** in the rail:
 
 1. The inbox lists open proposals awaiting review — everyone's except your own (GitHub
    won't let you approve your own change, which is the point of four-eyes).
-2. Click one to see a **cell-aware diff**: for a marimo notebook, exactly which *cells*
+2. Click a row to see a **cell-aware diff**: for a marimo notebook, exactly which *cells*
    changed, were added, or removed — the same value-free view as **Review changes**, so
    no data ever leaves the machine.
 3. Leave one **note** for the whole change and click **Approve** or **Request changes**
@@ -763,9 +775,9 @@ On the command line this is [`rollback`](cli.md#rollback).
 ## Switching repos
 
 A team can share more than one repo (say, `notebooks` for the team and a
-personal sandbox). Register each one once, then switch with the **dropdown in
-the hub header** — the file list, workspace, and pull/push all follow the
-selected repo. Choose **+ Add repo…** in the same dropdown to register another.
+personal sandbox). Register each one once, then switch from the **repo block in
+the left rail** — the file list, workspace, and pull/push all follow the
+selected repo. Choose **+ Add repo…** in the same menu to register another.
 
 Each repo keeps its **own workspace folder** on disk and its own sync state,
 so switching never mixes files. Your GitHub login covers all of them. The same

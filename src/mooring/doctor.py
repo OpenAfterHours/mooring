@@ -143,7 +143,7 @@ def _probe_github_auth(cfg: config.Config) -> ProbeResult:
         return ProbeResult(
             "auth", "GitHub login & repo access", UNKNOWN,
             "No team repo configured — nothing to check.",
-            "Connect one from the hub header (or `mooring repo add`).",
+            "Connect one from the hub's repo menu (or `mooring repo add`).",
         )
     token = auth.token_for(cfg.token_slot, method=cfg.auth_method)
     if not token:
