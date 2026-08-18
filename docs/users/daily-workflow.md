@@ -44,7 +44,7 @@ with the long tail under **more**.
 | **Verify runs** | Smoke-run the notebook once on your machine and record whether it **ran clean** on the notebook's receipts — the "does this still run before I share it?" check. See [Verifying a notebook runs](#verifying-a-notebook-runs). |
 | **Check all notebooks run** | The same check for **every** notebook in the workspace, one at a time, with a summary of what still runs. Slow, and cancellable. See [Checking that everything still runs](#checking-that-everything-still-runs). |
 | **Run for each…** | Run this notebook **once per region / entity / month** and save one snapshot per value — the month-end "same pack, six times" loop. See [Running one notebook for each value](#running-one-notebook-for-each-value). |
-| **Schedule refresh…** | Re-run a notebook on a cadence (pull → run → report), so you stop having to remember. Appears once the notebook has verified clean. See [Refreshing a notebook on a schedule](#refreshing-a-notebook-on-a-schedule). |
+| **schedule refresh** | Re-run a notebook on a cadence — daily, weekdays, weekly, hourly, or once on a date (pull → run → report), so you stop having to remember. In the panel's **SCHEDULE** block; reads **verify & schedule** until the notebook has verified clean. See [Refreshing a notebook on a schedule](#refreshing-a-notebook-on-a-schedule). |
 | **Push** | Upload your changed files to the team repo — **one commit per file**. Blocked for any file that's in conflict. |
 | **Propose** | Like Push, but uploads to a **review branch** instead of the shared branch, so a teammate can review the changes as a pull request before they land. See [Proposing changes](#proposing-changes-for-review). |
 | **Revert** | Appears on a *modified* or locally-deleted file. Discards your local changes and restores the last version you pulled or pushed. Your current version is snapshotted first, so a Revert can itself be undone. See [Reverting a file](#reverting-a-file). |
@@ -399,12 +399,20 @@ mooring run notebooks/board.py --for region=EMEA,APAC,AMER
 
 ## Refreshing a notebook on a schedule
 
-A month-end board pack, a daily reconciliation, a weekly exception report — the same
-notebook run against new data, on a cadence. **Schedule** it and stop having to remember.
+A month-end board pack, a daily reconciliation, a weekly exception report, a year-end pack
+owed once on the 20th — the same notebook run against new data, on a cadence. **Schedule**
+it and stop having to remember.
 
-Select the notebook and choose **Schedule refresh…** on the panel's **more** menu,
-pick how often (daily / every weekday / weekly / hourly) and at what time, and save.
-A **schedules** entry then appears in the left rail, and opens the board.
+Select the notebook and choose **schedule refresh** in the **SCHEDULE** block of its panel
+(it reads **verify & schedule** while the notebook has not run clean yet — that does the
+prerequisite and then opens the same form). Pick how often — daily, every weekday, weekly,
+hourly, or **once on a date** — and at what time, and save. A **schedules** entry then
+appears in the left rail, and opens the board.
+
+A **once** schedule is the one-off: *run the year-end pack on the 20th at 15:00*. Same
+machinery — pull, run, report, snapshot — aimed at a single instant. It won't run before
+that instant, it runs exactly once, and afterwards it reads as **done** rather than sitting
+on the board waiting for a tick that will never come.
 
 Each refresh **pulls the team's latest**, runs the notebook on your machine, and reports
 three things — none of which is a data value:
@@ -438,7 +446,8 @@ no longer reconcile"* is worth more than the file it produces.
     If a refresh doesn't happen when it was due, the card goes **amber** and says so. And
     every HTML snapshot a schedule produces is stamped with its cadence and its **next due
     date** in the footer — so someone you emailed it to three weeks ago can see it's out of
-    date without asking you.
+    date without asking you. A one-off's footer says so instead (*"a one-off — these numbers
+    will not refresh"*), because a date it has already passed would read as stale for ever.
 
 **Before you can schedule a notebook it has to have [verified](#verifying-a-notebook-runs)
 clean** — mooring won't schedule something that has never been shown to work. Editing a

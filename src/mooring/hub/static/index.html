@@ -289,7 +289,22 @@
                 <option value="weekdays">Every weekday</option>
                 <option value="weekly">Weekly</option>
                 <option value="hourly">Hourly</option>
+                <!-- A one-shot: "run this on the 20th and then stop". The month-end pack
+                     that is owed once, not the thing that repeats forever. -->
+                <option value="once">Once, on a date</option>
               </select>
+            </label>
+            <!-- "On <date>" is meaningful for the one-shot cadence only, exactly as the
+                 weekday picker below is meaningful for weekly only. -->
+            <label id="schedule-date-label" class="hidden">On
+              <!-- The bounds mirror schedule.MIN_YEAR/MAX_YEAR and must be kept equal to
+                   them: outside that range a date cannot be converted to local time on
+                   Windows at all, so the server refuses it, and the picker must not be able
+                   to offer what the server will reject. The floor is 1971 rather than the
+                   epoch on purpose — 1970-01-01 is not localisable in ANY zone (ahead of UTC
+                   it is below the epoch outright; at or behind it the DST-fold probe lands
+                   below the epoch), so 1971 is the first January every zone can place. -->
+              <input id="schedule-date" type="date" min="1971-01-01" max="3000-12-31">
             </label>
             <label id="schedule-day-label" class="hidden">On
               <select id="schedule-day">
@@ -317,9 +332,21 @@
           <thead><tr><th>Notebook</th><th>Repeats</th><th>Status</th><th>Actions</th></tr></thead>
           <tbody></tbody>
         </table>
+        <!-- The board is a rail DESTINATION, reachable before the first schedule exists, so
+             the empty state has to say what this place is for rather than showing a bare
+             table head over nothing. -->
+        <!-- The controls named here are the SCHEDULE block's links, whose text is the VALUES
+             of SCHEDULE_ACTIONS in app.js. Notebook rows carry no menu of their own, so this
+             has to point at the panel or it points at nothing. -->
+        <div id="schedules-empty" class="muted schedule-detail hidden">
+          Nothing scheduled yet. Pick a notebook, then in its panel&#8217;s SCHEDULE block
+          choose &#8220;schedule refresh&#8221; (&#8220;verify &amp; schedule&#8221; while it
+          has not run clean yet) and mooring will pull, re-run and report on it on the cadence
+          you choose &#8212; hourly, daily, weekdays, weekly, or once on a date.
+        </div>
         <!-- Which clock is actually running. The tier IS the freshness guarantee, so it is
              stated rather than left to assumption; renderSchedules fills it. -->
-        <div class="schedules-foot">
+        <div id="schedules-foot" class="schedules-foot">
           <span id="schedules-tier" class="muted"></span>
           <button id="btn-background-on" class="small hidden"
                   title="Run refreshes even when the hub is closed. No admin rights needed.">Run in the background</button>

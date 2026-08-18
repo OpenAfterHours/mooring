@@ -50,9 +50,9 @@ mooring deps list
 mooring deps lock
 mooring build-requirements [-o FILE]
 mooring schedule list
-mooring schedule add notebooks/board.py [--cadence daily|weekdays|weekly|hourly]
-                     [--at HH:MM] [--day mon..sun] [--grace-hours N]
-                     [--no-deliver] [--no-pull]
+mooring schedule add notebooks/board.py [--cadence daily|weekdays|weekly|hourly|once]
+                     [--at HH:MM] [--day mon..sun] [--date YYYY-MM-DD]
+                     [--grace-hours N] [--no-deliver] [--no-pull]
 mooring schedule rm | pause | resume notebooks/board.py
 mooring schedule background enable | disable | status
 mooring refresh notebooks/board.py [--no-pull] [--deliver] [--json]
@@ -270,13 +270,22 @@ never-synced `.mooring/`), so scheduling a notebook does not schedule it for you
 See [Refreshing a notebook on a schedule](daily-workflow.md#refreshing-a-notebook-on-a-schedule).
 
 - `schedule list` — every schedule, how it repeats, how the last run went, and how many are
-  overdue.
+  overdue. A schedule that has not run yet shows when it is next due, in the same words the
+  hub's board uses: a weekday and a time for a repeating cadence, the full date for a
+  one-off (a `once` months away must not read as *this* Thursday). A one-off that has had
+  its run reads **done**, with its outcome — `done` never hides a run whose tie-outs failed.
 - `schedule add <path>` — schedule a notebook. It must have **verified clean** first
   (`mooring verify <path>`); mooring will not schedule something never shown to work.
-  `--cadence daily|weekdays|weekly|hourly` (default `daily`), `--at HH:MM` (local, default
-  `07:30`), `--day mon..sun` (weekly only), `--grace-hours N` (how late before it counts as
-  overdue, default 4), `--no-deliver` (record the receipt but skip the HTML snapshot),
-  `--no-pull` (run against your local copy instead of pulling first).
+  `--cadence daily|weekdays|weekly|hourly|once` (default `daily`), `--at HH:MM` (local,
+  default `07:30`), `--day mon..sun` (weekly only), `--date YYYY-MM-DD` (**required** with
+  `--cadence once`), `--grace-hours N` (how late before it counts as overdue, default 4),
+  `--no-deliver` (record the receipt but skip the HTML snapshot), `--no-pull` (run against
+  your local copy instead of pulling first).
+- **`--cadence once`** is a one-off: *run the year-end pack on the 20th at 15:00*. It is the
+  same machinery — pull, run, receipts, an HTML snapshot with a provenance footer — aimed at
+  a single instant. It is not due before that instant, it runs exactly once, and afterwards
+  it reads as **done** rather than sitting on the board waiting for a tick that never comes.
+  A date in the past is legal and means "as soon as something is awake to run it".
 - `schedule rm <path>` — remove a schedule. `pause` / `resume <path>` — stop and restart one
   without losing it.
 - `schedule background enable` — run refreshes **with the hub closed**. Registers a Windows

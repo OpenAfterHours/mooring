@@ -45,7 +45,14 @@ FORMAT_VERSION = 1
 
 # The closed cadence vocabulary. Deliberately NOT cron: this audience does not write cron,
 # and a closed set is what lets the hub compute and display "next due" without a parser.
-CADENCES = ("hourly", "daily", "weekdays", "weekly")
+#
+# ``once`` is the odd one out and deliberately so: a one-shot ("run the year-end pack on the
+# 20th") is the same machinery — pull, run, receipts, an artifact with a provenance footer —
+# aimed at a single fixed instant instead of a repeating window. It carries a ``date``, its
+# window never moves, and once it has run CLEAN it is COMPLETE (see :func:`is_complete`)
+# rather than waiting for a next tick that will never come. Clean is the operative word: a
+# one-shot whose run FAILED is not finished, it is broken, and it goes amber like anything else.
+CADENCES = ("hourly", "daily", "weekdays", "weekly", "once")
 
 DEFAULT_AT = "07:30"
 DEFAULT_GRACE_HOURS = 4
@@ -110,6 +117,7 @@ class Schedule:
     cadence: str = "daily"
     at: str = DEFAULT_AT  # local wall-clock "HH:MM"
     day: int = 0  # weekly only: 0=Mon .. 6=Sun
+    date: str = ""  # "once" only: the local calendar date "YYYY-MM-DD" it fires on
     deliver: bool = True  # also render the stakeholder HTML into the outbox
     pull: bool = True  # pull the team's latest before running (degrades if it can't)
     grace_hours: int = DEFAULT_GRACE_HOURS
@@ -124,6 +132,7 @@ class Schedule:
             "cadence": self.cadence,
             "at": self.at,
             "day": self.day,
+            "date": self.date,
             "deliver": self.deliver,
             "pull": self.pull,
             "grace_hours": self.grace_hours,
@@ -151,11 +160,22 @@ class Schedule:
             at = normalize_at(_str(data.get("at")) or DEFAULT_AT)
         except ScheduleError:
             at = DEFAULT_AT
+        raw_date = _str(data.get("date"))
+        try:
+            date = normalize_date(raw_date) if raw_date else ""
+        except ScheduleError:
+            date = ""
+        if cadence == "once" and not date:
+            # A one-shot with no usable date cannot be placed on the clock at all: there is no
+            # window to be due in and no next tick to fall back to. Same tolerance rule as an
+            # unknown cadence — drop this ONE schedule, never crash.
+            return None
         return cls(
             notebook=notebook,
             cadence=cadence,
             at=at,
             day=min(6, max(0, _int(data.get("day")))),
+            date=date,
             deliver=bool(data.get("deliver", True)),
             pull=bool(data.get("pull", True)),
             grace_hours=max(0, _int(data.get("grace_hours"), DEFAULT_GRACE_HOURS)),
@@ -168,6 +188,8 @@ class Schedule:
     def describe_cadence(self) -> str:
         """One human phrase for the cadence — shared by the CLI, the hub card, and the
         artifact's freshness footer, so the three can never word it differently."""
+        if self.cadence == "once":
+            return f"once on {self.date} at {self.at}"
         if self.cadence == "hourly":
             return f"hourly at :{self.at.split(':')[1]}"
         if self.cadence == "weekly":
@@ -200,6 +222,58 @@ def normalize_at(text: str) -> str:
     if not (0 <= hour < 24 and 0 <= minute < 60):
         raise ScheduleError(f"Time must be between 00:00 and 23:59 (got {text!r}).")
     return f"{hour:02d}:{minute:02d}"
+
+
+# The years this module is willing to put on the clock. Localising a naive datetime (see
+# :func:`_once_start`) goes through the C runtime's local-time conversion, and on WINDOWS —
+# the primary platform — that raises ``OSError [Errno 22]`` outside roughly 1970..3000. So a
+# mistyped year is not a schedule that fires late, it is a schedule whose every clock call
+# raises: the board, the sweep, ``schedule list`` and ``doctor`` all go through the same
+# arithmetic. Refusing it at the boundary turns a typo into one actionable error message.
+#
+# The floor is NOT the epoch, and the difference is the whole point: 1970-01-01 cannot be
+# localised in ANY zone. Ahead of UTC it is below the epoch outright (Britain spent 1970 on
+# permanent BST); at or behind UTC the conversion still fails, because resolving the DST fold
+# probes a day either side of the instant and that probe lands below the epoch. 1971 is the
+# first January every zone can place, so that is the floor. A bound that admitted a date the
+# clock cannot place would defeat its own purpose — blessing the schedule here and then
+# silently parking it a century out in :func:`_once_start`, which is precisely the "stored and
+# forgotten" outcome this check exists to turn into one actionable error message.
+#
+# The ceiling carries the mirror-image exposure for a zone behind UTC (3000-12-31 23:00 local
+# is 3001 in UTC), but it is left at 3000: unlike the floor it is not reachable by a plausible
+# typo, and _once_start's guard already degrades it to "parked", never to a raise.
+#
+# Deliberately a FIXED range rather than a runtime probe: the refusal has to be identical on
+# every platform and reproducible in CI, not "whatever this machine's libc happens to accept".
+#
+# This also self-heals an entry a previous version already persisted, for free:
+# :meth:`Schedule.from_dict` catches :class:`ScheduleError`, blanks the date, and then drops a
+# dateless ``once`` outright — so the bad row leaves the board instead of taking it down.
+MIN_YEAR = 1971
+MAX_YEAR = 3000
+
+
+def normalize_date(text: str) -> str:
+    """Validate/normalise a local calendar date "YYYY-MM-DD"; raise :class:`ScheduleError`
+    if bad. Only the ``once`` cadence uses one, and for that cadence it is REQUIRED — a
+    one-shot with no date has no instant to fire at, so a blank is refused here rather than
+    quietly becoming a schedule that never runs. A year outside
+    :data:`MIN_YEAR`..:data:`MAX_YEAR` is refused for the same reason: it cannot be placed on
+    this machine's clock at all (see those constants)."""
+    value = text.strip()
+    if not value:
+        raise ScheduleError("A one-off schedule needs a date (YYYY-MM-DD).")
+    try:
+        moment = datetime.strptime(value, "%Y-%m-%d")
+    except ValueError:
+        raise ScheduleError(f"Date must look like YYYY-MM-DD (got {text!r}).") from None
+    if not MIN_YEAR <= moment.year <= MAX_YEAR:
+        raise ScheduleError(
+            f"Date must be between {MIN_YEAR}-01-01 and {MAX_YEAR}-12-31 (got {text!r}) — "
+            "check the year."
+        )
+    return moment.strftime("%Y-%m-%d")
 
 
 def normalize_day(text: str) -> int:
@@ -321,10 +395,40 @@ def _at_time(moment: datetime, at: str) -> datetime:
     return moment.replace(hour=hour, minute=minute, second=0, microsecond=0)
 
 
+def _once_start(sched: Schedule, now: datetime) -> datetime:
+    """The single instant a one-shot is owed, as a timezone-aware LOCAL datetime.
+
+    Built from the naive date+time and then localised, so the offset is the one in force ON
+    THAT DATE rather than today's — a one-shot booked across a DST boundary still fires at the
+    wall-clock time the user typed.
+
+    :meth:`Schedule.from_dict` already drops a stored ``once`` whose date is missing or
+    unparseable, and :func:`normalize_date` refuses a year this machine cannot localise, so
+    the fallback here only guards a hand-built Schedule: it places the instant a century out,
+    i.e. the schedule never becomes due, rather than firing an unattended run nobody asked for.
+
+    The guard catches OSError/OverflowError as well as ValueError because the localisation
+    step is the part that can fail: on Windows ``astimezone()`` raises ``OSError [Errno 22]``
+    for a year outside roughly 1970..3000 (see :data:`MIN_YEAR`). This clock must be TOTAL —
+    every route, the sweep and the CLI call it per row, so one unrepresentable date must never
+    be able to raise out of here and take the whole board (or every other schedule) with it."""
+    try:
+        year, month, day = (int(p) for p in sched.date.split("-"))
+        hour, minute = (int(p) for p in sched.at.split(":"))
+        return datetime(year, month, day, hour, minute).astimezone()
+    except (ValueError, OSError, OverflowError):
+        return now + timedelta(days=36500)
+
+
 def window_start(sched: Schedule, now: datetime | None = None) -> datetime:
     """The beginning of the cadence window ``now`` falls in — the moment this schedule most
-    recently became due. A run at or after this instant satisfies the current window."""
+    recently became due. A run at or after this instant satisfies the current window.
+
+    For ``once`` the window has a fixed start and no end: the schedule became due at its
+    instant and stays in that one window forever after."""
     now = now or _now()
+    if sched.cadence == "once":
+        return _once_start(sched, now)
     if sched.cadence == "hourly":
         minute = int(sched.at.split(":")[1])
         start = now.replace(minute=minute, second=0, microsecond=0)
@@ -346,9 +450,14 @@ def window_start(sched: Schedule, now: datetime | None = None) -> datetime:
 
 
 def next_due(sched: Schedule, now: datetime | None = None) -> datetime:
-    """When this schedule is next owed a run, after the current window."""
+    """When this schedule is next owed a run, after the current window.
+
+    For ``once`` that IS the window start — there is nothing after a one-shot, so the honest
+    answer is the single instant itself rather than an invented next tick."""
     now = now or _now()
     start = window_start(sched, now)
+    if sched.cadence == "once":
+        return start
     if sched.cadence == "hourly":
         return start + timedelta(hours=1)
     if sched.cadence == "weekly":
@@ -361,13 +470,24 @@ def next_due(sched: Schedule, now: datetime | None = None) -> datetime:
 
 
 def _ran_at(sched: Schedule) -> datetime | None:
+    """The receipt's instant as an aware datetime, or None when there isn't a usable one.
+
+    Same totality rule as :func:`_once_start`, and for the same reason: this is called per
+    row by every clock predicate, so one corrupt receipt must never raise out and take the
+    board (or the sweep, or ``schedule list``) down with it. A receipt mooring wrote is
+    always UTC ISO-8601, but a hand-edited one can be anything — and localising a NAIVE
+    stamp is the step that can fail, on Windows with ``OSError [Errno 22]`` outside roughly
+    1970..3000 (see :data:`MIN_YEAR`), so the same three exceptions are caught here.
+
+    None means "no usable run", which is the loud direction: the schedule reads as due and
+    goes overdue on its grace, rather than a broken receipt quietly satisfying a window."""
     if not sched.last_run.at:
         return None
     try:
         moment = datetime.fromisoformat(sched.last_run.at)
-    except ValueError:
+        return moment if moment.tzinfo is not None else moment.astimezone()
+    except (ValueError, OSError, OverflowError):
         return None
-    return moment if moment.tzinfo is not None else moment.astimezone()
 
 
 def ran_this_window(sched: Schedule, now: datetime | None = None) -> bool:
@@ -380,12 +500,53 @@ def ran_this_window(sched: Schedule, now: datetime | None = None) -> bool:
     return moment is not None and moment >= window_start(sched, now)
 
 
+def is_complete(sched: Schedule, now: datetime | None = None) -> bool:
+    """Whether a one-shot has already had its run and is finished for good.
+
+    DERIVED, never stored, so it cannot drift out of step with the history the way a persisted
+    ``done`` flag would. Two clauses beyond "this is a ``once``", and both are load-bearing:
+
+    * **WINDOW-RELATIVE, not "any receipt".** Both add paths deliberately carry the old
+      ``last_run`` across an amendment, so a re-dated one-shot — or a daily switched to
+      ``once`` — arrives here holding a receipt that predates the instant it now claims.
+      Asking :func:`ran_this_window` instead of "is there any receipt at all" is what stops
+      such a schedule advertising an instant it would never honour: its old run is outside its
+      new window, so it becomes due at that instant, goes amber after its grace, and the sweep
+      picks it up.
+    * **A FAILED run is not a finished one.** ``complete`` suppresses both alarms below, and a
+      one-shot whose only run failed is exactly the case that needs them: the notebook did not
+      run, and there is no next tick coming to try again. Excluding :data:`FAILED` here is what
+      makes a one-shot behave like every other cadence in that state — a failed daily reports
+      overdue, and so must this — rather than going quiet for the run that most needed the
+      noise. (:data:`CHECKS_FAILED` is NOT excluded: the notebook ran, the numbers merely
+      stopped tying out, and that is the board's red badge to carry, not the clock's.)
+
+    Always False for a repeating cadence."""
+    return (
+        sched.cadence == "once"
+        and ran_this_window(sched, now)
+        and sched.last_run.outcome != FAILED
+    )
+
+
 def is_due(sched: Schedule, now: datetime | None = None) -> bool:
     """Whether ``sched`` is owed a run right now. Paused schedules are never due.
 
     This is the catch-up test: it compares against the CURRENT window only, so a week of
-    missed windows collapses into one run, never seven."""
+    missed windows collapses into one run, never seven.
+
+    There is deliberately no :func:`is_complete` test here: it would be redundant (complete
+    implies ``ran_this_window``, which the last line already refuses on) and two predicates
+    that must agree are two predicates that can drift. The redundancy is why a FAILED one-shot
+    stays NOT due under the rule above — its failed run consumed the only window it will ever
+    have, so it must not auto-refire; :func:`is_overdue` is what says it out loud instead."""
     if sched.paused:
+        return False
+    now = now or _now()
+    # Nothing is due BEFORE its window opens. Load-bearing for ``once``: a one-shot dated next
+    # month has no run preceding its window, so without this it would read as due immediately
+    # and fire today. Free for the repeating cadences — their window_start is always <= now.
+    if now < window_start(sched, now):
         return False
     return not ran_this_window(sched, now)
 
@@ -396,20 +557,61 @@ def is_overdue(sched: Schedule, now: datetime | None = None) -> bool:
     This — not :func:`is_due` — is what turns the board amber and what the artifact footer's
     "next refresh due" clause lets a stakeholder check for themselves. A schedule can be due
     (it is 07:31 and the run has not started) without being overdue."""
-    if sched.paused:
-        return True  # a paused schedule is by definition not being kept fresh
+    # Resolved BEFORE the is_complete call so an injected clock stays authoritative all the way
+    # down: is_complete asks ran_this_window, which places the window itself.
     now = now or _now()
-    deadline = window_start(sched, now) + timedelta(hours=sched.grace_hours)
+    if is_complete(sched, now):
+        return False  # a one-shot that ran clean in its own window is finished, not late
+    start = window_start(sched, now)
+    # Nothing can be LATE before it was ever owed — the mirror of the same guard in
+    # :func:`is_due`, and it has to sit ABOVE the paused test rather than below it. ``once``
+    # is the first cadence whose window can be entirely in the future, so without this a
+    # one-shot booked for next month and paused today turns the board, the rail dot and
+    # ``mooring doctor`` red immediately, for a run that is not owed for weeks. Free for the
+    # repeating cadences — their window_start is always <= now — so the paused rule below
+    # keeps its full force for every schedule whose window has actually opened.
+    if now < start:
+        return False
+    if sched.paused:
+        # A paused schedule is by definition not being kept fresh. Note where a one-shot the
+        # FAILURE BUDGET auto-paused now lands: it is no longer complete (its run failed), so
+        # it falls through to here and reports overdue — which is the correct answer, and the
+        # one the banner, the rail count and the severity dot all read.
+        return True
+    deadline = start + timedelta(hours=sched.grace_hours)
     if now < deadline:
         return False
     moment = _ran_at(sched)
-    if moment is None or moment < window_start(sched, now):
+    if moment is None or moment < start:
         return True
     return sched.last_run.outcome == FAILED
 
 
 def due(schedules: list[Schedule], now: datetime | None = None) -> list[Schedule]:
     return [s for s in schedules if is_due(s, now)]
+
+
+def describe_next_due(sched: Schedule, now: datetime | None = None) -> str:
+    """When the next run is owed, worded for a human — or "" when none is coming.
+
+    The companion to :meth:`Schedule.describe_cadence`, and here for the same reason: the
+    CLI and the hub must not be able to describe one schedule two ways. Two rules, both of
+    which ``once`` is what forced:
+
+    * **A finished one-shot says nothing**, rather than repeating its own instant as though
+      it were a future tick. (:func:`next_due` honestly answers "the instant itself" for a
+      ``once``; it is this layer's job not to *promise* it. ``schedule_fmt.nextDue`` draws
+      the same line for the board.)
+    * **A one-shot names its DATE.** A weekday alone is enough for every repeating cadence,
+      whose next tick is always inside seven days — but "Thu 15:00" for a job four months
+      out reads as *this* Thursday, which is the one thing it must not say."""
+    now = now or _now()
+    if is_complete(sched, now):
+        return ""
+    moment = next_due(sched, now)
+    if sched.cadence == "once":
+        return f"{moment:%a %d %b %Y %H:%M}"
+    return f"{moment:%a %H:%M}"
 
 
 # -- recording ---------------------------------------------------------------
@@ -475,5 +677,18 @@ def freshness_note(sched: Schedule, now: datetime | None = None) -> str:
 
     This is the mechanism that makes staleness travel WITH the output: a stakeholder holding
     the emailed HTML three weeks later can see it is overdue without access to mooring, the
-    repo, or the analyst."""
-    return f"scheduled {sched.describe_cadence()} · next refresh due {next_due(sched, now):%Y-%m-%d}"
+    repo, or the analyst. Which is exactly why the clause has to be TRUE: it is the sentence
+    they read to decide whether the numbers in front of them are current.
+
+    One shape, one date arithmetic, one branch — and only ``once`` can ever take it. Its
+    "next" tick IS its own single instant (:func:`next_due` says so honestly), so for the
+    run that fulfils it that instant is already behind us: stamping "next refresh due" on a
+    delivered one-off would date it to the day it was made and read as stale from the day
+    after. It says what is true instead — there is no refresh coming. A one-shot still ahead
+    of its instant (delivered early by a manual run) genuinely does have one coming, and
+    keeps the shared clause. ``schedule_fmt.nextDue`` draws the same line on the board."""
+    now = now or _now()
+    upcoming = next_due(sched, now)
+    if sched.cadence == "once" and upcoming <= now:
+        return f"scheduled {sched.describe_cadence()} · a one-off — these numbers will not refresh"
+    return f"scheduled {sched.describe_cadence()} · next refresh due {upcoming:%Y-%m-%d}"

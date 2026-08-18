@@ -7,7 +7,9 @@
 // The whole point of the board is that a stale refresh is never silent, so the wording
 // rules live here once and are unit-tested: "overdue" always wins over the last outcome,
 // a paused schedule always says so, and a run that only LOOKED clean (it could not pull,
-// or its tie-outs failed) never reads as green.
+// or its tie-outs failed) never reads as green. The mirror-image rule matters just as
+// much: a one-shot that has already run is DONE, and must never be nagged about as due,
+// overdue or paused — the board only worries about refreshes that are still owed.
 
 const ScheduleFmt = (function () {
   // Row tone, worst first. Drives the badge class and therefore the colour.
@@ -38,6 +40,18 @@ const ScheduleFmt = (function () {
     return `${day} ${month} ${hh}:${mm}`;
   }
 
+  // A one-shot ("once") schedule that has already run CLEAN is FINISHED: it will never fire
+  // again, so every claim the board can otherwise make about it — due, overdue, next due,
+  // even paused — describes a future it does not have. The server DERIVES `complete` (the
+  // cadence, plus a receipt from inside this one-shot's OWN window, that did not fail — never
+  // a stored flag, so it cannot drift out of step with the receipt); this file only decides
+  // how it reads. Note what that leaves to the branches below: a one-shot whose run FAILED is
+  // NOT done, so it falls through to paused/overdue and keeps the loud badge, exactly like a
+  // failed daily. "Done" must never be the word that hides a run which did not finish.
+  function isDone(row) {
+    return !!(row && row.complete);
+  }
+
   // The state badge for one row: {text, tone}.
   //
   // Ordering is the load-bearing part. Paused and overdue are reported BEFORE the last
@@ -46,6 +60,14 @@ const ScheduleFmt = (function () {
   // show green on Friday.
   function state(row) {
     if (!row) return { text: "", tone: IDLE };
+    // By that same rule "done" outranks paused and overdue as well: it is the strongest
+    // available claim about NOW (this one will not run again, ever), which is what those
+    // two are groping at and would say wrongly. The outcome still rides along instead of
+    // being replaced — "done" must never be the word that hides a run which did not finish.
+    if (isDone(row)) {
+      const ran = OUTCOMES[(row.last_run || {}).outcome];
+      return ran ? { text: `done · ${ran.text}`, tone: ran.tone } : { text: "done", tone: IDLE };
+    }
     if (row.paused) {
       const auto = row.consecutive_failures > 0;
       return {
@@ -83,6 +105,10 @@ const ScheduleFmt = (function () {
   // when the row is in the boring state that auto-runs, so the UI only explains exceptions.
   function autoHint(row) {
     if (!row || row.auto) return "";
+    // A finished one-shot never auto-runs (may_auto_run reads its spent window), so without
+    // this guard EVERY one of them would draw a hint — and the one it would draw is about a
+    // run that is never coming. Same rule as state/nextDue/banner: done outranks the lot.
+    if (isDone(row)) return "";
     if (row.paused) return "Paused — resume it to run again.";
     if (!row.verified) return "Edited since it was verified — run it once to confirm it still works.";
     if ((row.last_run || {}).outcome === "failed") return "Last run failed — run it manually to retry.";
@@ -94,7 +120,12 @@ const ScheduleFmt = (function () {
   // exists to make impossible to miss.
   function banner(board) {
     const b = board || {};
-    const rows = b.schedules || [];
+    // Finished one-shots are invisible to the banner: they are neither due nor overdue
+    // (the server's counts already leave them out), and calling one "paused" would nag
+    // about resuming a schedule that has already had its single run. A board holding
+    // nothing but finished one-shots therefore says nothing at all, which is correct —
+    // there is no freshness left to be worried about.
+    const rows = (b.schedules || []).filter((r) => !isDone(r));
     if (!rows.length) return "";
     const paused = rows.filter((r) => r.paused).length;
     if (b.overdue) {
@@ -109,11 +140,54 @@ const ScheduleFmt = (function () {
 
   // Next-due text for a row, e.g. "next 31 Jul 07:30".
   function nextDue(row) {
+    // A finished one-shot has no next run. The board still carries a next_due for it (its
+    // own window is the only instant it could report), so printing it unguarded would
+    // promise a refresh that is never coming.
+    if (isDone(row)) return "";
     const text = when((row || {}).next_due);
     return text ? `next ${text}` : "";
   }
 
-  return { state, detail, autoHint, banner, nextDue, when, OUTCOMES };
+  // -- the one-shot date the form OFFERS -------------------------------------
+  // Pure, and here rather than in app.js, so the rule below is pinned by a test instead of
+  // living only in a comment. Both take an injectable `now` for that reason; the form
+  // passes none and gets the wall clock.
+
+  // A LOCAL wall-clock date `days` from `now`, as "YYYY-MM-DD". Deliberately not
+  // toISOString().slice(0, 10), which is UTC — west of Greenwich that hands back yesterday
+  // for most of the evening, and the date a user picks here is a local wall-clock date.
+  // setDate() past the end of a month rolls the month/year over for us.
+  function localDate(days = 0, now = new Date()) {
+    const when = new Date(now.getTime());
+    when.setDate(when.getDate() + days);
+    const month = String(when.getMonth() + 1).padStart(2, "0");
+    const day = String(when.getDate()).padStart(2, "0");
+    return `${when.getFullYear()}-${month}-${day}`;
+  }
+
+  // The date to OFFER a one-shot that hasn't got one yet: the first date on which `at` is
+  // still ahead of us — today while it is, tomorrow once it isn't.
+  //
+  // Deliberately not just today. A one-shot whose instant has already passed arrives SPENT:
+  // the server calls a one-shot complete once a run lands inside its own window, so switching
+  // a daily to "once" after this morning's tick would bank the run that already happened and
+  // create a schedule that is finished on arrival — while the hub cheerfully announces it as
+  // newly booked. Waiting for a refresh that has already been and gone is exactly the silence
+  // this whole board exists to prevent, so the default must never be able to produce it.
+  //
+  // A past date stays perfectly legal (it means "catch up now"); it just isn't something the
+  // form should pick on the user's behalf.
+  function firstUnspentDate(at, now = new Date()) {
+    const [hour, minute] = String(at || "").split(":");
+    const when = new Date(now.getTime());
+    when.setHours(Number(hour) || 0, Number(minute) || 0, 0, 0);
+    return localDate(when.getTime() > now.getTime() ? 0 : 1, now);
+  }
+
+  return {
+    state, detail, autoHint, banner, nextDue, isDone, when,
+    localDate, firstUnspentDate, OUTCOMES,
+  };
 })();
 
 if (typeof window !== "undefined") window.ScheduleFmt = ScheduleFmt;

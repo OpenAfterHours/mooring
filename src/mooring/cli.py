@@ -594,6 +594,12 @@ def _build_parser() -> argparse.ArgumentParser:
         "--day", default=None, metavar="DAY", help="weekly cadence only: mon..sun (default: mon)"
     )
     sched_add.add_argument(
+        "--date",
+        default=None,
+        metavar="YYYY-MM-DD",
+        help="once cadence only: the local date to run on (required with --cadence once)",
+    )
+    sched_add.add_argument(
         "--grace-hours",
         type=int,
         default=None,
@@ -2343,6 +2349,9 @@ def _schedule_add(
         cadence = schedule.normalize_cadence(args.cadence)
         at = schedule.normalize_at(args.at) if args.at else schedule.DEFAULT_AT
         day = schedule.normalize_day(args.day) if args.day else 0
+        # A one-shot needs its date up front — a `once` with nothing to fire at would store
+        # cleanly and then never run, which is the one failure this feature cannot afford.
+        date = schedule.normalize_date(args.date or "") if cadence == "once" else ""
     except schedule.ScheduleError as exc:
         sys.exit(str(exc))
     existing = schedule.get(ws, rel)
@@ -2351,6 +2360,7 @@ def _schedule_add(
         cadence=cadence,
         at=at,
         day=day,
+        date=date,
         deliver=not args.no_deliver,
         pull=not args.no_pull,
         grace_hours=(
@@ -2367,7 +2377,13 @@ def _schedule_add(
     telemetry.log_event("schedule", action="add", cadence=cadence)  # value-free: no path
     verb = "Updated" if existing else "Scheduled"
     print(f"{verb} {rel} — {sched.describe_cadence()}.")
-    print(f"  Next due {schedule.next_due(sched):%a %d %b %H:%M}.")
+    # The domain's wording, shared with `schedule list` and the board — a one-shot months out
+    # names its date rather than a weekday that reads as this week. It can also come back
+    # EMPTY: amending a daily to a past-dated `once` carries the old receipt across, which
+    # can land inside the new window and finish the one-shot on arrival. Saying so beats
+    # printing a tick that will never come.
+    upcoming = schedule.describe_next_due(sched)
+    print(f"  Next due {upcoming}." if upcoming else "  Already run — a one-off does not repeat.")
     print(_tier_note(alias))
     return 0
 
@@ -2447,30 +2463,51 @@ def _print_schedules(cfg: config.Config, ws: Path, alias: str = "") -> int:
         if sched.last_run.reason:
             print(f"  {'':<{width}}  {'':<24}  ({sched.last_run.reason})")
     print(f"{len(schedules)} schedule(s), {overdue} overdue.")
-    if any(s.paused for s in schedules):
+    # A finished one-shot is excluded for the same reason _schedule_state calls it "done"
+    # rather than "paused": resuming it would re-arm nothing, so the tip would send the user
+    # after a schedule that has already done its job.
+    if any(s.paused and not schedule.is_complete(s) for s in schedules):
         print("A paused schedule never runs — `mooring schedule resume <path>` to re-arm it.")
     if not any(refresh.preflight(cfg, s).verified for s in schedules):
         print("Tip: re-verify a notebook to restore its full retry budget.")
     return 0
 
 
+_RUN_MARKS = {
+    schedule.OK: "ok  ",
+    schedule.DEGRADED: "warn",
+    schedule.CHECKS_FAILED: "FAIL",
+    schedule.FAILED: "FAIL",
+}
+
+
 def _schedule_state(cfg: config.Config, sched: schedule.Schedule) -> str:
+    """One line saying where this schedule stands — the CLI's half of the hub's status badge.
+
+    Kept deliberately in step with ``schedule_fmt.state``: the two adapters describe the same
+    schedule, so they must not word it two ways. That is why the wording for *when the next
+    run is owed* comes from the domain (:func:`schedule.describe_next_due`) rather than being
+    formatted here a second time, and why "done" is tested FIRST."""
+    last = sched.last_run
+    mark = _RUN_MARKS.get(last.outcome, "?   ")
+    ran = f"last {last.at[:16].replace('T', ' ')}"
+    # "Done" outranks paused and overdue, exactly as it does on the board: a one-shot that
+    # has had its run will never fire again, so both of those describe a future it does not
+    # have. The outcome still rides along, so `done` is never the word that hides a run whose
+    # tie-outs failed.
+    if schedule.is_complete(sched):
+        return f"{mark} done — {ran}"
     if sched.paused:
         if sched.consecutive_failures:
             return f"PAUSED — auto-paused after {sched.consecutive_failures} failed run(s)"
         return "paused"
-    last = sched.last_run
-    if not last.outcome:
-        return f"never run — due {schedule.next_due(sched):%a %H:%M}"
-    marks = {
-        schedule.OK: "ok  ",
-        schedule.DEGRADED: "warn",
-        schedule.CHECKS_FAILED: "FAIL",
-        schedule.FAILED: "FAIL",
-    }
-    mark = marks.get(last.outcome, "?   ")
+    # Computed once and applied to BOTH exits below. A schedule that has never run at all is
+    # the one most worth marking — "never run — due Thu 07:30" on its own reads as merely
+    # pending, when the row above has already counted it in the overdue tally.
     stale = " OVERDUE" if schedule.is_overdue(sched) else ""
-    return f"{mark} last {last.at[:16].replace('T', ' ')}{stale}"
+    if not last.outcome:
+        return f"never run — due {schedule.describe_next_due(sched)}{stale}"
+    return f"{mark} {ran}{stale}"
 
 
 def cmd_refresh(cfg: config.Config, args: argparse.Namespace) -> int:
