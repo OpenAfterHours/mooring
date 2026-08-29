@@ -207,6 +207,75 @@ def test_dynamic_code_is_a_floor(code):
     assert "dynamic_code" in {f.kind for f in verdict.findings}
 
 
+@pytest.mark.parametrize(
+    "code",
+    [
+        'importlib.import_module("os").remove(path)',
+        'mod = importlib.import_module(name)',
+        'importlib.__import__("os")',
+        "from importlib import import_module\nimport_module(name)",
+        'getattr(importlib, "import_module")("os")',
+    ],
+)
+def test_dynamic_import_is_a_floor(code):
+    """`importlib.import_module` is `__import__` in modern spelling — same move, so the
+    same band. Both reach anything by name."""
+    verdict = codeguard.scan_code(code)
+    assert verdict.band == codeguard.BAND_FLOOR
+    assert "dynamic_code" in {f.kind for f in verdict.findings}
+
+
+def test_the_ordinary_importlib_api_stays_clean():
+    """Only the dynamic-IMPORT names are flagged, not the importlib package: reading a
+    package version or opening a packaged resource is everyday code."""
+    for code in (
+        'v = importlib.metadata.version("polars")',
+        'p = importlib.resources.files("mypkg") / "schema.json"',
+        "spec = importlib.util.spec_from_file_location(name, path)",
+        'dist = importlib.metadata.distribution("mooring")',
+    ):
+        assert codeguard.scan_code(code).band == codeguard.BAND_CLEAN, code
+
+
+@pytest.mark.parametrize(
+    "code,expected",
+    [
+        ('sys.modules["os"].remove(path)', {"deletes_files"}),
+        ('sys.modules["shutil"].rmtree(tmp)', {"deletes_files"}),
+        ('sys.modules["subprocess"].run(cmd)', {"runs_program"}),
+        ("import sys as s\ns.modules['os'].remove(path)", {"deletes_files"}),
+        # a computed key needs dataflow and stays clean, as documented
+        ("sys.modules[name].remove(path)", set()),
+        # an ordinary module reached this way is still ordinary
+        ('sys.modules["pandas"].read_csv(path)', set()),
+        ('mod = sys.modules["os"]', set()),
+    ],
+)
+def test_sys_modules_with_a_literal_key_resolves(code, expected):
+    """The next spelling after `getattr(os, "remove")`, closed for the same reason: the
+    module name is written down, not computed."""
+    assert {f.kind for f in codeguard.scan_code(code).findings} == expected
+
+
+@pytest.mark.parametrize(
+    "code,expected",
+    [
+        ('mo.sql(" ".join(["DROP", "TABLE", "t"]))', {"destroys_rows"}),
+        ('con.execute("".join(["DELETE ", "FROM sales"]))', {"destroys_rows"}),
+        ('q = " ".join(["DROP", "TABLE", "t"])\ncon.execute(q)', {"destroys_rows"}),
+        # every part has to be a literal — one computed element and it folds to nothing
+        ('mo.sql(" ".join(["DROP", "TABLE", table]))', set()),
+        ('mo.sql(sep.join(["DROP", "TABLE", "t"]))', set()),
+        # ordinary joins stay ordinary
+        ('labels = ", ".join(["insert", "update", "delete"])', set()),
+        ('header = ",".join(df.columns)', set()),
+    ],
+)
+def test_a_join_of_literals_is_folded(code, expected):
+    """Constant folding, not dataflow: separator and elements must all be literals."""
+    assert {f.kind for f in codeguard.scan_code(code).findings} == expected
+
+
 def test_getattr_on_a_dataframe_is_not_dynamic_code():
     # The narrow rule that keeps everyday reflection out of the floor band.
     assert codeguard.scan_code("col = getattr(df, name)").band == codeguard.BAND_CLEAN

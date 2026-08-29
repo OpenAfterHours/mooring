@@ -48,12 +48,28 @@ both are worth reading before changing anything here:
 boundary.** The matcher reads names, not values, so a call reached through a REBOUND name
 is invisible to it: ``rm = os.remove; rm(p)``, ``mod = os; mod.remove(p)``, and
 ``os.__dict__["remove"](p)`` all classify clean, and so does ``p.rename(q)`` (see the note
-on :data:`_ATTR_CALLS`). Two narrow one-hop resolutions exist — the buffer carve-out and
-the SQL binding below — and neither generalises to this: following arbitrary rebinding
-would mean real dataflow analysis, which is a different tool. A cell is also scanned
-ALONE, so an ``import`` in another cell is not seen (the module tables compensate by
-taking ``os.``/``subprocess.`` at face value). The gate raises the cost of an accident,
-not of an adversary.
+on :data:`_ATTR_CALLS`) and ``mo.sql(f"{verb} TABLE t")``, whose verb is interpolated.
+Three narrow one-hop resolutions exist — the buffer carve-out, the SQL binding, and
+``sys.modules["<literal>"]`` — and none generalises: following arbitrary rebinding would
+mean real dataflow analysis, which is a different tool. A cell is also scanned ALONE, so
+an ``import`` in another cell is not seen (the module tables compensate by taking
+``os.``/``subprocess.`` at face value). The gate raises the cost of an accident, not of an
+adversary.
+
+**Top follow-up, deliberately not taken here: let a REFERENCE count, not only a call.**
+``functools.partial(os.remove, p)``, ``list(map(os.remove, paths))`` and — the nastiest —
+``atexit.register(shutil.rmtree, tmp)`` all classify clean today, because ``os.remove``
+appears as a bare attribute REFERENCE that is called elsewhere. Classifying such a
+reference through the existing tables needs no dataflow at all, and the precedent is
+already here: ``handler = getattr(os, "remove")`` reaches the floor today, because the
+literal-``getattr`` path classifies an expression that YIELDS a dangerous callable rather
+than only a call of one. It would also narrow the rebinding family above — the reference
+SITE would be flagged, so ``rm = os.remove`` fires even though ``rm(p)`` alone never
+could — without closing it, since ``os.__dict__["remove"](p)`` stays out of reach. It is
+held back because it is a semantic rule change ("a reference counts"), not a table entry,
+and it would land after the false-positive rate was measured against the current rules;
+this feature's own design argues for measuring before tightening. Whoever picks it up
+should re-measure a realistic corpus first, not just re-run the tests.
 
 Privacy: a :class:`Finding` is ``(line, kind, label, band)`` where ``label`` is a FIXED
 string looked up from :data:`KINDS`. Nothing read out of the analyst's code — no path, no
@@ -174,6 +190,12 @@ _MODULE_ATTR_CALLS: dict[tuple[str, str], str] = {
     ("pickle", "loads"): "dynamic_code",
     ("marshal", "load"): "dynamic_code",
     ("marshal", "loads"): "dynamic_code",
+    # The modern spelling of `__import__`: importing a module named at run time is the
+    # same "call anything" move, so it sits at the same band. Deliberately these two
+    # NAMES and not the importlib package — `importlib.metadata.version(...)` and
+    # `importlib.resources.files(...)` are ordinary and must stay clean.
+    ("importlib", "import_module"): "dynamic_code",
+    ("importlib", "__import__"): "dynamic_code",
     ("requests", "post"): "sends_data",
     ("requests", "put"): "sends_data",
     ("requests", "patch"): "sends_data",
@@ -713,11 +735,33 @@ def _root_module(func, aliases: dict[str, str]) -> str | None:
     if not isinstance(func, ast.Attribute):
         return None
     node = func.value
+    through_sys_modules = _sys_modules_key(node, aliases)
+    if through_sys_modules is not None:
+        return through_sys_modules
     while isinstance(node, ast.Attribute):
         node = node.value
     if not isinstance(node, ast.Name):
         return None
     return aliases.get(node.id, node.id).split(".")[0]
+
+
+def _sys_modules_key(node, aliases: dict[str, str]) -> str | None:
+    """The module ``sys.modules["<literal>"]`` names, or ``None``.
+
+    The next spelling after ``getattr(os, "remove")``, and closed for the same reason:
+    the key is a LITERAL, so this reads a module name that is written down rather than
+    computed. ``sys.modules[name]`` with a variable key resolves to nothing and stays
+    clean — that one needs dataflow."""
+    if not (isinstance(node, ast.Subscript) and isinstance(node.value, ast.Attribute)):
+        return None
+    if node.value.attr != "modules" or not isinstance(node.value.value, ast.Name):
+        return None
+    if aliases.get(node.value.value.id, node.value.value.id).split(".")[0] != "sys":
+        return None
+    key = node.slice
+    if isinstance(key, ast.Constant) and isinstance(key.value, str):
+        return key.value.split(".")[0]
+    return None
 
 
 def _scan_call(node: ast.Call, aliases, funcs, buffers=None, bindings=None) -> list[Finding]:
@@ -1174,6 +1218,16 @@ def _string_value(node) -> str | None:
         left, right = _string_value(node.left), _string_value(node.right)
         if left is not None and right is not None:
             return left + right
+    if isinstance(node, ast.Call) and _call_name(node.func) == "join" and len(node.args) == 1:
+        # `" ".join(["DROP", "TABLE", "t"])` — constant folding, not dataflow: the
+        # separator and every element have to be literals, so the result is as readable
+        # as the string it spells and nothing computed can enter it.
+        separator = _string_value(node.func.value) if isinstance(node.func, ast.Attribute) else None
+        elements = node.args[0]
+        if separator is not None and isinstance(elements, (ast.List, ast.Tuple)):
+            parts = [_string_value(e) for e in elements.elts]
+            if parts and all(p is not None for p in parts):
+                return separator.join(parts)
     return None
 
 

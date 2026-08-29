@@ -253,6 +253,17 @@ scan, and the gaps are real rather than theoretical:
   destructive-code check at all; review it the way you would review any code.
 - **`.sql` files.** A `.sql` file is a document until something runs it, and the
   classifier reads Python, not a SQL dialect.
+- **A notebook mooring cannot parse.** If a notebook does not parse — a stray
+  UTF-8 BOM is the realistic cause on Windows, and marimo rejects one anyway —
+  the finding is `unparseable`, which is not a blocking band, so the file pushes
+  with the destructive-code check **silently skipped**. On a Propose PR the
+  reviewer is told; on a direct push nobody is. The Apply gate does not share
+  this gap: it holds `unparseable` too, so it fails closed.
+
+And one file the scope catches that you might not expect: a module that **embeds
+a notebook template in a string literal** is read as a notebook and scanned
+whole, because `is_marimo_app` matches `app = marimo.App(` anywhere in the file.
+Templates, fixtures and code generators are the class this affects.
 
 The reason for the notebook scope is worth stating precisely, because it is not
 "the classifier was too noisy". Pointed at whole modules it was **accurate**:
@@ -304,9 +315,12 @@ does not work.
 One shape the comment cannot reach: SQL written as a multi-line `"""…"""` string.
 The flagged line is the one the string *opens* on, so the marker would land
 inside the query text — it silences the finding but corrupts the SQL, and nothing
-warns you. Put such a statement on one line, or assign it to a variable and mark
-the assignment (the classifier follows the binding, so that is where the finding
-appears anyway).
+warns you. **Put such a statement on one line.** That is the only remedy that
+works: binding it to a variable does not help, because for a multi-line string
+the assignment line *is* the line the string opens on, so marking it does the
+very thing this paragraph warns against. (Binding does work when the string
+itself is on one line — the classifier follows the binding, so the finding lands
+where you marked it.)
 
 Weigh that standing cost before turning the setting below to `block` — under
 `block` there is no confirm, so a false positive stops the push until the line is
