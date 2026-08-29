@@ -125,10 +125,28 @@ side of the Apply, inside the same lock as the write and re-derived from the ops
 every time, so a client cannot claim to have shown you a dialog it did not show.
 Turning it off applies every proposed cell with no prompt.
 
+Like every other detector here it is **best-effort defence in depth, not a
+guarantee**: a cell that applies silently has not been proven safe. The classifier
+reads names, so code that reaches the same call another way slips past — `rm =
+os.remove` then `rm(p)`, `mod = os` then `mod.remove(p)`, `os.__dict__["remove"](p)`,
+and `p.rename(q)` on an unresolved receiver all classify clean. These are stated in
+`ai/codeguard.py`'s own docstring and are accepted limits, not oversights: following
+arbitrary rebinding needs dataflow analysis the module deliberately does not do. The
+gate is built for an honest model that makes a mistake and an analyst who cannot read
+the diff — not for code written to evade it.
+
 The scan is **value-free** like everything else here: a finding is a line number, a
-fixed kind, and a fixed label — never a path, a name, or a fragment of your code —
-and nothing about it is sent anywhere. It is a local read of code you were already
-about to run.
+fixed kind, and a fixed label — never a path, a name, or a fragment of your code.
+The scan itself is local: it reads code already on your machine, and no code, path
+or finding label leaves it.
+
+One thing does leave, and it is worth stating precisely rather than glossing. If
+your admin has configured `[logging] endpoint`, each Apply emits a telemetry line
+carrying the verdict's **band** and the **number** of findings — `band="floor",
+findings=2` — for held, confirmed and clean applies alike. Never the kinds, never
+the labels, never a line number, never anything from the cell. That is deliberate
+(`hub/routes/chat.py`: *"Count + band only: the central sink never carries kinds"*),
+and the value-free kinds go to the **local** activity ledger instead.
 
 **`[ai] apply_runs` (default `true`) — does an applied cell run?** By default Apply
 means *add and run*: mooring writes marimo's `runtime.watcher_on_save = "autorun"`

@@ -265,9 +265,17 @@ dialog — which also carries the secret and PII findings — noise that gets cl
 through. The classifier was right; the scope was wrong. It is calibrated for a
 marimo cell and is now applied to exactly that.
 
-Scoped to notebooks, nothing in this repository is withheld: 0 of 127 modules, 0
-of 113 test modules, and 0 of 70 marimo notebook sources carry a blocking
-finding. Note what that last figure is, though — those 70 are this project's own
+Scoped to notebooks, no module or notebook in this repository is withheld: 0 of
+127 modules, 0 of 113 test modules, and 0 of 70 marimo notebook sources carry a
+blocking finding. One file *is* withheld, and it shows the edge worth knowing:
+`scripts/spike_marimo_http_control.py` embeds a notebook template inside a string
+literal, so `is_marimo_app` — which is content-only, matching `app = marimo.App(`
+anywhere in the file — reads the whole module as a notebook and scans all of it.
+Any module carrying a notebook template, fixture or code generator is treated the
+same way, which reintroduces module-shaped noise for exactly that class of file.
+It is pre-existing behaviour shared with `sweep_run`, `notebooks` and `celldiff`,
+and deliberately not changed here: one definition of "notebook" product-wide is
+worth more than a special case, and the remedy is the `mooring: push-ok` pragma. Note what that last figure is, though — those 70 are this project's own
 test fixtures and template. **The rate on a real analyst data repo is
 unmeasured.** Systems code is far heavier in these constructs than analysis
 notebooks, so a lower rate is a reasonable expectation, not a demonstrated one.
