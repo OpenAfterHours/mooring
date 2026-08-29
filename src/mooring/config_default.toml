@@ -136,6 +136,19 @@ notebook_catalog = false    # OPT-IN, off by default: let the copilot search EVE
                             # disabled_notebooks) removes a notebook from the catalog too.
                             # The hub's own search box indexes the same facts LOCALLY
                             # (nothing leaves the machine) and is not gated by this.
+apply_guard = true          # scan every cell the copilot proposes BEFORE it lands in your
+                            # notebook, and HOLD anything Undo cannot take back for an
+                            # explicit confirm. Undo restores the notebook's bytes, so it is
+                            # a complete remedy for a cell that computes and no remedy at all
+                            # for one that deleted a file or dropped a table — so ordinary
+                            # cells apply silently and only the irreversible ones ask. Setting
+                            # this false applies every proposed cell with no prompt.
+apply_runs = true           # an applied cell RUNS immediately (mooring writes marimo's
+                            # runtime.watcher_on_save = "autorun", so the --watch reload runs
+                            # the cell that just landed). Set false to STAGE it instead
+                            # ("lazy"): the cell appears in the notebook marked stale and you
+                            # press run. Slower, but nothing the copilot writes executes until
+                            # a human asks for it — so a team policy may pin this false.
 traceback_guard = true      # when a chat message contains a pasted Python traceback,
                             # rewrite it value-safe before it leaves (exception types and
                             # workspace frames kept — their source re-read from disk —

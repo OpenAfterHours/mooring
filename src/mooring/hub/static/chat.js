@@ -403,7 +403,12 @@ function addProposal(d) {
   hint.className = "muted";
   hint.textContent = meta.hint + " · keys: a apply, s skip";
 
-  const prop = { card, kind, ops, copyText, applyBtn, skipBtn, note, applied: false, skipped: false };
+  // `held`/`holdRow`: set when the apply gate answers 428 (see holdProposal). While
+  // held, the ONLY route to an apply is the hold row's own confirm button.
+  const prop = {
+    card, kind, ops, copyText, applyBtn, skipBtn, note,
+    applied: false, skipped: false, held: false, holdRow: null,
+  };
   applyBtn.addEventListener("click", () => applyProposal(prop));
   skipBtn.addEventListener("click", () => skipProposal(prop));
   copyBtn.addEventListener("click", () => copyCode(copyText, note));
@@ -420,11 +425,20 @@ function addProposal(d) {
   latestProposal = prop;
 }
 
-async function applyProposal(p) {
+// `gateToken` is passed ONLY by the hold card's confirm button (addGateHold): it
+// re-POSTs the identical body plus the token the 428 handed us. The server
+// re-scans and re-derives that token, so this argument can only ever unlock the
+// exact change that was shown — never a different one, and never a stale one.
+async function applyProposal(p, gateToken) {
   if (!p || p.applied || p.skipped) return;
+  // A held proposal has exactly one way forward: its own hold card. The card's
+  // Apply button is disabled, but /apply and the `a` key reach here too.
+  if (p.held && !gateToken) return;
   p.applyBtn.disabled = true;
   p.note.textContent = " applying…";
-  const { status, data } = await api("/api/ai/chat/apply", { sid, ops: p.ops });
+  const body = { sid, ops: p.ops };
+  if (gateToken) body.gate_token = gateToken;
+  const { status, data } = await api("/api/ai/chat/apply", body);
   if (data.reason === "notebook_disabled") {
     // AI was turned off for this notebook (here, the hub, or a teammate's sync)
     // before the apply landed — lock the window instead of "asking the AI to fix".
@@ -432,16 +446,35 @@ async function applyProposal(p) {
     lockForDisabled();
     return;
   }
+  if (status === 428) {
+    // The apply gate held it (HTTP 428 Precondition Required — 409 already means a
+    // staleness conflict on this endpoint). NOT an error: nothing was written, and
+    // the analyst gets the decision. A 428 on a CONFIRMED re-POST means the token no
+    // longer matches — the code, the findings, or the notebook underneath moved — so
+    // render the NEW hold rather than failing silently.
+    const gate = ChatCore.gateFromResponse(data);
+    if (gate) {
+      holdProposal(p, gate);
+      return;
+    }
+    // A 428 we can't read is still a refusal — fall through to the error path below,
+    // but never to askAiToFix (re-proposing wouldn't answer a gate).
+    p.triedFix = true;
+  }
   if (data.ok) {
     p.applied = true;
+    p.held = false;
     p.applyBtn.textContent = "Applied";
-    p.applyBtn.classList.add("applied");
+    // A held card dropped the accent tint (see holdProposal); restore it so a
+    // confirmed apply ends in exactly the same "Applied" state as an ordinary one.
+    p.applyBtn.classList.add("primary", "applied");
     p.skipBtn.disabled = true;
     p.note.textContent = " applied ✓"; // ✓
     offerUndo(p);
     return;
   }
-  p.applyBtn.disabled = false;
+  // A held card keeps its inert button — the hold row below owns the retry.
+  p.applyBtn.disabled = !!p.held;
   const err = data.error || "the change could not be applied";
   if (status === 409) {
     // A staleness conflict (the cell changed since it was proposed) — re-reading,
@@ -458,6 +491,132 @@ async function applyProposal(p) {
     p.note.textContent = " — couldn't apply";
     addSysRow(err);
   }
+}
+
+// -- the apply gate ---------------------------------------------------------
+// Apply writes a cell AND marimo runs it immediately, so Undo — which restores the
+// notebook's bytes — is a complete remedy for ordinary code and no remedy at all
+// for code that deleted a file. The server holds those applies (HTTP 428) and this
+// is the ask. It deliberately reuses the PII/traceback hold idiom (an inline row in
+// the transcript, an explanation, a confirm carrying a token) rather than a modal:
+// the decision stays in the transcript, and there is one shape to learn.
+
+// Put a proposal into the held state: the card's own Apply stops being a live
+// primary Apply, and the decision moves to a new row below it. The reflex this
+// feature exists to break is POSITIONAL, so re-using that button would defeat it.
+function holdProposal(p, gate) {
+  const rehold = !!p.holdRow;
+  p.held = true;
+  p.applyBtn.disabled = true;
+  p.applyBtn.classList.remove("primary");
+  p.applyBtn.textContent = "Held";
+  p.note.textContent = " — held (see below)";
+  if (p.holdRow) {
+    p.holdRow.remove(); // a re-hold replaces the stale card; two live asks is worse
+    p.holdRow = null;
+  }
+  p.holdRow = addGateHold(p, gate, rehold);
+}
+
+// Render one hold card. Everything server-supplied reaches the DOM through
+// textContent — a finding label is data, never markup.
+function addGateHold(p, gate, rehold) {
+  const w = ChatCore.gateHoldWording(gate);
+  const wrap = addRow("row-sys row-pii row-gate" + (w.floor ? " gate-floor" : ""), "");
+
+  if (rehold) {
+    const again = document.createElement("p");
+    again.className = "gate-restale";
+    again.textContent =
+      "Your confirmation no longer matched — the change or the notebook moved " +
+      "underneath it. Nothing was applied. This is the current one:";
+    wrap.appendChild(again);
+  }
+  const summary = document.createElement("p");
+  summary.className = "gate-summary";
+  summary.textContent = w.summary;
+  const mechanism = document.createElement("p");
+  mechanism.textContent = w.mechanism;
+  wrap.append(summary, mechanism);
+  if (w.lead) {
+    const lead = document.createElement("p");
+    lead.className = "gate-lead";
+    lead.textContent = w.lead;
+    const list = document.createElement("ul");
+    list.className = "gate-findings";
+    for (const item of w.items) {
+      const li = document.createElement("li");
+      li.textContent = item.text; // plain-English label from the server — never a slug
+      // In a MIXED verdict, say which individual lines are the irreversible ones.
+      if (item.mark) {
+        const mark = document.createElement("span");
+        mark.className = "gate-mark";
+        mark.textContent = " — " + item.mark;
+        li.appendChild(mark);
+      }
+      list.appendChild(li);
+    }
+    wrap.append(lead, list);
+  }
+  // The line this whole feature turns on: the analyst believes Undo is a remedy.
+  const undo = document.createElement("p");
+  undo.className = "gate-undo";
+  undo.textContent = w.undoNote;
+  wrap.appendChild(undo);
+
+  const bar = document.createElement("div");
+  bar.className = "toolbar";
+  const note = document.createElement("span");
+  note.className = "muted";
+  // The SAFE choice takes the prominent first slot; the irreversible one is a plain
+  // button beside it. A reflex click here lands on "Don't apply".
+  const noBtn = document.createElement("button");
+  noBtn.className = "primary small";
+  noBtn.textContent = w.cancelLabel;
+  let yesBtn = null;
+  if (gate.token) {
+    yesBtn = document.createElement("button");
+    yesBtn.className = "small gate-confirm";
+    yesBtn.textContent = w.confirmLabel;
+    yesBtn.addEventListener("click", async () => {
+      if (p.applied || p.skipped) return;
+      yesBtn.disabled = true;
+      noBtn.disabled = true;
+      note.textContent = " applying…";
+      p.held = false; // this ask has been answered; a fresh 428 holds it again
+      await applyProposal(p, gate.token);
+      if (p.applied) {
+        wrap.classList.add("gate-done");
+        note.textContent = " applied ✓"; // ✓
+        return;
+      }
+      if (p.held) return; // a NEW hold replaced this row — this one is detached
+      yesBtn.disabled = false;
+      noBtn.disabled = false;
+      note.textContent = " — couldn't apply";
+    });
+  } else {
+    note.textContent =
+      " — this hold arrived without a confirmation token, so it can't be confirmed " +
+      "here. Ask for the change again.";
+  }
+  noBtn.addEventListener("click", () => {
+    if (p.applied || p.skipped) return;
+    p.held = false;
+    skipProposal(p); // the ordinary skip path — the card dims and stops being current
+    p.applyBtn.textContent = "Not applied";
+    p.note.textContent = " not applied";
+    noBtn.disabled = true;
+    if (yesBtn) yesBtn.disabled = true;
+    wrap.classList.add("gate-done");
+    note.textContent = " not applied";
+  });
+  bar.appendChild(noBtn);
+  if (yesBtn) bar.appendChild(yesBtn);
+  bar.appendChild(note);
+  wrap.appendChild(bar);
+  maybeScroll();
+  return wrap;
 }
 
 // Feed an Apply failure back to the assistant for one corrective re-proposal, clearly
@@ -1187,7 +1346,14 @@ function runCommand(cmd) {
       handleModelCommand(cmd.arg);
       break;
     case "apply":
-      if (latestProposal && !latestProposal.applied && !latestProposal.skipped) {
+      if (latestProposal && latestProposal.held) {
+        // Same rule as the `a` key: a held proposal is decided on its hold card, so
+        // /apply must not be a quieter way around it.
+        addSysRow("That change is held — confirm it on the card above, or don't.");
+        if (latestProposal.holdRow) {
+          latestProposal.holdRow.scrollIntoView({ block: "center", behavior: "smooth" });
+        }
+      } else if (latestProposal && !latestProposal.applied && !latestProposal.skipped) {
         applyProposal(latestProposal);
       } else {
         addSysRow("No proposal to apply.");
@@ -1551,6 +1717,15 @@ function onGlobalKeydown(e) {
   if (!latestProposal || latestProposal.applied || latestProposal.skipped) return;
   if (e.key === "a") {
     e.preventDefault();
+    // A HELD proposal has no one-key path. `a` applies with no dialog at all, and a
+    // single keystroke must never reach something Undo can't take back — so here it
+    // only walks the analyst to the hold card's own two-button decision.
+    if (latestProposal.held) {
+      if (latestProposal.holdRow) {
+        latestProposal.holdRow.scrollIntoView({ block: "center", behavior: "smooth" });
+      }
+      return;
+    }
     applyProposal(latestProposal);
   } else if (e.key === "s") {
     e.preventDefault();

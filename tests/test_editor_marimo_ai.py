@@ -60,6 +60,81 @@ def test_apply_theme_rewrites_existing_config(tmp_path):
     assert _read(ws)["display"]["theme"] == "dark"
 
 
+# -- [ai] apply_runs: does an applied cell run, or arrive staged? -------------
+#
+# marimo types runtime.watcher_on_save as Literal["lazy", "autorun"] and only issues
+# run ids on "autorun" (see marimo._session.file_change_handler), so "lazy" is THE
+# value that means "reload the cell, mark it stale, run nothing".
+
+
+def test_apply_runs_false_stages_the_cell_instead_of_running_it(tmp_path):
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    EditorServer(ws, apply_runs=False)._ensure_marimo_config()
+    data = _read(ws)
+    assert data["runtime"]["watcher_on_save"] == "lazy"
+    # ...and the value-blindness guarantee is untouched by the run mode.
+    assert data["ai"]["enabled"] is False
+    assert data["completion"]["copilot"] is False
+
+
+def test_apply_runs_true_is_todays_autorun(tmp_path):
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    EditorServer(ws, apply_runs=True)._ensure_marimo_config()
+    data = _read(ws)
+    assert data["runtime"]["watcher_on_save"] == "autorun"
+    assert data["ai"]["enabled"] is False
+    assert data["completion"]["copilot"] is False
+
+
+def test_idempotent_in_lazy_mode(tmp_path):
+    """The `already` short-circuit compares against the mode ACTUALLY wanted. Hard-coding
+    "autorun" there would make every staged workspace look stale and rewrite on each call."""
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    editor = EditorServer(ws, apply_runs=False)
+    editor._ensure_marimo_config()
+    before = (ws / ".marimo.toml").read_text("utf-8")
+    editor._ensure_marimo_config()
+    assert (ws / ".marimo.toml").read_text("utf-8") == before
+
+
+def test_apply_run_mode_rewrites_a_running_editors_config(tmp_path):
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    editor = EditorServer(ws, apply_runs=True)
+    editor._ensure_marimo_config()
+    assert _read(ws)["runtime"]["watcher_on_save"] == "autorun"
+    editor.apply_run_mode(False)  # the setting (or a policy) changed mid-session
+    assert editor.apply_runs is False
+    assert _read(ws)["runtime"]["watcher_on_save"] == "lazy"
+
+
+def test_a_caller_without_a_config_preserves_the_staged_mode(tmp_path):
+    """A Deliver export / scheduled run only wants the import path. If it re-armed
+    autorun it would silently undo a team policy underneath an open editor."""
+    from mooring import editor as editor_mod
+
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    EditorServer(ws, apply_runs=False)._ensure_marimo_config()
+    editor_mod.ensure_runtime_config(ws)  # no theme, no apply_runs — the export's call
+    assert _read(ws)["runtime"]["watcher_on_save"] == "lazy"
+    assert _read(ws)["display"]["theme"] == "system"  # and the theme is left alone too
+
+
+def test_a_fresh_workspace_defaults_to_autorun(tmp_path):
+    """Preserving must not mean "write nothing": a workspace with no .marimo.toml yet
+    still gets today's behaviour."""
+    from mooring import editor as editor_mod
+
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    editor_mod.ensure_runtime_config(ws)
+    assert _read(ws)["runtime"]["watcher_on_save"] == "autorun"
+
+
 def test_writes_workspace_root_to_pythonpath(tmp_path):
     # The workspace root goes on the notebook kernel's sys.path so a notebook in any
     # sub-folder can import the repo's helper modules (`from lib import helpers`), and

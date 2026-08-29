@@ -72,6 +72,11 @@ def sql_cell_guide() -> str:
     ``name = mo.sql(...)`` — marimo detects the SQL and runs it with DuckDB — so it
     round-trips through the same value-free codegen as any proposed cell (no new path).
 
+    The READ-ONLY rule is a safety one, not a style one: marimo runs an applied cell
+    immediately, and the analyst's undo restores the notebook TEXT only — a `DROP` or an
+    unfiltered `DELETE` would already have reached the database. The Apply gate holds a
+    write for an explicit confirm; this keeps the guide from teaching one in the first place.
+
     The no-PIVOT caveat is a value-blindness rule, not a style one: a pivot/crosstab
     names the output columns after the row VALUES it pivots on, and the live-kernel schema
     probe reports column NAMES back to the model — so a value→header pivot would smuggle
@@ -82,7 +87,10 @@ def sql_cell_guide() -> str:
         '`result = mo.sql("""<query>""")` (marimo detects the SQL). It requires '
         "`import marimo as mo` in the notebook — add it if the source you see lacks it — and "
         "the `duckdb` package in the notebook's environment; if duckdb may be missing, say so "
-        "(the analyst can add it with `mooring deps add duckdb`). Query any dataframe already "
+        "(the analyst can add it with `mooring deps add duckdb`). The query must be "
+        "READ-ONLY: SELECT / WITH ... SELECT (SHOW, DESCRIBE and EXPLAIN are fine too) — "
+        "never DROP, TRUNCATE, DELETE, INSERT, UPDATE, ALTER or MERGE; an applied cell runs "
+        "at once and undo restores only the notebook text. Query any dataframe already "
         "in scope BY ITS VARIABLE NAME and refer to columns by the names in the schema — never "
         "inline a data value, and prefer an explicit column list over SELECT *. Do NOT pivot or "
         "crosstab row VALUES into column headers (e.g. DuckDB PIVOT): the resulting column names "

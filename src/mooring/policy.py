@@ -163,6 +163,15 @@ KNOBS: tuple[Knob, ...] = (
         "the PII-dense notebook warning",
     ),
     Knob("ai.traceback_guard", ("ai", "traceback_guard"), True, "traceback sanitising"),
+    # The two Apply knobs point in OPPOSITE directions, and both are the stricter
+    # end of their own knob: `safe` is "the guard is armed" and "an applied cell is
+    # NOT run". So an admin may force the guard ON and may force autorun OFF; the
+    # data model has no way to express forcing the guard off or autorun on.
+    Knob("ai.apply_guard", ("ai", "apply_guard"), True, "the Apply code guard"),
+    Knob(
+        "ai.apply_runs", ("ai", "apply_runs"), False,
+        "running an applied cell immediately",
+    ),
     Knob("ai.context", ("ai", "context"), False, "team context files"),
     Knob("ai.code_index", ("ai", "code_index"), False, "the team code library"),
     Knob(

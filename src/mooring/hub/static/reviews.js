@@ -122,6 +122,7 @@ async function openReview(r) {
   try {
     const data = await api("/api/reviews/detail", { number: r.number });
     renderFiles(data.files || []);
+    markCodeBand(data.code_band);
   } catch (e) {
     showError(e.message);
     box.textContent = "";
@@ -144,6 +145,7 @@ function renderFiles(files) {
     const detail = DiffFmt.summary(result) || f.status || "";
     head.textContent = detail ? `${f.path} — ${detail}` : f.path;
     wrap.appendChild(head);
+    renderCodeFindings(wrap, f.code); // above the diff — read it before the code
     if (result.kind === "cells") {
       for (const block of DiffFmt.buildBlocks(result.cells)) {
         const cell = document.createElement("div");
@@ -168,6 +170,55 @@ function renderFiles(files) {
     }
     box.appendChild(wrap);
   }
+}
+
+// -- the destructive-code scan ------------------------------------------------
+// One file's findings, above its diff blocks. INFORMATIONAL: the reviewer is the one
+// person in the loop who reads Python, so they see both bands and there is nothing to
+// confirm or click past — this is context beside a diff they are already reading, not
+// the analyst-facing hold the copilot's Apply puts up.
+//
+// Value-free like everything else on this page: a line number and a fixed label, never
+// a matched substring and never source. Set with textContent, same as the diff.
+function renderCodeFindings(wrap, code) {
+  const rows = ChatCore.codeFindingRows(code);
+  if (!rows.length) return;
+  const box = document.createElement("div");
+  box.className = "review-code";
+  const lead = document.createElement("div");
+  lead.className = "review-code-lead";
+  lead.textContent = ChatCore.codeFindingLead(code);
+  const list = document.createElement("ul");
+  list.className = "review-code-list";
+  for (const row of rows) {
+    const li = document.createElement("li");
+    li.className = "rf-row rf-" + row.band;
+    const tag = document.createElement("span");
+    tag.className = "rf-band";
+    tag.textContent = ChatCore.codeFindingTag(row);
+    const text = document.createElement("span");
+    text.className = "rf-text";
+    text.textContent = row.text;
+    li.append(tag, text);
+    list.appendChild(li);
+  }
+  box.append(lead, list);
+  wrap.appendChild(box);
+}
+
+// Badge the review header when ANY changed file carries an irreversible finding, so a
+// reviewer knows before they start scrolling. Only "floor" earns it — a badge on every
+// proposal that writes a CSV would stop meaning anything.
+function markCodeBand(band) {
+  const head = $("detail-title");
+  const old = head.querySelector(".badge.destructive");
+  if (old) old.remove();
+  if (band !== "floor") return;
+  const badge = document.createElement("span");
+  badge.className = "badge destructive";
+  badge.textContent = "destructive code";
+  badge.title = "At least one changed file contains code Undo can't take back.";
+  head.append(" ", badge);
 }
 
 async function submit(event) {

@@ -321,9 +321,12 @@ async def api_batch_apply(request: Request) -> JSONResponse:
         op_dicts = [{"op": "append", "code": proposal["code"]}]
     else:
         return JSONResponse({"error": "Nothing to apply."}, status_code=400)
+    # The apply gate's confirmation, echoed back on the re-POST (see app/apply.py).
+    gate_token = str(data.get("gate_token", "")).strip() or None
     workspace = Path(run.workspace)
     notebook_rel = res.notebook_rel
     from mooring.ai.cellwrite import CellApplyConflict, CellWriteError
+    from mooring.app.apply import ApplyGateHeld, scan_report
 
     try:
         nb_path = hub._ws_file(workspace, notebook_rel, suffix=".py")
@@ -333,14 +336,30 @@ async def api_batch_apply(request: Request) -> JSONResponse:
         return JSONResponse({"error": f"No such notebook: {notebook_rel}"}, status_code=404)
     try:
         undo_depth = await asyncio.to_thread(
-            hub.apply.apply_with_undo, nb_path, workspace, notebook_rel, op_dicts
+            hub.apply.apply_with_undo,
+            nb_path,
+            workspace,
+            notebook_rel,
+            op_dicts,
+            gate_token=gate_token,
         )
     except PermissionError:
         return JSONResponse({"enabled": False, "reason": "notebook_disabled"}, status_code=403)
+    except ApplyGateHeld as held:
+        # 428, same shape as the chat Apply — the gate lives in the shared guard, so
+        # the batch tray inherits it rather than reimplementing it. The proposal is NOT
+        # marked applied: nothing was written, and the re-POST with the token must run.
+        telemetry.log_event(
+            "ai_batch_apply_held",
+            band=held.verdict.band,
+            findings=len(held.verdict.findings),
+        )
+        return JSONResponse(held.payload(), status_code=428)
     except CellApplyConflict as exc:
         return JSONResponse({"error": str(exc)}, status_code=409)
     except CellWriteError as exc:
         return JSONResponse({"error": str(exc)}, status_code=502)
     run.mark_applied(pid)
-    telemetry.log_event("ai_batch_apply")
+    band, kinds = scan_report(op_dicts)
+    telemetry.log_event("ai_batch_apply", band=band, findings=len(kinds))
     return JSONResponse({"ok": True, "can_undo": undo_depth > 0, "undo_depth": undo_depth})

@@ -494,6 +494,153 @@ const ChatCore = (function () {
     return "PII pre-flight scan could not run — your message was sent unchecked.";
   }
 
+  // -- apply gate hold card -------------------------------------------------
+  // The copilot's Apply writes a cell AND marimo runs it immediately, so Undo —
+  // which only restores the notebook's bytes — is a COMPLETE remedy for ordinary
+  // code and NO remedy at all for code that deleted a file or dropped a table.
+  // The server-side gate (mooring.ai.codeguard, enforced in app/apply.py) holds
+  // such an Apply with HTTP 428 and a `gate` payload; these helpers turn that
+  // payload into the analyst-facing wording. Pure, so every string is pinned by
+  // tests/js/apply_gate.test.js.
+  //
+  // Two bands reach the wire: "floor" (never downgradable — Undo is not a remedy)
+  // and "ask" (one confirmation). BOTH are held; only the wording and the emphasis
+  // differ. Anything else — a missing band, a typo, a mangled payload — is read as
+  // "floor", so a broken response over-warns rather than under-warns.
+  const GATE_FLOOR_UNDO =
+    "Undo puts the notebook back. It can't put back a deleted file or a dropped " +
+    "table. Once this runs, that part is permanent.";
+  const GATE_ASK_UNDO =
+    "Undo puts the notebook back. It can't take back anything this writes or " +
+    "sends elsewhere.";
+  const GATE_MECHANISM =
+    "Nothing has changed yet. Applying writes the change into the notebook, and " +
+    "marimo runs it straight away.";
+  // Per-finding marker, used only to pick the irreversible lines out of a MIXED
+  // verdict (see gateFindingItems).
+  const GATE_MARK = "can't be undone";
+
+  // Normalise a 428 body into {band, token, findings}, or null when it carries no
+  // usable gate. Defensive because it shapes an irreversible decision.
+  function gateFromResponse(data) {
+    const g = data && typeof data === "object" ? data.gate : null;
+    if (!g || typeof g !== "object") return null;
+    return {
+      band: g.band === "ask" ? "ask" : "floor", // fail closed: anything else => floor
+      token: typeof g.token === "string" ? g.token : "",
+      findings: Array.isArray(g.findings) ? g.findings : [],
+    };
+  }
+
+  // True unless the payload explicitly says "ask" (see the fail-closed note above).
+  function gateIsFloor(gate) {
+    return !gate || gate.band !== "ask";
+  }
+
+  // One item per finding, in the ANALYST's language: {text, floor, mark}. `text` is
+  // the server-supplied plain-English `label`, never the `kind` slug and never any
+  // code. A finding with no label is dropped rather than falling back to the slug —
+  // the hold itself is what stops the apply, so a missing label costs an
+  // explanation, not the guard.
+  //
+  // `mark` labels the individual lines Undo cannot help with, and ONLY in a mixed
+  // verdict: when every finding is the un-undoable kind the card's header has
+  // already said so, and repeating it per row is noise. A per-finding `band` is
+  // optional on the wire — when the server omits it nothing is marked, which is the
+  // right way to degrade (a missing mark under-decorates; a wrong one misleads).
+  function gateFindingItems(gate) {
+    const list = gate && Array.isArray(gate.findings) ? gate.findings : [];
+    const seen = new Set();
+    const out = [];
+    for (const f of list) {
+      if (!f || typeof f !== "object") continue;
+      const label = String(f.label == null ? "" : f.label).trim();
+      if (!label) continue;
+      const n = Number(f.line);
+      const text = Number.isInteger(n) && n > 0 ? "line " + n + ": " + label : label;
+      if (seen.has(text)) continue; // the same finding twice reads as noise
+      seen.add(text);
+      out.push({ text: text, floor: f.band === "floor", mark: "" });
+    }
+    const mixed = out.some((i) => i.floor) && out.some((i) => !i.floor);
+    if (mixed) out.forEach((i) => { if (i.floor) i.mark = GATE_MARK; });
+    return out;
+  }
+
+  // Just the lines, for callers that render plain text.
+  function gateFindingRows(gate) {
+    return gateFindingItems(gate).map((i) => i.text);
+  }
+
+  // The hold's one summary line: what happened (nothing) and why we stopped.
+  function gateHoldSummary(gate) {
+    return gateIsFloor(gate)
+      ? "Held before applying — this change can't be taken back."
+      : "Held before applying — this change does more than work out an answer.";
+  }
+
+  // Every string the hold card renders, chosen by band. `lead` is empty when there
+  // is nothing to list, so a findings-less payload never leaves a dangling colon.
+  function gateHoldWording(gate) {
+    const floor = gateIsFloor(gate);
+    const items = gateFindingItems(gate);
+    const rows = items.map((i) => i.text);
+    return {
+      band: floor ? "floor" : "ask",
+      floor: floor,
+      summary: gateHoldSummary(gate),
+      mechanism: GATE_MECHANISM,
+      lead: rows.length ? (floor ? "What it would do, permanently:" : "What it would do:") : "",
+      items: items,
+      rows: rows,
+      undoNote: floor ? GATE_FLOOR_UNDO : GATE_ASK_UNDO,
+      confirmLabel: floor ? "Run it anyway" : "Apply anyway",
+      cancelLabel: "Don't apply",
+    };
+  }
+
+  // -- the reviewer's view of the same findings ------------------------------
+  // The hub's reviews page shows the SAME value-free findings beside a Propose PR's
+  // diff, in the same wire shape — deliberately, so one derivation (and one rule that
+  // a labelless finding is dropped rather than shown as its slug) serves both.
+  //
+  // It is NOT a hold. There is nothing to confirm, no token, nothing to click past —
+  // it is context beside a diff someone is already reading. Two things follow. The
+  // reviewer sees BOTH bands, because they are the one person in the loop who reads
+  // Python and that is the whole reason the list exists; so every row carries its own
+  // band for styling. And the hold's mixed-verdict mark is dropped: a list that
+  // already styles each row by band would only be repeating itself.
+  //
+  // A missing/unreadable `code` yields NO rows, so the caller renders no block at all.
+  // The scan landed after this page shipped: an older payload has no `code` key, and
+  // the right answer to that is silence, not an empty box or a broken row.
+  function codeFindingRows(code) {
+    return gateFindingItems(code).map((i) => ({
+      text: i.text,
+      // DELIBERATELY the opposite of gateIsFloor's fail-closed rule, and not a bug:
+      // an unknown band reads as the QUIETER "ask" here. Fail-closed earns its keep by
+      // stopping a write, and this page stops nothing — it is context beside a diff a
+      // human is already reading. Over-warning a reviewer who can read the code for
+      // themselves spends the warning's credibility on a row that may not deserve it,
+      // and the credibility is what makes the real "can't be undone" rows land.
+      band: i.floor ? "floor" : "ask",
+      floor: i.floor,
+    }));
+  }
+
+  // The one line above that list. It names the scan, so the reviewer reads the rows as
+  // automated context sitting beside the diff rather than as a human's comment.
+  function codeFindingLead(code) {
+    const n = codeFindingRows(code).length;
+    if (!n) return "";
+    return "Destructive-code scan — " + n + " finding" + (n === 1 ? "" : "s") + ":";
+  }
+
+  // The per-row tag. Fixed strings that name the BAND, never the code.
+  function codeFindingTag(row) {
+    return row && row.floor ? GATE_MARK : "side effect";
+  }
+
   // -- batch jobs -----------------------------------------------------------
   // The batch composer is a list of per-notebook cards, each with its OWN free-form
   // brief (multi-line, as detailed as the analyst likes — bullet points, columns,
@@ -965,6 +1112,15 @@ const ChatCore = (function () {
     piiBadge,
     tracebackHoldSummary,
     scanErrorMessage,
+    gateFromResponse,
+    gateIsFloor,
+    gateFindingItems,
+    gateFindingRows,
+    gateHoldSummary,
+    gateHoldWording,
+    codeFindingRows,
+    codeFindingLead,
+    codeFindingTag,
     parseDeviceLogin,
     highlightCode,
     renderMarkdown,

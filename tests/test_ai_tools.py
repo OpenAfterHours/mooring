@@ -334,6 +334,21 @@ def test_sql_cell_guide_is_value_free_and_names_the_idiom():
     assert SECRET not in guide
 
 
+def test_sql_cell_guide_teaches_read_only_sql():
+    # The guide taught the mo.sql idiom and nothing else — so nothing discouraged authoring
+    # a cell that writes, and an applied cell runs at once (undo restores only the text).
+    from mooring.ai import tools
+
+    guide = tools.sql_cell_guide()
+    assert "READ-ONLY" in guide
+    assert "SELECT / WITH ... SELECT" in guide
+    for keyword in ("DROP", "TRUNCATE", "DELETE", "INSERT", "UPDATE", "ALTER", "MERGE"):
+        assert keyword in guide
+    # The value-blindness caveat is untouched by the safety rule.
+    assert "Do NOT pivot or crosstab row VALUES into column headers" in guide
+    assert SECRET not in guide
+
+
 def test_build_system_context_folds_in_the_sql_help():
     # The SQL capability reaches the model through the ONE context choke point, and only
     # when passed (default omits it). It introduces no data value — SQL is authored code.

@@ -285,6 +285,50 @@ EDITABLE: tuple[SettingSpec, ...] = (
         "for a “Send sanitised” confirm. There is deliberately no send-raw option.",
     ),
     SettingSpec(
+        key="ai.apply_guard",
+        accessor="ai_apply_guard",
+        label="Check a proposed cell before it is applied",
+        group="ai",
+        type="bool",
+        control="toggle",
+        default=True,
+        # "needs_care", not "weakens": the page renders "weakens" as *Weakens privacy*,
+        # and this guard is not a privacy control — nothing about what the model SEES
+        # changes when it is off. The weakening it does is to write safety, which the
+        # confirm below spells out; `weaken_value` (not `sensitivity`) is what makes
+        # the endpoint demand that confirm.
+        sensitivity="needs_care",
+        env_var="MOORING_AI_APPLY_GUARD",
+        weaken_value=False,
+        confirm="Turning the Apply check OFF applies every cell the copilot proposes "
+        "with no prompt — including one that deletes files, runs a program, or drops a "
+        "table. Undo restores the notebook's text, so it takes back a cell that "
+        "computes; it cannot take back a deleted file. This check is the only thing "
+        "standing between a proposed cell and that kind of side effect. Continue?",
+        help="Applied cells run the moment they land, so mooring reads each one first "
+        "and asks before applying anything Undo cannot take back. Ordinary work — "
+        "reading data, dataframes, plots, writing a new report file — applies silently.",
+    ),
+    SettingSpec(
+        key="ai.apply_runs",
+        accessor="ai_apply_runs",
+        label="Run an applied cell straight away",
+        group="ai",
+        type="bool",
+        control="toggle",
+        default=True,
+        sensitivity="needs_care",
+        env_var="MOORING_AI_APPLY_RUNS",
+        weaken_value=True,
+        confirm="With this ON, a cell you Apply EXECUTES as soon as it lands in the "
+        "notebook — you read its code and its result at the same moment. Turning it "
+        "off stages the cell instead: it arrives marked stale and nothing runs until "
+        "you press run. Continue?",
+        help="Apply = add and run. Turn this off to make Apply = add only: the cell "
+        "appears in your notebook marked stale and you run it yourself once you have "
+        "read it. Slower, but no code the copilot wrote ever runs unasked.",
+    ),
+    SettingSpec(
         key="ai.context",
         accessor="ai_context",
         label="Team context (instructions + data dictionary)",

@@ -238,7 +238,7 @@ def test_local_mode_new_lists_and_opens_without_login(unconfigured_client, monke
     client, _hub = unconfigured_client
 
     class FakeEditor:
-        def __init__(self, workspace, theme="system"):
+        def __init__(self, workspace, theme="system", apply_runs=None):
             self.workspace = workspace
 
         def ensure_started(self):
@@ -273,7 +273,7 @@ def test_new_into_a_package_subfolder_registers_lists_and_opens(unconfigured_cli
     client, hub = unconfigured_client
 
     class FakeEditor:
-        def __init__(self, workspace, theme="system"):
+        def __init__(self, workspace, theme="system", apply_runs=None):
             self.workspace = workspace
 
         def ensure_started(self):
@@ -321,7 +321,7 @@ NB_SOURCE = "import marimo\napp = marimo.App()\n"
 
 
 class DuplicateFakeEditor:
-    def __init__(self, workspace, theme="system"):
+    def __init__(self, workspace, theme="system", apply_runs=None):
         self.workspace = workspace
 
     def ensure_started(self):
@@ -588,7 +588,7 @@ def test_switch_changes_editor_workspace(configured, monkeypatch):
     class FakeEditor:
         instances = []
 
-        def __init__(self, workspace, theme="system"):
+        def __init__(self, workspace, theme="system", apply_runs=None):
             self.workspace = workspace
             self.theme = theme
             FakeEditor.instances.append(self)
@@ -1162,14 +1162,27 @@ def test_chat_apply_edit_op_rewrites_a_cell(unconfigured_client, stub_chat):
 def test_chat_apply_rewrite_with_returns_succeeds(unconfigured_client, stub_chat):
     # End-to-end of the user's bug: a rewrite whose cell bodies still carry the
     # auto-generated `return` lines now applies cleanly (normalized server-side).
+    # A replace_all is `ask`, so it takes the confirm round trip first â€” the normalization
+    # this test is really about happens after it.
+    #
+    # Do NOT "simplify" this back to clean. A whole-notebook rewrite IS fully undoable, so
+    # a literal reading of the band rule ("ask only where Undo stops being a remedy") says
+    # clean. The rule is incomplete: a remedy only counts if the analyst NOTICES they need
+    # it. One appended cell is visible and local; a replacement of every cell destroys
+    # their own work at a scale where the diff is large and the loss is easy to miss until
+    # after a save or a push. The remedy exists, the detection doesn't. The fatigue cost of
+    # asking is near zero because the operation is rare.
     client, hub = unconfigured_client
     sid = _open_chat(client, hub, source=_NB_SRC).json()["sid"]
+    body = {
+        "sid": sid,
+        "ops": [{"op": "replace_all", "cells": ["import marimo as mo\nreturn (mo,)"]}],
+    }
+    held = client.post("/api/ai/chat/apply", json=body)
+    assert held.status_code == 428
+    assert [f["kind"] for f in held.json()["gate"]["findings"]] == ["replaces_notebook"]
     resp = client.post(
-        "/api/ai/chat/apply",
-        json={
-            "sid": sid,
-            "ops": [{"op": "replace_all", "cells": ["import marimo as mo\nreturn (mo,)"]}],
-        },
+        "/api/ai/chat/apply", json={**body, "gate_token": held.json()["gate"]["token"]}
     )
     assert resp.status_code == 200 and resp.json()["ok"] is True
     nb = (hub.cfg.workspace() / "nb.py").read_text("utf-8")
@@ -1245,6 +1258,206 @@ def test_chat_apply_anchorless_edit_is_409(unconfigured_client, stub_chat):
     )
     assert resp.status_code == 409
     assert "seed = 1" in (hub.cfg.workspace() / "nb.py").read_text("utf-8")  # untouched
+
+
+# -- the apply gate (codeguard) ---------------------------------------------------
+# Apply writes a cell that marimo then RUNS, and Undo only restores bytes â€” a complete
+# remedy for a cell that computes, none at all for one that deleted a file. So a
+# non-clean cell is held until the analyst confirms it, and the hold is enforced in the
+# shared guard (app/apply.py) under the lock, before the snapshot: both Applies inherit
+# it, and no client can talk its way past it by claiming it showed a dialog.
+
+_FLOOR_CELL = 'import os\nos.remove("data/old.csv")\n'  # un-downgradable band
+_ASK_CELL = 'df.to_csv("report.csv")\n'  # the softer band, held identically here
+
+
+def _undo_depth(hub, rel="nb.py"):
+    from mooring import notebook_undo
+
+    return notebook_undo.depth(hub.cfg.workspace(), rel)
+
+
+def test_chat_apply_clean_cell_is_never_gated(unconfigured_client, stub_chat):
+    # The regression that matters most: for ordinary work the gate is invisible. A cell
+    # that only computes applies straight through â€” no token, no 428, no extra round trip.
+    client, hub = unconfigured_client
+    sid = _open_chat(client, hub, source=_NB_SRC).json()["sid"]
+    resp = client.post("/api/ai/chat/apply", json={"sid": sid, "code": "total = 41 + 1"})
+    assert resp.status_code == 200 and resp.json()["ok"] is True
+    assert "gate" not in resp.json()
+    assert "total = 41 + 1" in (hub.cfg.workspace() / "nb.py").read_text("utf-8")
+
+
+def test_chat_apply_floor_cell_is_held_then_applies_with_the_token(unconfigured_client, stub_chat):
+    import json as _json
+
+    client, hub = unconfigured_client
+    sid = _open_chat(client, hub, source=_NB_SRC).json()["sid"]
+    nb = hub.cfg.workspace() / "nb.py"
+    body = {"sid": sid, "code": _FLOOR_CELL}
+    held = client.post("/api/ai/chat/apply", json=body)
+    assert held.status_code == 428  # 409 already means CellApplyConflict here
+    gate = held.json()["gate"]
+    assert gate["band"] == "floor"
+    assert [f["kind"] for f in gate["findings"]] == ["deletes_files"]
+    assert gate["findings"][0]["label"]  # plain English, for someone who won't read the AST
+    assert gate["findings"][0]["band"] == "floor"  # each finding carries its own band
+    assert gate["token"]
+    # Value-free: the payload reaches the wire, the UI and the logs, so nothing read out
+    # of the analyst's code may ride in it.
+    blob = _json.dumps(gate)
+    assert "os.remove" not in blob and "data/old.csv" not in blob
+    assert "os.remove" not in nb.read_text("utf-8")  # nothing landed
+    # The SAME body plus the token proceeds â€” the client re-POSTs, it does not "override".
+    ok = client.post("/api/ai/chat/apply", json={**body, "gate_token": gate["token"]})
+    assert ok.status_code == 200 and ok.json()["ok"] is True
+    assert "os.remove" in nb.read_text("utf-8")
+
+
+def test_chat_apply_mixed_verdict_bands_each_finding_separately(unconfigured_client, stub_chat):
+    # WHY each finding carries its own band and not just the worst one: this cell both
+    # overwrites a file (recoverable) and deletes one (not). It is a single floor prompt,
+    # but the analyst still needs to see WHICH line is the irreversible half â€” summarising
+    # that away would leave the UI unable to say it.
+    client, hub = unconfigured_client
+    sid = _open_chat(client, hub, source=_NB_SRC).json()["sid"]
+    mixed = 'import os\ndf.to_csv("report.csv")\nos.remove("data/old.csv")\n'
+    gate = client.post("/api/ai/chat/apply", json={"sid": sid, "code": mixed}).json()["gate"]
+    assert gate["band"] == "floor"  # the summary is still the worst band
+    assert [(f["kind"], f["band"]) for f in gate["findings"]] == [
+        ("overwrites_file", "ask"),
+        ("deletes_files", "floor"),
+    ]
+
+
+@pytest.mark.parametrize("bad", [None, "", "   ", "not-a-real-token", "0" * 16])
+def test_chat_apply_held_leaves_no_trace(unconfigured_client, stub_chat, bad):
+    # Absent, blank or wrong â€” the answer is the same 428, and a held Apply must leave
+    # NOTHING behind: not a byte written, and no phantom undo step for a write that
+    # never happened (which the analyst could later "undo" into a state they never had).
+    client, hub = unconfigured_client
+    sid = _open_chat(client, hub, source=_NB_SRC).json()["sid"]
+    nb = hub.cfg.workspace() / "nb.py"
+    before, depth_before = nb.read_bytes(), _undo_depth(hub)
+    body = {"sid": sid, "code": _FLOOR_CELL}
+    if bad is not None:
+        body["gate_token"] = bad
+    resp = client.post("/api/ai/chat/apply", json=body)
+    assert resp.status_code == 428
+    assert resp.json()["gate"]["token"] != bad  # the real token is derived, not echoed
+    assert nb.read_bytes() == before
+    assert _undo_depth(hub) == depth_before
+
+
+def test_chat_apply_malformed_op_is_handled_not_a_500(unconfigured_client, stub_chat):
+    # The seam between the gate and codeguard: scan_ops runs on RAW wire input, before
+    # cellwrite has validated anything, so a malformed op reaches it first. It must come
+    # back as a finding ("we could not read this"), never as an exception â€” an exception
+    # inside the guard is a 500 and an unexplained dead end for the analyst. Owned here
+    # because neither module alone can prove it.
+    client, hub = unconfigured_client
+    sid = _open_chat(client, hub, source=_NB_SRC).json()["sid"]
+    nb = hub.cfg.workspace() / "nb.py"
+    before = nb.read_bytes()
+    body = {"sid": sid, "ops": [{"op": "replace_all", "cells": 7}]}
+    held = client.post("/api/ai/chat/apply", json=body)
+    assert held.status_code == 428
+    assert "unparseable" in [f["kind"] for f in held.json()["gate"]["findings"]]
+    # ...and confirming it still fails SAFELY: cellwrite's wire normalizer rejects the op
+    # as a CellWriteError (502), and the guard's discard-on-failure means no bytes written
+    # and no phantom undo step. Before the fix in _ops_from_wire this leg was a raw
+    # TypeError out of the normalizer, i.e. a 500 with no explanation.
+    confirmed = client.post(
+        "/api/ai/chat/apply", json={**body, "gate_token": held.json()["gate"]["token"]}
+    )
+    assert confirmed.status_code == 502 and confirmed.json()["error"]
+    assert nb.read_bytes() == before
+    assert _undo_depth(hub) == 0
+
+
+def test_chat_apply_token_expires_when_the_notebook_changes(unconfigured_client, stub_chat):
+    # WHY the token binds the notebook's bytes and not just the ops: an approval is for
+    # applying THIS cell to THIS file. If the notebook moves between the prompt and the
+    # confirm â€” the analyst edited it, a teammate's pull landed, another Apply went in â€”
+    # the approval is for a file that no longer exists and must be asked again.
+    client, hub = unconfigured_client
+    sid = _open_chat(client, hub, source=_NB_SRC).json()["sid"]
+    nb = hub.cfg.workspace() / "nb.py"
+    body = {"sid": sid, "code": _FLOOR_CELL}
+    first = client.post("/api/ai/chat/apply", json=body).json()["gate"]["token"]
+    nb.write_text(_NB_SRC.replace("seed = 1", "seed = 2"), "utf-8", newline="\n")
+    stale = client.post("/api/ai/chat/apply", json={**body, "gate_token": first})
+    assert stale.status_code == 428
+    fresh = stale.json()["gate"]["token"]
+    assert fresh != first  # a fresh ask, against the notebook as it is now
+    assert client.post("/api/ai/chat/apply", json={**body, "gate_token": fresh}).status_code == 200
+
+
+def test_chat_apply_token_from_another_proposal_is_rejected(unconfigured_client, stub_chat):
+    # A confirmation is not a session-wide "yes to everything": the token binds the exact
+    # ops, so the one minted for a different cell does not unlock this one.
+    client, hub = unconfigured_client
+    sid = _open_chat(client, hub, source=_NB_SRC).json()["sid"]
+    other = client.post("/api/ai/chat/apply", json={"sid": sid, "code": _ASK_CELL})
+    assert other.status_code == 428 and other.json()["gate"]["band"] == "ask"  # ask is held too
+    resp = client.post(
+        "/api/ai/chat/apply",
+        json={"sid": sid, "code": _FLOOR_CELL, "gate_token": other.json()["gate"]["token"]},
+    )
+    assert resp.status_code == 428 and resp.json()["gate"]["band"] == "floor"
+    assert "os.remove" not in (hub.cfg.workspace() / "nb.py").read_text("utf-8")
+
+
+def test_chat_apply_records_the_confirmed_kinds_in_the_local_ledger(unconfigured_client, stub_chat):
+    # The ledger answers "what did I approve?" â€” value-free kinds from codeguard's fixed
+    # table, never the cell, the path or the label text.
+    from mooring import activity
+
+    client, hub = unconfigured_client
+    sid = _open_chat(client, hub, source=_NB_SRC).json()["sid"]
+    body = {"sid": sid, "code": _FLOOR_CELL}
+    token = client.post("/api/ai/chat/apply", json=body).json()["gate"]["token"]
+    assert client.post("/api/ai/chat/apply", json={**body, "gate_token": token}).status_code == 200
+    entry = activity.read(hub.cfg.workspace(), limit=5)[0]
+    assert entry["op"] == "ai_apply" and entry["kinds"] == ["deletes_files"]
+    client.post("/api/ai/chat/apply", json={"sid": sid, "code": "total = 1"})
+    assert "kinds" not in activity.read(hub.cfg.workspace(), limit=5)[0]  # clean adds nothing
+
+
+def test_chat_apply_disabled_notebook_beats_the_gate(unconfigured_client, stub_chat):
+    # A notebook the copilot may not touch AT ALL is not a thing to ask permission
+    # about: 403, never 428, even for a floor-band cell.
+    from mooring import workspace_config
+
+    client, hub = unconfigured_client
+    sid = _open_chat(client, hub, source=_NB_SRC).json()["sid"]
+    nb = hub.cfg.workspace() / "nb.py"
+    before = nb.read_bytes()
+    workspace_config.set_ai_disabled(hub.cfg.workspace(), "nb.py", True)
+    resp = client.post("/api/ai/chat/apply", json={"sid": sid, "code": _FLOOR_CELL})
+    assert resp.status_code == 403 and resp.json()["reason"] == "notebook_disabled"
+    assert nb.read_bytes() == before
+
+
+def test_apply_guard_disabled_check_precedes_the_gate(unconfigured_client):
+    # The route's early opt-out check answers first, so it cannot prove the ORDER inside
+    # the lock. Drive the guard directly: disabled must raise PermissionError, and the
+    # second half proves that is not because the cell was read as clean.
+    from mooring import workspace_config
+    from mooring.app.apply import ApplyGateHeld
+
+    _client, hub = unconfigured_client
+    ws = hub.cfg.workspace()
+    ws.mkdir(parents=True, exist_ok=True)
+    nb = ws / "nb.py"
+    nb.write_text(_NB_SRC, "utf-8", newline="\n")
+    ops = [{"op": "append", "code": _FLOOR_CELL}]
+    workspace_config.set_ai_disabled(ws, "nb.py", True)
+    with pytest.raises(PermissionError):
+        hub.apply.apply_with_undo(nb, ws, "nb.py", ops)
+    workspace_config.set_ai_disabled(ws, "nb.py", False)
+    with pytest.raises(ApplyGateHeld):  # same ops; now only the gate stands in the way
+        hub.apply.apply_with_undo(nb, ws, "nb.py", ops)
 
 
 def test_chat_open_rejects_dot_state_dir(unconfigured_client, stub_chat):
@@ -1912,6 +2125,46 @@ def test_batch_apply_writes_the_proposal_into_the_notebook(batch_client):
     assert "ï»¿" not in nb  # no BOM
 
 
+def test_batch_apply_is_held_by_the_same_gate(batch_client, monkeypatch):
+    # The batch tray is the SECOND write path, and a second path is exactly where an
+    # enforcement point gets forgotten. It cannot be, here: the gate lives in the shared
+    # guard both Applies call, so the tray inherits the identical 428 and token.
+    from mooring.ai.chat import ChatEvent, StubChatSession
+
+    class DirtyBuilder(StubChatSession):
+        """A builder whose proposal deletes a file â€” floor band."""
+
+        def _reply(self) -> None:
+            self._broadcast(ChatEvent("message", {"text": "Here is a cell:"}))
+            self._broadcast(ChatEvent("proposal", {"code": _FLOOR_CELL, "rationale": "tidy up"}))
+            self._broadcast(ChatEvent("idle"))
+
+    client, hub = batch_client
+    monkeypatch.setattr(
+        Hub,
+        "_make_batch_session",
+        lambda self, ctx, nb, model="", reasoning_effort=None, dictionary=None: DirtyBuilder(
+            system_context=ctx
+        ),
+    )
+    bid, tray = _run_batch(client, [{"name": "tidy", "brief": "clear out the old extract"}])
+    assert tray["jobs"][0]["status"] == "built"
+    body = {"batch_id": bid, "job": 0, "proposal": 0}
+    held = client.post("/api/ai/batch/apply", json=body)
+    assert held.status_code == 428
+    gate = held.json()["gate"]
+    assert gate["band"] == "floor" and [f["kind"] for f in gate["findings"]] == ["deletes_files"]
+    nb = hub.cfg.workspace() / "notebooks/tidy.py"
+    assert "os.remove" not in nb.read_text("utf-8")
+    # The proposal is NOT marked applied by a hold â€” otherwise the idempotence guard
+    # would turn the confirmed re-POST into a silent no-op and the cell would be lost.
+    tray2 = client.get(f"/api/ai/batch/tray/{bid}").json()
+    assert tray2["jobs"][0]["proposals"][0]["applied"] is False
+    ok = client.post("/api/ai/batch/apply", json={**body, "gate_token": gate["token"]})
+    assert ok.status_code == 200 and ok.json()["ok"] is True
+    assert "os.remove" in nb.read_text("utf-8")
+
+
 def test_batch_apply_unknown_batch_404(batch_client):
     client, _ = batch_client
     resp = client.post("/api/ai/batch/apply", json={"batch_id": "nope", "job": 0, "proposal": 0})
@@ -2450,7 +2703,7 @@ def test_open_has_no_server_side_staleness_gate(configured, monkeypatch):
     a `remote changed` file still opens through /api/open with no new gate."""
 
     class FakeEditor:
-        def __init__(self, workspace, theme="system"):
+        def __init__(self, workspace, theme="system", apply_runs=None):
             self.workspace = workspace
 
         def ensure_started(self):

@@ -278,8 +278,12 @@ class Hub:
         # Lock so a pre-warm thread and a concurrent Open don't both Popen marimo for
         # the same cold workspace; the second caller then finds it already running.
         with self._editor_lock:
+            app_cfg = self.app_cfg  # one read: the property folds the team policy in
             editor = self.editors.setdefault(
-                str(workspace), EditorServer(workspace, theme=self.app_cfg.ui_theme)
+                str(workspace),
+                EditorServer(
+                    workspace, theme=app_cfg.ui_theme, apply_runs=app_cfg.ai_apply_runs
+                ),
             )
             editor.ensure_started()
             return editor
@@ -822,11 +826,18 @@ class Hub:
         provider auto-rebuilds for a new model because _provider_for keys on it."""
         was_ai = self.app_cfg.ai_enabled
         old_theme = self.app_cfg.ui_theme
+        old_apply_runs = self.app_cfg.ai_apply_runs
         with self._lock:
             self.app_cfg = config.load_app_config()
         if self.app_cfg.ui_theme != old_theme:
             for editor in list(self.editors.values()):
                 editor.apply_theme(self.app_cfg.ui_theme)
+        # Same treatment for "does an applied cell run": it also lives in the workspace
+        # .marimo.toml the editor owns, so a change that only took effect on the next
+        # editor launch would leave the setting page and the notebook disagreeing.
+        if self.app_cfg.ai_apply_runs != old_apply_runs:
+            for editor in list(self.editors.values()):
+                editor.apply_run_mode(self.app_cfg.ai_apply_runs)
         if was_ai and not self.app_cfg.ai_enabled:
             self._close_all_chats()
 

@@ -196,6 +196,7 @@ mid-session takes effect immediately.
 [policy.settings]
 "ai.pii.enabled"   = true
 "ai.traceback_guard" = true
+"ai.apply_guard"   = true
 "ai.context"       = false
 "ai.code_index"    = false
 "ai.batch.enabled" = false
@@ -208,6 +209,8 @@ mid-session takes effect immediately.
 | `ai.pii.block_prompt` | `true` | A PII hit always holds the prompt (never warn-only). |
 | `ai.pii.scan_notebook_source` | `true` | The PII-dense notebook warning stays on. |
 | `ai.traceback_guard` | `true` | Pasted tracebacks are always sanitised. |
+| `ai.apply_guard` | `true` | The Apply check cannot be turned off locally. |
+| `ai.apply_runs` | `false` | An applied cell is staged, never run by the act of applying. |
 | `ai.context` | `false` | Team context files are never sent. |
 | `ai.code_index` | `false` | The team code library is never sent. |
 | `ai.notebook_catalog` | `false` | No repo-wide notebook catalog. |
@@ -217,6 +220,13 @@ mid-session takes effect immediately.
 
 Writing the *other* value is refused when authoring (`mooring policy set`) and
 ignored when parsing — the same rule from both directions.
+
+Note that the two Apply keys point in **opposite directions**, and both are the
+stricter end of their own setting. `ai.apply_guard` may be pinned to `true` (the
+check is armed) and `ai.apply_runs` to `false` (an applied cell is staged rather
+than run). Neither can be spelled the other way round: there is no way to write a
+policy that switches the Apply check off, and none that forces a teammate's
+applied cells to run. See [the Apply check](ai-privacy.md#apply-gate).
 
 On each machine, a pinned setting shows on the hub's **Settings** page as
 *Set by your team*, with its control disabled and a note saying where the lock

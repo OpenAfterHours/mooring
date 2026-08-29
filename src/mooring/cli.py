@@ -1856,7 +1856,10 @@ def cmd_open(cfg: config.Config, rel_path: str) -> int:
         telemetry.log_event("open", kind="pbip")
         print(f"Opened {rel_path} in Power BI Desktop.")
         return 0
-    server = EditorServer(workspace)
+    # The effective [ai] apply_runs for THIS workspace — local config with the team
+    # policy folded on top, read here rather than captured, exactly as the hub reads it.
+    apply_runs = policy_mod.tighten_app_config(config.load_app_config(), workspace).ai_apply_runs
+    server = EditorServer(workspace, apply_runs=apply_runs)
     # Ungated by the launch backend: the sys.path[0] shadow trap is plain Python
     # import resolution and bites uv and frozen runs alike, unlike the missing-deps
     # note below (which is a bundle-only concern). Scans the whole folder, so opening

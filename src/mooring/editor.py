@@ -144,7 +144,25 @@ def export_html_command(
     return [*prefix, *args], env
 
 
-def ensure_runtime_config(workspace: Path, *, theme: str | None = None) -> None:
+# marimo's two accepted values for runtime.watcher_on_save (its RuntimeConfig types the
+# key as Literal["lazy", "autorun"]). "autorun" runs the cells a --watch reload changed;
+# "lazy" marks them stale instead and runs nothing.
+WATCHER_AUTORUN = "autorun"
+WATCHER_LAZY = "lazy"
+
+
+def _watcher_on_save(current: object, apply_runs: bool | None) -> str:
+    """The ``runtime.watcher_on_save`` to write: the mode ``apply_runs`` asks for, or —
+    when it is None — whatever is already there, defaulting to ``"autorun"`` for a
+    workspace that has no (or an unrecognisable) value yet."""
+    if apply_runs is None:
+        return current if current in (WATCHER_LAZY, WATCHER_AUTORUN) else WATCHER_AUTORUN
+    return WATCHER_AUTORUN if apply_runs else WATCHER_LAZY
+
+
+def ensure_runtime_config(
+    workspace: Path, *, theme: str | None = None, apply_runs: bool | None = None
+) -> None:
     """Write the workspace ``.marimo.toml`` mooring relies on, and install the
     value-free checks runtime. Idempotent, atomic, and best-effort (never raises).
 
@@ -154,9 +172,21 @@ def ensure_runtime_config(workspace: Path, *, theme: str | None = None) -> None:
        marimo's built-in AI would send real column *sample values* to whatever
        model is configured — a data-confidentiality leak outside mooring's control.
        mooring never uses marimo's AI (its copilot is schema-only and value-blind).
-    2. ``runtime.watcher_on_save = "autorun"`` so that when the copilot applies a
-       cell (by writing the .py source), ``--watch`` reloads AND runs it — matching
-       the "Apply = add + run" behaviour.
+    2. ``runtime.watcher_on_save``, which decides what ``--watch`` does when the
+       copilot applies a cell (by writing the .py source): ``"autorun"`` reloads AND
+       RUNS it — the "Apply = add + run" behaviour — and ``"lazy"`` reloads it marked
+       STALE, so the applied code is staged and nothing executes until the analyst
+       presses run. Those two are marimo's only accepted values for this key
+       (``RuntimeConfig.watcher_on_save: Literal["lazy", "autorun"]``); its own default
+       is ``"lazy"``, and its file-change handler issues run ids only on ``"autorun"``.
+       ``apply_runs`` picks between them — ``True`` (the shipped default, and the
+       behaviour the whole Apply flow is written around) means autorun; ``False``, which
+       a team policy may pin and local config may choose, means lazy. ``apply_runs=None``
+       PRESERVES whatever the file already says (falling back to ``"autorun"`` when the
+       key is absent), so a caller that only wants the import path — the one-shot HTML
+       export, a scheduled run — cannot silently re-arm autorun underneath an open
+       editor that was deliberately set to stage. That is the same reason ``theme=None``
+       preserves, below.
     3. ``runtime.pythonpath`` = the workspace root **and** the ``.mooring/pylib``
        dir, so a notebook in any sub-folder can import the repo's shared helper
        modules AND ``import mooring_checks`` (the injected value-free tie-out
@@ -208,10 +238,14 @@ def ensure_runtime_config(workspace: Path, *, theme: str | None = None) -> None:
         # used by the one-shot HTML export, which must never disturb an open editor's
         # appearance (nor introduce a theme key on a workspace that had none).
         theme_ok = theme is None or display.get("theme") == theme
+        # The watcher mode is a real desired VALUE, not a constant, so it has to go
+        # through `already` too — comparing against a hard-coded "autorun" would make
+        # every lazy workspace look out of date and rewrite the file on every call.
+        watcher = _watcher_on_save(runtime.get("watcher_on_save"), apply_runs)
         already = (
             ai.get("enabled") is False
             and completion.get("copilot") is False
-            and runtime.get("watcher_on_save") == "autorun"
+            and runtime.get("watcher_on_save") == watcher
             and runtime.get("pythonpath") == desired_pp
             and theme_ok
         )
@@ -219,7 +253,7 @@ def ensure_runtime_config(workspace: Path, *, theme: str | None = None) -> None:
             return  # nothing to change — don't rewrite the file
         ai["enabled"] = False
         completion["copilot"] = False
-        runtime["watcher_on_save"] = "autorun"
+        runtime["watcher_on_save"] = watcher
         runtime["pythonpath"] = desired_pp
         if theme is not None:
             display["theme"] = theme
@@ -235,12 +269,21 @@ def ensure_runtime_config(workspace: Path, *, theme: str | None = None) -> None:
 
 
 class EditorServer:
-    def __init__(self, workspace: Path, theme: str = "system") -> None:
+    def __init__(
+        self, workspace: Path, theme: str = "system", apply_runs: bool | None = None
+    ) -> None:
         self.workspace = workspace
         # The appearance mooring writes into this workspace's .marimo.toml so
         # notebooks open in the same theme as the hub. Updated live by the hub
         # via apply_theme() when the user switches the toggle.
         self.theme = theme
+        # Whether a cell the copilot applies RUNS on the --watch reload ([ai] apply_runs,
+        # after the team policy has had its say). Held like the theme, and for the same
+        # reason: the editor owns this workspace's .marimo.toml, so both keys have to be
+        # rewritable live — see apply_run_mode(). None means "leave what the file says"
+        # (see ensure_runtime_config), which is the safe default for a caller that has no
+        # AppConfig to hand: it can't re-arm autorun on a workspace set to stage.
+        self.apply_runs = apply_runs
         self.port: int | None = None
         self.token = secrets.token_urlsafe(16)
         self._proc: subprocess.Popen | None = None
@@ -301,7 +344,16 @@ class EditorServer:
         """Write this workspace's ``.marimo.toml`` for the editor's current theme
         and install the value-free checks runtime — see
         :func:`ensure_runtime_config`."""
-        ensure_runtime_config(self.workspace, theme=self.theme)
+        ensure_runtime_config(self.workspace, theme=self.theme, apply_runs=self.apply_runs)
+
+    def apply_run_mode(self, apply_runs: bool) -> None:
+        """Change whether an applied cell runs, for THIS workspace, live: update
+        ``self.apply_runs`` and rewrite ``.marimo.toml``. marimo's file-change handler
+        re-reads the config on every change it handles (its user-config manager reads the
+        file each call rather than caching it), so an editor already running picks the
+        new mode up on the next Apply — no restart. Best-effort — never raises."""
+        self.apply_runs = apply_runs
+        self._ensure_marimo_config()
 
     def apply_theme(self, theme: str) -> None:
         """Re-theme this workspace's notebooks: update ``self.theme`` and rewrite

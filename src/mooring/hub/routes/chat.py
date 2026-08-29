@@ -167,9 +167,13 @@ async def api_chat_apply(request: Request) -> JSONResponse:
         if not code.strip():
             return JSONResponse({"error": "Nothing to apply."}, status_code=400)
         op_dicts = [{"op": "append", "code": code}]
+    # The apply gate's confirmation, echoed back on the re-POST. A token only — the
+    # server re-scans and re-derives it, so this can never assert a verdict.
+    gate_token = str(data.get("gate_token", "")).strip() or None
     workspace_str, notebook_rel = target
     workspace = Path(workspace_str)
     from mooring.ai.cellwrite import CellApplyConflict, CellWriteError
+    from mooring.app.apply import ApplyGateHeld, scan_report
 
     try:
         nb_path = hub._ws_file(workspace, notebook_rel, suffix=".py")
@@ -182,17 +186,37 @@ async def api_chat_apply(request: Request) -> JSONResponse:
     # cells, so the change appears in the open notebook tab.
     try:
         undo_depth = await asyncio.to_thread(
-            hub.apply.apply_with_undo, nb_path, workspace, notebook_rel, op_dicts
+            hub.apply.apply_with_undo,
+            nb_path,
+            workspace,
+            notebook_rel,
+            op_dicts,
+            gate_token=gate_token,
         )
     except PermissionError:  # disabled between the gate above and the write
         hub.chat.close(sid)
         return JSONResponse({"enabled": False, "reason": "notebook_disabled"}, status_code=403)
+    except ApplyGateHeld as held:
+        # 428 Precondition Required — 409 already means CellApplyConflict here. Nothing
+        # was written, so the client re-POSTs this same body plus the token to proceed.
+        # Count + band only: the central sink never carries kinds (see ai_pii above).
+        telemetry.log_event(
+            "ai_chat_apply_held",
+            band=held.verdict.band,
+            findings=len(held.verdict.findings),
+        )
+        return JSONResponse(held.payload(), status_code=428)
     except CellApplyConflict as exc:
         return JSONResponse({"error": str(exc)}, status_code=409)
     except CellWriteError as exc:
         return JSONResponse({"error": str(exc)}, status_code=502)
-    telemetry.log_event("ai_chat_apply")
-    hub._activity("ai_apply", path=notebook_rel)
+    band, kinds = scan_report(op_dicts)
+    telemetry.log_event("ai_chat_apply", band=band, findings=len(kinds))
+    # The LOCAL ledger gets the kinds themselves ("what did I approve?"); they are
+    # value-free slugs from codeguard's fixed table, never anything from the cell. No
+    # band beside them — the kinds imply it, and a clean apply records neither (an
+    # empty list is dropped by activity.record).
+    hub._activity("ai_apply", path=notebook_rel, kinds=list(kinds))
     return JSONResponse({"ok": True, "can_undo": undo_depth > 0, "undo_depth": undo_depth})
 
 

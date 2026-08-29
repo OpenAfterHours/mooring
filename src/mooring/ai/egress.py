@@ -280,6 +280,26 @@ def build_system_context(
         "```python block in your reply is only for discussion; on its own it does NOT "
         "propose anything and cannot be applied."
     )
+    # A mooring-authored, value-free rule block on what a proposed cell may DO: an applied
+    # cell RUNS immediately and the analyst's only undo restores the notebook TEXT, so an
+    # effect outside the notebook cannot be undone. It names no dataset, column, path or
+    # value — only rules — so no scrub applies. Pinned here, above the lower-trust team
+    # block, for the same reason the privacy rules are. The Apply gate holds anything risky
+    # for an explicit confirm regardless; this note is the cheap first line, keeping the
+    # common case clean so the gate stays quiet.
+    parts.append(
+        "SAFE CELLS (an applied cell is RUN as-is, and undo only restores the notebook "
+        "text — anything changed OUTSIDE the notebook stays changed):\n"
+        "- Prefer cells with no side effects outside the notebook.\n"
+        "- Do not delete files or folders; do not shell out (`subprocess`, `os.system`); "
+        "do not install packages (the analyst has `mooring deps` for that); do not use "
+        "`eval`/`exec` or dynamic imports.\n"
+        "- SQL you author is READ-ONLY: `SELECT` / `WITH ... SELECT` only. Never `DROP`, "
+        "`TRUNCATE`, `DELETE`, `INSERT`, `UPDATE`, `ALTER` or `MERGE`.\n"
+        "- If the analyst genuinely asks for something that writes, deletes or sends data, "
+        "you may still propose it — but SAY PLAINLY in the rationale, in one sentence a "
+        "non-programmer would understand, what it will change outside the notebook."
+    )
     if schema_text.strip():
         parts.append("DATASET SCHEMA:\n" + schema_text.strip())
     if live_schemas_text.strip():

@@ -692,6 +692,28 @@ button.ctx-folder.on { color: var(--accent); }
 #merge-hint { margin-top: 0.4rem; font-size: 0.85rem; }
 
 /* Reviewer inbox: one block per changed file in a proposal. */
+/* the destructive-code scan's findings, above a reviewed file's diff. Informational —
+   the reviewer reads Python, so they see BOTH bands and there is nothing to confirm.
+   Each row carries a worded tag as well as its colour, so the band survives a
+   greyscale print and does not depend on colour vision. */
+.review-code { margin: 0.35rem 0 0.55rem; }
+.review-code-lead { font-size: 0.85rem; color: var(--muted); }
+.review-code-list { list-style: none; margin: 0.25rem 0 0; padding: 0; font-size: 0.85rem; }
+.review-code-list li { display: flex; gap: 0.45rem; align-items: baseline; margin: 0.15rem 0; }
+.rf-band {
+  flex: 0 0 auto;
+  font-size: 0.72rem;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  border: 1px solid currentColor;
+  border-radius: 4px;
+  padding: 0 0.3rem;
+  white-space: nowrap;
+}
+.rf-floor { color: var(--bad); font-weight: 600; }
+.rf-ask { color: var(--warn); }
+.rf-row .rf-text { color: var(--ink); font-weight: 400; }
+.badge.destructive { color: var(--bad); border-color: var(--bad); font-weight: 600; }
 .review-file { border-top: 1px solid var(--border); padding-top: 0.6rem; margin-top: 0.6rem; }
 .review-file:first-child { border-top: 0; padding-top: 0; margin-top: 0.3rem; }
 #review-note-text { width: 100%; box-sizing: border-box; margin-top: 0.25rem; }
@@ -1134,6 +1156,26 @@ pre {
   color: var(--warn);
 }
 .chat-body .row-pii .toolbar { margin: 0.4rem 0 0; }
+
+/* apply gate: a held Apply. Same inline-hold idiom as the PII/traceback rows above,
+   with the decision moved OFF the proposal card's own Apply button (the reflex is
+   positional) and into this row's two buttons — safe choice in the prominent slot. */
+.chat-body .row-gate p { margin: 0 0 0.35rem; }
+.chat-body .row-gate .gate-summary { font-weight: 700; }
+.chat-body .row-gate .gate-restale { font-style: italic; }
+.chat-body .row-gate .gate-lead { margin-bottom: 0.15rem; }
+.chat-body .row-gate .gate-findings { margin: 0 0 0.45rem; padding-left: 1.3rem; }
+.chat-body .row-gate .gate-findings li { margin: 0.1rem 0; }
+/* in a MIXED verdict, the individual lines Undo can't help with are called out. */
+.chat-body .row-gate .gate-mark { font-weight: 700; }
+/* the Undo sentence — the one string standing between a reflex click and something
+   Undo cannot take back. It is never quiet chrome. */
+.chat-body .row-gate .gate-undo { font-weight: 700; }
+/* "floor": Undo is no remedy at all, so the row reads as a stop, not a caution. */
+.chat-body .row-gate.gate-floor { border-left-color: var(--term-del); color: var(--term-del); }
+.chat-body .row-gate.gate-floor .gate-confirm { color: var(--term-del); }
+/* decided (confirmed or declined) — the ask stays in the transcript, visibly spent. */
+.chat-body .row-gate.gate-done { opacity: 0.6; }
 
 /* the prompt: a "> " gutter + an auto-growing, chrome-free input */
 .chat-body #prompt-area {
