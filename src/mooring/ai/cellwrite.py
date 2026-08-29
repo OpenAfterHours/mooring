@@ -101,11 +101,15 @@ def _ops_from_wire(op_dicts) -> list[marimo_rt.CellOp]:
                 )
             )
         elif kind == "replace_all":
-            ops.append(
-                marimo_rt.CellOp(
-                    op="replace_all", cells=tuple(str(c) for c in (d.get("cells") or []))
-                )
-            )
+            cells = d.get("cells") or []
+            # Guarded for the same reason the two raises around it are: this function is
+            # where malformed wire input becomes a CellWriteError. A non-iterable `cells`
+            # (a number) raised TypeError straight out of the comprehension and surfaced
+            # as a 500; a bare string is worse, because it iterates silently and rewrites
+            # the notebook as one cell per CHARACTER.
+            if not isinstance(cells, (list, tuple)):
+                raise CellWriteError("replace_all needs a list of cells")
+            ops.append(marimo_rt.CellOp(op="replace_all", cells=tuple(str(c) for c in cells)))
         else:
             raise CellWriteError(f"unknown patch operation: {kind!r}")
     return ops

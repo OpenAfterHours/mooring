@@ -1135,6 +1135,26 @@ pre {
 }
 .chat-body .row-pii .toolbar { margin: 0.4rem 0 0; }
 
+/* apply gate: a held Apply. Same inline-hold idiom as the PII/traceback rows above,
+   with the decision moved OFF the proposal card's own Apply button (the reflex is
+   positional) and into this row's two buttons — safe choice in the prominent slot. */
+.chat-body .row-gate p { margin: 0 0 0.35rem; }
+.chat-body .row-gate .gate-summary { font-weight: 700; }
+.chat-body .row-gate .gate-restale { font-style: italic; }
+.chat-body .row-gate .gate-lead { margin-bottom: 0.15rem; }
+.chat-body .row-gate .gate-findings { margin: 0 0 0.45rem; padding-left: 1.3rem; }
+.chat-body .row-gate .gate-findings li { margin: 0.1rem 0; }
+/* in a MIXED verdict, the individual lines Undo can't help with are called out. */
+.chat-body .row-gate .gate-mark { font-weight: 700; }
+/* the Undo sentence — the one string standing between a reflex click and something
+   Undo cannot take back. It is never quiet chrome. */
+.chat-body .row-gate .gate-undo { font-weight: 700; }
+/* "floor": Undo is no remedy at all, so the row reads as a stop, not a caution. */
+.chat-body .row-gate.gate-floor { border-left-color: var(--term-del); color: var(--term-del); }
+.chat-body .row-gate.gate-floor .gate-confirm { color: var(--term-del); }
+/* decided (confirmed or declined) — the ask stays in the transcript, visibly spent. */
+.chat-body .row-gate.gate-done { opacity: 0.6; }
+
 /* the prompt: a "> " gutter + an auto-growing, chrome-free input */
 .chat-body #prompt-area {
   flex: 0 0 auto;

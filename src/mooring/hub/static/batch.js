@@ -55,6 +55,16 @@
   let queue = { pending: 0, total: 0 };
   let trayTimer = null;
   const applying = new Set(); // "job:proposal" keys with an Apply in flight
+  // "job:proposal" -> {gate, rehold}: proposals the APPLY GATE is holding. The gate is
+  // enforced in ApplyGuard.apply_with_undo, which /api/ai/batch/apply calls too, so the
+  // tray meets it exactly as the copilot's chat card does. It lives here rather than in
+  // the DOM because renderTray rebuilds the whole tray on every job event — a decision
+  // must not vanish mid-thought because another notebook finished building.
+  const heldGates = new Map();
+  // Keys this page has applied. The tray is authoritative (p.applied), but a confirmed
+  // apply must not flicker back to "Apply" in the render between the write and the tray
+  // catching up — which is exactly the window a confirmed gate re-POST lands in.
+  const appliedHere = new Set();
   // The model/effort the analyst picks apply to every job submitted while selected; the
   // queue is appendable so they can change the model between submits. Preference is
   // shared with the chat window via the same localStorage keys.
@@ -337,6 +347,16 @@
     $("jobs")
       .querySelectorAll("[data-force]")
       .forEach((b) => b.addEventListener("click", onForce));
+    // Held proposals: fill each placeholder with DOM (never innerHTML — see
+    // renderGateHold) and wire its two buttons. Re-run on EVERY render, so a hold
+    // survives the tray rebuild another job's progress triggers.
+    $("jobs").querySelectorAll("[data-gate]").forEach(renderGateHold);
+    $("jobs")
+      .querySelectorAll("[data-gate-confirm]")
+      .forEach((b) => b.addEventListener("click", onGateConfirm));
+    $("jobs")
+      .querySelectorAll("[data-gate-cancel]")
+      .forEach((b) => b.addEventListener("click", onGateCancel));
   }
 
   function allApplied(j) {
@@ -411,39 +431,172 @@
     // a stray second click can't double-apply, but this avoids the misleading enabled UI.
     const key = j.index + ":" + p.proposal;
     const busy = applying.has(key);
-    const done = p.applied;
-    const label = done ? "Applied ✓" : busy ? "Applying…" : "Apply";
+    const done = p.applied || appliedHere.has(key);
+    // A HELD proposal (see heldGates): this button stops being a live Apply and the
+    // decision moves into the hold below it — the reflex to break here is positional,
+    // so re-using this button would defeat the whole gate.
+    const heldHere = !done && heldGates.has(key);
+    const label = done ? "Applied ✓" : busy ? "Applying…" : heldHere ? "Held" : "Apply";
+    const off = done || busy || heldHere;
     return `<div class="proposal">
       ${p.rationale ? `<div class="prop-why muted">${escapeHtml(p.rationale)}</div>` : ""}
       <div class="prop-code">${code || '<span class="muted">(no change)</span>'}</div>
       <div class="prop-actions">
-        <button class="small" data-apply="${key}" ${done || busy ? "disabled" : ""}>${label}</button>
+        <button class="small${heldHere ? " held" : ""}" data-apply="${key}" ${off ? "disabled" : ""}>${label}</button>
         ${j.notebook ? `<button class="small" data-open="${escapeAttr(j.notebook)}">Open notebook</button>` : ""}
       </div>
+      ${heldHere ? `<div class="prop-gate" data-gate="${escapeAttr(key)}"></div>` : ""}
     </div>`;
   }
 
-  async function onApply(e) {
-    clearError();
+  // -- the apply gate ---------------------------------------------------------
+  // Apply writes the cells AND marimo runs them, so Undo — which restores the
+  // notebook's bytes — is a complete remedy for ordinary code and no remedy at all for
+  // code that deleted a file. Every analyst-facing STRING comes from ChatCore.gate*,
+  // the same helpers the chat card uses: two copies of the Undo sentence would drift,
+  // and that sentence is the last thing between a reflex click and a permanent change.
+
+  // Fill in a hold placeholder. The tray around it is innerHTML templates, but nothing
+  // server-supplied goes through one here — a finding label is data, so it is built as
+  // DOM and set with textContent.
+  function renderGateHold(el) {
+    const key = el.getAttribute("data-gate");
+    const entry = heldGates.get(key);
+    if (!entry) return;
+    const w = C.gateHoldWording(entry.gate);
+    el.className = "prop-gate row-pii row-gate" + (w.floor ? " gate-floor" : "");
+    el.textContent = "";
+    if (entry.rehold) {
+      el.appendChild(
+        para(
+          "gate-restale",
+          "Your confirmation no longer matched — the change or the notebook moved " +
+            "underneath it. Nothing was applied. This is the current one:"
+        )
+      );
+    }
+    el.appendChild(para("gate-summary", w.summary));
+    el.appendChild(para("", w.mechanism));
+    if (w.lead) {
+      el.appendChild(para("gate-lead", w.lead));
+      const list = document.createElement("ul");
+      list.className = "gate-findings";
+      for (const item of w.items) {
+        const li = document.createElement("li");
+        li.textContent = item.text; // plain-English label — never the kind slug
+        if (item.mark) {
+          // A MIXED verdict: say which individual lines are the irreversible ones.
+          const mark = document.createElement("span");
+          mark.className = "gate-mark";
+          mark.textContent = " — " + item.mark;
+          li.appendChild(mark);
+        }
+        list.appendChild(li);
+      }
+      el.appendChild(list);
+    }
+    // The line this whole feature turns on: the analyst believes Undo is a remedy.
+    el.appendChild(para("gate-undo", w.undoNote));
+
+    const bar = document.createElement("div");
+    bar.className = "toolbar";
+    // The SAFE choice takes the prominent first slot; the irreversible one is a plain
+    // button beside it. A reflex click here lands on "Don't apply".
+    const noBtn = document.createElement("button");
+    noBtn.className = "primary small";
+    noBtn.textContent = w.cancelLabel;
+    noBtn.setAttribute("data-gate-cancel", key);
+    bar.appendChild(noBtn);
+    if (entry.gate.token) {
+      const yesBtn = document.createElement("button");
+      yesBtn.className = "small gate-confirm";
+      yesBtn.textContent = w.confirmLabel;
+      yesBtn.setAttribute("data-gate-confirm", key);
+      bar.appendChild(yesBtn);
+    } else {
+      const note = document.createElement("span");
+      note.className = "muted";
+      note.textContent =
+        " — this hold arrived without a confirmation token, so it can't be confirmed " +
+        "here. Reload the page and try again.";
+      bar.appendChild(note);
+    }
+    el.appendChild(bar);
+  }
+
+  function para(cls, text) {
+    const p = document.createElement("p");
+    if (cls) p.className = cls;
+    p.textContent = text;
+    return p;
+  }
+
+  // Confirm: re-POST the identical body plus the token the 428 handed us. The server
+  // re-scans and re-derives that token, so this can only unlock the change it was shown.
+  function onGateConfirm(e) {
+    const key = e.currentTarget.getAttribute("data-gate-confirm");
+    const entry = heldGates.get(key);
+    if (!entry || !entry.gate.token) return;
+    e.currentTarget.disabled = true;
+    e.currentTarget.textContent = "Applying…";
+    applyProposal(key, entry.gate.token);
+  }
+
+  // Decline: drop the hold and put the row back as it was. Nothing was written, and
+  // clicking Apply again simply meets the gate again — the server always re-scans, so
+  // dismissing can never become a way past it.
+  function onGateCancel(e) {
+    heldGates.delete(e.currentTarget.getAttribute("data-gate-cancel"));
+    refreshTray();
+  }
+
+  function onApply(e) {
     const btn = e.currentTarget;
     const key = btn.getAttribute("data-apply");
-    const [job, proposal] = key.split(":").map(Number);
-    applying.add(key);
+    if (heldGates.has(key)) return; // held — the decision lives on the hold card below
     btn.disabled = true;
     btn.textContent = "Applying…";
-    const { ok, body } = await postJSON("/api/ai/batch/apply", {
-      batch_id: batchId,
-      job,
-      proposal,
-    });
+    applyProposal(key, "");
+  }
+
+  // `gateToken` is passed ONLY by the hold card's confirm button. A hold is NOT a
+  // failure and NOT an apply: it must leave the proposal un-applied both here and on
+  // the server, or the idempotence guard would swallow the confirmed re-POST.
+  async function applyProposal(key, gateToken) {
+    clearError();
+    const [job, proposal] = key.split(":").map(Number);
+    applying.add(key);
+    const payload = { batch_id: batchId, job, proposal };
+    if (gateToken) payload.gate_token = gateToken;
+    const { ok, status, body } = await postJSON("/api/ai/batch/apply", payload);
     applying.delete(key);
-    if (!ok) {
-      showError(body.error || "Apply failed.");
-      btn.disabled = false;
-      btn.textContent = "Apply";
+    if (status === 428) {
+      // The apply gate held it (428 Precondition Required). A 428 on a CONFIRMED
+      // re-POST means the token no longer matches — the code, the findings, or the
+      // notebook underneath them moved — so show the NEW hold rather than failing
+      // silently or, worse, leaving the row looking applied.
+      const gate = C.gateFromResponse(body);
+      if (gate) {
+        heldGates.set(key, { gate: gate, rehold: heldGates.has(key) });
+        refreshTray();
+        return;
+      }
+      heldGates.delete(key);
+      showError(
+        "That change needs confirming, but the confirmation details didn't arrive. " +
+          "Reload the page and try again."
+      );
+      refreshTray();
       return;
     }
-    btn.textContent = "Applied ✓";
+    heldGates.delete(key);
+    if (!ok) {
+      showError(body.error || "Apply failed.");
+      refreshTray();
+      return;
+    }
+    appliedHere.add(key);
+    refreshTray();
   }
 
   // "Build anyway": re-run a PII-blocked job with the guard overridden. The flagged
