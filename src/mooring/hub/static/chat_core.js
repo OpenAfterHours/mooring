@@ -599,6 +599,48 @@ const ChatCore = (function () {
     };
   }
 
+  // -- the reviewer's view of the same findings ------------------------------
+  // The hub's reviews page shows the SAME value-free findings beside a Propose PR's
+  // diff, in the same wire shape — deliberately, so one derivation (and one rule that
+  // a labelless finding is dropped rather than shown as its slug) serves both.
+  //
+  // It is NOT a hold. There is nothing to confirm, no token, nothing to click past —
+  // it is context beside a diff someone is already reading. Two things follow. The
+  // reviewer sees BOTH bands, because they are the one person in the loop who reads
+  // Python and that is the whole reason the list exists; so every row carries its own
+  // band for styling. And the hold's mixed-verdict mark is dropped: a list that
+  // already styles each row by band would only be repeating itself.
+  //
+  // A missing/unreadable `code` yields NO rows, so the caller renders no block at all.
+  // The scan landed after this page shipped: an older payload has no `code` key, and
+  // the right answer to that is silence, not an empty box or a broken row.
+  function codeFindingRows(code) {
+    return gateFindingItems(code).map((i) => ({
+      text: i.text,
+      // DELIBERATELY the opposite of gateIsFloor's fail-closed rule, and not a bug:
+      // an unknown band reads as the QUIETER "ask" here. Fail-closed earns its keep by
+      // stopping a write, and this page stops nothing — it is context beside a diff a
+      // human is already reading. Over-warning a reviewer who can read the code for
+      // themselves spends the warning's credibility on a row that may not deserve it,
+      // and the credibility is what makes the real "can't be undone" rows land.
+      band: i.floor ? "floor" : "ask",
+      floor: i.floor,
+    }));
+  }
+
+  // The one line above that list. It names the scan, so the reviewer reads the rows as
+  // automated context sitting beside the diff rather than as a human's comment.
+  function codeFindingLead(code) {
+    const n = codeFindingRows(code).length;
+    if (!n) return "";
+    return "Destructive-code scan — " + n + " finding" + (n === 1 ? "" : "s") + ":";
+  }
+
+  // The per-row tag. Fixed strings that name the BAND, never the code.
+  function codeFindingTag(row) {
+    return row && row.floor ? GATE_MARK : "side effect";
+  }
+
   // -- batch jobs -----------------------------------------------------------
   // The batch composer is a list of per-notebook cards, each with its OWN free-form
   // brief (multi-line, as detailed as the analyst likes — bullet points, columns,
@@ -1076,6 +1118,9 @@ const ChatCore = (function () {
     gateFindingRows,
     gateHoldSummary,
     gateHoldWording,
+    codeFindingRows,
+    codeFindingLead,
+    codeFindingTag,
     parseDeviceLogin,
     highlightCode,
     renderMarkdown,

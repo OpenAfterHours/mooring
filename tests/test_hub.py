@@ -238,7 +238,7 @@ def test_local_mode_new_lists_and_opens_without_login(unconfigured_client, monke
     client, _hub = unconfigured_client
 
     class FakeEditor:
-        def __init__(self, workspace, theme="system"):
+        def __init__(self, workspace, theme="system", apply_runs=None):
             self.workspace = workspace
 
         def ensure_started(self):
@@ -273,7 +273,7 @@ def test_new_into_a_package_subfolder_registers_lists_and_opens(unconfigured_cli
     client, hub = unconfigured_client
 
     class FakeEditor:
-        def __init__(self, workspace, theme="system"):
+        def __init__(self, workspace, theme="system", apply_runs=None):
             self.workspace = workspace
 
         def ensure_started(self):
@@ -321,7 +321,7 @@ NB_SOURCE = "import marimo\napp = marimo.App()\n"
 
 
 class DuplicateFakeEditor:
-    def __init__(self, workspace, theme="system"):
+    def __init__(self, workspace, theme="system", apply_runs=None):
         self.workspace = workspace
 
     def ensure_started(self):
@@ -588,7 +588,7 @@ def test_switch_changes_editor_workspace(configured, monkeypatch):
     class FakeEditor:
         instances = []
 
-        def __init__(self, workspace, theme="system"):
+        def __init__(self, workspace, theme="system", apply_runs=None):
             self.workspace = workspace
             self.theme = theme
             FakeEditor.instances.append(self)
@@ -2703,7 +2703,7 @@ def test_open_has_no_server_side_staleness_gate(configured, monkeypatch):
     a `remote changed` file still opens through /api/open with no new gate."""
 
     class FakeEditor:
-        def __init__(self, workspace, theme="system"):
+        def __init__(self, workspace, theme="system", apply_runs=None):
             self.workspace = workspace
 
         def ensure_started(self):

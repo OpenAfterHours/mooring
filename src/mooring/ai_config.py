@@ -153,6 +153,21 @@ class AiConfig:
     # Default ON: it only ever REMOVES information, and the raw paste is never
     # stored, so there is no send-raw path. Turning it off is a weakening flip.
     traceback_guard: bool = True
+    # The Apply code guard: every proposed cell is scanned before it lands, and one
+    # that does something Undo cannot take back (deletes a file, runs a program, DROPs
+    # a table) is HELD for an explicit confirm. Default ON, and turning it off is a
+    # weakening flip in the same class as ``traceback_guard``: it changes nothing about
+    # WHAT Apply writes, it removes the one prompt between the model's code and an
+    # irreversible side effect. See :mod:`mooring.ai.codeguard`.
+    apply_guard: bool = True
+    # Whether an APPLIED cell runs immediately. Default True — today's behaviour:
+    # mooring writes ``runtime.watcher_on_save = "autorun"`` into the workspace's
+    # .marimo.toml, so marimo's ``--watch`` reload RUNS the cell the moment it lands.
+    # False writes marimo's ``"lazy"`` instead, so the cell arrives in the notebook
+    # marked stale and the analyst presses run — the applied code is staged, never
+    # executed by the act of applying. "Not running it" is the restrictive direction,
+    # so a policy may pin this OFF and never on (see :data:`mooring.policy.KNOBS`).
+    apply_runs: bool = True
     # OpenAI-provider endpoint overrides — VALUE-FREE (a URL and an API version,
     # never the API key, which is resolved locally from env/keyring; see
     # mooring.ai.openai_provider). ``openai_base_url`` points the client at an
@@ -294,6 +309,12 @@ def load_ai_config(ai: Mapping, env: Mapping[str, str]) -> AiConfig:
         ),
         traceback_guard=_as_bool(
             env.get("MOORING_AI_TRACEBACK_GUARD"), _as_bool(ai.get("traceback_guard"), True)
+        ),
+        apply_guard=_as_bool(
+            env.get("MOORING_AI_APPLY_GUARD"), _as_bool(ai.get("apply_guard"), True)
+        ),
+        apply_runs=_as_bool(
+            env.get("MOORING_AI_APPLY_RUNS"), _as_bool(ai.get("apply_runs"), True)
         ),
         openai_base_url=env.get(
             "MOORING_AI_OPENAI_BASE_URL", str(ai.get("openai_base_url", ""))

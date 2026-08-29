@@ -233,7 +233,76 @@ because they gate what the copilot may *read*:
 The **push guard** scans every outgoing file for things that look like secrets,
 structured PII, or bulk data exports, and withholds flagged files behind an
 explicit confirm (see [why the copilot can't see your data](ai-privacy.md) — the
-same best-effort detectors watch both channels). The default policy is
+same best-effort detectors watch both channels). An outgoing **notebook** is also
+read by the copilot's own **destructive-code** classifier, since a cell that
+deletes files or drops a table is worse in the *shared* repo than in one
+notebook — every teammate pulls it and runs it. Only the irreversible band gates
+a push (deleting files, `DROP`/`TRUNCATE`, running another program, building
+code at runtime, editing mooring's own settings files); writing a CSV, loading a
+warehouse table or calling an API is ordinary analysis and never prompts.
+
+#### What it does *not* check
+
+**Only marimo notebooks are classified.** Two kinds of file are outside the
+scan, and the gaps are real rather than theoretical:
+
+- **Hand-written helper modules — including a synced `codelib/`.** A `.py` that
+  is not a marimo notebook is never classified, so a helper with a
+  `shutil.rmtree` in it pushes unscanned, and teammates import and run it just
+  the same. If your repo ships shared helper code, that code gets **no**
+  destructive-code check at all; review it the way you would review any code.
+- **`.sql` files.** A `.sql` file is a document until something runs it, and the
+  classifier reads Python, not a SQL dialect.
+
+The reason for the notebook scope is worth stating precisely, because it is not
+"the classifier was too noisy". Pointed at whole modules it was **accurate**:
+over mooring's own source it flagged 35 of 127 modules (28%), and 21 of 113 test
+modules (19%) — and of 74 findings, **97% were true positives** by its own rules.
+They were simply what module code *is*: 47% were `Path.unlink()` and 18% were
+`os.replace(tmp, path)`, the **correct** way to save a file atomically. Gating a
+quarter of every helper module for writing files safely would have made this
+dialog — which also carries the secret and PII findings — noise that gets clicked
+through. The classifier was right; the scope was wrong. It is calibrated for a
+marimo cell and is now applied to exactly that.
+
+Scoped to notebooks, nothing in this repository is withheld: 0 of 127 modules, 0
+of 113 test modules, and 0 of 70 marimo notebook sources carry a blocking
+finding. Note what that last figure is, though — those 70 are this project's own
+test fixtures and template. **The rate on a real analyst data repo is
+unmeasured.** Systems code is far heavier in these constructs than analysis
+notebooks, so a lower rate is a reasonable expectation, not a demonstrated one.
+
+#### Budget for false positives, and know the remedy first
+
+Unlike a copilot prompt — asked once about a new cell and then gone — a push
+finding is a **standing property of the file**: a notebook with one legitimate
+`os.remove(tmp)` in a cleanup cell is withheld on *every* push until someone
+retires it. That is what the `# mooring: push-ok` comment is for, and using it on
+a reviewed line is the intended outcome, not a workaround. It is line-scoped to
+the line the flagged call *starts* on, so a call spanning several lines takes the
+comment after its opening bracket:
+
+```python
+subprocess.run(  # mooring: push-ok
+    ["pack", "--all"],
+    check=True,
+)
+```
+
+`mooring scan` prints the line number of every finding without pushing, which is
+how you find the line to mark. Marking the closing bracket, or the line above,
+does not work.
+
+One shape the comment cannot reach: SQL written as a multi-line `"""…"""` string.
+The flagged line is the one the string *opens* on, so the marker would land
+inside the query text — it silences the finding but corrupts the SQL, and nothing
+warns you. Put such a statement on one line, or assign it to a variable and mark
+the assignment (the classifier follows the binding, so that is where the finding
+appears anyway).
+
+Weigh that standing cost before turning the setting below to `block` — under
+`block` there is no confirm, so a false positive stops the push until the line is
+marked or the code changes. The default policy is
 `warn` (confirmable). To make findings a hard stop for the whole team, set, in
 the repo's **synced** `mooring.toml` (so the policy travels with the repo and is
 visible in its history):

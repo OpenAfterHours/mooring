@@ -692,6 +692,28 @@ button.ctx-folder.on { color: var(--accent); }
 #merge-hint { margin-top: 0.4rem; font-size: 0.85rem; }
 
 /* Reviewer inbox: one block per changed file in a proposal. */
+/* the destructive-code scan's findings, above a reviewed file's diff. Informational —
+   the reviewer reads Python, so they see BOTH bands and there is nothing to confirm.
+   Each row carries a worded tag as well as its colour, so the band survives a
+   greyscale print and does not depend on colour vision. */
+.review-code { margin: 0.35rem 0 0.55rem; }
+.review-code-lead { font-size: 0.85rem; color: var(--muted); }
+.review-code-list { list-style: none; margin: 0.25rem 0 0; padding: 0; font-size: 0.85rem; }
+.review-code-list li { display: flex; gap: 0.45rem; align-items: baseline; margin: 0.15rem 0; }
+.rf-band {
+  flex: 0 0 auto;
+  font-size: 0.72rem;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  border: 1px solid currentColor;
+  border-radius: 4px;
+  padding: 0 0.3rem;
+  white-space: nowrap;
+}
+.rf-floor { color: var(--bad); font-weight: 600; }
+.rf-ask { color: var(--warn); }
+.rf-row .rf-text { color: var(--ink); font-weight: 400; }
+.badge.destructive { color: var(--bad); border-color: var(--bad); font-weight: 600; }
 .review-file { border-top: 1px solid var(--border); padding-top: 0.6rem; margin-top: 0.6rem; }
 .review-file:first-child { border-top: 0; padding-top: 0; margin-top: 0.3rem; }
 #review-note-text { width: 100%; box-sizing: border-box; margin-top: 0.25rem; }

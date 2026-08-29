@@ -89,6 +89,35 @@ def scan_report(op_dicts) -> tuple[str, tuple[str, ...]]:
     return verdict.band, tuple(f.kind for f in verdict.findings)
 
 
+def _guard_armed(workspace: Path) -> bool:
+    """Whether ``[ai] apply_guard`` is on for ``workspace``, read FRESH from disk.
+
+    Deliberately not a value anyone hands in. It is read exactly where and how
+    :func:`mooring.policy.ai_disabled` is read — inside
+    :meth:`ApplyGuard.apply_with_undo`'s lock, at the moment of the write — and for the
+    same TOCTOU reason: the local config file and the synced ``mooring.toml`` both
+    change under a running hub (a ``mooring config set``, a Settings write, a pull that
+    brings a new ``[policy]`` block), and a guard decided when the chat opened would
+    then be answering a question about a config that no longer exists. A policy pinning
+    ``ai.apply_guard = true`` has to bite on the very NEXT Apply, not the next restart.
+
+    ``policy.tighten`` is applied here rather than trusting the local value alone,
+    because that is the whole point of the knob being policy-governed: a team may force
+    the guard on for everyone, and local config (env vars included) cannot answer back.
+
+    Fails CLOSED. Neither call is expected to raise — ``policy.load`` never does, by
+    construction — but a guard that disarms itself on an unreadable config would make
+    "corrupt the config" a way past it, and an armed guard's worst case is one extra
+    confirm.
+    """
+    from mooring import config, policy
+
+    try:
+        return policy.tighten_app_config(config.load_app_config(), workspace).ai_apply_guard
+    except Exception:  # noqa: BLE001  # unreadable config must arm the guard, not skip it
+        return True
+
+
 class ApplyGuard:
     def __init__(self) -> None:
         # Serializes the snapshot+write of an Apply and the restore of an Undo so
@@ -115,6 +144,9 @@ class ApplyGuard:
         is not the token this call derives for them. ``floor`` and ``ask`` are held
         identically here — the difference between them is how the confirmation is
         WORDED, which is the UI's business, not the write path's.
+
+        With ``[ai] apply_guard`` off there is no scan and no token: every cell applies
+        the way it did before the gate existed.
         """
         from mooring import notebook_undo, policy
         from mooring.ai import cellwrite, codeguard
@@ -135,14 +167,24 @@ class ApplyGuard:
             # confirmation stale. Before the snapshot because a held Apply must leave NO
             # trace: an undo step for a write that never happened would be a phantom the
             # analyst could "undo" into a state they never had.
-            verdict = codeguard.scan_ops(op_dicts)
-            if verdict.band != codeguard.BAND_CLEAN:
-                expected = codeguard.token(notebook_rel, op_dicts, verdict, notebook_bytes=current)
-                # Re-scanned and re-derived server-side every time: the client supplies a
-                # token, never a verdict, so "the dialog was shown" is not something it
-                # can assert.
-                if gate_token != expected:
-                    raise ApplyGateHeld(verdict, expected)
+            # ...and armed at the same instant, read the SAME way as ai_disabled above:
+            # from disk, from THIS workspace, under THIS lock. Never a value the route
+            # captured when the chat opened or the hub booted — a policy that arrives by
+            # pull mid-session must arm the guard for the very next Apply, and the
+            # config a captured value came from is exactly the thing an attacker-supplied
+            # mooring.toml tightens. The TOCTOU window the comment above describes is the
+            # same window here.
+            if _guard_armed(workspace):
+                verdict = codeguard.scan_ops(op_dicts)
+                if verdict.band != codeguard.BAND_CLEAN:
+                    expected = codeguard.token(
+                        notebook_rel, op_dicts, verdict, notebook_bytes=current
+                    )
+                    # Re-scanned and re-derived server-side every time: the client supplies
+                    # a token, never a verdict, so "the dialog was shown" is not something
+                    # it can assert.
+                    if gate_token != expected:
+                        raise ApplyGateHeld(verdict, expected)
             token = notebook_undo.snapshot(workspace, notebook_rel, current)
             try:
                 cellwrite.apply_wire_patch(nb_path, op_dicts)

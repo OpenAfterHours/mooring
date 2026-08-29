@@ -313,6 +313,114 @@ test("gateHoldWording fails closed on a malformed payload", () => {
   assert.deepEqual(w.rows, []);
 });
 
+// -- the reviewer's list (hub reviews page) ----------------------------------
+// Same wire shape, same rows — but informational, not a hold. The reviewer is the
+// one person in the loop who reads Python, so they see BOTH bands.
+
+const REVIEW_CODE = {
+  band: "floor",
+  findings: [
+    { line: 2, kind: "overwrites_file", label: "Overwrites a file that already exists", band: "ask" },
+    { line: 6, kind: "deletes_files", label: "Deletes files or folders", band: "floor" },
+  ],
+};
+
+test("codeFindingRows shows BOTH bands, each carrying its own", () => {
+  assert.deepEqual(C.codeFindingRows(REVIEW_CODE), [
+    { text: "line 2: Overwrites a file that already exists", band: "ask", floor: false },
+    { text: "line 6: Deletes files or folders", band: "floor", floor: true },
+  ]);
+});
+
+test("codeFindingRows drops the hold's mixed-verdict mark", () => {
+  // The hold marks the irreversible rows because it styles them all alike; this list
+  // colours every row by band already, so a mark would only repeat itself.
+  const rows = C.codeFindingRows(REVIEW_CODE);
+  for (const row of rows) {
+    assert.equal("mark" in row, false, "no mark field reaches the reviewer's row");
+    assert.equal(row.text.includes("can't be undone"), false, row.text);
+  }
+});
+
+test("codeFindingRows reads a bandless finding as the quieter band", () => {
+  // Informational, not a gate: nothing is being stopped, so crying wolf on a row the
+  // reviewer can read for themselves costs more than it buys.
+  assert.deepEqual(C.codeFindingRows({ band: "floor", findings: [{ line: 1, label: "A" }] }), [
+    { text: "line 1: A", band: "ask", floor: false },
+  ]);
+});
+
+test("codeFindingRows inherits the value-free rules from the gate derivation", () => {
+  const rows = C.codeFindingRows({
+    band: "ask",
+    findings: [
+      { line: 3, kind: "sends_data" }, // no label — dropped, never shown as its slug
+      { line: 4, kind: "sends_data", label: "Sends data to another system", band: "ask" },
+      { line: 4, kind: "sends_data", label: "Sends data to another system", band: "ask" },
+    ],
+  });
+  assert.deepEqual(rows.map((r) => r.text), ["line 4: Sends data to another system"]);
+  assert.equal(rows[0].text.includes("sends_data"), false);
+});
+
+test("codeFindingRows survives an absent or malformed code block", () => {
+  assert.deepEqual(C.codeFindingRows(undefined), []);
+  assert.deepEqual(C.codeFindingRows(null), []);
+  assert.deepEqual(C.codeFindingRows({}), []);
+  assert.deepEqual(C.codeFindingRows({ findings: "nope" }), []);
+  assert.deepEqual(C.codeFindingRows({ findings: [null, 1, "x"] }), []);
+});
+
+test("a file entry with NO `code` key renders nothing at all", () => {
+  // The scan landed after the reviews page shipped, so `{path, status, diff}` with no
+  // `code` key is a real payload — an older server, or a cached response. The renderer
+  // skips on an empty row list, so both halves must come back empty: no block, no
+  // empty box, no lead line with nothing under it.
+  const file = { path: "notebooks/old.py", status: "modified", diff: { kind: "line" } };
+  assert.equal(file.code, undefined, "the shape under test really has no code key");
+  assert.deepEqual(C.codeFindingRows(file.code), []);
+  assert.equal(C.codeFindingLead(file.code), "");
+  // and the same for a present-but-empty scan (a clean file)
+  assert.deepEqual(C.codeFindingRows({ band: "clean", findings: [] }), []);
+  assert.equal(C.codeFindingLead({ band: "clean", findings: [] }), "");
+});
+
+test("codeFindingLead names the scan and counts the findings", () => {
+  assert.equal(C.codeFindingLead(REVIEW_CODE), "Destructive-code scan — 2 findings:");
+  assert.equal(
+    C.codeFindingLead({ band: "ask", findings: [{ line: 1, label: "A", band: "ask" }] }),
+    "Destructive-code scan — 1 finding:",
+  );
+  // nothing found: no lead, so the caller renders no block at all
+  assert.equal(C.codeFindingLead({ band: "clean", findings: [] }), "");
+  assert.equal(C.codeFindingLead(null), "");
+});
+
+test("codeFindingTag names the band, never the code", () => {
+  const [ask, floor] = C.codeFindingRows(REVIEW_CODE);
+  assert.equal(C.codeFindingTag(floor), "can't be undone");
+  assert.equal(C.codeFindingTag(ask), "side effect");
+  assert.equal(C.codeFindingTag(null), "side effect"); // quieter default, as above
+});
+
+test("the reviewer's list carries NO hold wording — it is not a gate", () => {
+  const text = [C.codeFindingLead(REVIEW_CODE)]
+    .concat(C.codeFindingRows(REVIEW_CODE).map((r) => C.codeFindingTag(r) + " " + r.text))
+    .join(" ");
+  for (const held of ["Held before applying", "Undo puts the notebook back", "anyway", "Don't apply"]) {
+    assert.equal(text.includes(held), false, held);
+  }
+});
+
+test("no reviewer string leaks a kind slug, a path, or Python", () => {
+  const text = [C.codeFindingLead(REVIEW_CODE)]
+    .concat(C.codeFindingRows(REVIEW_CODE).map((r) => C.codeFindingTag(r) + " " + r.text))
+    .join(" ");
+  for (const bad of ["overwrites_file", "deletes_files", "shutil", "os.remove", ".py"]) {
+    assert.equal(text.includes(bad), false, bad);
+  }
+});
+
 test("no card string leaks a kind slug, a path, or Python", () => {
   for (const gate of [FLOOR, ASK, null, {}]) {
     const w = C.gateHoldWording(gate);

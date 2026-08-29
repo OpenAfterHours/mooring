@@ -416,6 +416,14 @@ class AppConfig:
         return self.ai.traceback_guard
 
     @property
+    def ai_apply_guard(self) -> bool:
+        return self.ai.apply_guard
+
+    @property
+    def ai_apply_runs(self) -> bool:
+        return self.ai.apply_runs
+
+    @property
     def ai_pii(self) -> bool:
         return self.ai.pii.enabled
 

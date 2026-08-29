@@ -7,6 +7,8 @@ merge-base + rename handling in the diff, and the event/note validation.
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from mooring.app import reviews
@@ -201,3 +203,107 @@ def test_content_at_missing_ref_or_path_is_none():
     assert reviews._content_at(client, "a.py", "") is None
     assert reviews._content_at(client, "missing.py", "B") is None
     assert reviews._content_at(client, "a.py", "B") == b"x"
+
+
+# -- destructive-code findings beside the diff ----------------------------------
+#
+# The reviewer is the one person in the loop who reads Python, so they get the WHOLE
+# verdict (ask AND floor) with its bands — not the floor-only slice the push guard
+# withholds on. Value-free either way: line, slug, fixed label, band.
+
+SECRET_VALUE_DO_NOT_LEAK = "/mnt/warehouse/q3-payroll-extract.parquet"
+
+
+def _nb_body(body: str) -> bytes:
+    return (
+        "import marimo\n\n"
+        "app = marimo.App()\n\n\n"
+        "@app.cell\n"
+        f"def _():\n    {body}\n    return\n"
+    ).encode()
+
+
+def _detail_with(head_bytes: bytes, *, path="notebooks/recon.py", status="modified"):
+    pr = _pr(1, base_sha="B", head_sha="H")
+    files = {1: [{"filename": path, "status": status, "patch": ""}]}
+    blobs = {"MB": {path: NB_BASE.encode()}, "H": {path: head_bytes}}
+    return reviews.review_detail(FakeClient(pulls=[pr], files=files, blobs=blobs), 1)
+
+
+def test_review_detail_reports_floor_findings_with_a_pr_level_summary():
+    detail = _detail_with(_nb_body("import shutil\n    shutil.rmtree('archive')"))
+    code = detail["files"][0]["code"]
+    assert code["band"] == "floor"
+    assert code["findings"] == [
+        {"line": 9, "kind": "deletes_files", "label": "Deletes files or folders",
+         "band": "floor"}
+    ]
+    # The PR-level roll-up, so the inbox can flag the proposal before a file is opened.
+    assert detail["code_band"] == "floor"
+
+
+def test_review_detail_shows_the_ask_band_the_push_guard_lets_through():
+    detail = _detail_with(_nb_body("df.to_csv('summary.csv')"))
+    code = detail["files"][0]["code"]
+    assert code["band"] == "ask"
+    assert [f["kind"] for f in code["findings"]] == ["overwrites_file"]
+    # The same bytes push without a prompt — the reviewer sees more than the author did.
+    from mooring import pushguard
+    assert pushguard.scan_text("notebooks/recon.py", _nb_body("df.to_csv('summary.csv')")) == []
+
+
+def test_review_detail_code_findings_are_value_free():
+    # Scoped to the "code" block: the DIFF beside it carries source by design (reading
+    # the change is the reviewer's job) — the finding must not repeat what it matched.
+    detail = _detail_with(_nb_body(f"import os\n    os.remove('{SECRET_VALUE_DO_NOT_LEAK}')"))
+    code = detail["files"][0]["code"]
+    assert code["band"] == "floor"
+    assert SECRET_VALUE_DO_NOT_LEAK not in json.dumps(code)
+
+
+def test_review_detail_reports_clean_for_a_harmless_notebook_and_a_non_python_file():
+    detail = _detail_with(NB_HEAD.encode())
+    assert detail["files"][0]["code"] == {"band": "clean", "findings": []}
+    assert detail["code_band"] == "clean"
+    # A non-.py file is never run through the classifier, but still reports a shape.
+    pr = _pr(1, base_sha="B", head_sha="H")
+    files = {1: [{"filename": "docs/notes.md", "status": "modified", "patch": "@@ -1 +1 @@"}]}
+    other = reviews.review_detail(FakeClient(pulls=[pr], files=files, blobs={}), 1)
+    assert other["files"][0]["code"] == {"band": "clean", "findings": []}
+
+
+def test_review_detail_reports_clean_for_a_file_the_pr_deletes():
+    # No head bytes -> nothing will land -> nothing to classify.
+    pr = _pr(1, base_sha="B", head_sha="H")
+    files = {1: [{"filename": "notebooks/old.py", "status": "removed", "patch": ""}]}
+    blobs = {"MB": {"notebooks/old.py": _nb_body("import os\n    os.remove('x')")}, "H": {}}
+    detail = reviews.review_detail(FakeClient(pulls=[pr], files=files, blobs=blobs), 1)
+    assert detail["files"][0]["code"] == {"band": "clean", "findings": []}
+
+
+def test_pr_level_band_is_the_worst_across_files():
+    pr = _pr(1, base_sha="B", head_sha="H")
+    files = {
+        1: [
+            {"filename": "notebooks/a.py", "status": "modified", "patch": ""},
+            {"filename": "notebooks/b.py", "status": "modified", "patch": ""},
+        ]
+    }
+    blobs = {
+        "MB": {"notebooks/a.py": NB_BASE.encode(), "notebooks/b.py": NB_BASE.encode()},
+        "H": {
+            "notebooks/a.py": _nb_body("df.to_csv('out.csv')"),
+            "notebooks/b.py": _nb_body("import subprocess\n    subprocess.run(['rm'])"),
+        },
+    }
+    detail = reviews.review_detail(FakeClient(pulls=[pr], files=files, blobs=blobs), 1)
+    assert [f["code"]["band"] for f in detail["files"]] == ["ask", "floor"]
+    assert detail["code_band"] == "floor"
+
+
+def test_push_ok_pragma_retires_a_finding_for_the_reviewer_too():
+    # The pragma is a marker the reviewer can SEE in the diff sitting right next to the
+    # line, which is a better signal than a finding they have no way to silence.
+    body = "import os\n    os.remove('stale.csv')  # mooring: push-ok"
+    detail = _detail_with(_nb_body(body))
+    assert detail["files"][0]["code"] == {"band": "clean", "findings": []}
