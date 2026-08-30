@@ -117,7 +117,20 @@ packages = ["src/mooring"]
 mooring-spacy-en-md = { path = "packages/mooring-spacy-en-md" }
 
 [tool.pytest.ini_options]
+# `tests` ONLY. evals/ is a model-capability eval, not a test suite: a run needs
+# network and an API key, and this suite is offline by contract. Three things keep
+# it out, so no single edit can drag it in:
+#   1. testpaths, here — a bare `uv run pytest` never looks outside tests/.
+#   2. --ignore=evals, below — an explicit `pytest .` or `pytest --co` at the repo
+#      root skips it too.
+#   3. naming — no file in evals/ matches python_files (test_*.py / *_test.py) and
+#      no function there is named test_*, so there is nothing to collect anyway.
+# The eval's own logic IS covered offline, by tests/test_eval_harness.py, which
+# drives it with a scripted fake provider (evals/fake.py). That import needs the
+# repo root importable, which is what `pythonpath` does.
 testpaths = ["tests"]
+addopts = "--ignore=evals"
+pythonpath = ["."]
 
 [tool.ruff]
 line-length = 100
