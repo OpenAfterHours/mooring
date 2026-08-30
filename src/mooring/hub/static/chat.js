@@ -15,7 +15,13 @@ const NOTEBOOK = new URLSearchParams(location.search).get("notebook") || "";
 const EXPLAIN = new URLSearchParams(location.search).get("explain") === "1";
 const REVIEW = new URLSearchParams(location.search).get("review") === "1";
 const LS_MODEL = "mooring.ai.model";
-const LS_EFFORT = "mooring.ai.effort";
+// The effort pick is stored PER PROVIDER (ChatCore.effortKey) — see chat_core.js.
+// PROVIDER and DEFAULT_EFFORT are both learned from /api/ai/models and kept for the
+// life of the window: populateEfforts re-runs on every model switch, and without the
+// remembered default each switch would drop the configured effort.
+let PROVIDER = "";
+let DEFAULT_EFFORT = "";
+const effortStore = () => ChatCore.effortKey(PROVIDER);
 // Appearance is owned by the shared theme.js module (loaded before this file):
 // it follows the hub's /api/state theme and re-themes this window live on a
 // cross-tab change. Alias applyTheme for the /api/state follow below.
@@ -1537,7 +1543,9 @@ function updateAutocomplete(input) {
 
 // -- models / effort --------------------------------------------------------
 
-function populateEfforts(preferDefault) {
+// Takes no argument on purpose: the configured default is remembered in
+// DEFAULT_EFFORT, so a model switch (/model, the dropdown) can't lose it.
+function populateEfforts() {
   const model = MODELS.find((m) => m.id === $("chat-model").value);
   const sel = $("chat-effort");
   sel.innerHTML = "";
@@ -1553,17 +1561,19 @@ function populateEfforts(preferDefault) {
     o.textContent = e;
     sel.appendChild(o);
   }
-  const saved = localStorage.getItem(LS_EFFORT);
-  let chosen;
-  if (efforts.includes(saved)) chosen = saved;
-  else if (efforts.includes(preferDefault)) chosen = preferDefault;
-  else chosen = model?.default_effort || efforts[0];
-  sel.value = chosen;
+  sel.value = ChatCore.chooseEffort(
+    efforts,
+    localStorage.getItem(effortStore()),
+    DEFAULT_EFFORT,
+    model?.default_effort,
+  );
 }
 
 async function loadModels() {
   const { data } = await api("/api/ai/models");
   MODELS = data.models || [];
+  PROVIDER = data.provider || "";
+  DEFAULT_EFFORT = data.default_effort || "";
   const sel = $("chat-model");
   sel.innerHTML = "";
   const wrap = sel.closest("label");
@@ -1588,7 +1598,7 @@ async function loadModels() {
     MODELS.some((m) => m.id === id),
   );
   sel.value = wanted;
-  populateEfforts(data.default_effort);
+  populateEfforts();
 }
 
 async function loadDatasets() {
@@ -1621,6 +1631,8 @@ async function init() {
   // fire-and-forget and hydrates after the chat is already usable — it no longer
   // sits in front of the open.
   loadDatasets();
+  // One-time: hand the old un-namespaced effort pick to the provider that made it.
+  ChatCore.adoptLegacyEffort(localStorage);
   await loadModels();
 
   $("chat-model").addEventListener("change", () => {
@@ -1629,7 +1641,7 @@ async function init() {
     openChat();
   });
   $("chat-effort").addEventListener("change", () => {
-    localStorage.setItem(LS_EFFORT, $("chat-effort").value);
+    localStorage.setItem(effortStore(), $("chat-effort").value);
     openChat();
   });
   $("messages").addEventListener("scroll", () => {

@@ -32,6 +32,12 @@ if TYPE_CHECKING:
 
 _START_TIMEOUT = 60.0
 _SEND_TIMEOUT = 30.0
+# Reasoning-effort picker sentinels meaning "send no reasoning_effort at all" — leave
+# it to the model's own default. Defined HERE (the lowest ai/ session module) and
+# imported by :mod:`mooring.ai.openai_session`, so both providers read one list: the
+# hub's `ai.reasoning_effort` is a free-text Settings field and the word "default"
+# now appears in the picker, so either session can be handed it.
+_EFFORT_SENTINELS = frozenset({"", "default", "auto"})
 
 _TOOL_GUIDE = (
     "\n\nYou have tools to inspect this workspace WITHOUT ever seeing data values:\n"
@@ -159,7 +165,13 @@ class CopilotChatSession(ChatBroadcaster):
             enabled=traceback_guard, workspace=workspace, notebook_rel=notebook_rel
         )
         self._model = (model or "").strip()
-        self._reasoning_effort = (reasoning_effort or "").strip() or None
+        # Normalise the picker's "leave it to the model" sentinels to None here, in the
+        # ctor every Copilot path flows through: otherwise "default" rides on as a
+        # LITERAL reasoning_effort into client.create_session (see _aopen), which is not
+        # a value the SDK accepts. The hub's ai.reasoning_effort is free text, so the
+        # word can reach us from Settings as well as from the picker.
+        effort = (reasoning_effort or "").strip()
+        self._reasoning_effort = None if effort.lower() in _EFFORT_SENTINELS else effort
         self._read_only = read_only
         # A read-only investigate sub-agent: no propose/edit tool and no
         # mooring_investigate (so it cannot write or recurse). Forced off under read_only

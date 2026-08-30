@@ -641,6 +641,56 @@ const ChatCore = (function () {
     return row && row.floor ? GATE_MARK : "side effect";
   }
 
+  // -- reasoning effort -----------------------------------------------------
+  // The effort picker sits beside the model in BOTH the chat window and the batch
+  // page, and what it shows is what every request carries — so the decision of which
+  // option starts selected is the decision of what gets SENT (and billed). It lives
+  // here, pure and unit-tested, because it went wrong in three ways at once: a
+  // configured effort the list didn't contain was silently discarded, a pick made
+  // under one provider selected under another, and switching model dropped the
+  // configured default on the floor.
+
+  // The per-provider localStorage key for the effort pick. Namespaced because the
+  // same words mean different money on different backends (Copilot's own type is
+  // low|medium|high|xhigh, which INTERSECTS OpenAI's list), so a "high" chosen once
+  // in Copilot must not silently ride along after switching to OpenAI.
+  const LEGACY_EFFORT_KEY = "mooring.ai.effort";
+  function effortKey(provider) {
+    return LEGACY_EFFORT_KEY + "." + (String(provider || "").trim() || "unknown");
+  }
+
+  // One-time move of the un-namespaced key into the Copilot slot. Copilot is the
+  // ONLY provider that could have written it: before the OpenAI provider advertised
+  // any efforts its picker was permanently hidden, so no pick could be made — and a
+  // pick is the only thing that writes the key. Idempotent, never overwrites a
+  // namespaced value, and takes the storage so it is testable without a browser.
+  function adoptLegacyEffort(storage) {
+    if (!storage) return "";
+    const legacy = storage.getItem(LEGACY_EFFORT_KEY);
+    if (!legacy) return "";
+    const key = effortKey("copilot");
+    if (!storage.getItem(key)) storage.setItem(key, legacy);
+    storage.removeItem(LEGACY_EFFORT_KEY);
+    return legacy;
+  }
+
+  // Which option the picker should start on, in precedence order: the user's last
+  // explicit pick for THIS provider, then the configured `ai.reasoning_effort` (the
+  // hub unions it into the list so it is always selectable), then the model's own
+  // advertised default, then the head of the list — which providers order so that
+  // the head is the "send nothing" sentinel. Every candidate must be IN the list:
+  // a <select> silently resolves an unknown value to "", which is how a configured
+  // effort turned into an empty wire value. "" when there is nothing to pick from
+  // (the caller hides the picker and sends no effort at all).
+  function chooseEffort(efforts, saved, configuredDefault, modelDefault) {
+    const list = Array.isArray(efforts) ? efforts : [];
+    if (!list.length) return "";
+    for (const candidate of [saved, configuredDefault, modelDefault]) {
+      if (candidate && list.includes(candidate)) return candidate;
+    }
+    return list[0];
+  }
+
   // -- batch jobs -----------------------------------------------------------
   // The batch composer is a list of per-notebook cards, each with its OWN free-form
   // brief (multi-line, as detailed as the analyst likes — bullet points, columns,
@@ -1121,6 +1171,9 @@ const ChatCore = (function () {
     codeFindingRows,
     codeFindingLead,
     codeFindingTag,
+    effortKey,
+    adoptLegacyEffort,
+    chooseEffort,
     parseDeviceLogin,
     highlightCode,
     renderMarkdown,

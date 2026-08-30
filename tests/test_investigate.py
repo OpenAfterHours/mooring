@@ -324,6 +324,69 @@ def test_a_cut_short_branch_is_marked_truncated_and_labelled_in_the_merge():
     assert "INCOMPLETE" in merged
 
 
+# -- a session's own NOTICE is not the sub-agent's answer -----------------------
+
+# What OpenAIChatSession._settle_effort broadcasts when the server refuses the
+# reasoning-effort setting: mooring talking to the human, flagged so a collector can
+# tell it apart from the model's answer. Value-free fixed text either way.
+NOTICE = {
+    "text": "(Note: the server rejected the reasoning-effort setting for this chat.)",
+    "notice": True,
+}
+
+
+def test_a_stranded_notice_is_not_reported_as_a_finding():
+    # The branch answered NOTHING, but its session emitted a notice on the same
+    # "message" channel. Counting that as the branch's finding is wrong three times
+    # over: the status lies, the notice sentence lands in the merged block the parent
+    # chat reads, and the "found" count the planner emits is inflated.
+    [r] = _planner([ScriptedSession([("message", NOTICE), ("idle", {})])]).run(
+        [BranchJob(question="q")]
+    )
+    assert r.status == "empty"
+    assert r.finding == ""
+    assert NOTICE["text"] not in merge_findings([r])
+
+
+def test_a_notice_does_not_suppress_a_branchs_streamed_analysis():
+    # The last non-empty "message" wins outright over accumulated deltas, so a notice
+    # arriving after the analysis would DISCARD real content, not just add noise.
+    events = [
+        ("delta", {"text": "orders joins customers "}),
+        ("delta", {"text": "on customer_id"}),
+        ("message", NOTICE),
+        ("idle", {}),
+    ]
+    [r] = _planner([ScriptedSession(events)]).run([BranchJob(question="q")])
+    assert r.status == "finding"
+    assert r.finding == "orders joins customers on customer_id"
+
+
+def test_a_notice_does_not_replace_a_cut_short_branchs_partial_answer():
+    # Same suppression, on the path where it costs most: a branch cut off by a close
+    # (or a deadline) returns whatever it streamed, flagged incomplete — not the notice.
+    events = [
+        ("delta", {"text": "partial analysis so far"}),
+        ("message", NOTICE),
+        ("closed", {}),
+    ]
+    [r] = _planner([ScriptedSession(events)]).run([BranchJob(question="q")])
+    assert r.status == "finding" and r.truncated is True
+    assert r.finding == "partial analysis so far"
+
+
+def test_an_ordinary_assistant_message_is_still_the_finding():
+    # The flag is what distinguishes them: an UNflagged message is the model's answer
+    # and must keep winning over the deltas that streamed it.
+    events = [
+        ("delta", {"text": "streamed"}),
+        ("message", {"text": "the final answer"}),
+        ("idle", {}),
+    ]
+    [r] = _planner([ScriptedSession(events)]).run([BranchJob(question="q")])
+    assert r.status == "finding" and r.finding == "the final answer"
+
+
 def test_a_clean_idle_branch_is_not_marked_truncated():
     [r] = _planner([ScriptedSession(_msg("complete answer"))]).run([BranchJob(question="q")])
     assert r.status == "finding" and r.truncated is False

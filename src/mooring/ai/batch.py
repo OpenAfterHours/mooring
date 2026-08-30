@@ -90,6 +90,10 @@ class BatchResult:
     carries the value-free (line + kind) redaction report when a traceback in the
     brief was sanitised and auto-confirmed (see the "traceback" branch in
     :meth:`BatchPlanner._drive`) — so the tray can show the brief was rewritten.
+    ``notices`` carries the session's own fixed-text asides (currently only the
+    OpenAI reasoning-effort downgrade), which have nowhere else to go on an
+    unattended run: there is no chat window watching a batch, so the result is the
+    only place the analyst can be told.
     """
 
     job: BatchJob
@@ -99,6 +103,7 @@ class BatchResult:
     error: str = ""
     pii: list[dict] = field(default_factory=list)
     traceback_redactions: list[dict] = field(default_factory=list)
+    notices: list[str] = field(default_factory=list)
 
 
 def _name_from_brief(brief: str) -> str:
@@ -656,6 +661,7 @@ class BatchPlanner:
         proposals: list[dict] = []
         forced_pii: list[dict] = []  # findings the analyst overrode, carried onto the result
         tb_redactions: list[dict] = []  # value-free rewrite report of a sanitised brief
+        notices: list[str] = []  # the session's own fixed-text asides (see the branch below)
         follow_ups = max(0, self._cfg.follow_up_turns)
         while True:
             if abort.is_set():
@@ -668,6 +674,7 @@ class BatchPlanner:
                     error="" if proposals else "Batch cancelled.",
                     pii=forced_pii,
                     traceback_redactions=tb_redactions,
+                    notices=notices,
                 )
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -680,6 +687,7 @@ class BatchPlanner:
                     error="" if proposals else "Timed out before the assistant proposed anything.",
                     pii=forced_pii,
                     traceback_redactions=tb_redactions,
+                    notices=notices,
                 )
             try:
                 event = q.get(timeout=min(remaining, _POLL))
@@ -687,7 +695,20 @@ class BatchPlanner:
                 continue
             kind = getattr(event, "kind", "")
             data = getattr(event, "data", {}) or {}
-            if kind == "proposal":
+            if kind == "message":
+                # A batch job's product is its PROPOSALS, so ordinary assistant prose is
+                # not collected here. A "notice" is different: it is mooring's own fixed
+                # value-free aside about how the request had to change (the OpenAI
+                # reasoning-effort downgrade), and the session promises the analyst is
+                # told once. On the chat path a message IS the telling; unattended there
+                # is no window watching, so carry it onto the result for the tray —
+                # otherwise a 20-notebook run can silently drop to a different reasoning
+                # setting with nothing anywhere saying so.
+                if data.get("notice"):
+                    text = str(data.get("text", "")).strip()
+                    if text and text not in notices:
+                        notices.append(text)
+            elif kind == "proposal":
                 proposals.append(data)
                 self._emit(
                     index=index,
@@ -710,11 +731,20 @@ class BatchPlanner:
                         session.send_confirmed(token, "")
                     except Exception as exc:  # noqa: BLE001
                         return self._make_result(
-                            job, notebook_rel, "failed", error=str(exc), pii=forced_pii
+                            job,
+                            notebook_rel,
+                            "failed",
+                            error=str(exc),
+                            pii=forced_pii,
+                            notices=notices,
                         )
                 elif token:
                     return self._make_result(
-                        job, notebook_rel, "pii_blocked", pii=data.get("findings", [])
+                        job,
+                        notebook_rel,
+                        "pii_blocked",
+                        pii=data.get("findings", []),
+                        notices=notices,
                     )
             elif kind == "traceback":
                 # The session's traceback guard sanitised a traceback in the brief and
@@ -742,6 +772,7 @@ class BatchPlanner:
                                 "pii_blocked",
                                 pii=pii_findings,
                                 traceback_redactions=tb_redactions,
+                                notices=notices,
                             )
                         forced_pii = pii_findings
                     try:
@@ -754,6 +785,7 @@ class BatchPlanner:
                             error=str(exc),
                             pii=forced_pii,
                             traceback_redactions=tb_redactions,
+                            notices=notices,
                         )
             elif kind == "fail":
                 status = "built" if proposals else "failed"
@@ -765,6 +797,7 @@ class BatchPlanner:
                     error=str(data.get("text", "") or "The assistant reported an error."),
                     pii=forced_pii,
                     traceback_redactions=tb_redactions,
+                    notices=notices,
                 )
             elif kind == "idle":
                 if follow_ups > 0:
@@ -779,6 +812,7 @@ class BatchPlanner:
                             proposals=proposals,
                             pii=forced_pii,
                             traceback_redactions=tb_redactions,
+                            notices=notices,
                         )
                     continue
                 return self._make_result(
@@ -788,6 +822,7 @@ class BatchPlanner:
                     proposals=proposals,
                     pii=forced_pii,
                     traceback_redactions=tb_redactions,
+                    notices=notices,
                 )
             elif kind == "closed":
                 return self._make_result(
@@ -798,6 +833,7 @@ class BatchPlanner:
                     error="" if proposals else "The session closed before proposing anything.",
                     pii=forced_pii,
                     traceback_redactions=tb_redactions,
+                    notices=notices,
                 )
 
     def _await_ready(self, session, q, deadline: float, abort: threading.Event) -> bool:
@@ -874,6 +910,7 @@ class BatchPlanner:
         error: str = "",
         pii: list[dict] | None = None,
         traceback_redactions: list[dict] | None = None,
+        notices: list[str] | None = None,
     ) -> BatchResult:
         """Build a BatchResult WITHOUT storing/emitting/discarding — pure, so the caller
         decides whether to adopt it (an initial build always; a revision only if built)."""
@@ -885,6 +922,7 @@ class BatchPlanner:
             error=error,
             pii=list(pii or []),
             traceback_redactions=list(traceback_redactions or []),
+            notices=list(notices or []),
         )
 
     def _commit(self, index: int, result: BatchResult) -> BatchResult:

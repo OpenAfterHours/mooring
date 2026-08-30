@@ -192,6 +192,22 @@ def test_no_reasoning_effort_by_default(fake_sdk, tmp_path):
         sess.close()
 
 
+@pytest.mark.parametrize("sentinel", ["default", "Default", "auto", " AUTO ", "  "])
+def test_the_default_effort_sentinel_is_not_forwarded_to_the_sdk(fake_sdk, tmp_path, sentinel):
+    # The effort picker offers "default" to mean "leave it to the model", and the hub's
+    # ai.reasoning_effort is a FREE-TEXT settings field, so the word reaches this ctor as
+    # an ordinary string. Un-normalised it rides on as a LITERAL reasoning_effort into
+    # create_session — a value the SDK never defined. Normalising in __init__ covers
+    # every route into the session at once, so no caller can forget it.
+    sess = _make(tmp_path, reasoning_effort=sentinel).start()
+    try:
+        client = FakeClient.last
+        assert client is not None and client.session is not None
+        assert "reasoning_effort" not in client.session.create_kwargs
+    finally:
+        sess.close()
+
+
 def test_create_session_is_value_blind(fake_sdk, tmp_path):
     sess = _make(tmp_path).start()
     try:

@@ -1856,6 +1856,100 @@ def test_provider_cache_drops_on_reload(configured, monkeypatch):
     assert len(built) == 2  # rebuilt after reload
 
 
+class _FakeOpenAIProvider:
+    """Shaped like OpenAIProvider: a reasoning model advertising the fixed advisory
+    list (sentinel first), a plain chat model advertising none — and, like the real
+    one, it CACHES the dicts it returns, so a mutating consumer would poison it."""
+
+    name = "openai"
+
+    def __init__(self):
+        self._models = [
+            {
+                "id": "gpt-4o",
+                "name": "gpt-4o",
+                "efforts": [],
+                "default_effort": "",
+                "multiplier": None,
+            },
+            {
+                "id": "o3-mini",
+                "name": "o3-mini",
+                "efforts": ["default", "none", "low", "medium", "high"],
+                "default_effort": "",
+                "multiplier": None,
+            },
+        ]
+
+    def list_models(self, force=False):
+        return self._models
+
+
+def _effort_client(tmp_path, monkeypatch, provider, effort=""):
+    monkeypatch.setattr(paths, "user_config_dir", lambda: tmp_path / "appdata")
+    monkeypatch.setattr("mooring.ai.get_provider", lambda app_cfg: provider)
+    spec = config.RepoSpec(alias="ws", owner="", repo="", workspace_path=str(tmp_path / "ws"))
+    hub = Hub(
+        config.AppConfig(
+            repos=(spec,),
+            active_alias="ws",
+            ai=config.AiConfig(provider="openai", reasoning_effort=effort),
+        )
+    )
+    return TestClient(create_app(hub))
+
+
+def test_chat_models_offers_a_configured_effort_the_provider_never_listed(tmp_path, monkeypatch):
+    # `minimal` / `xhigh` are real OpenAI values the advisory list omits, and a gateway
+    # may take its own. Without this union the picker cannot show the configured value,
+    # so it selects something else and the knob is silently discarded — while the
+    # Settings page still displays it.
+    provider = _FakeOpenAIProvider()
+    with _effort_client(tmp_path, monkeypatch, provider, effort="xhigh") as client:
+        data = client.get("/api/ai/models").json()
+    by_id = {m["id"]: m for m in data["models"]}
+    assert by_id["o3-mini"]["efforts"] == ["default", "none", "low", "medium", "high", "xhigh"]
+    assert by_id["o3-mini"]["efforts"][0] == "default"  # the send-nothing sentinel stays first
+    assert by_id["gpt-4o"]["efforts"] == []  # "takes no effort" is not a list to add to
+    assert data["default_effort"] == "xhigh"
+
+
+def test_chat_models_does_not_duplicate_an_effort_already_offered(tmp_path, monkeypatch):
+    provider = _FakeOpenAIProvider()
+    with _effort_client(tmp_path, monkeypatch, provider, effort="high") as client:
+        data = client.get("/api/ai/models").json()
+    efforts = next(m for m in data["models"] if m["id"] == "o3-mini")["efforts"]
+    assert efforts == ["default", "none", "low", "medium", "high"]
+
+
+def test_chat_models_union_never_mutates_the_providers_cached_dicts(tmp_path, monkeypatch):
+    # Providers cache their listing, so appending in place would poison the cache and
+    # re-append on every later request ("high, high, high" in the picker).
+    provider = _FakeOpenAIProvider()
+    with _effort_client(tmp_path, monkeypatch, provider, effort="xhigh") as client:
+        first = client.get("/api/ai/models").json()
+        second = client.get("/api/ai/models").json()
+    assert first["models"] == second["models"]
+    cached = {m["id"]: m["efforts"] for m in provider._models}
+    assert cached["o3-mini"] == ["default", "none", "low", "medium", "high"]  # untouched
+
+
+def test_chat_models_names_the_provider(tmp_path, monkeypatch):
+    # The page namespaces its stored effort pick per provider (ChatCore.effortKey), so
+    # a "high" chosen under Copilot can't silently ride along on OpenAI. It can only do
+    # that if the listing says WHICH provider answered.
+    provider = _FakeOpenAIProvider()
+    with _effort_client(tmp_path, monkeypatch, provider) as client:
+        assert client.get("/api/ai/models").json()["provider"] == "openai"
+
+
+def test_chat_models_falls_back_to_the_configured_provider_name(tmp_path, monkeypatch):
+    # A provider object without a .name must still yield a stable namespace, never "".
+    provider = _FakeModelProvider()  # no `name` attribute
+    with _effort_client(tmp_path, monkeypatch, provider) as client:
+        assert client.get("/api/ai/models").json()["provider"] == "openai"
+
+
 def test_chat_models_disabled_when_ai_off(tmp_path, monkeypatch):
     monkeypatch.setattr(paths, "user_config_dir", lambda: tmp_path / "appdata")
     spec = config.RepoSpec(alias="ws", owner="", repo="", workspace_path=str(tmp_path / "ws"))

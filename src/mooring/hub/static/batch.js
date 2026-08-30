@@ -50,6 +50,7 @@
   }
 
   let state = { enabled: false, max_jobs: 20, max_concurrency: 3, datasets: [] };
+  let stateLoaded = false; // true once /api/ai/batch/state answered (the caps are real)
   let batchId = null; // null until the first "Add to queue" opens the run
   let stream = null;
   let queue = { pending: 0, total: 0 };
@@ -66,11 +67,16 @@
   // catching up — which is exactly the window a confirmed gate re-POST lands in.
   const appliedHere = new Set();
   // The model/effort the analyst picks apply to every job submitted while selected; the
-  // queue is appendable so they can change the model between submits. Preference is
-  // shared with the chat window via the same localStorage keys.
+  // queue is appendable so they can change the model between submits. The preference is
+  // shared with the chat window — the model key outright, the effort key per provider.
   let MODELS = [];
   const LS_MODEL = "mooring.ai.model";
-  const LS_EFFORT = "mooring.ai.effort";
+  // The effort pick is stored PER PROVIDER (ChatCore.effortKey), and the configured
+  // default is remembered for the life of the page so a model switch can't drop it —
+  // same contract as the chat window, same helpers.
+  let PROVIDER = "";
+  let DEFAULT_EFFORT = "";
+  const effortStore = () => C.effortKey(PROVIDER);
 
   function showError(msg) {
     const b = $("error-banner");
@@ -130,8 +136,9 @@
       return;
     }
     state = body;
+    stateLoaded = true;
     applyTheme(state.ui_theme); // follow the hub's appearance
-    $("caps").textContent = `up to ${state.max_jobs} per queue · ${state.max_concurrency} built at a time`;
+    showCaps();
     if (!$("jobs-form").querySelector(".job-form-card")) addJobCard(); // start with one card
     if (!state.enabled) {
       showDisabled(
@@ -142,13 +149,16 @@
 
   // -- model / effort (mirrors the chat window) ----------------------------
 
-  function populateEfforts(preferDefault) {
+  // Takes no argument on purpose: DEFAULT_EFFORT remembers the configured default, so
+  // switching model can't silently drop it (it did — every switch fell to efforts[0]).
+  function populateEfforts() {
     const model = MODELS.find((m) => m.id === $("batch-model").value);
     const sel = $("batch-effort");
     sel.innerHTML = "";
     const efforts = (model && model.efforts) || [];
     if (!efforts.length) {
       $("batch-effort-wrap").classList.add("hidden");
+      showCaps();
       return;
     }
     $("batch-effort-wrap").classList.remove("hidden");
@@ -158,21 +168,41 @@
       o.textContent = e;
       sel.appendChild(o);
     }
-    const saved = localStorage.getItem(LS_EFFORT);
-    sel.value = efforts.includes(saved)
-      ? saved
-      : efforts.includes(preferDefault)
-        ? preferDefault
-        : (model && model.default_effort) || efforts[0];
+    sel.value = C.chooseEffort(
+      efforts,
+      localStorage.getItem(effortStore()),
+      DEFAULT_EFFORT,
+      model && model.default_effort
+    );
+    sel.title =
+      "Reasoning effort sent with EVERY notebook you queue. " +
+      "'default' sends none (the model's own).";
+    showCaps();
   }
 
   function selectedEffort() {
     return $("batch-effort-wrap").classList.contains("hidden") ? "" : $("batch-effort").value;
   }
 
+  // The queue's caps line, beside the "Add to queue" button — and the one place the
+  // effort a submit will actually use is spelled out. Batch had no fallback to the
+  // configured `ai.reasoning_effort` while the picker was hidden, so it never sent one;
+  // now that it can, the analyst must see it BEFORE queueing N notebooks with it.
+  function showCaps() {
+    if (!stateLoaded) return; // never quote the placeholder caps after a failed load
+    const effort = selectedEffort();
+    $("caps").textContent =
+      `up to ${state.max_jobs} per queue · ${state.max_concurrency} built at a time` +
+      (effort ? ` · reasoning effort: ${effort}` : "");
+  }
+
   async function loadModels() {
+    // One-time: hand the old un-namespaced effort pick to the provider that made it.
+    C.adoptLegacyEffort(localStorage);
     const { ok, body } = await fetchJSON("/api/ai/models");
     MODELS = (ok && body.models) || [];
+    PROVIDER = (ok && body.provider) || "";
+    DEFAULT_EFFORT = (ok && body.default_effort) || "";
     const sel = $("batch-model");
     sel.innerHTML = "";
     // Hide the picker when there are no models (not signed in / provider unavailable —
@@ -180,6 +210,11 @@
     // loadModels runs AFTER loadState (see DOMContentLoaded), so state.enabled is known.
     if (!MODELS.length || !state.enabled) {
       $("model-row").classList.add("hidden");
+      // Hide the effort control too (it lives inside the row, but selectedEffort()
+      // reads the CLASS, and the caps line reads selectedEffort) so a hidden picker
+      // can never claim an effort the submit won't carry.
+      $("batch-effort-wrap").classList.add("hidden");
+      showCaps();
       return;
     }
     $("model-row").classList.remove("hidden");
@@ -193,7 +228,7 @@
     sel.value = [saved, body.default_model, MODELS[0].id].find((id) =>
       MODELS.some((m) => m.id === id)
     );
-    populateEfforts(body.default_effort);
+    populateEfforts();
   }
 
   // -- the per-notebook job form -------------------------------------------
@@ -665,7 +700,8 @@
       populateEfforts();
     });
     $("batch-effort").addEventListener("change", () => {
-      localStorage.setItem(LS_EFFORT, $("batch-effort").value);
+      localStorage.setItem(effortStore(), $("batch-effort").value);
+      showCaps(); // the caps line names the effort the next submit will carry
     });
     // Load models AFTER state so the picker can be gated on whether batch is enabled
     // (avoids briefly showing the model row under a "batch is off" notice).

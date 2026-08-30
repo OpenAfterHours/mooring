@@ -23,6 +23,15 @@ no hosted tool (web_search / file_search / code_interpreter) is ever attached, a
 ``store=False`` is sent on every request so nothing is retained server-side. Every
 tool result crosses to the model through the egress minter
 (:func:`mooring.ai.egress.to_openai_tool_message`).
+
+Which request fields a given model accepts is SERVER-side policy that no name
+prefix can predict, so ``reasoning_effort`` is settled by asking rather than by
+guessing: :meth:`OpenAIChatSession._create_stream` walks a short ladder when the
+server REJECTS a request over the param (send -> drop -> ``"none"``, or straight to
+``"none"`` when the request carried no effort at all) and REMEMBERS the answer on
+the session, so the probe costs one extra round-trip once, not once per turn. The
+detector that arms it (:func:`_blames_reasoning_effort`) is deliberately strict: a
+false positive would disable the analyst's setting for the whole session.
 """
 
 from __future__ import annotations
@@ -40,6 +49,7 @@ from mooring.ai.chat import ChatBroadcaster, ChatEvent
 from mooring.ai.session import (
     _CATALOG_TOOL_GUIDE,
     _DICT_TOOL_GUIDE,
+    _EFFORT_SENTINELS,
     _HELPER_TOOL_GUIDE,
     _INVESTIGATE_GUIDE,
     _INVESTIGATOR_GUIDE,
@@ -58,6 +68,36 @@ _TOOL_BUDGET_MSG = (
     "(Stopped: reached the tool-call limit for one turn. Ask me to continue if needed.)"
 )
 _STOP = object()  # sentinel queued by close() to end the worker loop
+# What the ladder settled on, remembered for the life of the session (_effort_mode):
+#   "send" - the configured effort rides every request (the un-probed default)
+#   "drop" - the server rejected the param; omit it and keep the model's own default
+#   "none" - the server rejects any other effort here; send "none"
+# The two rungs that CHANGE behaviour each say so once, in fixed value-free text.
+# The wording states only what we OBSERVED (a rejection, and what we re-sent): the
+# server may be refusing the parameter itself, or only the configured value, and the
+# error body is not something we can safely repeat back or reliably classify.
+_EFFORT_NOTICE = {
+    "drop": (
+        "(Note: the server rejected the reasoning-effort setting for this chat — it may "
+        "not accept the setting at all, or not that value — so the request was re-sent "
+        "without it and the model's own default reasoning applies.)"
+    ),
+    "none": (
+        "(Note: the server rejected the reasoning-effort setting for this chat — it may "
+        "not accept the setting at all, or not that value — so the request was re-sent "
+        "with reasoning effort set to 'none'.)"
+    ),
+}
+# Words that mark an error as a REJECTION of the request, rather than a transient
+# failure that merely happens to name the field (see _blames_reasoning_effort).
+_REJECTION_MARKERS = (
+    "not supported",
+    "unsupported",
+    "does not support",
+    "not permitted",
+    "not allowed",
+    "invalid",
+)
 
 
 class OpenAIChatSession(ChatBroadcaster):
@@ -101,7 +141,16 @@ class OpenAIChatSession(ChatBroadcaster):
             enabled=traceback_guard, workspace=workspace, notebook_rel=notebook_rel
         )
         self._model = (model or "").strip()
-        self._reasoning_effort = (reasoning_effort or "").strip() or None
+        # The provider's effort picker offers "default" (and "auto") to mean "don't send
+        # the param at all". Normalised HERE because __init__ is the ONE choke point every
+        # path flows through (hub chat, batch, investigate), so no caller can forget it.
+        # The sentinel list is shared with CopilotChatSession, which needs the same guard.
+        effort = (reasoning_effort or "").strip()
+        self._reasoning_effort = None if effort.lower() in _EFFORT_SENTINELS else effort
+        # Where the reasoning-effort ladder has got to for this session (see
+        # _create_stream): probed once on the first rejection, then reused.
+        self._effort_mode = "send"
+        self._effort_notified = False
         self._read_only = read_only
         # A read-only investigate sub-agent: no propose/edit tool and no
         # mooring_investigate (so it cannot write or recurse). Force it off even if a
@@ -295,12 +344,13 @@ class OpenAIChatSession(ChatBroadcaster):
         if self._tool_specs:
             kwargs["tools"] = self._tool_specs
             kwargs["tool_choice"] = "auto"
-        # reasoning_effort is only accepted by reasoning models (o-series / gpt-5);
-        # sending it to a plain chat model errors, so gate it by model AND config.
-        if self._reasoning_effort and _is_reasoning_model(self._model or _DEFAULT_MODEL):
-            kwargs["reasoning_effort"] = self._reasoning_effort
+        effort = self._effort_for_request()
+        if effort is not None:
+            kwargs["reasoning_effort"] = effort
 
-        stream = self._client.chat.completions.create(**kwargs)
+        # Only the create() call is retryable; the iteration below is NOT, because a
+        # delta broadcast from a half-consumed stream can never be un-broadcast.
+        stream = self._create_stream(kwargs)
         text_parts: list[str] = []
         acc: dict[int, dict] = {}
         finish: str | None = None
@@ -328,6 +378,90 @@ class OpenAIChatSession(ChatBroadcaster):
                 finish = choice.finish_reason
         calls = [acc[i] for i in sorted(acc)] if finish == "tool_calls" else []
         return "".join(text_parts), calls
+
+    # -- the reasoning-effort ladder (the server is the authority) -----------
+
+    def _effort_for_request(self) -> str | None:
+        """The ``reasoning_effort`` this request should carry, or None to omit it."""
+        # A settled ladder wins over BOTH the config and the name pre-filter. It has to:
+        # the "none" rung can be reached from a request that sent no param at all (the
+        # shipped default), and if config were consulted first that rung would evaluate
+        # back to "send nothing" and the session would re-probe on every single turn.
+        if self._effort_mode == "drop":
+            return None
+        if self._effort_mode == "none":
+            return "none"
+        # _is_reasoning_model is an ADVISORY pre-filter: it spares a plain chat model a
+        # wasted 400, but it never decides that a model DOES accept the param — the
+        # ladder in _create_stream does, from the server's own answer.
+        if not (self._reasoning_effort and _is_reasoning_model(self._model or _DEFAULT_MODEL)):
+            return None
+        return self._reasoning_effort
+
+    def _create_stream(self, kwargs: dict[str, Any]):
+        """Open ONE streamed completion, letting the server settle ``reasoning_effort``.
+
+        Some models reject the param outright, and some reject a non-``"none"`` effort
+        *alongside function tools* — which mooring always sends. That is server-side
+        policy, not something the model NAME can be read for, so when the server
+        REJECTS the request over ``reasoning_effort`` we re-ask, and which rungs we
+        walk depends on what the failed request carried:
+
+        * we sent an effort -> (a) the same request with the param DROPPED (preferred:
+          it keeps the model's own default reasoning), then (b) ``"none"``.
+        * we sent none -> only (b). Dropping is a no-op here, so re-sending the
+          identical request would just buy the identical 400; and the premise of rung
+          (b) is precisely that the model's OWN default effort is what the server
+          refuses alongside tools, which is the state this request was already in.
+
+        The first success is remembered in ``self._effort_mode``, so a session pays the
+        extra round-trip once. If every rung fails the error propagates as it always did.
+
+        Returns the stream object WITHOUT iterating it: consuming chunks stays in the
+        caller so a retry can never replay a delta that has already been broadcast.
+        """
+        try:
+            return self._client.chat.completions.create(**kwargs)
+        except Exception as exc:  # noqa: BLE001 - re-raised below unless it is ours
+            # Hard guard: only an actual REJECTION over this param is ours to retry.
+            # Anything else (auth, model-not-found, rate limit, a transient blip that
+            # merely lists the request's fields) fails on one request, as before.
+            if not _blames_reasoning_effort(exc):
+                raise
+        rungs = ("drop", "none") if "reasoning_effort" in kwargs else ("none",)
+        for i, mode in enumerate(rungs):
+            attempt = dict(kwargs)
+            if mode == "drop":
+                attempt.pop("reasoning_effort", None)
+            else:
+                attempt["reasoning_effort"] = "none"
+            try:
+                stream = self._client.chat.completions.create(**attempt)
+            except Exception as exc:  # noqa: BLE001
+                # Still a rejection over the param with it dropped means the model's own
+                # default effort is the problem — fall through to the next rung. The last
+                # rung, and any other error, propagates.
+                if i == len(rungs) - 1 or not _blames_reasoning_effort(exc):
+                    raise
+                continue
+            self._settle_effort(mode)
+            return stream
+        raise AssertionError("unreachable: the last rung either returns or raises")
+
+    def _settle_effort(self, mode: str) -> None:
+        """Remember the ladder's answer for the rest of the session and say so ONCE, so
+        a silently different reasoning setting is visible.
+
+        The notice is fixed text — no values, no paths, no model name, nothing echoed
+        back from the server — and rides the ``message`` channel flagged ``notice``, so
+        consumers that collect the assistant's ANSWER can tell mooring's own aside apart
+        from it: the chat UI renders it like any message, the investigate fan-out skips
+        it (it is not a finding), and the batch tray records it on the job's result."""
+        self._effort_mode = mode
+        if self._effort_notified:
+            return
+        self._effort_notified = True
+        self._broadcast(ChatEvent("message", {"text": _EFFORT_NOTICE[mode], "notice": True}))
 
     def _dispatch_call(self, name: str, args_json: str) -> "egress.ToolOutput":
         """Run one tool call through mooring's value-free handler. FAIL-CLOSED: an
@@ -374,5 +508,59 @@ class OpenAIChatSession(ChatBroadcaster):
 
 
 def _is_reasoning_model(model: str) -> bool:
+    """ADVISORY only: does this model name LOOK like a reasoning model?
+
+    A name prefix cannot know a server's per-model rules — ``gpt-5.6-sol`` matches
+    "gpt-5" yet rejects ``reasoning_effort`` whenever function tools are attached,
+    which mooring always attaches. So this is kept purely as a cheap pre-filter that
+    spares an obvious chat model (``gpt-4o``) a wasted 400; the authority on whether
+    the param is accepted is the server, via the ladder in
+    :meth:`OpenAIChatSession._create_stream`. Deliberately NOT a per-model list: the
+    next model would break it again.
+    """
     m = (model or "").lower()
     return m.startswith(("o1", "o3", "o4", "o5", "gpt-5")) or "reasoning" in m
+
+
+def _blames_reasoning_effort(exc: BaseException) -> bool:
+    """Is this API error the server REJECTING the ``reasoning_effort`` parameter?
+
+    Deliberately STRICT, because a false positive is expensive: arming the ladder
+    settles ``_effort_mode`` for the life of the session, so one transient failure that
+    merely happened to name the field would disable the analyst's setting for the rest
+    of the chat and blame the model for it. Three things must all hold:
+
+    1. the parameter is IDENTIFIED — its name in the message, or a duck-typed
+       structured ``.param`` (the OpenAI SDK's ``APIError.__init__`` lifts ``param``
+       out of the error body; a gateway wrapper may expose it without repeating the
+       name in the text);
+    2. the message carries a genuine REJECTION marker. A bare mention is not enough:
+       ``"Upstream hiccup while validating request (fields: model, messages, tools,
+       reasoning_effort)"`` names the field and is a transient fault, not a verdict;
+    3. the status, when exposed, is exactly 400. A 401/403 from a gateway that echoes
+       the request body back, a 429, a 5xx — none of those are our request being
+       refused. A front-end that exposes no status at all is still allowed through,
+       since some do; the rejection marker then carries the weight on its own.
+
+    KNOWN AND ACCEPTED BLIND SPOT — do not "fix" it by loosening this back to a bare
+    substring test. When the SDK cannot read the error body (its
+    ``response.is_closed and not response.is_stream_consumed`` branch) it builds the
+    exception with ``body=None``, so ``str(exc)`` is just ``"Error code: 400"`` and
+    ``.param`` is ``None`` too: nothing identifies the parameter and the ladder stays
+    disarmed. That request fails, as it would have before the ladder existed. A
+    matcher loose enough to catch it would fire on unrelated 400s.
+
+    String-first and duck-typed because this module never imports ``openai`` (the SDK
+    is an optional extra, and the injected client may be any OpenAI-compatible
+    stand-in), and Azure / LiteLLM / gateway front-ends reword the body freely.
+    """
+    status = getattr(exc, "status_code", None)
+    if isinstance(status, int) and status != 400:
+        return False
+    text = str(exc).lower()
+    named = (
+        "reasoning_effort" in text
+        or "reasoning effort" in text
+        or getattr(exc, "param", None) == "reasoning_effort"
+    )
+    return named and any(marker in text for marker in _REJECTION_MARKERS)

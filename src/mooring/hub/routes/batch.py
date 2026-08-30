@@ -83,6 +83,10 @@ def _tray_jobs(run, results) -> list[dict]:
                 # Value-free (line, kind) report when a traceback in the brief was
                 # sanitised and auto-confirmed (only the rewrite was forwarded).
                 "traceback_redactions": res.traceback_redactions,
+                # The session's own fixed-text asides (e.g. a reasoning-effort
+                # downgrade). A batch has no chat window, so the tray is where the
+                # analyst gets told.
+                "notices": res.notices,
                 "proposals": proposals,
                 "refining": idx in refining,
                 "forcing": idx in forcing,

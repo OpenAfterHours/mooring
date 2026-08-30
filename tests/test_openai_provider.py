@@ -267,3 +267,194 @@ def test_api_key_rejects_empty(tmp_path, monkeypatch):
     with _openai_hub_client(tmp_path, monkeypatch, fake_kr) as client:
         resp = client.post("/api/ai/key", json={"key": "   "})
     assert resp.status_code == 400
+
+
+# -- reasoning effort: the picker the analyst never had ------------------------
+
+
+def test_reasoning_efforts_lead_with_the_send_nothing_sentinel():
+    from mooring.ai.openai_provider import _efforts_for
+
+    efforts = _efforts_for("o3-mini")
+    # Order is a UI contract: chat.js/batch.js fall back to efforts[0] when the user
+    # has configured no default, so "default" (= send no reasoning_effort at all)
+    # MUST be first or making the picker visible would change what is sent.
+    assert efforts == ["default", "none", "low", "medium", "high"]
+    assert efforts[0] == "default"
+
+
+@pytest.mark.parametrize(
+    ("model_id", "offered"),
+    [
+        # Reasoning families: the picker must appear.
+        ("gpt-5.6-sol", True),
+        ("gpt-5", True),
+        ("o1", True),
+        ("o3-mini", True),
+        ("o4-mini", True),
+        ("o5-preview", True),
+        ("my-reasoning-model", True),  # a gateway id that SAYS it reasons
+        # Plain chat models and gateway ids: the picker must stay hidden, because the
+        # request path would drop the param anyway.
+        ("gpt-4o", False),
+        ("gpt-4.1", False),
+        ("chatgpt-4o-latest", False),
+        ("llama-3-70b", False),
+        ("qwen2.5-coder", False),
+        ("", False),
+    ],
+)
+def test_efforts_are_offered_for_reasoning_models_only(model_id, offered):
+    """The picker offers efforts iff the request path would send one.
+
+    The expectations are written out rather than derived from ``_is_reasoning_model``:
+    computing them from the function under test made the assertion unfalsifiable, so
+    the twelve ids proved nothing about the mapping.
+    """
+    from mooring.ai.openai_provider import _efforts_for
+
+    assert bool(_efforts_for(model_id)) is offered, model_id
+
+
+def test_efforts_are_a_fresh_list_the_caller_cannot_corrupt():
+    """The advertised list is per-call, not the module tuple: the hub UNIONS a
+    configured effort into it (hub/routes/chat.py::_offer_configured_effort), and one
+    model's listing must never grow another's — or the module constant's."""
+    from mooring.ai import openai_provider
+
+    first = openai_provider._efforts_for("o3-mini")
+    first.append("xhigh")
+    assert openai_provider._efforts_for("o3-mini") == ["default", "none", "low", "medium", "high"]
+    assert openai_provider._REASONING_EFFORTS == ("default", "none", "low", "medium", "high")
+
+
+def test_list_models_offers_efforts_only_for_reasoning_models(monkeypatch):
+    client = _fake_client(ids=["gpt-4o", "gpt-5.6-sol", "o3-mini"])
+    provider = _provider_with_client(monkeypatch, client)
+    by_id = {m["id"]: m for m in provider.list_models(force=True)}
+    for reasoning in ("gpt-5.6-sol", "o3-mini"):
+        assert by_id[reasoning]["efforts"] == ["default", "none", "low", "medium", "high"]
+        assert by_id[reasoning]["default_effort"] == ""  # no per-model metadata to report
+    # A plain chat model keeps an empty list, so its picker stays hidden as today.
+    assert by_id["gpt-4o"]["efforts"] == []
+
+
+def test_list_models_custom_endpoint_does_not_mislabel_non_openai_ids(monkeypatch):
+    monkeypatch.delenv("MOORING_OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    client = _fake_client(ids=["llama-3-70b", "o3-mini"])
+    provider = OpenAIProvider(base_url="http://localhost:11434/v1")
+    monkeypatch.setattr(provider, "available", lambda: True)
+    monkeypatch.setattr(provider, "_make_client", lambda: client)
+    by_id = {m["id"]: m for m in provider.list_models(force=True)}
+    # The base_url path skips prefix-filtering, so the gateway's own id must still be
+    # listed — and must NOT be mislabelled as reasoning-capable.
+    assert by_id["llama-3-70b"]["efforts"] == []
+    assert by_id["o3-mini"]["efforts"][0] == "default"
+
+
+_EFFORT_400 = (
+    "Error code: 400 - {'error': {'message': \"Function tools with reasoning_effort are "
+    "not supported for gpt-5.6-sol in /v1/chat/completions. To use function tools, use "
+    "/v1/responses or set reasoning_effort to 'none'.\", 'type': 'invalid_request_error', "
+    "'param': 'reasoning_effort', 'code': None}}"
+)
+
+
+# A 401 whose body ECHOES the request's parameters — routine — and whose own code
+# ("invalid_api_key") carries a rejection word. It therefore matches BOTH the auth
+# markers and the effort branch's two requirements, so it pins which branch wins.
+_ECHOING_401 = (
+    "Error code: 401 - {'error': {'message': \"Incorrect API key provided: sk-ab***. "
+    "(request: model=gpt-5, reasoning_effort=high, tools=[mooring_get_schema])\", "
+    "'type': 'invalid_request_error', 'code': 'invalid_api_key'}}"
+)
+# The same trap for rate limits: a gateway rewording a 429 while naming the parameter
+# and saying it is not supported. Only the STATUS decides correctly here.
+_ECHOING_429 = (
+    "Error code: 429 - {'error': {'message': 'Rate limit reached for gpt-5 in "
+    "organization org-x on tokens per min. Limit 30000, Used 30000 (params: "
+    "reasoning_effort=high, not supported above your tier).', "
+    "'type': 'rate_limit_exceeded'}}"
+)
+# Mentions the parameter with NO rejection word: a bare mention is not a rejection.
+_MENTIONING_500 = (
+    "Error code: 500 - {'error': {'message': 'The server had an error while processing "
+    "your request (params: model=gpt-5, reasoning_effort=high). Sorry about that!', "
+    "'type': 'server_error'}}"
+)
+
+
+def test_friendly_error_explains_a_reasoning_effort_rejection():
+    from mooring.ai.openai_provider import friendly_error
+
+    out = friendly_error(_EFFORT_400)
+    assert "reasoning effort" in out.lower()
+    assert "ai.reasoning_effort" in out and "MOORING_AI_REASONING_EFFORT" in out
+    assert "'none'" in out and "'default'" in out  # what to pick instead
+    assert "tools" in out.lower()  # says WHY: an effort alongside function tools
+
+
+def test_friendly_error_points_at_the_control_that_actually_decides():
+    """The remedy must name the effort PICKER, not only the Settings field.
+
+    Clearing Settings -> 'Default reasoning effort' is inert while a stored pick
+    exists: the pick beats the configured default (ChatCore.chooseEffort), so an
+    instruction to clear the setting alone would send the user in a circle."""
+    from mooring.ai.openai_provider import friendly_error
+
+    out = friendly_error(_EFFORT_400).lower()
+    assert "picker" in out
+    assert "batch" in out  # the batch page carries the same control
+    assert "override" in out  # says the pick beats the setting
+
+
+def test_friendly_error_keeps_the_original_message():
+    """The fixed guidance must not throw the server's own words away — they are the
+    only place the model id and the real reason survive."""
+    from mooring.ai.openai_provider import friendly_error
+
+    out = friendly_error(_EFFORT_400)
+    assert "gpt-5.6-sol" in out
+    assert "/v1/responses" in out
+
+
+def test_friendly_error_reports_an_echoing_401_as_an_auth_fault():
+    # The branch ORDER is the property under test: an effort branch placed first (or
+    # matching on a bare mention of the field) reports this as a rejected effort and
+    # throws the real cause away.
+    from mooring.ai.openai_provider import friendly_error
+
+    out = friendly_error(_ECHOING_401)
+    assert "api key" in out.lower()
+    assert "reasoning" not in out.lower()
+
+
+def test_friendly_error_reports_an_echoing_429_as_a_rate_limit():
+    from mooring.ai.openai_provider import friendly_error
+
+    out = friendly_error(_ECHOING_429)
+    assert "rate-limited" in out.lower()
+    assert "reasoning" not in out.lower()
+
+
+def test_friendly_error_needs_a_rejection_not_a_mention():
+    # A 500 that merely echoes the parameter is a server fault, not a rejected effort.
+    from mooring.ai.openai_provider import friendly_error
+
+    out = friendly_error(_MENTIONING_500)
+    assert out.startswith("OpenAI request failed:")
+    assert "reasoning effort" not in out.lower()
+
+
+def test_friendly_error_keeps_mapping_the_other_failures():
+    from mooring.ai.openai_provider import friendly_error
+
+    assert "key" in friendly_error("401 Unauthorized").lower()
+    assert "key" in friendly_error("Error code: 401 - invalid api key").lower()
+    assert "rate-limited" in friendly_error("429 Too Many Requests").lower()
+    assert "rate-limited" in friendly_error("Error code: 429 - too many requests").lower()
+    # A code-less body (a gateway raising a bare error) still routes on its words.
+    assert "key" in friendly_error("your api key is not valid").lower()
+    assert "rate-limited" in friendly_error("quota exceeded").lower()
+    assert friendly_error("boom") == "OpenAI request failed: boom"
