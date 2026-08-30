@@ -226,6 +226,69 @@ async def api_chat_apply(request: Request) -> JSONResponse:
     return JSONResponse({"ok": True, "can_undo": undo_depth > 0, "undo_depth": undo_depth})
 
 
+async def api_chat_run_report(request: Request) -> JSONResponse:
+    """Smoke-run the chat's notebook and report any failure back to the assistant.
+
+    The gap this closes: mooring never opens a marimo websocket (that is the channel
+    carrying cell OUTPUTS), so it cannot see that an applied cell blew up at runtime — and
+    the failures a weak model actually produces are exactly the ones only a RUN reveals. So
+    the analyst gets one explicit action that runs the existing value-free verify smoke path
+    (:mod:`mooring.app.run_report`) and hands the assistant the sanitised failure summary.
+
+    **Never automatic.** This re-executes every cell in the notebook, which is precisely
+    what the apply gate exists to keep deliberate. It fires only on a click, on a button
+    that says so first; nothing here is reachable from Apply, a timer, or a page load.
+
+    Gated exactly like apply/rollback: the per-notebook opt-out (unioned with the policy's
+    ``ai_off`` globs by ``policy.ai_gate``) is checked here AND re-checked in the app layer
+    immediately before the send, because the run itself takes minutes and the send is the
+    egress. The run is off the event loop — it spawns a marimo kernel."""
+    hub = request.app.state.hub
+    data = await request.json()
+    sid = str(data.get("sid", ""))
+    session = hub.chat.get(sid)
+    target = hub.chat.target(sid)
+    if session is None or target is None:
+        return _unknown_session()
+    if (blocked := hub._disabled_block(sid)) is not None:
+        return blocked
+    workspace_str, notebook_rel = target
+    if Path(workspace_str) != hub.cfg.workspace():
+        # The hub switched repos under this window; running would execute a notebook in a
+        # workspace this session was never opened against.
+        return JSONResponse(
+            {"error": "The workspace changed since this chat opened — reopen the copilot."},
+            status_code=409,
+        )
+    from mooring.app import run_report
+
+    try:
+        # The live-kernel schema is deliberately NOT refreshed for this turn: it comes from
+        # the EDITOR's session, which this headless export run does not touch, and a kernel
+        # poll would only add latency to an action already measured in minutes.
+        report = await asyncio.to_thread(run_report.run_and_report, session, hub.cfg, notebook_rel)
+    except PermissionError:  # disabled while the run was in flight
+        hub.chat.close(sid)
+        return JSONResponse({"enabled": False, "reason": "notebook_disabled"}, status_code=403)
+    except run_report.ReportError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=502)
+    except (ValueError, FileNotFoundError) as exc:  # bad/absent path (notebooks.ws_file)
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    telemetry.log_event("ai_chat_run_report", ok=int(report.ran_clean))
+    return JSONResponse(
+        {
+            "ok": True,
+            "ran_clean": report.ran_clean,
+            "cells_failed": report.cells_failed,
+            # The EXACT text the assistant was given, echoed back so the analyst can read
+            # what left their machine. The click is the consent; this is the receipt.
+            "sent": report.sent,
+            # Value-free (line, kind) pairs: what the rewrite withheld, never what it was.
+            "redactions": [{"line": line, "kind": kind} for line, kind in report.redactions],
+        }
+    )
+
+
 async def api_chat_rollback(request: Request) -> JSONResponse:
     hub = request.app.state.hub
     data = await request.json()

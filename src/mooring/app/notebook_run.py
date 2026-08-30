@@ -14,9 +14,16 @@ subtly wrong:
    ``uv run``; a plain ``subprocess.run`` timeout on Windows terminates only ``uv``, leaving
    the marimo kernel alive to finish and re-write the value-bearing HTML *after* cleanup. A new
    process group plus ``taskkill /T`` tears the kernel down before anyone unlinks.
-3. **stderr is never stored, only counted.** marimo's stderr can quote a data value inside a
-   cell's error message, so the only thing read from it is the COUNT of marker-anchored lines.
-   The text never reaches a receipt, the activity ledger, telemetry, or the AI.
+3. **stderr is never stored, and never leaves this module.** marimo's stderr is not a log —
+   the exporter echoes every cell's own ``print`` output onto it (verified: a printed
+   dataframe lands there in full, values and all), interleaved with one
+   ``<MarimoErrorClass>: <message>`` line per failed cell. So the only thing the default
+   path reads from it is the COUNT of marker-anchored lines, and the text never reaches a
+   receipt, the activity ledger, telemetry, or the AI. A caller that must learn *why* a cell
+   failed opts in with ``on_failures`` and receives :func:`failure_lines`' narrow slice — a
+   KIND from marimo's own closed error taxonomy plus that one line's raw message — never the
+   stderr text, so a printed value has no path out. Its one caller
+   (:mod:`mooring.app.run_report`) hands the message straight to the traceback sanitiser.
 4. **"Did not run" is distinguished from "ran and failed".** marimo writes its render iff it
    actually executed the notebook. A non-zero exit with NO render at all is an ENVIRONMENT
    failure (a stale ``uv.lock``, an unresolvable dependency) and must not badge a good notebook
@@ -35,10 +42,12 @@ from __future__ import annotations
 
 import contextlib
 import os
+import re
 import subprocess
 import sys
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -56,6 +65,31 @@ RUN_TIMEOUT = 300
 # value-free; the rest of the line can quote a data value, so only marker-anchored lines are
 # counted and the text is never read.
 _FAIL_MARKER = "MarimoExceptionRaisedError"
+
+# Every error class name marimo's exporter can print at the start of a stderr line — its own
+# closed taxonomy (``marimo/_messaging/errors.py``; the exporter emits
+# ``f"{err.__class__.__name__}: {err.describe()}"``, see marimo/_server/export/__init__.py).
+#
+# A CLOSED set is the point, not a convenience. :func:`failure_lines` returns the constant it
+# matched rather than the substring it found, so the KIND half of a failure can only ever be
+# one of these fixed strings — nothing a cell PRINTED onto the same stream can ride out on it.
+# A name marimo adds later simply is not recognised, which loses a report and leaks nothing.
+_ERROR_KINDS = (
+    "CycleError",
+    "ImportStarError",
+    "MarimoAncestorPreventedError",
+    "MarimoAncestorStoppedError",
+    "MarimoExceptionRaisedError",
+    "MarimoInternalError",
+    "MarimoInterruptionError",
+    "MarimoSQLError",
+    "MarimoStrictExecutionError",
+    "MarimoSyntaxError",
+    "MultipleDefinitionError",
+    "SetupRootError",
+    "UnknownError",
+)
+_ERROR_LINE_RE = re.compile(rf"^(?P<kind>{'|'.join(_ERROR_KINDS)}):[ \t]?(?P<msg>.*)$")
 
 # How often the cancel watchdog wakes while a run is in flight. Short enough that "Cancel"
 # feels immediate, long enough to cost nothing over a run measured in minutes.
@@ -192,6 +226,7 @@ def run(
     timeout: int = RUN_TIMEOUT,
     env_extra: dict[str, str] | None = None,
     cancel: threading.Event | None = None,
+    on_failures: Callable[[list[tuple[str, str]]], None] | None = None,
 ) -> RunOutcome:
     """Execute ``rel_posix`` top to bottom, rendering to ``out_path``.
 
@@ -209,6 +244,11 @@ def run(
 
     ``cancel`` is an event another thread may set to stop the run; it becomes the same
     process-tree kill the timeout uses and raises :class:`RunCancelled`.
+
+    ``on_failures`` is the ONE opt-in past rule 3. It is called once, on a completed run,
+    with :func:`failure_lines`' ``(KIND, message)`` pairs — never with the stderr text, and
+    never at all unless a caller asked. It fires AFTER the render has been dealt with, so a
+    sink that raises can never leave a value-bearing HTML behind.
 
     Raises :class:`RunError` when the notebook could not be run at all."""
     editor.ensure_runtime_config(workspace)
@@ -272,7 +312,32 @@ def run(
     )
     if not (outcome.ok and keep_on_success):
         _unlink(out_path)
+    if on_failures is not None:
+        on_failures(failure_lines(proc.stderr or ""))
     return outcome
+
+
+def failure_lines(stderr: str) -> list[tuple[str, str]]:
+    """The ``(KIND, message)`` pair for each marimo error line in ``stderr`` — the narrowest
+    slice of a failed run that can answer "why did it fail", and the ONLY thing a caller may
+    learn beyond the value-free count.
+
+    ``KIND`` is one of the :data:`_ERROR_KINDS` constants (returned as the constant, never as
+    text lifted from the stream). ``message`` is marimo's own error message, **raw and
+    value-BEARING** — ``KeyError: 'ACME Ltd'`` is a real shape here — so it is the caller's
+    job to make it value-safe; the one caller in the tree hands it straight to
+    ``egress.sanitize_traceback`` (:mod:`mooring.app.run_report`).
+
+    Everything else on the stream — above all the cell ``print`` output the exporter echoes
+    there — is dropped, so no caller can reach it. A message never spans lines: this is
+    line-based by construction, so a multi-line message contributes only its first line.
+    """
+    out: list[tuple[str, str]] = []
+    for line in (stderr or "").splitlines():
+        match = _ERROR_LINE_RE.match(line.lstrip())
+        if match:
+            out.append((match.group("kind"), match.group("msg")))
+    return out
 
 
 def _count_failed_cells(proc: subprocess.CompletedProcess) -> int | None:

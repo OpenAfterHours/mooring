@@ -364,6 +364,78 @@ class ChatBroadcaster:
         self._broadcast(ChatEvent("traceback", data))
         return True
 
+    # -- run-failure report (the applied cell actually blew up) --------------
+
+    # How many failed cells one report names before it says "and N more". A notebook
+    # whose graph broke can fail every cell downstream of the applied one; the first
+    # few carry the cause, the rest are the same fact restated.
+    RUN_REPORT_MAX = 8
+
+    def run_failure_report(self, failures) -> tuple[str, list]:
+        """The value-safe message describing a failed run, plus its redaction findings.
+
+        ``failures`` is :func:`mooring.app.notebook_run.failure_lines`' output: pairs of a
+        marimo error KIND (a constant from marimo's own closed taxonomy) and that error's
+        **raw** message, which can quote a data value exactly as a pasted traceback can.
+
+        The raw message never leaves this method. Each pair is composed into a minimal
+        traceback and put through :func:`mooring.ai.egress.sanitize_traceback` — the ONE
+        gateway, the same rewrite a pasted traceback gets — so the message survives only
+        when it is provably value-free (a fixed interpreter message, or quoted tokens the
+        model has already been shown this session: a column name it wrote is rescued,
+        ``'ACME Ltd'`` is not) and otherwise becomes ``<redacted: N chars>``.
+
+        Two things make the composition safe rather than merely convenient:
+
+        * The synthetic ``Traceback (most recent call last):`` header exists only to make
+          the sanitiser's block detector fire; it carries **no frame line**, so there is no
+          path/line for a source re-read to key off and nothing is ever read from disk.
+        * The header is then dropped and the surviving line is checked to still begin with
+          the KIND constant we composed. An unexpected shape falls back to the kind alone —
+          fail closed, in the sanitiser's own spirit.
+
+        Note what this deliberately does NOT consult: ``[ai] traceback_guard``. That knob
+        governs the analyst's own **paste** — text they wrote, can see, and may judge safe.
+        Here they never see the raw message at all, so there is nothing for an off switch to
+        hand back; the rewrite is unconditional.
+
+        Returns ``(text, findings)``; the caller sends ``text`` through the ordinary
+        :meth:`send` so the PII valve applies to it like any other turn.
+        """
+        all_failures = list(failures)
+        kept = all_failures[: self.RUN_REPORT_MAX]
+        more = len(all_failures) - len(kept)
+        lines: list[str] = []
+        findings: list = []
+        for kind, message in kept:
+            result = egress.sanitize_traceback(
+                f"Traceback (most recent call last):\n{kind}: {message}",
+                workspace=self._tb_workspace,
+                known_text=self._traceback_known_text(),
+            )
+            findings.extend(result.findings)
+            rewritten = result.text.splitlines()
+            line = rewritten[1].strip() if result.detected and len(rewritten) == 2 else ""
+            if not (line == kind or line.startswith(kind + ":")):
+                line = f"{kind}: <redacted>"  # fail closed on any shape we didn't compose
+            lines.append(line)
+        body = "\n".join(lines)
+        if more:
+            body += f"\n…and {more} more failing cell(s), not shown."
+        count = len(all_failures)
+        cells = "cell" if count == 1 else "cells"
+        return (
+            "I applied your change and then ran the notebook locally, top to bottom. "
+            f"It did not run clean: {count} {cells} failed.\n\n"
+            f"{body}\n\n"
+            "This is all mooring can tell you: it reads marimo's error lines only, and "
+            "rewrites each message value-safe before showing it to you, so a message that "
+            "quoted a data value arrives redacted. There is no cell index and no "
+            "traceback — work out which cell it is from the notebook source you can "
+            "already see. Re-propose a corrected version.",
+            findings,
+        )
+
     # -- live-kernel schema refresh -----------------------------------------
 
     def set_initial_live_schema(self, text: str) -> None:

@@ -75,6 +75,12 @@ CLI/agent policy enabled. If the extra isn't installed, the chat will tell you.
    (*"Looking up the schema…"*); the reply then streams in with formatted code.
 4. Click **Apply ▸** on a proposed cell: it's written into your notebook and runs
    there. Review it like any other cell.
+5. If the cell breaks something, click **Run & report** on the applied card. mooring
+   runs the whole notebook locally (it can take a while) and hands the assistant a
+   value-safe summary of the errors, so it can fix its own mistake instead of you
+   describing it. You're shown exactly what was sent, and it only ever happens when
+   you press the button — see
+   [Run & report](../admins/ai-privacy.md#run-and-report).
 
 Keep both tabs side by side: chat on one, the marimo notebook on the other.
 

@@ -32,6 +32,7 @@ push, propose, and sending a delivered artifact — never the local run itself.
 from __future__ import annotations
 
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -60,8 +61,19 @@ class VerifyResult:
     sha: str = ""
 
 
-def verify_notebook(cfg: Config, rel_path: str) -> VerifyResult:
+def verify_notebook(
+    cfg: Config,
+    rel_path: str,
+    *,
+    on_failures: Callable[[list[tuple[str, str]]], None] | None = None,
+) -> VerifyResult:
     """Run ``rel_path``'s cells locally and record a value-free trust receipt.
+
+    ``on_failures`` is passed straight to the shared runner: a caller that needs to know
+    WHY a cell failed (the copilot's "run and report the error", :mod:`mooring.app.run_report`)
+    opts into :func:`mooring.app.notebook_run.failure_lines` rather than getting a second,
+    parallel way to run a notebook. The receipt, the badge and the activity entry are the
+    ordinary ones either way — a reported run is a verify, not a look-alike.
 
     Raises :class:`VerifyError` when the notebook cannot be run (missing/failing
     renderer, timeout, broken environment, non-notebook target) and ``ValueError`` /
@@ -75,13 +87,17 @@ def verify_notebook(cfg: Config, rel_path: str) -> VerifyResult:
         # per-notebook throwaway render — which the other run would then promote as ITS
         # artifact, giving a file labelled with a value it does not contain.
         with notebook_run.workspace_guard(workspace):
-            return run_verified(cfg, rel_posix)
+            return run_verified(cfg, rel_posix, on_failures=on_failures)
     except notebook_run.RunBusy as exc:
         raise VerifyError(str(exc)) from exc
 
 
 def run_verified(
-    cfg: Config, rel_posix: str, *, cancel: threading.Event | None = None
+    cfg: Config,
+    rel_posix: str,
+    *,
+    cancel: threading.Event | None = None,
+    on_failures: Callable[[list[tuple[str, str]]], None] | None = None,
 ) -> VerifyResult:
     """The verify body WITHOUT the workspace lock — for a caller that already holds it.
 
@@ -96,6 +112,8 @@ def run_verified(
     TREE of the notebook currently executing rather than merely declining to start the
     next one.
 
+    ``on_failures`` likewise goes straight to the runner — see :func:`verify_notebook`.
+
     ``rel_posix`` must already have passed :func:`ensure_runnable`."""
     workspace = cfg.workspace()
     # Capture the SHA of the bytes marimo is about to run BEFORE launching it, so an
@@ -109,6 +127,7 @@ def run_verified(
             verify.render_target(workspace, rel_posix),
             keep_on_success=False,
             cancel=cancel,
+            on_failures=on_failures,
         )
     except notebook_run.RunCancelled:
         # Ordered BEFORE the RunError catch it subclasses: "you stopped it" is not "it

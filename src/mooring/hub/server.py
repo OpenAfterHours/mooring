@@ -1357,6 +1357,7 @@ def create_app(hub: Hub) -> Starlette:
             Route("/api/ai/chat/send", chat.api_chat_send, methods=["POST"]),
             Route("/api/ai/chat/apply", chat.api_chat_apply, methods=["POST"]),
             Route("/api/ai/chat/rollback", chat.api_chat_rollback, methods=["POST"]),
+            Route("/api/ai/chat/run-report", chat.api_chat_run_report, methods=["POST"]),
             Route("/api/ai/notebook/toggle", chat.api_notebook_ai_toggle, methods=["POST"]),
             Route("/api/ai/model/toggle", chat.api_model_ai_toggle, methods=["POST"]),
             Route("/ai/batch", pages.batch_page),

@@ -124,6 +124,7 @@ EXPECTED_ROUTES = {
     ("/api/ai/chat/send", ("POST",), "api_chat_send"),
     ("/api/ai/chat/apply", ("POST",), "api_chat_apply"),
     ("/api/ai/chat/rollback", ("POST",), "api_chat_rollback"),
+    ("/api/ai/chat/run-report", ("POST",), "api_chat_run_report"),
     ("/api/ai/notebook/toggle", ("POST",), "api_notebook_ai_toggle"),
     # Per-model AI opt-out for Power BI semantic models (roadmap: pbi-semantic-model).
     ("/api/ai/model/toggle", ("POST",), "api_model_ai_toggle"),
