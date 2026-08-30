@@ -145,7 +145,7 @@ def test_notebook_is_shown_as_indexed_unwrapped_cells():
     assert "The notebook has 2 cell(s)" in section
     assert "# === cell 0 ===" in section and "# === cell 1 ===" in section
     assert "seed = 1" in section and "x = seed + 1" in section
-    assert "mooring_propose_cell_edit" in section  # the index line names its consumer
+    assert "mooring_propose_notebook_edit" in section  # the index line names its consumer
 
 
 def test_notebook_wrapper_never_reaches_the_model():
@@ -265,15 +265,21 @@ def test_the_index_view_says_that_it_is_a_snapshot():
     # Every session builds its system context ONCE (ai/session.py and ai/openai_session.py
     # set _system_context at construction and never rewrite it), so the moment the analyst
     # applies an insert or a delete, every index the model can see is stale — the same
-    # wrong-cell write as a forged marker, with no attacker involved. Until the context is
-    # refreshed per turn, the view must say so and point at the tool that reads live.
+    # wrong-cell write as a forged marker, with no attacker involved. The view must say
+    # so and point at the tool that reads live. (That is the MITIGATION; the guarantee is
+    # the propose tool's `expect`, pinned in tests/test_ai_tools.py — a model that ignores
+    # this paragraph has its mis-aimed edit refused rather than applied.)
     section = _notebook_section(build_system_context(**{**BASE, "notebook_source": _REAL_NB}))
     assert "SNAPSHOT" in section and "mooring_read_notebook_source" in section
+    # The view is also where the model reads the first line each `expect` needs, so it
+    # says which line that is rather than leaving the tool schema to explain it alone.
+    assert "FIRST LINE" in section and "`expect`" in section
     # ...and the tool guide must not pull the other way (it used to say only "read the
     # source first for the index", which reads as optional once indices are in context).
     from mooring.ai.session import _TOOL_GUIDE
 
-    assert "snapshot" in _TOOL_GUIDE and "mooring_read_notebook_source first" in _TOOL_GUIDE
+    assert "SNAPSHOT" in _TOOL_GUIDE and "mooring_read_notebook_source" in _TOOL_GUIDE
+    assert "`expect`" in _TOOL_GUIDE
 
 
 def test_the_dependency_header_is_scrubbed_like_any_other_notebook_text():

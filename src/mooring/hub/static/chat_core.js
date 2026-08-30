@@ -168,15 +168,16 @@ const ChatCore = (function () {
   }
 
   // The canned follow-up behind "Add as notes cell": ONE new appended markdown
-  // documentation cell via mooring_propose_cell SPECIFICALLY — the edit/rewrite
-  // tools are forbidden so the walkthrough can never clobber an existing cell.
-  // The proposal still rides the normal card → Apply → undo path.
+  // documentation cell. There is now ONE propose tool, so the forbidden thing is no
+  // longer a set of tool names but the other FIELDS of that tool — `appends` only,
+  // never `edits`, `deletes` or `cells` — so the walkthrough can never clobber an
+  // existing cell. The proposal still rides the normal card → Apply → undo path.
   function notesCellPrompt() {
     return (
       "Now add that walkthrough to the notebook as a notes cell. Propose ONE new " +
-      "markdown documentation cell using the mooring_propose_cell tool only — never " +
-      "mooring_propose_cell_edit, mooring_propose_notebook_edit or " +
-      "mooring_propose_notebook_rewrite, and do not touch any existing cell.\n" +
+      "markdown documentation cell using mooring_propose_notebook_edit with `appends` " +
+      "only — never its `edits`, `deletes` or `cells` fields, and do not touch any " +
+      "existing cell.\n" +
       "\n" +
       "The cell's text must begin with this disclaimer line:\n" +
       EXPLAIN_DISCLAIMER +
@@ -202,7 +203,7 @@ const ChatCore = (function () {
       "\n" +
       "First call mooring_read_notebook_source to see the current cells, and " +
       "mooring_get_schema for the datasets involved, so you pick real column and key " +
-      "names. Then propose ONE new cell (mooring_propose_cell) that:\n" +
+      "names. Then propose ONE new cell (mooring_propose_notebook_edit, using `appends`) that:\n" +
       "- begins with `import mooring_checks as mc` and `mc.reset()`;\n" +
       "- asserts the checks that fit THIS notebook — e.g. mc.unique_key(df, \"id\") on any " +
       "key you expect to be unique, mc.no_fanout(left, right, on=\"key\") before a join, " +
@@ -232,7 +233,7 @@ const ChatCore = (function () {
       "\n" +
       "First call mooring_read_notebook_source to see the current cells, and " +
       "mooring_get_schema for the datasets involved, so you use real dataframe and " +
-      "column names. Then propose ONE new cell (mooring_propose_cell) that:\n" +
+      "column names. Then propose ONE new cell (mooring_propose_notebook_edit, using `appends`) that:\n" +
       '- runs the query with `result = mo.sql("""...""")` (assign it to a well-named ' +
       "dataframe variable so later cells can use it);\n" +
       "- queries the dataframes already in scope BY THEIR VARIABLE NAME;\n" +

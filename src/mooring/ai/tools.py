@@ -10,13 +10,16 @@ tool serialisation.
 Every tool here is **value-free by construction** — it returns only a dataset's
 SCHEMA (names + dtypes, via the trusted ``schema`` module), the notebook's
 SOURCE code, or a list of dataset paths. None can reach a data value, a cell
-output, or the kernel. ``propose_cell`` does NOT write the notebook; it surfaces
-a proposal to the chat UI, and the analyst Applies it.
+output, or the kernel. ``propose_notebook_edit`` does NOT write the notebook; it
+surfaces a proposal to the chat UI, and the analyst Applies it.
 
-Before it surfaces anything, every propose tool composes the notebook its change
+Before it surfaces anything, the propose tool composes the notebook its change
 would produce IN MEMORY and statically validates it (see the propose gate below,
 on ``marimo_rt.validate_notebook_source``): a proposal that would break the
-notebook comes back to the model as the diagnostics, not as a success.
+notebook comes back to the model as the diagnostics, not as a success. An
+edit/delete is checked once more before that — against what the model SAYS is at
+the index it is targeting (``expect``; see :func:`_expect_matches`) — so a stale
+or forged index is refused instead of writing to a cell the model never read.
 
 Combined with ``available_tools`` allowlisting exactly these names (so the SDK's
 built-in file/shell tools are dropped) and a deny-all permission backstop, the
@@ -36,21 +39,29 @@ if TYPE_CHECKING:
 # The always-on tools. The session's ``available_tools`` allowlist is derived
 # from the tools actually built (these plus the dictionary tools when a data
 # dictionary is present), so it stays in lock-step with what is registered.
+#
+# ``mooring_propose_notebook_edit`` is the ONE write surface, and it is only on when the
+# caller wires a proposal callback — a read-only investigate sub-agent gets the three
+# reads and nothing else (see the gate on the spec below).
+#
+# There used to be FOUR propose tools — ``mooring_propose_cell`` (append),
+# ``mooring_propose_cell_edit`` (edit one), this one (the general patch) and
+# ``mooring_propose_notebook_rewrite`` (replace everything) — three of which expressed a
+# change this one already covers. Tool SELECTION is one of the sharpest capability
+# gradients between model tiers, and here a mis-selection was not graceful: a model asked
+# to FIX cell 3 that reached for the append tool wrote a SECOND definition of the same
+# name, which stops both cells and everything downstream. They were merged rather than
+# aliased: nothing outside this process ever calls a tool by name (no persisted
+# conversation — ``enable_session_store`` is False and the OpenAI message list is
+# in-memory — no HTTP or CLI surface takes a tool name), and on the copilot path
+# ``available_tools`` IS the advertised list, so a "hidden alias" cannot exist there. An
+# alias would therefore have been a fourth tool for the model to choose between, which is
+# the thing being removed.
 TOOL_NAMES = [
     "mooring_list_datasets",
     "mooring_get_schema",
     "mooring_read_notebook_source",
-    "mooring_propose_cell",
-]
-
-# Added when the caller supplies an ``emit_proposal_patch`` callback (the real chat
-# session always does). These let the model propose EDITING an existing cell or
-# rewriting the notebook — each is still propose-only (the analyst Applies it) and
-# value-free (it emits source code to the local UI, never reads a data value).
-EDIT_TOOL_NAMES = [
-    "mooring_propose_cell_edit",
     "mooring_propose_notebook_edit",
-    "mooring_propose_notebook_rewrite",
 ]
 
 # Cell-source format reminder for every propose tool: a cell's source is the BODY ONLY
@@ -64,6 +75,22 @@ _CELL_FORMAT = (
     " Each cell is the BODY ONLY (top-level statements) — do NOT include '@app.cell', "
     "'def _():', or a trailing 'return (...)'; those are added automatically."
 )
+
+# How many of a cell's leading lines the model's ``expect`` is checked against.
+#
+# ``expect`` is the model saying WHICH cell it believes index N holds. The server-captured
+# ``anchor`` cannot say that: it is read live at the index the model supplied, so it always
+# matches whatever is there and guards only the propose->apply race. A stale index (the
+# system context's cell view is built once per session and never refreshed) or a forged one
+# sails straight past it, into a cell the model never read.
+#
+# Three lines is the compromise: enough to tell neighbouring cells apart, few enough that a
+# model quoting a whole cell back is not held to reproducing all of it. Comparison is on
+# non-blank lines with each line's whitespace collapsed, so indentation drift, a re-wrapped
+# copy and the render's own defused cell-boundary marker (``egress._DEFUSED_BOUNDARY_MARK``,
+# which wedges one space into a comment) all still match. It is deliberately tolerant: a
+# false PASS is the behaviour this replaces, a false FAIL blocks correct work.
+_EXPECT_LINES = 3
 
 
 def sql_cell_guide() -> str:
@@ -103,7 +130,8 @@ def sql_cell_guide() -> str:
         "inline a data value, and prefer an explicit column list over SELECT *. Do NOT pivot or "
         "crosstab row VALUES into column headers (e.g. DuckDB PIVOT): the resulting column names "
         "would BE data values. Assign the result to a well-named dataframe variable so later "
-        "cells can use it, and propose it with mooring_propose_cell (the BODY only)."
+        "cells can use it, and propose it with mooring_propose_notebook_edit's `appends` "
+        "(the BODY only)."
     )
 
 # Added only when the workspace has a parsed data dictionary. Each is value-free:
@@ -161,6 +189,49 @@ def _safe(workspace: Path, rel: str) -> Path:
     target = (workspace / rel).resolve()
     target.relative_to(workspace.resolve())  # raises ValueError on escape
     return target
+
+
+def _lead_lines(code: str) -> list[str]:
+    """``code``'s leading non-blank lines, whitespace-collapsed, capped at
+    :data:`_EXPECT_LINES` — the normalised form both sides of an ``expect`` check take."""
+    lines = [" ".join(line.split()) for line in code.splitlines() if line.strip()]
+    return lines[:_EXPECT_LINES]
+
+
+def _expect_matches(expect: str, actual: str) -> bool:
+    """Whether ``actual`` starts the way the model said it does.
+
+    A PREFIX comparison on normalised lines, so the model may send one line (cheap, and
+    what the tool asks for) or paste several; more lines make a stronger claim and still
+    pass. An empty ``expect`` never matches — a claim has to be made to be checked.
+    """
+    want = _lead_lines(expect)
+    if not want:
+        return False
+    return _lead_lines(actual)[: len(want)] == want
+
+
+def _locate(expect: str, cells) -> int | None:
+    """The index of the ONE cell ``expect`` describes, or ``None`` if none or several do.
+
+    Only ever used to make a rejection actionable ("what you described is at index 5"),
+    which is the corrective half of a mis-target: it points the model at the cell it
+    actually meant, and — unlike quoting what is at the index it got wrong — it cannot be
+    copied back to succeed at writing over a cell it never read.
+    """
+    hits = [i for i, code in cells if _expect_matches(expect, code)]
+    return hits[0] if len(hits) == 1 else None
+
+
+def _as_list(value) -> list:
+    """A tool argument that should be a list, as one. ``None`` is empty; a lone scalar
+    becomes a one-item list, so a model that sends ``appends: "code"`` instead of
+    ``appends: ["code"]`` is answered rather than failed on a shape slip."""
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple)):
+        return list(value)
+    return [value]
 
 
 def _args(invocation) -> dict:
@@ -243,10 +314,13 @@ def build_tool_specs(
     key) — the second, dynamic schema egress (besides the system context) that the
     agent can reach at any time.
 
-    ``emit_proposal_patch`` (supplied by the real chat session) enables the
-    edit/rewrite tools: each captures the target cell's current source as an
-    ``anchor`` and emits a structured proposal ``{kind, ops, diffs}`` to the local
-    UI for the analyst to review and Apply (never an autonomous write).
+    Either proposal callback enables the ONE write tool,
+    ``mooring_propose_notebook_edit``: it captures each targeted cell's current source
+    as an ``anchor`` and emits a proposal to the local UI for the analyst to review and
+    Apply (never an autonomous write). ``emit_proposal_patch`` (the real chat session
+    supplies both) carries the structured ``{kind, ops, diffs}`` payload; a proposal
+    that is exactly one appended cell still goes out on ``emit_proposal`` as
+    ``{code, rationale}``, the shape the chat UI renders as an additive block.
 
     :func:`build_tools` adapts these to the copilot SDK; a second backend reuses the
     same handlers and only re-expresses the spec and result shapes.
@@ -313,20 +387,6 @@ def build_tool_specs(
             return _err(str(exc))
         scrubbed, _ = egress.scrub_text(egress.render_notebook_for_model(raw))
         return _ok(scrubbed)
-
-    def propose_cell(invocation):
-        args = _args(invocation)
-        code = marimo_rt.normalize_cell_code(str(args.get("code", "")))
-        rationale = str(args.get("rationale", ""))
-        if not code.strip():
-            return _err("code required")
-        refusal, note = _gate([{"op": "append", "code": code}])
-        if refusal is not None:
-            return refusal
-        emit_proposal(code, rationale)
-        return _ok(
-            "Proposed the cell to the analyst, who will review and apply it." + note
-        )
 
     def _coerce_index(value):
         try:
@@ -436,21 +496,54 @@ def build_tool_specs(
             "\n".join(f"- [{d.code}] {d.name}" for d in diagnostics[:_MAX_REPORTED]),
         )
 
-    def _refused(detail: str) -> "ToolOutput":
-        """The result for a proposal the gate is holding back. Nothing was emitted."""
+    def _spent_the_budget() -> "ToolOutput | None":
+        """Count one rejection, and return the give-up result once the budget is gone.
+
+        Shared by BOTH ways a proposal comes back refused — the static check and the
+        ``expect`` mis-target check — because they are the same problem from the model's
+        side: it has been told no, repeatedly, and is not converging. A model that cannot
+        aim at the right cell after three tries is exactly as stuck as one that cannot
+        write a cell the notebook accepts.
+        """
         _consecutive_failures[0] += 1
         if _consecutive_failures[0] > _VALIDATION_BUDGET:
             return _err(
-                f"NOT proposed. {_consecutive_failures[0]} proposals in a row have failed "
-                "mooring's static check, so re-proposing is not working. Stop calling the "
-                "propose tools for this change: tell the analyst in your reply what you were "
-                "trying to write and what the notebook does not allow, and let them decide."
+                f"NOT proposed. {_consecutive_failures[0]} proposals in a row have been "
+                "rejected, so re-proposing is not working. Stop calling the propose tools "
+                "for this change: tell the analyst in your reply what you were trying to "
+                "write and what the notebook does not allow, and let them decide."
             )
+        return None
+
+    def _refused(detail: str) -> "ToolOutput":
+        """The result for a proposal the gate is holding back. Nothing was emitted."""
+        spent = _spent_the_budget()
+        if spent is not None:
+            return spent
         return _err(
             "NOT proposed — the analyst was shown nothing. mooring built the notebook this "
             "change would produce and checked it statically; it would not work:\n"
             f"{detail}\n"
             "Fix the cause and call the tool again."
+        )
+
+    def _mistargeted(detail: str) -> "ToolOutput":
+        """The result for a change aimed at a cell the model has not actually seen.
+
+        Deliberately says NOTHING about what is really at that index. Handing over the
+        real first line would let a model that just wants the call to succeed paste it
+        back and write over a cell it never read — which is the exact outcome this check
+        exists to prevent. It re-points instead: read the notebook, then aim again.
+        """
+        spent = _spent_the_budget()
+        if spent is not None:
+            return spent
+        return _err(
+            "NOT proposed — the analyst was shown nothing. What you said is at that index "
+            "is not what is there, so mooring did not write to a cell you have not read:\n"
+            f"{detail}\n"
+            "Call mooring_read_notebook_source for the notebook as it is NOW, then propose "
+            "again against the current cells."
         )
 
     def _gate(op_dicts) -> tuple["ToolOutput | None", str]:
@@ -603,113 +696,114 @@ def build_tool_specs(
             return None
         return Counter(_diag_key(d) for d in found)
 
-    def propose_cell_edit(invocation):
-        args = _args(invocation)
-        code = marimo_rt.normalize_cell_code(str(args.get("code", "")))
-        rationale = str(args.get("rationale", ""))
-        if not code.strip():
-            return _err("code required")
-        idx = _coerce_index(args.get("index"))
-        if idx is None:
-            return _err("index (the integer cell number to edit) is required")
-        try:
-            cells = _current_cells()
-        except _NB_READ_ERRORS as exc:
-            return _err(f"cannot read the notebook cells: {exc}")
-        if not 0 <= idx < len(cells):
-            return _err(f"index must be 0..{len(cells) - 1} (the notebook has {len(cells)} cells)")
-        anchor = cells[idx][1]
-        ops = [{"op": "edit", "index": idx, "anchor": anchor, "code": code}]
-        refusal, note = _gate(ops)
-        if refusal is not None:
-            return refusal
-        assert emit_proposal_patch is not None  # tool only registered when the callback exists
-        emit_proposal_patch(
-            {
-                "kind": "edit",
-                "rationale": rationale,
-                "ops": ops,
-                "diffs": [{"label": f"cell {idx}", "before": anchor, "after": code}],
-            }
+    # --- the ONE write tool ----------------------------------------------------
+    #
+    # Every kind of change the copilot can make to the notebook arrives here: append,
+    # edit, delete, and the wholesale rewrite. What it EMITS is unchanged per op shape,
+    # so the analyst's card and both Apply routes see exactly the payloads they saw when
+    # four tools produced them — a lone append still goes out as the legacy
+    # `{code, rationale}`, a lone edit as `kind: "edit"`, a `cells` rewrite as
+    # `kind: "rewrite"`, anything else as `kind: "patch"`.
+
+    def _verify_target(idx: int, expect, cells) -> "ToolOutput | None":
+        """Check the model's claim about what is at ``idx``. ``None`` means it holds."""
+        text = str(expect or "").strip()
+        if not text:
+            return _mistargeted(
+                f"- cell {idx}: no 'expect' was given. Every edit and delete must say what "
+                "you believe is at that index — the first line of that cell, as you last "
+                "saw it — because the cell view you were given is a SNAPSHOT and anything "
+                "applied since has renumbered it. mooring will not tell you what is there; "
+                "read it."
+            )
+        if _expect_matches(text, cells[idx][1]):
+            return None
+        moved = _locate(text, cells)
+        where = (
+            f" What you described is at index {moved} in the notebook as it is now."
+            if moved is not None
+            else ""
         )
-        return _ok(
-            f"Proposed an edit to cell {idx} for the analyst to review and apply." + note
+        return _mistargeted(
+            f"- cell {idx} does not begin the way your 'expect' says it does, so it is not "
+            f"the cell you meant to change.{where}"
         )
 
     def propose_notebook_edit(invocation):
         args = _args(invocation)
         rationale = str(args.get("rationale", ""))
-        try:
-            cells = _current_cells()
-        except _NB_READ_ERRORS as exc:
-            return _err(f"cannot read the notebook cells: {exc}")
-        n = len(cells)
-        ops: list[dict] = []
-        diffs: list[dict] = []
-        targeted: set[int] = set()
-        for edit in args.get("edits") or []:
-            if not isinstance(edit, dict):
-                return _err("each entry in 'edits' must be an object {index, code}")
-            idx = _coerce_index(edit.get("index"))
-            code = marimo_rt.normalize_cell_code(str(edit.get("code", "")))
-            if idx is None:
-                return _err("each edit needs an integer 'index'")
-            if not code.strip():
-                return _err(f"the edit for cell {idx} has no code")
-            if not 0 <= idx < n:
-                return _err(f"edit index {idx} is out of range 0..{n - 1}")
-            if idx in targeted:
-                return _err(f"cell {idx} is targeted more than once")
-            targeted.add(idx)
-            anchor = cells[idx][1]
-            ops.append({"op": "edit", "index": idx, "anchor": anchor, "code": code})
-            diffs.append({"label": f"cell {idx}", "before": anchor, "after": code})
-        for raw in args.get("deletes") or []:
-            idx = _coerce_index(raw)
-            if idx is None:
-                return _err("each entry in 'deletes' must be an integer cell index")
-            if not 0 <= idx < n:
-                return _err(f"delete index {idx} is out of range 0..{n - 1}")
-            if idx in targeted:
-                return _err(f"cell {idx} is targeted more than once")
-            targeted.add(idx)
-            anchor = cells[idx][1]
-            ops.append({"op": "delete", "index": idx, "anchor": anchor})
-            diffs.append({"label": f"cell {idx} (deleted)", "before": anchor, "after": ""})
-        for raw in args.get("appends") or []:
-            code = marimo_rt.normalize_cell_code(
-                str(raw.get("code", "") if isinstance(raw, dict) else raw)
-            )
-            if not code.strip():
-                return _err("an appended cell has no code")
-            ops.append({"op": "append", "code": code})
-            diffs.append({"label": "new cell", "before": "", "after": code})
-        if not ops:
-            return _err("provide at least one of edits, appends, or deletes")
-        refusal, note = _gate(ops)
-        if refusal is not None:
-            return refusal
-        assert emit_proposal_patch is not None  # tool only registered when the callback exists
-        emit_proposal_patch({"kind": "patch", "rationale": rationale, "ops": ops, "diffs": diffs})
-        return _ok(
-            f"Proposed {len(ops)} change(s) to the notebook for the analyst to review and apply."
-            + note
-        )
+        edits = _as_list(args.get("edits"))
+        appends = _as_list(args.get("appends"))
+        deletes = _as_list(args.get("deletes"))
+        raw_cells = args.get("cells")
 
-    def propose_notebook_rewrite(invocation):
-        args = _args(invocation)
-        rationale = str(args.get("rationale", ""))
+        # Shape tolerance for the flat form the retired tools took (`code`, or `code` +
+        # `index`): a model that reaches for it is answered rather than failed, and the
+        # change still goes through every check below — including `expect`, which an
+        # `index` here does not get to skip. One tool, one schema; this only stops a
+        # near-miss costing a whole round-trip.
+        top_code = args.get("code")
+        if isinstance(top_code, str) and top_code.strip():
+            top_index = _coerce_index(args.get("index"))
+            if top_index is None:
+                appends = [*appends, top_code]
+            else:
+                edits = [
+                    *edits,
+                    {"index": top_index, "code": top_code, "expect": args.get("expect", "")},
+                ]
+
+        if raw_cells is not None:
+            return _propose_rewrite(raw_cells, args, rationale, edits, appends, deletes)
+        return _propose_patch(edits, appends, deletes, rationale)
+
+    def _propose_rewrite(raw_cells, args, rationale, edits, appends, deletes):
+        """The ``cells`` variant: replace every cell in the notebook.
+
+        Kept as a field on this tool rather than a separate one because it is the same
+        act — proposing the notebook's next state — and because forcing a rewrite through
+        N edits + M deletes would make the model enumerate indices it may well get wrong,
+        pushing work onto exactly the weak model this consolidation is for. It is the
+        most destructive shape the tool has, so it is EXCLUSIVE (a model that meant to
+        append cannot half-fill it) and it carries its own claim, ``expect_cells``.
+        """
+        if edits or appends or deletes:
+            return _err(
+                "'cells' REPLACES the whole notebook, so it cannot be combined with edits, "
+                "appends or deletes. Send either 'cells' on its own for a wholesale "
+                "rewrite, or the targeted changes."
+            )
+        if not isinstance(raw_cells, (list, tuple)):
+            return _err(
+                "'cells' must be a LIST of cell bodies (the full ordered notebook). A "
+                "single string would rewrite the notebook as one cell."
+            )
         new_cells = [
             marimo_rt.normalize_cell_code(str(c.get("code", "") if isinstance(c, dict) else c))
-            for c in (args.get("cells") or [])
+            for c in raw_cells
         ]
         new_cells = [c for c in new_cells if c.strip()]
         if not new_cells:
             return _err("a rewrite needs a non-empty 'cells' list of cell source strings")
         try:
-            before = "\n\n".join(code for _, code in _current_cells())
+            current = _current_cells()
         except _NB_READ_ERRORS:
-            before = ""  # still allow the rewrite; the diff just reads as all-additions
+            # Nothing to verify the claim against, and nothing to diff against either. The
+            # house rule everywhere in this module: what cannot be checked cannot refuse.
+            current = None
+        if current is not None:
+            claimed = _coerce_index(args.get("expect_cells"))
+            if claimed is None:
+                return _mistargeted(
+                    "- a rewrite discards every existing cell, so 'expect_cells' is "
+                    "required: how many cells you believe the notebook has right now."
+                )
+            if claimed != len(current):
+                return _mistargeted(
+                    f"- you said the notebook has {claimed} cell(s). It does not — so a "
+                    "rewrite built from that view would delete cells you have never seen."
+                )
+        before = "\n\n".join(code for _, code in current) if current is not None else ""
         # A rewrite replaces every cell, so its candidate is these cells wholesale —
         # the path where a weak model's output is LEAST constrained by existing code,
         # and the one where an unchecked proposal costs the whole notebook.
@@ -717,7 +811,8 @@ def build_tool_specs(
         refusal, note = _gate(ops)
         if refusal is not None:
             return refusal
-        assert emit_proposal_patch is not None  # tool only registered when the callback exists
+        if emit_proposal_patch is None:
+            return _err("this session can only propose appended cells")
         emit_proposal_patch(
             {
                 "kind": "rewrite",
@@ -730,6 +825,97 @@ def build_tool_specs(
         )
         return _ok(
             f"Proposed a full rewrite ({len(new_cells)} cells) for the analyst to review and apply."
+            + note
+        )
+
+    def _propose_patch(edits, appends, deletes, rationale):
+        """The targeted form: any mix of edits, deletes and appends as ONE patch."""
+        cells = None
+        try:
+            cells = _current_cells()
+        except _NB_READ_ERRORS as exc:
+            if edits or deletes:
+                # An index has nothing to mean without cells to index into.
+                return _err(f"cannot read the notebook cells: {exc}")
+        n = len(cells) if cells is not None else 0
+        ops: list[dict] = []
+        diffs: list[dict] = []
+        targeted: set[int] = set()
+
+        def _claim(idx, where: str) -> "ToolOutput | None":
+            if idx is None:
+                return _err(f"each entry in '{where}' needs an integer 'index'")
+            if not 0 <= idx < n:
+                return _err(f"{where} index {idx} is out of range 0..{n - 1}")
+            if idx in targeted:
+                return _err(f"cell {idx} is targeted more than once")
+            targeted.add(idx)
+            return None
+
+        for edit in edits:
+            if not isinstance(edit, dict):
+                return _err("each entry in 'edits' must be an object {index, expect, code}")
+            idx = _coerce_index(edit.get("index"))
+            code = marimo_rt.normalize_cell_code(str(edit.get("code", "")))
+            if idx is not None and not code.strip():
+                return _err(f"the edit for cell {idx} has no code")
+            bad = _claim(idx, "edits")
+            if bad is not None:
+                return bad
+            bad = _verify_target(idx, edit.get("expect"), cells)
+            if bad is not None:
+                return bad
+            anchor = cells[idx][1]
+            ops.append({"op": "edit", "index": idx, "anchor": anchor, "code": code})
+            diffs.append({"label": f"cell {idx}", "before": anchor, "after": code})
+        for raw in deletes:
+            # A bare integer is accepted only so the model gets the real answer — that a
+            # delete needs an 'expect' too — instead of a shape complaint. Deleting the
+            # wrong cell is worse than editing it, not better.
+            entry = raw if isinstance(raw, dict) else {"index": raw}
+            idx = _coerce_index(entry.get("index"))
+            bad = _claim(idx, "deletes")
+            if bad is not None:
+                return bad
+            bad = _verify_target(idx, entry.get("expect"), cells)
+            if bad is not None:
+                return bad
+            anchor = cells[idx][1]
+            ops.append({"op": "delete", "index": idx, "anchor": anchor})
+            diffs.append({"label": f"cell {idx} (deleted)", "before": anchor, "after": ""})
+        for raw in appends:
+            code = marimo_rt.normalize_cell_code(
+                str(raw.get("code", "") if isinstance(raw, dict) else raw)
+            )
+            if not code.strip():
+                return _err("an appended cell has no code")
+            ops.append({"op": "append", "code": code})
+            diffs.append({"label": "new cell", "before": "", "after": code})
+        if not ops:
+            return _err("provide at least one of edits, appends, deletes, or cells (a rewrite)")
+        refusal, note = _gate(ops)
+        if refusal is not None:
+            return refusal
+
+        # One appended cell keeps the legacy `{code, rationale}` event: the chat renders it
+        # as an additive block rather than a diff against nothing, which is the better card
+        # for the commonest change the copilot makes.
+        if len(ops) == 1 and ops[0]["op"] == "append" and emit_proposal is not None:
+            emit_proposal(ops[0]["code"], rationale)
+            return _ok("Proposed the cell to the analyst, who will review and apply it." + note)
+        if emit_proposal_patch is None:
+            return _err("this session can only propose appended cells")
+        if len(ops) == 1 and ops[0]["op"] == "edit":
+            emit_proposal_patch(
+                {"kind": "edit", "rationale": rationale, "ops": ops, "diffs": diffs}
+            )
+            return _ok(
+                f"Proposed an edit to cell {ops[0]['index']} for the analyst to review and apply."
+                + note
+            )
+        emit_proposal_patch({"kind": "patch", "rationale": rationale, "ops": ops, "diffs": diffs})
+        return _ok(
+            f"Proposed {len(ops)} change(s) to the notebook for the analyst to review and apply."
             + note
         )
 
@@ -965,132 +1151,124 @@ def build_tool_specs(
         ),
     ]
 
-    # The propose tool is the WRITE surface. It is gated on ``emit_proposal`` (mirroring
-    # the edit tools' gate on ``emit_proposal_patch`` below), so a READ-ONLY session — an
-    # investigate sub-agent, built with emit_proposal=None — registers NO way to write:
+    # The propose tool is the WRITE surface, and there is exactly ONE of it. It is gated
+    # on a proposal callback, so a READ-ONLY session — an investigate sub-agent, built
+    # with emit_proposal=None and emit_proposal_patch=None — registers NO way to write:
     # only the value-free read tools above (plus dictionary/model/helper reads). This gate
     # is a LOAD-BEARING privacy invariant: a sub-agent's finding is trusted because the
     # sub-agent is structurally value-blind (docs/admins/ai-privacy.md), which holds only
     # if no write/value-returning tool is ever added to a read-only session.
-    if emit_proposal is not None:
-        specs.append(
-            ToolSpec(
-                "mooring_propose_cell",
-                "Propose a Python cell for the analyst to apply into the notebook. "
-                "Use this to suggest code; the analyst reviews and applies it." + _CELL_FORMAT,
-                handler=propose_cell,
-                parameters={
-                    "type": "object",
-                    "properties": {
-                        "code": {
-                            "type": "string",
-                            "description": "the cell BODY (no @app.cell/def/return)",
-                        },
-                        "rationale": {"type": "string", "description": _RATIONALE_DESC},
-                    },
-                    "required": ["code"],
-                },
-                skip_permission=True,  # only surfaces a proposal to the analyst; never injects
-                blocking=True,  # runs the static check off the SDK's loop (see below)
-            )
-        )
-
-    # Every propose tool is `blocking`: each now builds the candidate notebook and runs
+    #
+    # It is `blocking`: it builds the candidate notebook and runs
     # `marimo_rt.validate_notebook_source` on it — measured end to end at ~50 ms for a
     # 12-cell notebook, ~170 ms at 48 cells and ~370 ms at 100, with the validator's own
-    # 5 s cap under it — and that validator is not safe to call from a coroutine: it
-    # joins its own worker thread, and it serializes on a module-wide lock, so a propose
-    # in one chat session can queue behind another's. On the copilot path handlers run ON
-    # the SDK's event-loop thread, which must stay free for streaming and teardown, so the
+    # 5 s cap under it — and that validator is not safe to call from a coroutine: it joins
+    # its own worker thread, and it serializes on a module-wide lock, so a propose in one
+    # chat session can queue behind another's. On the copilot path handlers run ON the
+    # SDK's event-loop thread, which must stay free for streaming and teardown, so the
     # adapter hands a blocking handler to a worker thread. (The OpenAI session already
     # runs its loop on its own thread, where the flag is a no-op.)
-    if emit_proposal_patch is not None:
-        specs += [
-            ToolSpec(
-                "mooring_propose_cell_edit",
-                "Propose REPLACING an existing cell's code. Read the notebook first "
-                "(mooring_read_notebook_source) to get cell indices. The analyst sees a "
-                "diff and applies it; only that cell (and its dependents) re-runs." + _CELL_FORMAT,
-                handler=propose_cell_edit,
-                parameters={
-                    "type": "object",
-                    "properties": {
-                        "index": {
-                            "type": "integer",
-                            "description": "the cell number to edit (0-based)",
-                        },
-                        "code": {
-                            "type": "string",
-                            "description": "the new cell BODY (no @app.cell/def/return)",
-                        },
-                        "rationale": {"type": "string", "description": _RATIONALE_DESC},
-                    },
-                    "required": ["index", "code"],
-                },
-                skip_permission=True,  # surfaces a proposal only; the analyst applies it
-                blocking=True,  # static check off the loop (see the note above)
-            ),
+    if emit_proposal is not None or emit_proposal_patch is not None:
+        specs.append(
             ToolSpec(
                 "mooring_propose_notebook_edit",
-                "Propose SEVERAL cell changes at once — edits, appends, and deletes — "
-                "as one reviewable patch (prefer this for a multi-cell change). Indices "
-                "are 0-based against the current notebook. The analyst reviews and applies."
-                + _CELL_FORMAT,
+                "THE one tool that changes the notebook: propose new cells, edits to "
+                "existing cells, deletions, or a wholesale rewrite — any mix, as ONE "
+                "reviewable patch. You never write the file; the analyst sees a diff and "
+                "applies it. To CHANGE what the notebook already does, EDIT the cell that "
+                "does it: appending a second cell that defines the same name stops both "
+                "cells and everything downstream. Indices are 0-based against the notebook "
+                "AS IT IS NOW — call mooring_read_notebook_source first if anything has "
+                "been applied since the cell view you were given. Every 'edits' and "
+                "'deletes' entry MUST carry 'expect' (the first line of the cell you "
+                "believe is at that index); mooring checks it against the real cell and "
+                "refuses the whole change if they disagree, which is what stops a stale "
+                "index writing over a cell you never read." + _CELL_FORMAT,
                 handler=propose_notebook_edit,
                 parameters={
                     "type": "object",
                     "properties": {
                         "edits": {
                             "type": "array",
-                            "description": "cells to replace",
+                            "description": "cells to replace with new source",
                             "items": {
                                 "type": "object",
                                 "properties": {
-                                    "index": {"type": "integer"},
-                                    "code": {"type": "string"},
+                                    "index": {
+                                        "type": "integer",
+                                        "description": "0-based index of the cell to replace",
+                                    },
+                                    "expect": {
+                                        "type": "string",
+                                        "description": (
+                                            "the FIRST LINE of the cell you believe is at "
+                                            "that index, copied from the cell view you were "
+                                            "shown (checked; the edit is refused if it does "
+                                            "not match)"
+                                        ),
+                                    },
+                                    "code": {
+                                        "type": "string",
+                                        "description": "the new cell BODY (no @app.cell/def/return)",
+                                    },
                                 },
-                                "required": ["index", "code"],
+                                "required": ["index", "expect", "code"],
                             },
                         },
                         "appends": {
                             "type": "array",
-                            "description": "source of new cells to add at the end",
+                            "description": "BODIES of brand-new cells to add at the end",
                             "items": {"type": "string"},
                         },
                         "deletes": {
                             "type": "array",
-                            "description": "indices of cells to remove",
-                            "items": {"type": "integer"},
+                            "description": "cells to remove",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "index": {
+                                        "type": "integer",
+                                        "description": "0-based index of the cell to remove",
+                                    },
+                                    "expect": {
+                                        "type": "string",
+                                        "description": (
+                                            "the FIRST LINE of the cell you believe is at "
+                                            "that index (checked, as for an edit)"
+                                        ),
+                                    },
+                                },
+                                "required": ["index", "expect"],
+                            },
                         },
-                        "rationale": {"type": "string", "description": _RATIONALE_DESC},
-                    },
-                },
-                skip_permission=True,  # surfaces a proposal only; the analyst applies it
-                blocking=True,  # static check off the loop (see the note above)
-            ),
-            ToolSpec(
-                "mooring_propose_notebook_rewrite",
-                "Propose REPLACING THE WHOLE notebook with a new ordered list of cells. "
-                "Heavier than an edit (every changed cell re-runs and loses its identity) — "
-                "PREFER mooring_propose_notebook_edit for targeted changes; use this only for "
-                "a wholesale rewrite. The analyst reviews a full diff and applies." + _CELL_FORMAT,
-                handler=propose_notebook_rewrite,
-                parameters={
-                    "type": "object",
-                    "properties": {
                         "cells": {
                             "type": "array",
-                            "description": "the full ordered list of cell BODIES (each: no @app.cell/def/return)",
+                            "description": (
+                                "REWRITE: the full ordered list of cell BODIES that REPLACES "
+                                "every existing cell. Heavier than an edit (every cell loses "
+                                "its identity and re-runs) and it discards anything you did "
+                                "not carry over — use it only for a wholesale rewrite, never "
+                                "to add a cell, and never together with edits/appends/"
+                                "deletes. Requires expect_cells."
+                            ),
                             "items": {"type": "string"},
+                        },
+                        "expect_cells": {
+                            "type": "integer",
+                            "description": (
+                                "with 'cells' only: how many cells you believe the notebook "
+                                "has right now (checked; the rewrite is refused if it does "
+                                "not match, because one built from a stale view would delete "
+                                "cells you have not seen)"
+                            ),
                         },
                         "rationale": {"type": "string", "description": _RATIONALE_DESC},
                     },
-                    "required": ["cells"],
                 },
                 skip_permission=True,  # surfaces a proposal only; the analyst applies it
                 blocking=True,  # static check off the loop (see the note above)
-            ),
-        ]
+            )
+        )
 
     if dictionary is not None and not dictionary.is_empty():
         specs += [

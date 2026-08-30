@@ -208,7 +208,8 @@ _RAW_NOTEBOOK_NOTE = (
     "NOTE: this file could not be split into marimo cells, so it is shown below exactly "
     "as it is on disk — for a marimo notebook that is the WRAPPED form (`@app.cell` / "
     "`def _(...)` / a trailing `return (...)`) — with NO cell indices. Code you propose "
-    "is still BODY ONLY, and mooring_propose_cell_edit has no index to target here.\n\n"
+    "is still BODY ONLY, and mooring_propose_notebook_edit has no index to target here — "
+    "only `appends` and a whole-notebook `cells` rewrite can apply.\n\n"
 )
 
 _NOTEBOOK_HEADER_LABEL = (
@@ -225,10 +226,12 @@ _WRAPPER_LEAK_RE = re.compile(r"^@app\.(?:cell|function|class_definition)\b", re
 
 # A cell body containing the literal text of a boundary line FORGES a cell: the render
 # emits two blocks labelled `cell 1`, the model edits the one it read, and the index it
-# sends names the OTHER — a real cell it never looked at. The anchor cannot catch that;
-# `propose_cell_edit` takes it from a live read at the index the model supplied, so it
+# sends names the OTHER — a real cell it never looked at. The server-captured anchor
+# cannot catch that; it is taken from a live read at the index the model supplied, so it
 # matches the real cell and the wrong write succeeds. Demonstrated end to end, not
-# theorised. So the boundary is made unforgeable at the ONE place it is emitted: any line
+# theorised. The model-supplied `expect` (ai/tools.py) now catches it at the propose
+# boundary, but defence in depth costs one space: the boundary is also made unforgeable at
+# the ONE place it is emitted, so the two blocks never appear in the first place. Any line
 # in a body that would read as one gets a space wedged in, which cannot change what the
 # code DOES (the marker only ever matches a line whose first non-blank characters are the
 # `#` of a comment) and leaves the text otherwise intact for the model to copy back.
@@ -256,11 +259,16 @@ def render_notebook_for_model(source: str) -> str:
 
     The indices are a SNAPSHOT, and the rendering says so. Each session's system context
     is built once (``ai/session.py`` / ``ai/openai_session.py`` set ``_system_context`` at
-    construction and never rewrite it), so after the analyst applies anything that inserts
-    or deletes a cell, the indices in it are stale — and a stale index mis-targets a write
-    exactly like a forged one. The header therefore tells the model to re-read via
-    ``mooring_read_notebook_source`` (which always reads live) before editing if anything
-    has been applied. Refreshing the context per turn is the real fix and is queued.
+    construction and never rewrite it — on the copilot path it is a ``create_session``
+    kwarg, so it CANNOT be rewritten without discarding the conversation), so after the
+    analyst applies anything that inserts or deletes a cell, the indices in it are stale —
+    and a stale index mis-targets a write exactly like a forged one. The header therefore
+    tells the model to re-read via ``mooring_read_notebook_source`` (which always reads
+    live) before editing if anything has been applied. That prompt is the mitigation; the
+    guarantee is ``mooring_propose_notebook_edit``'s ``expect``, which makes the model
+    state what it believes is at the index it targets and refuses the change when the
+    notebook disagrees. This view is where it reads that first line, so the header points
+    at it.
 
     What a rendered notebook CARRIES: every cell's body, in file order, under its
     index; a ``DISABLED`` marker on any cell marimo will not run (from the options
@@ -325,7 +333,9 @@ def render_notebook_for_model(source: str) -> str:
         f"The notebook has {len(cells)} cell(s), each shown below with its index. Those "
         "indices are a SNAPSHOT of the notebook as it was when this view was made: if any "
         "cell has been applied, added or deleted since, call mooring_read_notebook_source "
-        "for current indices before calling mooring_propose_cell_edit."
+        "for current indices before editing with mooring_propose_notebook_edit. Each "
+        "cell's FIRST LINE below is what that tool's `expect` wants, so keep this view to "
+        "hand — it is checked against the real cell and a mismatch refuses the change."
     ]
     if header.strip():
         parts.append(f"{_NOTEBOOK_HEADER_LABEL}\n{header.strip()}")

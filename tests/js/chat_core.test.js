@@ -411,7 +411,7 @@ test("checksPrompt: a pure constant that names the value-free mooring_checks API
     assert.ok(p.includes(fn), fn);
   }
   // It must propose (review-then-apply), never ask for data values.
-  assert.match(p, /mooring_propose_cell/);
+  assert.match(p, /mooring_propose_notebook_edit, using `appends`/);
   assert.match(p, /never ask for data values/);
 });
 
@@ -427,7 +427,7 @@ test("sqlPrompt: a pure constant that names the value-free mo.sql/DuckDB idiom",
   assert.match(p, /mo\.sql/);
   assert.match(p, /DuckDB/);
   // Propose (review-then-apply), schema-only, no SELECT * to "peek" and no data values.
-  assert.match(p, /mooring_propose_cell/);
+  assert.match(p, /mooring_propose_notebook_edit, using `appends`/);
   assert.match(p, /no SELECT \*/);
   assert.match(p, /never inline a /);
   // The applied cell must actually run: the import + the duckdb dependency (review).
@@ -496,16 +496,15 @@ test("investigate is a command: parseSlash and filterCommands pick it up", () =>
   assert.deepEqual(C.filterCommands("i").map((c) => c.name), ["investigate"]);
 });
 
-test("notesCellPrompt: mooring_propose_cell ONLY — edit/rewrite tools forbidden", () => {
+test("notesCellPrompt: `appends` ONLY — the destructive fields are forbidden", () => {
   const p = C.notesCellPrompt();
   assert.equal(p, C.notesCellPrompt()); // constant
   assert.match(p, /ONE new/);
-  assert.match(p, /mooring_propose_cell tool only/);
-  // The walkthrough may never clobber an existing cell: each write tool is
-  // named and forbidden, so a model can't "helpfully" reach for a rewrite.
-  assert.match(p, /never\s+mooring_propose_cell_edit/);
-  assert.match(p, /mooring_propose_notebook_edit/);
-  assert.match(p, /mooring_propose_notebook_rewrite/);
+  assert.match(p, /mooring_propose_notebook_edit with `appends`/);
+  // The walkthrough may never clobber an existing cell. With ONE propose tool the
+  // thing to forbid is no longer a set of tool names but that tool's other FIELDS,
+  // so a model can't "helpfully" reach for a rewrite.
+  assert.match(p, /never its `edits`, `deletes` or `cells` fields/);
   assert.match(p, /do not touch any existing cell/);
 });
 

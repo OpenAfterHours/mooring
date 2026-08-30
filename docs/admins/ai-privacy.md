@@ -69,15 +69,23 @@ DAX), but never the data itself.
    [structured-PII scan](#structured-pii-pre-flight-scan-opt-in-best-effort) runs at
    all of these, not only `build_system_context`.
 2. **Value-free tools only.** The agent is given mooring's own tools (`ai/tools.py`):
-   list datasets, get a schema, read the notebook source, and *propose* a cell —
-   each value-free by construction. A propose tool answers with mooring's **static
+   list datasets, get a schema, read the notebook source, and *propose* a change —
+   each value-free by construction. There is exactly **one** propose tool,
+   `mooring_propose_notebook_edit`, and it covers every change the copilot can make
+   (new cells, edits, deletions, a wholesale rewrite) as one reviewable patch. It
+   answers with mooring's **static
    check** of the notebook that proposal would produce (`marimo_rt.validate_notebook_source`):
    the candidate is composed in memory, never written, and checked on the AST alone —
    nothing is executed, so there is no runtime value for a finding to carry. A finding is
    a rule code, a rule slug, a line number, and the rule's own wording. That text is the
    one thing here mooring does not author (marimo's `message`/`fix` are forwarded as
    written), so it goes through `egress.scrub_text` like every other tool result before it
-   can leave. When a data dictionary is configured, three more
+   can leave. An edit or a deletion is checked once more before that: the model has to
+   state which cell it *believes* is at the index it is targeting, and mooring refuses
+   the whole change when the notebook disagrees — so a model working from a cell view
+   that has since been renumbered is stopped rather than writing over a cell it never
+   read. The refusal tells it to re-read; it never quotes back what is actually there.
+   When a data dictionary is configured, three more
    tools (`list_tables`, `describe_table`, `search_dictionary`) serve it; they look
    up tables by name in an **in-memory parsed index** (never a filesystem path) and
    return only the five allowlisted fields (see [Team context](#team-context-opt-in-not-a-structural-guarantee)).
@@ -193,8 +201,9 @@ It preserves every guarantee above, and its safety rests on one load-bearing inv
   exactly a branch's job). Note the compounding: a fan-out runs up to 8 sub-agents at
   once, so anything they can read is read in parallel. That is a large part of why the
   catalog carries no free prose and is opt-in. The
-  read-only tool subset is enforced in one place (`ai/tools.py`: the propose tool is gated
-  on the `emit_proposal` callback, which a sub-agent is never given) and pinned by a test.
+  read-only tool subset is enforced in one place (`ai/tools.py`: the one propose tool is
+  gated on the proposal callbacks, neither of which a sub-agent is ever given) and pinned
+  by a test.
   The merge still applies the checksum-PII floor as defence-in-depth, but that floor is
   *beneath* the structural guarantee, not the guarantee itself.
 - **Investigations cannot recurse.** `mooring_investigate` is never in a sub-agent's own

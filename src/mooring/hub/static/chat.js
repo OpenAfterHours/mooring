@@ -31,10 +31,7 @@ const TOOL_LABELS = {
   mooring_list_datasets: "listing datasets",
   mooring_get_schema: "looking up the schema",
   mooring_read_notebook_source: "reading the notebook",
-  mooring_propose_cell: "drafting a cell",
-  mooring_propose_cell_edit: "drafting an edit",
   mooring_propose_notebook_edit: "drafting changes",
-  mooring_propose_notebook_rewrite: "rewriting the notebook",
   mooring_list_tables: "listing dictionary tables",
   mooring_describe_table: "describing a table",
   mooring_search_dictionary: "searching the dictionary",
@@ -717,7 +714,7 @@ function copyCode(code, note) {
 // A walkthrough that lives only in this transcript rots; one that syncs with the
 // notebook greets the next inheritor. After an explain turn goes idle, offer to
 // send the canned follow-up (chat_core.js notesCellPrompt — one appended markdown
-// cell via mooring_propose_cell only). The resulting proposal rides the normal
+// cell via the propose tool's `appends` only). The resulting proposal rides the normal
 // card → Apply → Undo path untouched, so it still gets the human review step.
 function offerNotesCell() {
   const rows = $("messages").querySelectorAll(".row-assistant");

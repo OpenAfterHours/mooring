@@ -12,7 +12,7 @@ icon: lucide/book-open
     + `&explain=1`, auto-run consumed by a once-per-window flag at both
     readiness paths so a `/model` or effort switch never re-fires it), the
     **Add as notes cell** follow-up (offered on the explain reply when the turn
-    goes idle; `notesCellPrompt()` demands `mooring_propose_cell` only, with the
+    goes idle; `notesCellPrompt()` demands the propose tool's `appends` only, with the
     disclaimer inside the cell), and the docs. Entirely static-JS (L4) as
     designed — zero new Python, endpoints, or config keys, checked by the
     unchanged route-table pin in `tests/test_hub_routes.py`. The optional
@@ -81,7 +81,7 @@ the transcript.
 **Keeping it with the notebook.** After an explain reply finishes, the reply
 card offers an "Add as notes cell" button. It sends a canned follow-up turn
 asking the model to propose the walkthrough as a single markdown documentation
-cell via the existing `mooring_propose_cell` tool. That proposal flows through
+cell via the existing propose tool's `appends` field. That proposal flows through
 the normal card → Apply → `/api/ai/chat/apply` path, so it gets the same review
 step, the same `ApplyGuard.apply_with_undo` byte snapshot
 (`src/mooring/app/apply.py` — which also re-checks the per-notebook AI opt-out
@@ -102,7 +102,7 @@ Two deliberate adaptations from the ideation sketch, following the code:
   `mooring.marimo_rt.CellOp` are `append` / `edit` / `delete` / `replace_all` —
   there is no insert-at-position, so the cell lands at the end of the file.
   Cosmetic only (marimo execution is dataflow-ordered, not top-to-bottom), and
-  the model routing through `mooring_propose_cell` — rather than a
+  the model routing through the propose tool — rather than a
   deterministic UI wrapper — also sidesteps the `mo.md` problem: `mo.md` needs
   `import marimo as mo`, and only the model, which can see the source, knows
   whether blindly adding that import would collide with an existing definition.
@@ -118,7 +118,7 @@ sequenceDiagram
     Srv->>AI: session.send → _pii_gate → model
     AI-->>Chat: streamed, cell-anchored walkthrough
     Chat->>Srv: "Add as notes cell" follow-up turn (optional)
-    AI-->>Chat: mooring_propose_cell proposal
+    AI-->>Chat: mooring_propose_notebook_edit (appends) proposal
     Chat->>Srv: Apply → /api/ai/chat/apply (+ undo snapshot)
 ```
 
@@ -172,7 +172,7 @@ channel.
 3. **"Add as notes cell"** (M)
     - Add a pure `notesCellPrompt()` to `chat_core.js` — the canned follow-up
       asking the model to propose the walkthrough as one markdown
-      documentation cell via `mooring_propose_cell`, prefixed with the
+      documentation cell via the propose tool's `appends`, prefixed with the
       generated-content disclaimer, adapting to whether `marimo` is imported.
     - In `chat.js`, tag the assistant reply that answers an explain turn and
       render the button on its card; clicking sends the follow-up turn. The
