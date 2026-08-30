@@ -22,6 +22,7 @@ gateway or an Azure resource so an enterprise can keep data in its own tenant.
 from __future__ import annotations
 
 import os
+import re
 import time
 from collections.abc import Mapping
 
@@ -64,6 +65,18 @@ _NON_CHAT_MARKERS = (
     "transcribe",
     "search",  # e.g. *-search-preview endpoints are not general chat
 )
+
+# The reasoning-effort choices advertised for a reasoning-capable model. OpenAI's
+# listing carries no per-model effort metadata, so this is a fixed advisory list.
+# "default" is a SENTINEL, not an API value: it means "send no reasoning_effort at
+# all" (the session normalises it away). It is FIRST on purpose — ChatCore.chooseEffort
+# falls back to ``efforts[0]`` when neither a stored pick nor a configured default is
+# selectable, so merely making the picker visible keeps a FRESH user's requests
+# byte-for-byte as today. This list is deliberately config-blind: a configured
+# ``ai.reasoning_effort`` outside it (``minimal``, ``xhigh``, a gateway's own value)
+# is unioned in by the hub route that serves the listing (hub/routes/chat.py), which
+# is the only layer that knows the user's config.
+_REASONING_EFFORTS = ("default", "none", "low", "medium", "high")
 
 
 def _keyring():
@@ -122,15 +135,77 @@ def delete_api_key() -> None:
         pass
 
 
+_AUTH_MARKERS = ("401", "unauthorized", "invalid api key", "api key")
+_RATE_MARKERS = ("429", "rate limit", "quota")
+_EFFORT_FIELDS = ("reasoning_effort", "reasoning effort")
+# A MENTION of the parameter is not a rejection of it: an error body routinely echoes
+# the request's parameters, so a 401 or a 429 can name reasoning_effort while being
+# about something else entirely. Require a word that says the server refused it.
+_EFFORT_REJECTIONS = (
+    "unsupported",
+    "not supported",
+    "does not support",
+    "unrecognized",
+    "unrecognised",
+    "unknown",
+    "unexpected",
+    "invalid",
+    "not permitted",
+    "not allowed",
+    "cannot be used",
+    "must be",
+)
+_AUTH_HELP = (
+    "OpenAI rejected the request: the API key is missing or invalid. "
+    "Check MOORING_OPENAI_API_KEY / OPENAI_API_KEY (or your base_url)."
+)
+_RATE_HELP = "OpenAI rate-limited the request or the account is out of quota."
+_EFFORT_HELP = (
+    "OpenAI rejected the reasoning effort: this model may not accept one alongside "
+    "function tools, which mooring always sends. Set the 'effort' picker beside the "
+    "model — in this chat window, or on the batch page — to 'default' (send none) or "
+    "'none'. That picker is what decides: it is remembered per provider and OVERRIDES "
+    "Settings -> 'Default reasoning effort' (config ai.reasoning_effort, env "
+    "MOORING_AI_REASONING_EFFORT), so clearing the setting alone will not change it."
+)
+
+
+def _status_code(low: str) -> str:
+    """The HTTP status the SDK prefixes its message with ("Error code: 401 - ..."),
+    or "" when the message carries none (a gateway may raise a bare error)."""
+    match = re.search(r"error code:\s*(\d{3})", low)
+    return match.group(1) if match else ""
+
+
+def _has(low: str, markers: tuple[str, ...]) -> bool:
+    return any(marker in low for marker in markers)
+
+
 def friendly_error(msg: str) -> str:
+    """Map a raw SDK/gateway error string onto one short, actionable line.
+
+    Order is load-bearing. The STATUS CODE decides first where the SDK gives one,
+    because an error body echoes the request's parameters — a 401 whose body lists
+    the request keys, or a 429 reading "Rate limit reached for gpt-5 (params:
+    reasoning_effort=high)", must be reported as auth and rate-limit faults, not as
+    a rejected effort. The effort branch comes last and needs BOTH the parameter
+    name and a rejection word; the substring auth/rate checks below it still catch a
+    code-less message, and the original text is always preserved.
+    """
     low = msg.lower()
-    if "401" in low or "unauthorized" in low or "invalid api key" in low or "api key" in low:
-        return (
-            "OpenAI rejected the request: the API key is missing or invalid. "
-            "Check MOORING_OPENAI_API_KEY / OPENAI_API_KEY (or your base_url)."
-        )
-    if "429" in low or "rate limit" in low or "quota" in low:
-        return "OpenAI rate-limited the request or the account is out of quota."
+    code = _status_code(low)
+    if code == "401" or (not code and _has(low, _AUTH_MARKERS)):
+        return _AUTH_HELP
+    if code == "429" or (not code and _has(low, _RATE_MARKERS)):
+        return _RATE_HELP
+    if _has(low, _EFFORT_FIELDS) and _has(low, _EFFORT_REJECTIONS):
+        return f"{_EFFORT_HELP} (OpenAI said: {msg})"
+    # A status the branches above don't claim (a 400, a 5xx), so fall back to the
+    # substring reading of the body.
+    if _has(low, _AUTH_MARKERS):
+        return _AUTH_HELP
+    if _has(low, _RATE_MARKERS):
+        return _RATE_HELP
     return f"OpenAI request failed: {msg}"
 
 
@@ -292,8 +367,9 @@ class OpenAIProvider:
 
         Unlike Copilot's ``ModelInfo``, OpenAI's listing carries no reasoning-effort
         or premium-multiplier metadata (reasoning effort is a per-request param), and
-        it includes non-chat models — so it is filtered to chat ids and the extra
-        fields are left empty.
+        it includes non-chat models — so it is filtered to chat ids, ``multiplier``
+        and ``default_effort`` are left empty, and ``efforts`` is synthesised locally
+        (:func:`_efforts_for`) so a reasoning model's picker is actually shown.
         """
         if not self.available() or (not self._key() and not self._base_url):
             return []
@@ -312,7 +388,13 @@ class OpenAIProvider:
                 {m.id for m in client.models.list() if _is_chat_model(m.id, require_prefix)},
             )
             dicts = [
-                {"id": mid, "name": mid, "efforts": [], "default_effort": "", "multiplier": None}
+                {
+                    "id": mid,
+                    "name": mid,
+                    "efforts": _efforts_for(mid),
+                    "default_effort": "",
+                    "multiplier": None,
+                }
                 for mid in models
             ]
             error = ""
@@ -424,6 +506,20 @@ def _is_chat_model(model_id: str, require_prefix: bool = True) -> bool:
     if require_prefix and not low.startswith(_CHAT_PREFIXES):
         return False
     return True
+
+
+def _efforts_for(model_id: str) -> list[str]:
+    """Reasoning-effort choices to advertise for ``model_id``; ``[]`` hides the picker.
+
+    "Is this a reasoning model?" is the SAME advisory heuristic the request path gates
+    its ``reasoning_effort`` param on: imported from ``openai_session`` (function-local,
+    mirroring that module's own import of :func:`friendly_error`) so the prefixes live
+    in ONE place and the picker can never offer an effort the request would drop. A
+    non-reasoning id (``gpt-4o``, ``llama-3-70b``) gets ``[]`` and stays hidden.
+    """
+    from mooring.ai.openai_session import _is_reasoning_model
+
+    return list(_REASONING_EFFORTS) if _is_reasoning_model(model_id) else []
 
 
 def _host(base_url: str) -> str:

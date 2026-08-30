@@ -138,7 +138,14 @@ def drive_to_finding(session, brief: str, *, deadline: float, abort) -> BranchOu
         if kind == "delta":
             deltas.append(str(data.get("text", "")))
         elif kind == "message":
-            message = str(data.get("text", "")) or message
+            # A "notice" message is mooring's own aside to the human (e.g. the OpenAI
+            # session telling them its reasoning-effort setting was refused), NOT the
+            # sub-agent's answer. It must never become a branch's finding: the last
+            # non-empty message wins outright below, so a stranded notice would both
+            # report an answerless branch as a "finding" and SUPPRESS the partial
+            # analysis accumulated in the deltas.
+            if not data.get("notice"):
+                message = str(data.get("text", "")) or message
         elif kind == "pii":
             # A tokened hold under block mode: no human at a sub-agent, so block the
             # branch (never auto-confirm). A warn-only "pii" event (no token) is ignored.

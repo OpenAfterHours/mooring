@@ -19,7 +19,17 @@ const vm = require("node:vm");
 
 const STATIC = path.join(__dirname, "..", "..", "src", "mooring", "hub", "static");
 // The members batch.js reaches through `C` — a missing one is what made the page throw.
-const HELPERS = ["cleanJobs", "additiveBlockLines", "diffLines", "highlightCode"];
+const HELPERS = [
+  "cleanJobs",
+  "additiveBlockLines",
+  "diffLines",
+  "highlightCode",
+  // The effort picker's decision + storage key: batch.js calls all three through `C`,
+  // so a missing one throws on page load and the picker loses its selection.
+  "chooseEffort",
+  "effortKey",
+  "adoptLegacyEffort",
+];
 
 // Execute chat_core.js the way a BROWSER does: a top-level script in a context that has
 // a `window` and no CommonJS `module`. Returns {bare, win} — the bare lexical global and

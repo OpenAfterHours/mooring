@@ -319,6 +319,54 @@ def test_a_proposal_then_failure_still_keeps_the_proposal(tmp_path):
     assert result.proposals[0]["code"] == "kept = 1"
 
 
+# -- a session's own NOTICE has to survive the unattended path -------------------
+
+# What OpenAIChatSession._settle_effort broadcasts when the server refuses the
+# reasoning-effort setting. It is mooring talking to the HUMAN, flagged so a collector
+# can tell it apart from the model's prose. Fixed, value-free text.
+_NOTICE_TEXT = "(Note: the server rejected the reasoning-effort setting for this chat.)"
+_NOTICE = ("message", {"text": _NOTICE_TEXT, "notice": True})
+
+
+def test_a_session_notice_is_carried_onto_the_job_result(tmp_path):
+    # The session promises the analyst is told ONCE that its reasoning setting was
+    # downgraded. On the chat path the message IS the telling; a batch has no chat
+    # window, so without this a 20-notebook run silently changes reasoning setting
+    # with nothing anywhere recording it.
+    script = [_NOTICE, _proposal("built = 1"), ("idle", {})]
+    planner = _make_planner(tmp_path, lambda ctx, nb, m, e, d: ScriptedSession(script))
+    [result] = planner.run([BatchJob("nb", "x")])
+    assert result.status == "built"
+    assert result.notices == [_NOTICE_TEXT]
+
+
+def test_a_notice_is_recorded_once_and_never_stands_in_for_a_proposal(tmp_path):
+    # Repeats collapse, and a notice is not work: a job whose only "message" was the
+    # notice still finishes "empty".
+    script = [_NOTICE, _NOTICE, ("idle", {})]
+    planner = _make_planner(tmp_path, lambda ctx, nb, m, e, d: ScriptedSession(script))
+    [result] = planner.run([BatchJob("nb", "x")])
+    assert result.status == "empty" and result.proposals == []
+    assert result.notices == [_NOTICE_TEXT]
+
+
+def test_ordinary_assistant_prose_is_not_recorded_as_a_notice(tmp_path):
+    # Only the flagged asides are kept. The model's own chatter is not a batch product
+    # and must not end up in the tray.
+    script = [("message", {"text": "Here is what I did."}), _proposal(), ("idle", {})]
+    planner = _make_planner(tmp_path, lambda ctx, nb, m, e, d: ScriptedSession(script))
+    [result] = planner.run([BatchJob("nb", "x")])
+    assert result.status == "built" and result.notices == []
+
+
+def test_a_notice_survives_a_job_that_then_fails(tmp_path):
+    # The downgrade happened whatever the job's outcome, so every terminal carries it.
+    script = [_NOTICE, ("fail", {"text": "late error"})]
+    planner = _make_planner(tmp_path, lambda ctx, nb, m, e, d: ScriptedSession(script))
+    [result] = planner.run([BatchJob("nb", "x")])
+    assert result.status == "failed" and result.notices == [_NOTICE_TEXT]
+
+
 def test_exceeding_max_jobs_raises(tmp_path):
     planner = _make_planner(
         tmp_path,

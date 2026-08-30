@@ -40,6 +40,36 @@ def _tc(index, tc_id=None, name=None, args=None):
     return types.SimpleNamespace(index=index, id=tc_id, function=fn)
 
 
+class _ScriptedError(Exception):
+    """A scripted API failure. A PLAIN Exception subclass on purpose: the session must
+    recognise a rejected parameter without importing ``openai`` (an optional extra), and
+    a gateway's error class is not knowable anyway. ``status_code`` is set only when
+    asked for, so a front-end that exposes none can be scripted too."""
+
+    def __init__(self, message: str, status_code: int | None = None):
+        super().__init__(message)
+        if status_code is not None:
+            self.status_code = status_code
+
+
+# The 400 gpt-5.6-sol returns for every request mooring makes (it always sends tools).
+EFFORT_400 = (
+    "Error code: 400 - {'error': {'message': \"Function tools with reasoning_effort are "
+    "not supported for gpt-5.6-sol in /v1/chat/completions. To use function tools, use "
+    "/v1/responses or set reasoning_effort to 'none'.\", 'type': 'invalid_request_error', "
+    "'param': 'reasoning_effort', 'code': None}}"
+)
+
+
+def _play(chunks):
+    """Yield the scripted chunks, RAISING any exception scripted among them — that is a
+    stream which fails part-way, AFTER deltas have already gone out to subscribers."""
+    for item in chunks:
+        if isinstance(item, BaseException):
+            raise item
+        yield item
+
+
 class _FakeCompletions:
     def __init__(self, scripted):
         self._scripted = scripted
@@ -48,8 +78,10 @@ class _FakeCompletions:
     def create(self, **kwargs):
         idx = len(self.calls)
         self.calls.append(kwargs)
-        chunks = self._scripted[idx] if idx < len(self._scripted) else [_chunk(finish="stop")]
-        return iter(chunks)
+        entry = self._scripted[idx] if idx < len(self._scripted) else [_chunk(finish="stop")]
+        if isinstance(entry, BaseException):
+            raise entry  # a create() that fails before any chunk is produced
+        return _play(entry)
 
 
 class _FakeClient:
@@ -295,6 +327,9 @@ def test_tool_result_is_scrubbed_on_the_wire(ws):
 
 
 def test_reasoning_effort_only_for_reasoning_models(ws):
+    # The name-prefix check is an ADVISORY pre-filter (the ladder below is the
+    # authority), but it still earns its keep: it spares an obvious chat model a
+    # wasted 400 round-trip.
     stop = [[_chunk(content="ok"), _chunk(finish="stop")]]
     # A plain chat model must NOT receive reasoning_effort (it would 400).
     plain, plain_calls = _session(ws, stop, model="gpt-4o", reasoning_effort="high")
@@ -311,6 +346,321 @@ def test_reasoning_effort_only_for_reasoning_models(ws):
     _drain(q, until="idle")
     reasoning.close()
     assert reasoning_calls.calls[0]["reasoning_effort"] == "high"
+
+
+# -- the reasoning-effort ladder: the SERVER settles it, not the model name -----
+
+
+def _notices(events):
+    """The value-free ladder notices among a drained event stream."""
+    return [
+        e.data["text"]
+        for e in events
+        if e.kind == "message" and "reasoning" in e.data["text"].lower()
+    ]
+
+
+def test_reasoning_effort_400_retries_with_the_param_dropped(ws):
+    # gpt-5.6-sol matches the "gpt-5" prefix but rejects reasoning_effort whenever
+    # function tools are attached — and mooring ALWAYS attaches them, so without the
+    # ladder every single request of the session fails.
+    scripted = [
+        _ScriptedError(EFFORT_400, 400),
+        [_chunk(content="ok"), _chunk(finish="stop")],
+    ]
+    session, completions = _session(ws, scripted, model="gpt-5.6-sol", reasoning_effort="high")
+    q = session.subscribe()
+    session.send("hi")
+    events = _drain(q, until="idle")
+    session.close()
+
+    assert len(completions.calls) == 2
+    assert completions.calls[0]["reasoning_effort"] == "high"
+    # Rung (a): the param is DROPPED (the model keeps its own default reasoning);
+    # everything else about the request is the same one, re-sent.
+    assert "reasoning_effort" not in completions.calls[1]
+    assert completions.calls[1]["model"] == "gpt-5.6-sol"
+    assert completions.calls[1]["messages"] == completions.calls[0]["messages"]
+    assert completions.calls[1]["tools"] == completions.calls[0]["tools"]
+
+    # The turn completes normally: an answer, no failure, and ONE value-free notice
+    # so the analyst can see why the effort setting did not apply.
+    assert not [e for e in events if e.kind == "fail"]
+    texts = [e.data["text"] for e in events if e.kind == "message"]
+    assert "ok" in texts
+    [notice] = _notices(events)
+    assert str(ws) not in notice and SECRET not in notice
+    assert SECRET not in json.dumps(completions.calls, default=str)
+
+
+def test_the_effort_ladder_is_remembered_for_the_session(ws):
+    scripted = [
+        _ScriptedError(EFFORT_400, 400),
+        [_chunk(content="one"), _chunk(finish="stop")],
+        [_chunk(content="two"), _chunk(finish="stop")],
+    ]
+    session, completions = _session(ws, scripted, model="gpt-5.6-sol", reasoning_effort="high")
+    q = session.subscribe()
+    session.send("first")
+    first = _drain(q, until="idle")
+    session.send("second")
+    second = _drain(q, until="idle")
+    session.close()
+
+    # ONE probe for the whole session: 2 creates for turn 1, exactly 1 for turn 2.
+    assert len(completions.calls) == 3
+    assert "reasoning_effort" not in completions.calls[2]
+    assert not [e for e in first + second if e.kind == "fail"]
+    assert len(_notices(first + second)) == 1  # told once, not once per turn
+
+
+def test_the_effort_ladder_falls_back_to_none(ws):
+    # Dropping the param is not always enough: the model's OWN default effort can be
+    # what conflicts with tools, and the server says so again — so rung (b) sends the
+    # remedy the error message itself suggests.
+    scripted = [
+        _ScriptedError(EFFORT_400, 400),
+        _ScriptedError(EFFORT_400, 400),
+        [_chunk(content="ok"), _chunk(finish="stop")],
+    ]
+    session, completions = _session(ws, scripted, model="gpt-5.6-sol", reasoning_effort="high")
+    q = session.subscribe()
+    session.send("hi")
+    events = _drain(q, until="idle")
+    session.close()
+
+    assert len(completions.calls) == 3
+    assert completions.calls[0]["reasoning_effort"] == "high"
+    assert "reasoning_effort" not in completions.calls[1]
+    assert completions.calls[2]["reasoning_effort"] == "none"
+    assert not [e for e in events if e.kind == "fail"]
+    assert len(_notices(events)) == 1
+
+
+def test_a_gateway_error_without_a_status_code_still_ladders(ws):
+    # Azure / LiteLLM / OpenAI-compatible front-ends reword the body and may expose no
+    # status_code at all, so detection is string-first and must not require one.
+    scripted = [
+        _ScriptedError("BadRequest: unsupported parameter 'reasoning effort' for tool use"),
+        [_chunk(content="ok"), _chunk(finish="stop")],
+    ]
+    assert not hasattr(scripted[0], "status_code")
+    session, completions = _session(ws, scripted, model="gpt-5.6-sol", reasoning_effort="high")
+    q = session.subscribe()
+    session.send("hi")
+    events = _drain(q, until="idle")
+    session.close()
+
+    assert len(completions.calls) == 2
+    assert "reasoning_effort" not in completions.calls[1]
+    assert not [e for e in events if e.kind == "fail"]
+
+
+def test_an_unrelated_400_is_not_retried(ws):
+    # An error that does not blame the parameter is NOT ours to fix: it must fail on
+    # exactly one request, never be turned into a double request.
+    scripted = [
+        _ScriptedError(
+            "Error code: 400 - {'error': {'message': 'The model `nope` does not exist.', "
+            "'type': 'invalid_request_error', 'param': None, 'code': 'model_not_found'}}",
+            400,
+        ),
+        [_chunk(content="never reached"), _chunk(finish="stop")],
+    ]
+    session, completions = _session(ws, scripted, model="gpt-5.6-sol", reasoning_effort="high")
+    q = session.subscribe()
+    session.send("hi")
+    events = _drain(q, until="fail")
+    session.close()
+
+    assert len(completions.calls) == 1
+    assert [e for e in events if e.kind == "fail"]
+    assert not _notices(events)
+
+
+def test_a_mid_stream_failure_is_never_retried(ws):
+    # The ladder retries the create() CALL only. Once chunks are flowing the deltas
+    # have been broadcast and cannot be un-broadcast, so a failure during iteration
+    # surfaces as-is rather than re-issuing the request and replaying the text.
+    scripted = [
+        [_chunk(content="Half a sentence"), _ScriptedError(EFFORT_400, 400)],
+        [_chunk(content="Half a sentence and the rest"), _chunk(finish="stop")],
+    ]
+    session, completions = _session(ws, scripted, model="gpt-5.6-sol", reasoning_effort="high")
+    q = session.subscribe()
+    session.send("hi")
+    events = _drain(q, until="fail")
+    session.close()
+
+    assert len(completions.calls) == 1  # the 2nd script entry is never reached
+    deltas = "".join(e.data["text"] for e in events if e.kind == "delta")
+    assert deltas == "Half a sentence"  # streamed once, not duplicated
+    assert [e for e in events if e.kind == "fail"]
+
+
+@pytest.mark.parametrize("sentinel", ["default", "Default", "auto", " AUTO "])
+def test_the_default_effort_sentinel_sends_no_param(ws, sentinel):
+    # The provider's effort picker offers "default" for "leave it to the model". The
+    # session __init__ is the one choke point every path flows through, so normalising
+    # the sentinel there covers hub chat, batch and investigate alike.
+    stop = [[_chunk(content="ok"), _chunk(finish="stop")]]
+    session, completions = _session(ws, stop, model="o3-mini", reasoning_effort=sentinel)
+    q = session.subscribe()
+    session.send("hi")
+    _drain(q, until="idle")
+    session.close()
+
+    assert session._reasoning_effort is None
+    assert "reasoning_effort" not in completions.calls[0]  # nothing on the wire
+
+
+def test_the_ladder_arms_when_the_request_carried_no_effort_at_all(ws):
+    # The SHIPPED default configures no reasoning_effort, so the request sends none —
+    # and gpt-5.6-sol 400s anyway, because what it refuses alongside tools is a
+    # non-"none" effort and the model's OWN default is one. Gating the ladder on "we
+    # sent the param" therefore disarmed it in exactly the configuration most people
+    # run: one request, one 400, no probe at all.
+    scripted = [
+        _ScriptedError(EFFORT_400, 400),
+        [_chunk(content="ok"), _chunk(finish="stop")],
+        [_chunk(content="again"), _chunk(finish="stop")],
+    ]
+    session, completions = _session(ws, scripted, model="gpt-5.6-sol")
+    q = session.subscribe()
+    session.send("hi")
+    first = _drain(q, until="idle")
+    session.send("again")
+    second = _drain(q, until="idle")
+    session.close()
+
+    assert "reasoning_effort" not in completions.calls[0]
+    # Dropping a param that was never sent would re-send the IDENTICAL request, so the
+    # only rung that can differ here is "none" — and it is the one taken.
+    assert completions.calls[1]["reasoning_effort"] == "none"
+    assert not [e for e in first + second if e.kind == "fail"]
+    # ...and remembered: turn two is ONE request, still on the settled rung. (Consulting
+    # the config before the settled mode would evaluate "none" back to "send nothing"
+    # and re-probe every single turn.)
+    assert len(completions.calls) == 3
+    assert completions.calls[2]["reasoning_effort"] == "none"
+    assert len(_notices(first + second)) == 1
+
+
+# -- detection is STRICT: naming the field is not the same as refusing it -------
+
+
+def test_a_transient_error_that_merely_lists_the_fields_is_not_a_rejection(ws):
+    # A blip whose body enumerates the request's fields NAMES reasoning_effort without
+    # refusing it. Arming on that is expensive, because the ladder's answer is sticky
+    # for the session: one such blip would silently disable the analyst's setting for
+    # the rest of the chat and blame the model for it in the notice.
+    blip = (
+        "Error code: 400 - Upstream backend hiccup while validating request "
+        "(fields: model, messages, tools, reasoning_effort)"
+    )
+    scripted = [_ScriptedError(blip, 400)] + [
+        [_chunk(content="ok"), _chunk(finish="stop")] for _ in range(3)
+    ]
+    session, completions = _session(ws, scripted, model="gpt-5.6-sol", reasoning_effort="high")
+    q = session.subscribe()
+    session.send("one")
+    events = _drain(q, until="fail")
+    for text in ("two", "three", "four"):
+        session.send(text)
+        events += _drain(q, until="idle")
+    session.close()
+
+    # One request for the blip (not a three-rung probe), and "high" still rides every
+    # later turn — NOT ['high', absent, absent, absent].
+    assert [c.get("reasoning_effort") for c in completions.calls] == ["high"] * 4
+    assert not _notices(events)
+
+
+@pytest.mark.parametrize("status", [401, 403, 429, 500, 503])
+def test_a_non_400_that_echoes_the_request_body_is_not_a_rejection(ws, status):
+    # Gateways echo the request back inside auth / throttle / upstream errors, so the
+    # body names the parameter and even reads as "Invalid ...". Only a 400 is THIS
+    # REQUEST being refused; anything else must fail once and be reported as itself.
+    echoed = (
+        "Error code: %d - {'error': {'message': 'Invalid authentication. Request was: "
+        "{model: gpt-5.6-sol, tools: [...], reasoning_effort: high}'}}" % status
+    )
+    scripted = [
+        _ScriptedError(echoed, status),
+        [_chunk(content="never reached"), _chunk(finish="stop")],
+    ]
+    session, completions = _session(ws, scripted, model="gpt-5.6-sol", reasoning_effort="high")
+    q = session.subscribe()
+    session.send("hi")
+    events = _drain(q, until="fail")
+    session.close()
+
+    assert len(completions.calls) == 1
+    assert [e for e in events if e.kind == "fail"]
+    assert not _notices(events)  # never misreported to the analyst as an effort fault
+
+
+def test_a_structured_param_field_identifies_the_rejection(ws):
+    # A front-end may name the offending parameter STRUCTURALLY rather than in the
+    # prose (the OpenAI SDK lifts "param" out of the error body onto the exception).
+    # Read duck-typed, because this module never imports openai.
+    err = _ScriptedError("Error code: 400 - unsupported parameter for this model.", 400)
+    err.param = "reasoning_effort"
+    scripted = [err, [_chunk(content="ok"), _chunk(finish="stop")]]
+    session, completions = _session(ws, scripted, model="gpt-5.6-sol", reasoning_effort="high")
+    q = session.subscribe()
+    session.send("hi")
+    events = _drain(q, until="idle")
+    session.close()
+
+    assert len(completions.calls) == 2
+    assert "reasoning_effort" not in completions.calls[1]
+    assert not [e for e in events if e.kind == "fail"]
+
+
+def test_a_400_whose_body_was_lost_is_left_alone(ws):
+    # A KNOWN, ACCEPTED blind spot, pinned here so nobody "fixes" it by loosening the
+    # matcher back to a bare substring test: when the SDK cannot read the error body it
+    # builds the exception with body=None, so the message is bare ("Error code: 400")
+    # and .param is None too. Nothing identifies the parameter, so the request fails
+    # exactly as it would have before the ladder existed.
+    scripted = [
+        _ScriptedError("Error code: 400", 400),
+        [_chunk(content="never reached"), _chunk(finish="stop")],
+    ]
+    session, completions = _session(ws, scripted, model="gpt-5.6-sol", reasoning_effort="high")
+    q = session.subscribe()
+    session.send("hi")
+    events = _drain(q, until="fail")
+    session.close()
+
+    assert len(completions.calls) == 1
+    assert [e for e in events if e.kind == "fail"]
+
+
+def test_the_notice_does_not_assert_a_cause_it_cannot_know(ws):
+    # The server may be refusing the PARAMETER, or only the configured VALUE. This body
+    # is the second kind: 'high' is out of range where 'low' would be accepted. A notice
+    # asserting "this model rejected the setting when tools are in play" is simply wrong
+    # here, and it talks the analyst out of the one fix that would work.
+    value_400 = (
+        "Error code: 400 - {'error': {'message': \"Invalid value for 'reasoning_effort': "
+        "'high'. Supported values are: 'low' and 'medium'.\", 'type': "
+        "'invalid_request_error', 'param': 'reasoning_effort'}}"
+    )
+    scripted = [_ScriptedError(value_400, 400), [_chunk(content="ok"), _chunk(finish="stop")]]
+    session, _completions = _session(ws, scripted, model="gpt-5.6-sol", reasoning_effort="high")
+    q = session.subscribe()
+    session.send("hi")
+    events = _drain(q, until="idle")
+    session.close()
+
+    [notice] = _notices(events)
+    assert "tools" not in notice.lower()  # no claim about tool calling
+    assert "not that value" in notice  # both causes left open
+    # Fixed text: nothing echoed back from the server, no value, no path, no model name.
+    assert "high" not in notice and "gpt-5.6-sol" not in notice
+    assert str(ws) not in notice and SECRET not in notice
 
 
 def test_parallel_tool_calls_are_each_answered_before_the_next_request(ws):

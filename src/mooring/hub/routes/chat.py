@@ -30,6 +30,12 @@ async def api_chat_open(request: Request) -> JSONResponse:
     notebook = str(data.get("notebook", "")).strip()
     dataset = str(data.get("dataset", "")).strip()
     model = str(data.get("model", "")).strip()
+    # An explicit pick from the effort picker wins; "" means the page had no picker
+    # to offer (a model that takes no effort, or a provider that advertises none), so
+    # the configured default stands in. A page WITH a picker always sends a concrete
+    # word — including "default", the sentinel that means "send no effort at all" —
+    # because /api/ai/models offers the configured value in the list (see
+    # _offer_configured_effort), so this fallback can no longer swallow it.
     reasoning_effort = (
         str(data.get("reasoning_effort", "")).strip() or hub.app_cfg.ai_reasoning_effort
     )
@@ -268,6 +274,36 @@ def api_chat_datasets(request: Request) -> JSONResponse:
     return JSONResponse({"datasets": datasets, "ui_theme": hub.app_cfg.ui_theme})
 
 
+def _offer_configured_effort(models: list[dict], configured: str) -> list[dict]:
+    """``models`` with the configured ``ai.reasoning_effort`` unioned into every
+    non-empty ``efforts`` list.
+
+    A provider advertises a FIXED list (Copilot's per-model metadata, OpenAI's
+    advisory one), but ``ai.reasoning_effort`` is free text — ``minimal`` and
+    ``xhigh`` are real OpenAI values the list omits, and a gateway may take its own.
+    Without this the picker cannot show such a value, so it selects something else
+    and the configured knob is silently discarded (it would still be displayed on
+    the Settings page while nothing sent it). Unioning here rather than in the
+    provider keeps the provider config-blind.
+
+    An EMPTY list is left empty: that is the provider saying "this model takes no
+    effort", and the picker must stay hidden for it. Order is preserved and the new
+    value appended, so a sentinel first element ("default" = send none) stays first.
+    """
+    effort = (configured or "").strip()
+    if not effort:
+        return models
+    out = []
+    for model in models:
+        efforts = model.get("efforts") or []
+        if efforts and effort not in efforts:
+            # Copy: providers CACHE the dicts they return, so mutating one would
+            # poison the cache (and re-append on every later request).
+            model = dict(model, efforts=[*efforts, effort])
+        out.append(model)
+    return out
+
+
 async def api_chat_models(request: Request) -> JSONResponse:
     """The models the user can pick, plus the configured defaults (value-free)."""
     hub = request.app.state.hub
@@ -275,10 +311,15 @@ async def api_chat_models(request: Request) -> JSONResponse:
         return JSONResponse({"enabled": False}, status_code=404)
     provider = hub._provider_for()
     models = await asyncio.to_thread(provider.list_models)
+    default_effort = hub.app_cfg.ai_reasoning_effort or ""
     payload = {
-        "models": models,
+        "models": _offer_configured_effort(models, default_effort),
         "default_model": hub.app_cfg.ai_model or "",
-        "default_effort": hub.app_cfg.ai_reasoning_effort or "",
+        "default_effort": default_effort,
+        # The picker's stored preference is namespaced per provider: the same effort
+        # words mean different money on different backends, so a pick made under one
+        # must never select under another (chat.js/batch.js -> ChatCore.effortKey).
+        "provider": getattr(provider, "name", "") or hub.app_cfg.ai_provider or "",
     }
     # When the list is empty because the provider REJECTED the request (e.g. a
     # 403 "not authorized to use this Copilot feature" — a signed-in but
