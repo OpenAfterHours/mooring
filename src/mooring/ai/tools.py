@@ -47,9 +47,11 @@ EDIT_TOOL_NAMES = [
     "mooring_propose_notebook_rewrite",
 ]
 
-# Cell-source format reminder for every propose tool. The displayed file source shows
-# marimo's wrapper (`@app.cell` / `def _()` / a trailing `return (...)`); a cell's
-# source is the BODY ONLY — mooring regenerates the wrapper and the return.
+# Cell-source format reminder for every propose tool: a cell's source is the BODY ONLY
+# — mooring regenerates marimo's wrapper (`@app.cell` / `def _()` / a trailing
+# `return (...)`). The model is now SHOWN that same body-only form (egress.
+# render_notebook_for_model), so this states a rule it can already see obeyed rather
+# than asking it to translate out of the wrapped file on disk.
 _RATIONALE_DESC = "a one-line reason (optional)"
 
 _CELL_FORMAT = (
@@ -287,24 +289,14 @@ def build_tool_specs(
         # Enumerate the cells WITH their indices so the model can target one for an
         # edit, and route the result through the egress scrubber — the same value-free
         # treatment build_system_context gives the notebook source (this tool used to
-        # bypass it). On any parse trouble, fall back to the scrubbed raw source.
+        # bypass it). The rendering itself lives in egress (ONE renderer, shared with
+        # the system context, so a re-read never disagrees with what the model was
+        # already shown); it falls back to the raw source on any parse trouble.
         try:
             raw = _safe(workspace, notebook_rel).read_text("utf-8")
         except (ValueError, OSError) as exc:
             return _err(str(exc))
-        try:
-            cells = marimo_rt.read_cells(raw)
-        except _NB_READ_ERRORS:
-            cells = []
-        if cells:
-            body = "\n\n".join(f"# === cell {i} ===\n{code}" for i, code in cells)
-            rendered = (
-                f"The notebook has {len(cells)} cell(s); each is shown with its index "
-                "(use mooring_propose_cell_edit to change one):\n\n" + body
-            )
-        else:  # not a parseable marimo notebook — show the raw source instead
-            rendered = raw
-        scrubbed, _ = egress.scrub_text(rendered)
+        scrubbed, _ = egress.scrub_text(egress.render_notebook_for_model(raw))
         return _ok(scrubbed)
 
     def propose_cell(invocation):

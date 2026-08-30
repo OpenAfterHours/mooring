@@ -350,6 +350,39 @@ def read_cells_checked(source: str) -> list[tuple[int, str]]:
     return [(i, cell.code) for i, cell in enumerate(ir.cells)]
 
 
+def read_cells_with_options(source: str) -> list[tuple[int, str, dict]]:
+    """:func:`read_cells`, but each cell also carries the OPTIONS marimo recorded for
+    it — ``(index, code, options)`` triples, in document order. PURE.
+
+    ``options`` is what the ``@app.cell(...)`` decorator declared: ``disabled`` (marimo
+    never RUNS the cell), ``hide_code``, and whatever else marimo adds later. It is a
+    plain ``dict`` copy, so a caller cannot reach back into the IR through it, and it is
+    ``{}`` for a cell with no options — including a ``with app.setup:`` block, which
+    marimo counts as a cell but which takes none.
+
+    Exists so a caller that must distinguish a live cell from a dead one does not have
+    to go reading marimo's serialised form itself: ``disabled`` is only visible in the
+    ``@app.cell`` decorator, and the ``marimo-internals-isolated`` seam means the ``ai/``
+    layer may not go and parse that. Reading it off the SAME cell object the code comes
+    from also makes a whole class of bug impossible — anything that pairs options to
+    code positionally, from a separate scan of the file, misaligns the moment a notebook
+    contains a cell form the scan does not recognise (a setup block being exactly that),
+    and silently reports the WRONG cell disabled. That direction is the dangerous one: a
+    caller told a live cell is dead skips real work, while a missing flag only costs it
+    the hint — so where this cannot know, it says nothing rather than guessing. Raises
+    like :func:`read_cells`.
+    """
+    _require_marimo_floor()
+    _, MarimoConvert = _codegen_api()
+    ir = _parse_ir(MarimoConvert, source)
+    # getattr, not cell.options: a cell class marimo adds later (or one that stops
+    # carrying options) degrades to {} — no flags — never to a flag on the wrong cell.
+    return [
+        (i, cell.code, dict(getattr(cell, "options", None) or {}))
+        for i, cell in enumerate(ir.cells)
+    ]
+
+
 def read_notebook_frame(source: str) -> tuple[str, dict]:
     """Everything about a notebook that is NOT a cell: its header text (the leading
     comment block — a PEP 723 ``# /// script`` dependency pin lives here) and the

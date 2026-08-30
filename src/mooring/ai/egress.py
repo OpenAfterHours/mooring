@@ -24,6 +24,7 @@ this is the deterministic floor beneath it.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -42,6 +43,7 @@ __all__ = [
     "scrub_text",
     "scrub_error_text",
     "sanitize_traceback",
+    "render_notebook_for_model",
     "build_system_context",
     "to_tool_result",
     "to_error_result",
@@ -198,6 +200,146 @@ def to_openai_tool_message(tool_call_id: str, output: ToolOutput) -> dict:
     return {"role": "tool", "tool_call_id": tool_call_id, "content": content}
 
 
+# Said ABOVE the raw file whenever the cell split failed, so the rendering itself
+# always tells the model which of the two forms it is looking at — the system prompt's
+# "the cells you are shown are body-only" claim would otherwise be false here (a BOM'd
+# notebook, a zero-cell stub, a plain module, a half-parseable file all land here).
+_RAW_NOTEBOOK_NOTE = (
+    "NOTE: this file could not be split into marimo cells, so it is shown below exactly "
+    "as it is on disk — for a marimo notebook that is the WRAPPED form (`@app.cell` / "
+    "`def _(...)` / a trailing `return (...)`) — with NO cell indices. Code you propose "
+    "is still BODY ONLY, and mooring_propose_cell_edit has no index to target here.\n\n"
+)
+
+_NOTEBOOK_HEADER_LABEL = (
+    "NOTEBOOK HEADER (script metadata / dependency pins — NOT a cell; no propose tool "
+    "can change it, the analyst runs `mooring deps`):"
+)
+
+# marimo strips its own cell decorator when it unwraps a body, so seeing one INSIDE a
+# rendered body means marimo swallowed a region it could not parse into the previous
+# cell — the split is lying, and the raw file is the honest thing to show. Anchored to
+# marimo's three real cell decorators, not a bare `@app.`: a notebook demoing a web
+# framework legitimately has `@app.get(...)` / `@app.route(...)` at a cell's top level.
+_WRAPPER_LEAK_RE = re.compile(r"^@app\.(?:cell|function|class_definition)\b", re.MULTILINE)
+
+# A cell body containing the literal text of a boundary line FORGES a cell: the render
+# emits two blocks labelled `cell 1`, the model edits the one it read, and the index it
+# sends names the OTHER — a real cell it never looked at. The anchor cannot catch that;
+# `propose_cell_edit` takes it from a live read at the index the model supplied, so it
+# matches the real cell and the wrong write succeeds. Demonstrated end to end, not
+# theorised. So the boundary is made unforgeable at the ONE place it is emitted: any line
+# in a body that would read as one gets a space wedged in, which cannot change what the
+# code DOES (the marker only ever matches a line whose first non-blank characters are the
+# `#` of a comment) and leaves the text otherwise intact for the model to copy back.
+# Matched at any indentation, since an indented forgery misleads a reader just as well.
+_CELL_BOUNDARY_MARK = "# === cell"
+_DEFUSED_BOUNDARY_MARK = "#  === cell"  # one wedged space: no longer a boundary line
+_FORGED_BOUNDARY_RE = re.compile(rf"^([ \t]*){re.escape(_CELL_BOUNDARY_MARK)}", re.MULTILINE)
+
+
+def render_notebook_for_model(source: str) -> str:
+    """Render a notebook's ``.py`` source the way the model must WRITE it BACK: one
+    indexed block per cell, each holding the cell BODY only.
+
+    THE single renderer of notebook source for the AI. Both channels that show the
+    model a notebook use it — the system context (:func:`build_system_context`, every
+    turn) and the ``mooring_read_notebook_source`` tool (:mod:`mooring.ai.tools`, on
+    demand) — so the two can never drift into showing the same file two different ways.
+
+    Why not the raw file: on disk a marimo notebook is the WRAPPED form (``@app.cell``
+    / ``def _(df):`` / a trailing ``return (df,)``) and carries no cell indices, but
+    every propose tool wants the opposite — an unwrapped body, plus an integer index
+    for an edit. Showing the wrapped form asked the model to translate between two
+    formats on every proposal, and to spend a tool round-trip just to learn the
+    indices. This renders exactly what the propose tools consume.
+
+    The indices are a SNAPSHOT, and the rendering says so. Each session's system context
+    is built once (``ai/session.py`` / ``ai/openai_session.py`` set ``_system_context`` at
+    construction and never rewrite it), so after the analyst applies anything that inserts
+    or deletes a cell, the indices in it are stale — and a stale index mis-targets a write
+    exactly like a forged one. The header therefore tells the model to re-read via
+    ``mooring_read_notebook_source`` (which always reads live) before editing if anything
+    has been applied. Refreshing the context per turn is the real fix and is queued.
+
+    What a rendered notebook CARRIES: every cell's body, in file order, under its
+    index; a ``DISABLED`` marker on any cell marimo will not run (from the options
+    :func:`marimo_rt.read_cells_with_options` returns beside each body — this layer
+    never reads marimo's serialised form itself); and the notebook's
+    leading header block — the PEP 723 ``# /// script`` dependency pins and any comment
+    above them — which is not a cell but which the model is asked to reason about (see
+    :func:`mooring.ai.tools.sql_cell_guide`, which has it judge whether ``duckdb`` is
+    in the notebook's environment).
+
+    What it DROPS, deliberately: marimo's per-cell wrapper — the ``@app.cell``
+    decorator, the ``def _(names)`` signature and the trailing ``return (...)`` — which
+    is precisely what the propose tools regenerate, so showing it only invited the
+    model to copy it back. Also dropped as noise the model can neither use nor change:
+    ``__generated_with``, the ``marimo.App(...)`` options, the ``if __name__`` footer,
+    and per-cell options other than ``disabled``. It is therefore NOT a lossless view
+    of the file — on the fallback path below it is, everywhere else it is not.
+
+    Falls back to the RAW source, prefixed with :data:`_RAW_NOTEBOOK_NOTE` so the model
+    is told which form it is reading, whenever the cell split fails or cannot be
+    trusted: a file marimo will not parse (a plain ``.py`` module, a UTF-8 BOM — see
+    CLAUDE.md — a syntax error), one that yields no cells (a zero-cell stub, an empty
+    file), or one where marimo swallowed an unparseable region INTO a cell body, which
+    shows up as its own decorator surviving in the body it hands back.
+
+    The cell boundary is UNFORGEABLE, because a body that carries the literal text of one
+    would otherwise let the notebook's own content name a cell the model never read — see
+    :data:`_FORGED_BOUNDARY_RE`. A body line that would read as a boundary is emitted with
+    one extra space; that is the only way the rendering ever alters a cell's text, it can
+    only ever land inside a comment, and nothing else is touched.
+
+    PURE and value-free: every character it emits is either a mooring-authored label or
+    text already in ``source``. It applies NO scrub of its own — each channel keeps its
+    own gate (the assembler scrubs the result below; the tool handler scrubs it at the
+    mint), and both scrub the rendering, so the header block is covered like any cell.
+    """
+    # Function-local, like ai/tools.py's: marimo_rt is the transport seam ai/ reaches
+    # marimo through (.importlinter's marimo-internals-isolated contract), and THIS
+    # module is imported on non-AI paths too, so its module-level surface stays light.
+    from mooring import marimo_rt
+
+    read_errors = (
+        ValueError,
+        OSError,
+        SyntaxError,
+        marimo_rt.MarimoTooOld,
+        marimo_rt.MarimoTransportError,
+    )
+    try:
+        # ...with_options, not read_cells: `disabled` rides on the SAME cell object as
+        # the code, so a live cell can never be labelled dead by a pairing that slipped.
+        cells = marimo_rt.read_cells_with_options(source)
+    except read_errors:
+        cells = []
+    if not cells or any(_WRAPPER_LEAK_RE.search(code) for _i, code, _opts in cells):
+        return _RAW_NOTEBOOK_NOTE + source
+    try:
+        header, _app_options = marimo_rt.read_notebook_frame(source)
+    except read_errors:  # the cells parsed, so this should not fire — degrade quietly
+        header = ""
+    parts = [
+        f"The notebook has {len(cells)} cell(s), each shown below with its index. Those "
+        "indices are a SNAPSHOT of the notebook as it was when this view was made: if any "
+        "cell has been applied, added or deleted since, call mooring_read_notebook_source "
+        "for current indices before calling mooring_propose_cell_edit."
+    ]
+    if header.strip():
+        parts.append(f"{_NOTEBOOK_HEADER_LABEL}\n{header.strip()}")
+    parts.append(
+        "\n\n".join(
+            f"{_CELL_BOUNDARY_MARK} {i}"
+            f"{' (DISABLED — marimo does not run it)' if options.get('disabled') else ''} ===\n"
+            + _FORGED_BOUNDARY_RE.sub(rf"\1{_DEFUSED_BOUNDARY_MARK}", code)
+            for i, code, options in cells
+        )
+    )
+    return "\n\n".join(parts)
+
+
 def build_system_context(
     *,
     schema_text: str,
@@ -225,8 +367,12 @@ def build_system_context(
     ``schema.format_for_ai`` — never a value), the schema of any dataframes LIVE in
     the running kernel (``live_schemas_text``, also names + dtypes only — see
     :mod:`mooring.ai.introspect`), and the notebook `.py` SOURCE (code; data loads
-    at runtime). ``semantic_models_text`` is the names-only Power BI semantic-model
-    hint (model/table/measure NAMES and counts from the allowlist extractor in
+    at runtime), rendered as INDEXED, UNWRAPPED cells by
+    :func:`render_notebook_for_model` — the one renderer the
+    ``mooring_read_notebook_source`` tool shares, so what the model READS is already
+    the shape the propose tools make it WRITE. ``semantic_models_text`` is the
+    names-only Power BI semantic-model hint (model/table/measure NAMES and counts
+    from the allowlist extractor in
     :mod:`mooring.pbip_model` — the DAX detail stays behind the pull tools). The
     optional team context — ``dictionary_text`` (the value-minimised data-dictionary
     slice) and ``instructions_text`` (free text the team wrote) — is opt-in and
@@ -241,7 +387,11 @@ def build_system_context(
     # rather than trusting each caller to have scrubbed upstream. A clean fragment
     # is returned unchanged, so this is a no-op on the common path.
     schema_text, _ = scrub_text(schema_text)
-    notebook_source, _ = scrub_text(notebook_source)
+    # The notebook is shown as INDEXED, UNWRAPPED cell bodies — the exact shape the
+    # propose tools consume (see render_notebook_for_model) — and scrubbed only AFTER
+    # rendering, so the backstop still covers every notebook line that reaches the model
+    # (rendering is a pure re-split of the same code: it can neither add nor hide one).
+    notebook_source, _ = scrub_text(render_notebook_for_model(notebook_source))
     live_schemas_text, _ = scrub_text(live_schemas_text)
     instructions_text, _ = scrub_text(instructions_text)
     dictionary_text, _ = scrub_text(dictionary_text)
