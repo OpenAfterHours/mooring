@@ -132,7 +132,46 @@ proposal emitted; is each cell body free of `@app.cell` / `def _(` / a trailing
 `return`; does each body parse; did it target the right cell index; are all
 referenced columns in the schema; is the SQL read-only.
 
-Two of those are honest heuristics rather than proofs, and are scoped to one
+### Silence is not a decline
+
+Four cases — `dag/no-cycle`, `schema/no-invented-column`, `sql/read-only`,
+`sql/no-pivot` — are ones where **declining is a correct answer**: the request is
+impossible, or asks for something the copilot should refuse. Their structural
+checks are wrapped in `if_proposed(...)`, which passes when nothing was proposed.
+
+That combinator alone is not enough, and getting this wrong is the single most
+damaging bug this eval can have. Every predicate here is *vacuously true over an
+empty proposal* — no invented column, no destructive SQL, no dependency cycle — so
+a case built only from `if_proposed` is passed by a model with no tool-calling
+ability whatsoever. It scored 12.5% instead of 0% and its card credited it with
+four correct declines. **A flattering eval is worse than no eval.**
+
+So each of those four also carries:
+
+* `answered()` — a proposal, or words. Kills silence outright.
+* `declined_explaining(*terms)` — when nothing was proposed, the reply must mention
+  the vocabulary of the **constraint** (`cycle`/`circular`, `exist`/`available`,
+  `read-only`/`delete`, `pivot`/`crosstab`), never of the request. A reply that
+  hands back code without noticing the constraint matches none of them.
+
+`declined_explaining` is the one place the eval reads a model's prose, and it is a
+keyword heuristic. What makes that acceptable is the gate: it runs **only when
+nothing was proposed**, so it can never fail a model that did the work. Its entire
+blast radius is the population where the eval otherwise cannot tell a reasoned
+decline from a shrug.
+
+Three tests hold the line, and two of them audit the **whole** registry rather than
+the four known cases — enumerating them by hand is how the first four were missed:
+`test_a_silent_model_passes_nothing`, `test_a_prose_only_model_passes_nothing`, and
+`test_no_case_is_built_only_from_vacuous_checks`. A fourth,
+`test_a_reasoned_decline_still_passes`, keeps the intended reading alive so the fix
+cannot degenerate into "declining always fails".
+
+The card reports unanswered runs on their own line rather than folding them into
+the rate — a model that cannot call tools looks merely cautious until you count
+them.
+
+Two checks are honest heuristics rather than proofs, and are scoped to one
 bucket each:
 
 * **`columns-in-schema`** collects string literals in unambiguous *column
@@ -191,7 +230,10 @@ the gate.)
   end to end through the gate, and through the checks alone with the gate out of
   the way (which is what a regression in `ai/tools.py` would look like);
 * a **golden correct answer for every case**, so no case can be unwinnable;
-* a weak model that fails nearly every case, so the harness cannot pass everything;
+* a weak model, a **silent** model and a **prose-only** model that each score 0/32,
+  so the harness cannot pass everything — and cannot credit silence as a decline;
+* a **reasoned decline** that still passes, so the above cannot degenerate into
+  "declining always fails";
 * the `expect` refusals — an absent claim, a stale one, and a rewrite that
   misstates the cell count;
 * the pre-existing-fault rule, the tool-choice predicates, and the card renderer;
@@ -221,7 +263,11 @@ own literal.
    never hand-written.
 2. Add the `Case` to `evals/cases.py`, in the bucket matching the *cause* it
    isolates. If it can fail for two reasons, split it.
-3. Add a golden answer to `GOLDEN` in `tests/test_eval_harness.py` and run
+3. If the case can be passed by *declining*, give it `answered()` and
+   `declined_explaining(...)` — see [Silence is not a decline](#silence-is-not-a-decline).
+   Never build a case out of `if_proposed` alone.
+4. Add a golden answer to `GOLDEN` in `tests/test_eval_harness.py` and run
    `uv run pytest tests/test_eval_harness.py -q`. A case with no golden fails
-   `test_a_golden_answer_exists_for_every_case`, and an unwinnable one fails
-   `test_every_case_passes_on_a_correct_answer`.
+   `test_a_golden_answer_exists_for_every_case`, an unwinnable one fails
+   `test_every_case_passes_on_a_correct_answer`, and one a silent model can pass
+   fails `test_a_silent_model_passes_nothing`.

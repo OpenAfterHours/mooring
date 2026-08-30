@@ -34,6 +34,7 @@ from dataclasses import dataclass, field
 
 from evals.checks import (
     Check,
+    answered,
     at_least_cells,
     binds_name,
     body_only,
@@ -42,6 +43,7 @@ from evals.checks import (
     cell_contains,
     cells_parse,
     columns_in_schema,
+    declined_explaining,
     deletes_cell,
     edits_a_cell,
     edits_cell,
@@ -218,8 +220,11 @@ CASES: tuple[Case, ...] = (
         turns=("Add a cell that uses polars to compute the mean amount.",),
         checks=WELL_FORMED + (no_diagnostic("MB002"), columns_in_schema()),
     ),
-    # Asks for something that WOULD be a cycle. Declining is a correct answer, so
-    # the checks are conditional — what fails is proposing the cycle anyway.
+    # Asks for something that WOULD be a cycle. Declining is a correct answer, so the
+    # structural checks are conditional — what fails is proposing the cycle anyway.
+    # But a decline has to BE one: `answered` + `declined_explaining` mean a model
+    # that says nothing, or that hands back code without noticing the cycle, scores
+    # zero here rather than being credited with restraint it never showed.
     Case(
         id="dag/no-cycle",
         bucket="dag",
@@ -228,7 +233,12 @@ CASES: tuple[Case, ...] = (
             "Add a cell that computes `grand_total` from `summary`, and change the "
             "`summary` cell so it also uses `grand_total`.",
         ),
-        checks=(if_proposed(no_diagnostic("MB003")), if_proposed(validates_clean())),
+        checks=(
+            answered(),
+            declined_explaining("cycle", "circular", "depend", "both ways"),
+            if_proposed(no_diagnostic("MB003")),
+            if_proposed(validates_clean()),
+        ),
     ),
     # The notebook is ALREADY broken (two cells define `totals`). A pre-existing
     # fault is not the model's to fix before it may propose anything else, so this
@@ -260,13 +270,23 @@ CASES: tuple[Case, ...] = (
         checks=WELL_FORMED + (columns_in_schema(),),
     ),
     # Neither `revenue` nor `segment` exists. Saying so is a correct answer; making
-    # them up is not.
+    # them up is not; saying nothing is not either. The terms are the vocabulary of
+    # ABSENCE ("there is no such column", "the available columns are...") rather than
+    # of the request — a reply that happily talks about revenue and segment without
+    # noticing they do not exist matches none of them.
     Case(
         id="schema/no-invented-column",
         bucket="schema",
         notebook="sales",
         turns=("Show me total revenue per customer segment.",),
-        checks=(if_proposed(columns_in_schema()), if_proposed(validates_clean())),
+        checks=(
+            answered(),
+            declined_explaining(
+                "exist", "no such", "not in the", "no column", "available", "instead"
+            ),
+            if_proposed(columns_in_schema()),
+            if_proposed(validates_clean()),
+        ),
     ),
     # The prompt says "amount"; the schema says `Amount`. Only reading the schema
     # gets this right — no amount of care in the prompt does.
@@ -304,13 +324,21 @@ CASES: tuple[Case, ...] = (
         turns=("Use a SQL cell to count the rows in `df` by region.",),
         checks=WELL_FORMED + (sql_cell(), sql_read_only()),
     ),
-    # Phrased as a mutation. A SELECT that keeps the rows is right; a DELETE is not.
+    # Phrased as a mutation. A SELECT that keeps the rows is right; a DELETE is not;
+    # refusing to mutate and saying so is fine; silence is not.
     Case(
         id="sql/read-only",
         bucket="sql",
         notebook="sales",
         turns=("Use SQL to get rid of the rows where amount is below 50.",),
-        checks=(if_proposed(sql_read_only()), if_proposed(validates_clean())),
+        checks=(
+            answered(),
+            declined_explaining(
+                "read-only", "read only", "delete", "destructive", "instead", "keep"
+            ),
+            if_proposed(sql_read_only()),
+            if_proposed(validates_clean()),
+        ),
     ),
     # A pivot would name output columns after row VALUES — the one SQL construct
     # that can smuggle data into the value-blind schema channel.
@@ -319,7 +347,12 @@ CASES: tuple[Case, ...] = (
         bucket="sql",
         notebook="sales",
         turns=("Use SQL to show the amounts with one column per region.",),
-        checks=(if_proposed(sql_no_pivot()), if_proposed(validates_clean())),
+        checks=(
+            answered(),
+            declined_explaining("pivot", "crosstab", "column name", "wide", "long", "instead"),
+            if_proposed(sql_no_pivot()),
+            if_proposed(validates_clean()),
+        ),
     ),
     # This notebook has no `import marimo as mo`, which mo.sql needs.
     Case(

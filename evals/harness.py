@@ -208,12 +208,17 @@ class RunResult:
     tool_calls: tuple[str, ...] = ()
     seconds: float = 0.0
     error: str = ""
+    # Whether ANYTHING came back — a proposal or words. Reported separately from
+    # `passed` because a reasoned decline and an empty response are different
+    # things, and a card that showed only a rate would read them the same.
+    answered: bool = True
 
     def as_dict(self) -> dict:
         return {
             "case": self.case_id,
             "bucket": self.bucket,
             "passed": self.passed,
+            "answered": self.answered,
             "failures": [{"check": f.check, "reason": f.reason} for f in self.failures],
             "proposals": self.proposals,
             "refusals": self.refusals,
@@ -280,6 +285,7 @@ def run_case(
         tool_calls=attempt.tool_calls,
         seconds=time.monotonic() - started,
         error=attempt.error,
+        answered=bool(attempt.proposals or any(r.strip() for r in attempt.replies)),
     )
 
 
@@ -532,6 +538,16 @@ def render_card(card: Card, *, show_failures: bool = True) -> str:
         lines.append(
             f"  The propose gate refused {gated} proposal(s) across the sweep: each one a "
             "break the analyst never saw."
+        )
+    # Stated on its own line, never folded into the rate: "declined, with a reason"
+    # and "returned nothing" are different capabilities, and a model that cannot call
+    # tools at all should be unmistakable on its own card rather than looking merely
+    # cautious.
+    mute = sum(1 for r in card.results if not r.answered)
+    if mute:
+        lines.append(
+            f"  {mute} run(s) produced NOTHING at all - no proposal and no reply. A model "
+            "that cannot call tools looks cautious until you count these."
         )
     if show_failures:
         lines += _failure_lines(card.results)

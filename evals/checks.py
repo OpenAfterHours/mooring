@@ -69,6 +69,62 @@ def proposed() -> Check:
     return Check("proposed", run)
 
 
+def answered() -> Check:
+    """The model produced SOMETHING — a proposal, or words.
+
+    The floor under every case where declining is an acceptable answer. Without it
+    those cases are passed by a model that emits nothing at all, because each of
+    their checks is vacuously true over an empty proposal: no invented column, no
+    destructive SQL, no dependency cycle. Silence is not a decline, and an eval that
+    credits it as one flatters exactly the weak models it exists to identify.
+
+    Kept separate from :func:`proposed` because the two say different things: this
+    is "did it engage", that is "did it produce something applicable". A case that
+    genuinely has no correct proposal wants the first and not the second.
+    """
+
+    def run(a: "Attempt") -> str:
+        if a.proposals or any(r.strip() for r in a.replies):
+            return ""
+        return "produced nothing at all: no proposal and no reply"
+
+    return Check("answered", run)
+
+
+def declined_explaining(*terms: str) -> Check:
+    """When nothing was proposed, the reply must show it engaged with the CONSTRAINT
+    — it mentions at least one of ``terms``.
+
+    Gated behind "proposed nothing", and that gate is what makes a keyword test
+    defensible here: it can never fail a model that did the work, so its whole blast
+    radius is the population where the eval otherwise cannot tell a reasoned decline
+    ("that would close a dependency cycle") from a shrug ("here's some code") or a
+    model that simply cannot call tools. ``terms`` are the vocabulary of the
+    constraint, never of the request, so an answer that ignored the constraint
+    cannot match by accident.
+
+    Deliberately generous: any one term, case-insensitive, anywhere in any reply. A
+    decline that matches none of several natural phrasings is not a decline this
+    eval is willing to credit — but the terms per case are chosen so that is a very
+    small set. It is a heuristic, and the one place the eval reads a model's PROSE;
+    see the README.
+    """
+    wanted = tuple(t.lower() for t in terms)
+
+    def run(a: "Attempt") -> str:
+        if a.proposals:
+            return ""  # it did the work; there is no decline to justify
+        blob = " ".join(a.replies).lower()
+        if any(term in blob for term in wanted):
+            return ""
+        return (
+            "proposed nothing and the reply does not explain why "
+            f"(expected it to mention one of: {', '.join(wanted)})"
+        )
+
+    return Check("declined-explaining", run)
+
+
 def within_turns(limit: int) -> Check:
     """The proposal landed inside ``limit`` analyst turns."""
 
@@ -192,6 +248,16 @@ def if_proposed(check: Check) -> Check:
     request that would close a dependency cycle, a SQL mutation. Scoring silence as
     a failure there would train the eval to reward a model that always produces
     something, which is the opposite of what these cases are asking.
+
+    **Never the only thing a case checks.** Every predicate in here is vacuously
+    true over an empty proposal, so a case built solely from these combinators is
+    passed by a model that emits nothing — which is how four cases once credited a
+    model with no tool-calling ability at all with four correct declines. Pair it
+    with :func:`answered` (something came back) and, where the case is really about
+    a decline, :func:`declined_explaining` (the decline is reasoned). Pinned by
+    ``test_a_silent_model_passes_nothing``, which drives every case with an empty
+    script, so a case that reintroduces the shape fails in CI rather than in a
+    capability card.
     """
 
     def run(a: "Attempt") -> str:

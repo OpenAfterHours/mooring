@@ -729,28 +729,107 @@ def test_every_case_passes_on_a_correct_answer(root, case):
     assert result.passed, [(f.check, f.reason) for f in result.failures]
 
 
-def test_a_weak_model_fails_nearly_every_case(root):
-    """The other half of the goldens: a harness that passes everything is as
-    useless as one that fails everything, so a model that only ever emits the same
-    colliding cell must score near zero.
+def test_a_weak_model_fails_every_case(root):
+    """The other half of the goldens: a harness that passes everything is as useless
+    as one that fails everything, so a model that only ever emits the same colliding
+    cell must score ZERO.
 
-    The handful that still pass are the cases where DECLINING is a correct answer
-    (``if_proposed``): the gate refused the bad proposal, nothing reached the
-    analyst, and those cases have nothing to object to. That is the intended
-    reading, not a gap — and pinning the exact set here stops a future
-    ``if_proposed`` from being added to a case where silence should have failed.
+    It used to be allowed to pass four cases — the ones whose checks were built
+    entirely from ``if_proposed``, which is vacuously true over an empty proposal.
+    The justification written here was that the gate had refused the bad proposal so
+    those cases had nothing to object to. That reasoning was wrong, and having it
+    written down as though it were considered is what let the shape survive: it
+    describes THIS test's weak model, which at least tries, and says nothing about a
+    model that emits nothing at all — which passed the same four cases and was
+    credited with four correct declines. See
+    :func:`test_a_silent_model_passes_nothing`, which covers that directly.
     """
     weak = fake.scripted_opener({c.id: [fake.propose_cell(REDEFINES_DF)] for c in CASES})
     results = [run_case(c, weak, root=root, turn_timeout=30) for c in CASES]
     passed = {r.case_id for r in results if r.passed}
-    vacuous = {
+    assert passed == set(), f"a model that only emits a colliding cell passed: {sorted(passed)}"
+    assert sum(r.refusals for r in results) >= len(CASES) - 8
+
+
+# -- silence is not a decline -------------------------------------------------
+
+
+def test_a_silent_model_passes_nothing(root):
+    """A model that emits NOTHING must score zero on every case.
+
+    The regression net for the whole class of bug, and deliberately an audit of the
+    FULL registry rather than of the four cases that had it: every predicate in
+    ``checks.py`` is vacuously true over an empty proposal, so any case built only
+    from ``if_proposed``-style combinators is passed by a model with no tool-calling
+    ability whatsoever. Enumerating the affected cases by hand is exactly how the
+    first four were missed; driving all of them with an empty script is not.
+    """
+    silent = fake.scripted_opener({c.id: [] for c in CASES})
+    results = [run_case(c, silent, root=root, turn_timeout=30) for c in CASES]
+    passed = {r.case_id for r in results if r.passed}
+    assert passed == set(), f"a model that produced nothing passed: {sorted(passed)}"
+    assert all(not r.answered for r in results)
+    assert all(r.proposals == 0 and r.refusals == 0 for r in results)
+
+
+def test_a_prose_only_model_passes_nothing(root):
+    """A model that can only talk — no tool calls — must also score zero.
+
+    Distinct from silence: it HAS answered, so :func:`checks.answered` is satisfied,
+    and the decline cases fall to :func:`checks.declined_explaining` instead. The
+    reply here is the shape a non-tool-calling model actually produces: correct-looking
+    code in a fence, engaging with none of the constraints the decline cases are about.
+    """
+    prose = fake.scripted_opener(
+        {
+            c.id: [fake.Say("Sure! Here is the code:\n\n```python\nout = df.height\n```")]
+            for c in CASES
+        }
+    )
+    results = [run_case(c, prose, root=root, turn_timeout=30) for c in CASES]
+    passed = {r.case_id for r in results if r.passed}
+    assert passed == set(), f"a prose-only model passed: {sorted(passed)}"
+    assert all(r.answered for r in results)  # it spoke; it just never acted
+
+
+def test_a_reasoned_decline_still_passes(root):
+    """The intended reading of the four decline cases, kept alive.
+
+    The fix must not simply make declining impossible — these cases exist because
+    the right answer sometimes IS "no, and here is why". Each of these replies
+    engages with the constraint, proposes nothing, and must pass.
+    """
+    declines = {
+        "dag/no-cycle": "I can't do both: having summary use grand_total while "
+        "grand_total is computed from summary would be a circular dependency, and "
+        "marimo would refuse to run either cell.",
+        "schema/no-invented-column": "This dataset has no revenue or segment column "
+        "- the available columns are region, product, amount and order_date.",
+        "sql/read-only": "I won't propose a DELETE: an applied cell runs at once and "
+        "undo only restores the notebook text. Shall I select the rows to keep instead?",
+        "sql/no-pivot": "A pivot would name the output columns after the region "
+        "values themselves, so I'd rather give you a long result grouped by region.",
+    }
+    for case_id, reply in declines.items():
+        case = next(c for c in CASES if c.id == case_id)
+        opener = fake.scripted_opener({case_id: [fake.Say(reply)]})
+        result = run_case(case, opener, root=root, turn_timeout=30)
+        assert result.passed, (case_id, [(f.check, f.reason) for f in result.failures])
+        assert result.proposals == 0 and result.answered
+
+
+def test_no_case_is_built_only_from_vacuous_checks():
+    """The static half of the same guarantee, so a NEW case cannot reintroduce the
+    shape even if nobody re-runs the silent sweep against it."""
+    offenders = [
         c.id
         for c in CASES
         if all(check.name.startswith("if-proposed:") for check in c.checks)
-    }
-    assert passed <= vacuous, f"unexpectedly passed: {sorted(passed - vacuous)}"
-    assert len(passed) <= 6, sorted(passed)
-    assert sum(r.refusals for r in results) >= len(CASES) - 8
+    ]
+    assert not offenders, (
+        "these cases are passed by a model that emits nothing; add answered() "
+        f"(and declined_explaining() if a decline is the point): {offenders}"
+    )
 
 
 def test_the_card_renders_and_serialises(root):
