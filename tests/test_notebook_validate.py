@@ -236,8 +236,70 @@ SQL_NOTEBOOK = nb("import marimo as mo", "res = mo.sql('SELECT * FROM customers'
 SQL_QUALIFIED = nb("import marimo as mo", "res = mo.sql('SELECT * FROM sales.public.orders')")
 
 
+def inject_sql_refs(monkeypatch, table, *, marimo_itemises_it=True):
+    """Make marimo's graph look the way it does once duckdb and sqlglot are importable.
+
+    Neither is a dependency of this repo, so on CI marimo's visitor never reaches its
+    SQL branch and a plain end-to-end test would pass for the wrong reason — green on a
+    build where the bug is live. This reproduces the one condition that branch creates
+    (``marimo/_ast/visitor.py``: ``if has_sqlglot: ... self._add_ref(None, name,
+    sql_ref=ref)``) by adding the table to the SQL cell's ``refs``, and recording it in
+    ``sql_refs`` exactly as marimo does. ``CellImpl`` is a frozen dataclass, but both
+    fields are mutable containers, so no attribute is rebound.
+
+    ``marimo_itemises_it=False`` CLEARS ``sql_refs`` — the negative control, which must
+    still produce the diagnostic. Without it these tests could not tell suppression from
+    an injection that never fired. Clearing rather than merely not adding matters: where
+    duckdb and sqlglot ARE installed, marimo has already itemised the table itself, and
+    the control would pass for the wrong reason. Forcing the state makes every
+    assertion here mean the same thing on every machine.
+    """
+    import marimo._lint.context as lint_context
+
+    real = lint_context.LintContext
+
+    class Injecting(real):
+        def get_graph(self):
+            graph = super().get_graph()
+            for cell in graph.cells.values():
+                if "mo.sql(" in cell.code:
+                    cell.refs.add(table)
+                    if marimo_itemises_it:
+                        cell.sql_refs[table] = None  # marimo stores an SQLRef here
+                    else:
+                        cell.sql_refs.clear()
+            return graph
+
+    monkeypatch.setattr(lint_context, "LintContext", Injecting)
+
+
+def test_a_sql_table_name_is_never_an_unresolved_reference(monkeypatch):
+    inject_sql_refs(monkeypatch, "customers")
+    assert DIAG_UNRESOLVED_REFERENCE not in codes(validate_notebook_source(SQL_NOTEBOOK))
+
+
+def test_the_injection_really_does_produce_the_diagnostic(monkeypatch):
+    # The negative control for the test above: the same table name, not itemised as a
+    # SQL ref, IS reported. So the suppression is what silences it — not a fixture that
+    # quietly does nothing.
+    inject_sql_refs(monkeypatch, "customers", marimo_itemises_it=False)
+    found = [d for d in validate_notebook_source(SQL_NOTEBOOK) if d.code == DIAG_UNRESOLVED_REFERENCE]
+    assert len(found) == 1
+    assert "customers" in found[0].message
+
+
+def test_a_ref_that_is_not_a_python_identifier_is_never_reported(monkeypatch):
+    # The structural backstop, independent of the SQL path: `sales.public.orders` is not
+    # a name Python could ever look up, so it cannot be a NameError however it got here.
+    # Injected WITHOUT the sql_refs marking, so only the identifier guard can suppress it.
+    inject_sql_refs(monkeypatch, "sales.public.orders", marimo_itemises_it=False)
+    assert DIAG_UNRESOLVED_REFERENCE not in codes(validate_notebook_source(SQL_QUALIFIED))
+
+
 @pytest.mark.parametrize("source", [SQL_NOTEBOOK, SQL_QUALIFIED])
-def test_sql_table_names_are_never_unresolved_references(source):
+def test_sql_table_names_are_never_unresolved_references_for_real(source):
+    # The same property against the real marimo visitor, wherever `marimo[sql]` is
+    # installed. Skips on this repo's CI, which is why the injected tests above exist.
     pytest.importorskip("duckdb")
     pytest.importorskip("sqlglot")
     assert DIAG_UNRESOLVED_REFERENCE not in codes(validate_notebook_source(source))
@@ -331,8 +393,14 @@ def test_it_writes_nothing_beside_the_notebook(tmp_path):
 
 
 def test_diagnostics_carry_no_notebook_content():
-    # Names, rule codes, line numbers and authored fix text only — never a value from
-    # the notebook, even when the failure is on the line that holds one.
+    # Two different strengths in one assertion. For mooring's own MOOR codes this is
+    # structural — every field is built in marimo_rt from a code, an index, a line
+    # number, an identifier or authored text, and `_syntax_detail` reads
+    # `SyntaxError.msg` and never `.text`. For marimo's MB codes it is a behavioural
+    # check against the pinned marimo: its `message`/`fix` are forwarded verbatim, so
+    # this test is what would notice a future rule starting to quote the offending line
+    # the way ruff's messages do. A caller sending diagnostics out of the workspace
+    # still scrubs them through ai/egress.py; this is not a substitute for that.
     sources = [
         nb(f"token = '{SECRET}'", f"token = '{SECRET}' + '!'"),  # duplicate definition
         nb(f"token = '{SECRET}' +"),  # syntax error on the secret's own line

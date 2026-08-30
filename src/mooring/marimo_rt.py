@@ -624,9 +624,10 @@ class Diagnostic:
 
     ``code`` is either a marimo rule code (``MB002``) or one of mooring's own
     ``MOOR`` codes; ``name`` is its short slug (``multiple-definitions``);
-    ``lines`` are 1-based line numbers in the candidate source; ``fix`` is static,
-    authored advice. Nothing here is derived from a runtime value — see the
-    value-freedom argument on :func:`validate_notebook_source`.
+    ``lines`` are 1-based line numbers in the candidate source; ``fix`` is static
+    advice. Nothing here is ever a runtime value — nothing is run. But ``message`` and
+    ``fix`` on a marimo-owned code are marimo's own words, forwarded verbatim, so read
+    the two-tier note on :func:`validate_notebook_source` before sending one anywhere.
     """
 
     code: str
@@ -665,11 +666,29 @@ def validate_notebook_source(source: str) -> list[Diagnostic]:
     **It never executes a line of the notebook.** Every check runs on the AST: marimo's
     converter parses the source, and marimo's own graph builder ``compile()``s each cell
     to read its defs/refs — compiling is not running, and no kernel, subprocess or
-    websocket is involved. That is what makes the result value-free by construction:
-    with nothing executed there is no value to observe, so every field of every
-    :class:`Diagnostic` can only be a name, a rule code, a line number, or fix text
-    authored here. Diagnostics quote nothing but source the caller already holds, so
-    passing them back to a model opens no new egress channel.
+    websocket is involved. Nothing runs, so there is no runtime value anywhere for a
+    diagnostic to carry.
+
+    **The remaining exposure is quoted SOURCE, and it comes in two tiers.** A notebook's
+    own text can hold a literal that is a value in every sense that matters — a
+    hardcoded key, a customer's name — so "nothing executed" is not on its own the whole
+    story:
+
+    * mooring's own ``MOOR`` diagnostics are **structurally** value-free. Every field is
+      built here from a rule code, a cell index, a line number, an identifier, or fix
+      text written in this module. The one place CPython's own words are used,
+      :func:`_syntax_detail`, deliberately reads ``SyntaxError.msg`` and never ``.text``,
+      so the offending line cannot come with it.
+    * marimo's ``MB`` diagnostics forward its ``message`` and ``fix`` **verbatim** (one
+      ships a docs URL), and :data:`DIAG_VALIDATOR_UNAVAILABLE` embeds ``str(exc)`` from
+      a marimo internal. No marimo rule quotes notebook text today — checked against
+      secrets planted in the failing position of every failure class — but this module
+      cannot promise that a future rule will not start, the way ruff's messages do.
+
+    So treat the forwarded text as best-effort, not as a guarantee. A caller sending
+    diagnostics OUT of the workspace (to a model, say) must put them through
+    ``ai/egress.py`` like any other outbound text; that scrub belongs at the propose-tool
+    boundary, not here — this module is below the egress layer and cannot reach it.
 
     **It never raises.** A malformed candidate, a marimo too old or missing its private
     APIs, an internal that moved — all degrade to diagnostics. A checker failure comes
@@ -1135,11 +1154,15 @@ def _unresolved_diagnostics(ir, source: str) -> list[Diagnostic]:
     * **anything a cell's SQL contributed** — see :func:`_sql_names`. A ``mo.sql`` cell's
       refs include the TABLES its query reads, which are not Python names at all.
 
-    Then, as a last backstop, anything that is not a Python identifier is dropped: a
+    Then, as a last backstop, anything that is not a Python identifier is dropped. A
     real ``NameError`` can only ever come from an identifier, so a ref like
     ``sales.public.orders`` is by definition something marimo synthesised rather than a
     name Python will look up. A hallucinated name is bound nowhere and IS an identifier,
-    so it still surfaces.
+    so it still surfaces. This guard is unconditional and deliberately not tied to the
+    SQL path: an audit of marimo 0.23.9 found four ``_add_ref`` call sites, of which
+    three pass a real ``ast.Name.id`` / ``ast.Global`` name and only the SQL branch
+    synthesises — but the guard costs nothing and holds for whatever a later marimo
+    invents.
 
     Any failure inside marimo's graph builder is swallowed: this check is an extra, and
     losing it must not cost the caller the other three.
