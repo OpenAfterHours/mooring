@@ -232,7 +232,9 @@ def build_system_context(
     slice) and ``instructions_text`` (free text the team wrote) — is opt-in and
     carries whatever the author put in it; the STRICT PRIVACY RULES are pinned FIRST
     and the instructions are placed in a clearly lower-trust section that may not
-    override them.
+    override them. Two mooring-authored blocks — how a marimo notebook works, and SAFE
+    CELLS — are pinned above that team section for the same reason: they are static
+    strings written here, carrying no user data, that state how the tool works.
     """
     # Defence-in-depth backstop: scrub every value-bearing fragment HERE, at the
     # single assembler, so the choke point enforces value-freedom by structure
@@ -279,6 +281,26 @@ def build_system_context(
         "below — calling a propose tool is what gives the analyst an Apply button. A "
         "```python block in your reply is only for discussion; on its own it does NOT "
         "propose anything and cannot be applied."
+    )
+    # A mooring-authored, value-free rule block on the notebook MODEL a proposed cell has to
+    # fit: marimo is a reactive dependency graph, not a Jupyter scratchpad, and a model that
+    # assumes otherwise redefines a name in a second cell — which errors BOTH cells and every
+    # cell downstream of them, so an Apply breaks work that was fine before. (Independent
+    # cells still run, and `marimo export html` exits 1, which is what turns Verify amber.)
+    # Stating marimo's own rules here is far cheaper than the analyst discovering them from a
+    # MultipleDefinitionError. It names no dataset, column, path or value — only rules — so no
+    # scrub applies, exactly as for checks_help/sql_help. Pinned above the lower-trust team
+    # block for the same reason the privacy rules are: it is a correctness rule of the tool,
+    # not something team instructions may override.
+    parts.append(
+        "HOW A MARIMO NOTEBOOK WORKS (this is not Jupyter):\n"
+        "- Cells form a dependency graph. marimo runs them in dataflow order, not top to "
+        "bottom; where a cell sits in the file does not decide when it runs.\n"
+        "- Every variable is defined in exactly ONE cell. To change a value, EDIT the cell "
+        "that defines it — never redefine it in a new cell. Two cells defining the same name "
+        "is an error: both of them, and every cell downstream of them, refuse to run.\n"
+        "- Prefix a throwaway name with _ to keep it local to its cell.\n"
+        "- Cells must not form a cycle (two cells that each use a name the other defines)."
     )
     # A mooring-authored, value-free rule block on what a proposed cell may DO: an applied
     # cell RUNS immediately and the analyst's only undo restores the notebook TEXT, so an

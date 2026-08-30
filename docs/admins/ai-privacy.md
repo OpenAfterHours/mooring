@@ -281,7 +281,7 @@ endpoint:
 # OpenAI itself — leave the base URL empty
 [ai]
 provider = "openai"
-model = "gpt-4o"
+model = "gpt-5.1"
 
 # A local model server (no key needed)
 [ai]

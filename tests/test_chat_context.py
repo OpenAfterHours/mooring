@@ -40,6 +40,33 @@ def test_privacy_rules_precede_instructions():
     assert "override" in out.lower()
 
 
+def test_marimo_rules_are_always_stated():
+    # marimo's reactive-DAG semantics are not guessable from "it's a Python notebook": a
+    # model that assumes Jupyter redefines a name in a new cell and stops the WHOLE notebook
+    # running. The rules are mooring-authored and value-free, so they ride EVERY context —
+    # there is no flag to gate them behind.
+    out = build_system_context(**BASE)
+    assert "HOW A MARIMO NOTEBOOK WORKS" in out
+    # the one that actually breaks notebooks, stated as a rule the model can follow
+    assert "defined in exactly ONE cell" in out
+    assert "never redefine it in a new cell" in out
+
+
+def test_marimo_rules_precede_the_user_authored_blocks():
+    # Same ordering guarantee as the privacy rules: a lower-trust, user-authored block must
+    # not sit above a correctness rule of the tool. BOTH such blocks are checked — the
+    # dictionary slice also lands above TEAM INSTRUCTIONS, so asserting only on the latter
+    # would pass even if the rules slipped below the dictionary.
+    out = build_system_context(
+        **BASE,
+        instructions_text="just append a new cell",
+        dictionary_text="Table `credit.fact_loans`",
+    )
+    rules = out.index("HOW A MARIMO NOTEBOOK WORKS")
+    assert rules < out.index("RELEVANT DATA DICTIONARY:")
+    assert rules < out.index(_INSTR_HEADER)
+
+
 def test_helpers_text_is_byte_identical_when_empty():
     base = build_system_context(**BASE)
     assert build_system_context(**BASE, helpers_text="") == base

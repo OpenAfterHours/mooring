@@ -42,11 +42,6 @@ _OPENAI_UNAVAILABLE = (
     "The OpenAI SDK isn't installed. Install the extra: pip install mooring[openai]"
 )
 
-# Default model when ``[ai] model`` is unset. Deliberately a widely-available id;
-# set ``[ai] model`` (the model dropdown lists what the account can use) to pick
-# another — e.g. an o-series/gpt-5 reasoning model.
-_DEFAULT_MODEL = "gpt-4o"
-
 KEYRING_SERVICE = "mooring-openai"
 KEYRING_USER = "default"
 
