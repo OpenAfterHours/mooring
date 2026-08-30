@@ -31,10 +31,7 @@ const TOOL_LABELS = {
   mooring_list_datasets: "listing datasets",
   mooring_get_schema: "looking up the schema",
   mooring_read_notebook_source: "reading the notebook",
-  mooring_propose_cell: "drafting a cell",
-  mooring_propose_cell_edit: "drafting an edit",
   mooring_propose_notebook_edit: "drafting changes",
-  mooring_propose_notebook_rewrite: "rewriting the notebook",
   mooring_list_tables: "listing dictionary tables",
   mooring_describe_table: "describing a table",
   mooring_search_dictionary: "searching the dictionary",
@@ -411,9 +408,12 @@ function addProposal(d) {
 
   // `held`/`holdRow`: set when the apply gate answers 428 (see holdProposal). While
   // held, the ONLY route to an apply is the hold row's own confirm button.
+  // `fixTried` counts the corrective re-proposals this proposal has asked for (bounded
+  // by ChatCore.MAX_FIX_ATTEMPTS); `noFix` marks a refusal re-proposing cannot answer.
   const prop = {
     card, kind, ops, copyText, applyBtn, skipBtn, note,
     applied: false, skipped: false, held: false, holdRow: null,
+    fixTried: 0, noFix: false,
   };
   applyBtn.addEventListener("click", () => applyProposal(prop));
   skipBtn.addEventListener("click", () => skipProposal(prop));
@@ -464,8 +464,9 @@ async function applyProposal(p, gateToken) {
       return;
     }
     // A 428 we can't read is still a refusal — fall through to the error path below,
-    // but never to askAiToFix (re-proposing wouldn't answer a gate).
-    p.triedFix = true;
+    // but never to askAiToFix (re-proposing wouldn't answer a gate). This must not
+    // CONSUME a fix attempt either: the model didn't get anything wrong here.
+    p.noFix = true;
   }
   if (data.ok) {
     p.applied = true;
@@ -475,24 +476,26 @@ async function applyProposal(p, gateToken) {
     // confirmed apply ends in exactly the same "Applied" state as an ordinary one.
     p.applyBtn.classList.add("primary", "applied");
     p.skipBtn.disabled = true;
-    p.note.textContent = " applied ✓"; // ✓
+    p.note.textContent = APPLIED;
     offerUndo(p);
+    offerRunReport(p);
     return;
   }
   // A held card keeps its inert button — the hold row below owns the retry.
   p.applyBtn.disabled = !!p.held;
   const err = data.error || "the change could not be applied";
-  if (status === 409) {
+  const plan = ChatCore.applyFailureAction(status, p.fixTried, p.noFix);
+  p.fixTried = plan.tried;
+  if (plan.action === "conflict") {
     // A staleness conflict (the cell changed since it was proposed) — re-reading,
     // not a re-write, is what's needed, so don't auto-ask the AI to "fix" it.
     p.note.textContent = " — that cell changed";
     addSysRow(err + " Ask me to redo it against the current notebook.");
-  } else if (!p.triedFix) {
+  } else if (plan.action === "fix") {
     // A parse/write failure (e.g. the model malformed a cell) — hand the exact error
-    // back to the assistant once so it can re-propose a corrected version.
-    p.triedFix = true;
+    // back to the assistant so it can re-propose a corrected version.
     p.note.textContent = " — couldn't apply";
-    askAiToFix(err);
+    askAiToFix(err, plan.tried);
   } else {
     p.note.textContent = " — couldn't apply";
     addSysRow(err);
@@ -625,18 +628,17 @@ function addGateHold(p, gate, rehold) {
   return wrap;
 }
 
-// Feed an Apply failure back to the assistant for one corrective re-proposal, clearly
-// narrated so the analyst knows what's happening (no silent billed turn).
-function askAiToFix(error) {
+// Feed an Apply failure back to the assistant for a corrective re-proposal, clearly
+// narrated so the analyst knows what's happening (no silent billed turn). `tried` is
+// which attempt this is (1-based, bounded by ChatCore.MAX_FIX_ATTEMPTS).
+function askAiToFix(error, tried) {
   if (isBusy()) {
     addSysRow("Couldn't apply that change: " + error);
     return;
   }
-  addSysRow("That change didn't apply — asking the assistant to fix it.");
-  const msg =
-    "The change you proposed could not be applied: " + error +
-    " Please re-propose a corrected version. Remember each cell is the BODY only — " +
-    "no @app.cell, no def, and no return statements.";
+  const nth = tried > 1 ? ` (attempt ${tried} of ${ChatCore.MAX_FIX_ATTEMPTS})` : "";
+  addSysRow("That change didn't apply — asking the assistant to fix it" + nth + ".");
+  const msg = ChatCore.applyFixPrompt(error, tried);
   lastUserText = msg;
   lastUserLabel = ""; // /retry after a fix attempt resends (and shows) the fix text
   startTurn();
@@ -662,6 +664,123 @@ function offerUndo(p) {
   btn.addEventListener("click", () => undoLast(btn));
   p.applyBtn.parentNode.insertBefore(btn, p.note);
   lastUndoBtn = btn;
+}
+
+// -- "did it actually run?" -------------------------------------------------
+// The repair loop above only ever sees failures mooring can find WITHOUT running
+// anything — a cell that won't parse, a patch that won't write. A wrong column, a
+// bad API call, a NameError: those exist only at runtime, and mooring never opens a
+// marimo websocket (that is the channel carrying outputs and values), so it cannot
+// see them. This is the one route back, and it is a deliberate click: it re-runs
+// EVERY cell in the notebook, which is exactly what the apply gate exists to keep
+// deliberate. So the card says what it will do before it does it, and nothing here
+// is reachable from Apply itself, a timer, or a page load.
+
+// The single visible "Run & report" offer (the latest applied card), with the sentence
+// that explains it. One at a time, like the Undo button: the action is the notebook, not
+// the card, so several buttons would all do the same thing while looking like they didn't.
+let lastRunOffer = null; // { btn, note }
+
+const APPLIED = " applied ✓"; // ✓ — the Apply state, kept visible through a run
+
+function offerRunReport(p) {
+  if (lastRunOffer) {
+    lastRunOffer.btn.remove();
+    lastRunOffer.note.remove();
+    lastRunOffer = null;
+  }
+  const btn = document.createElement("button");
+  btn.className = "small";
+  btn.textContent = "Run & report";
+  const says = document.createElement("div");
+  says.className = "muted run-report-note";
+  says.textContent =
+    "Run & report runs every cell in this notebook locally (it can take a while), " +
+    "then tells the assistant which errors came back — the error kind and a " +
+    "value-safe rewrite of its message, never a traceback and never a data value. " +
+    "You'll see exactly what was sent.";
+  btn.addEventListener("click", () => runAndReport(p, btn));
+  p.applyBtn.parentNode.insertBefore(btn, p.note);
+  p.card.appendChild(says);
+  lastRunOffer = { btn, note: says };
+}
+
+async function runAndReport(p, btn) {
+  if (isBusy()) {
+    addSysRow("Wait for the current turn to finish, then run and report.");
+    return;
+  }
+  btn.disabled = true;
+  p.note.textContent = APPLIED + " · running…";
+  // The composer is deliberately left usable: the run is server-side and can take
+  // minutes, and there is no cancel, so locking the input for it would be worse than
+  // the mess it prevents. That means the analyst CAN start a turn meanwhile — hence
+  // the isBusy() guards below, which keep this handler from stamping on one.
+  setStatus("running the notebook…");
+  const { status, data } = await api("/api/ai/chat/run-report", { sid });
+  const settle = () => {
+    if (!isBusy()) setTurnState("idle"); // restore the status line we borrowed
+  };
+  if (data.reason === "notebook_disabled") {
+    lockForDisabled(); // AI off for this notebook — the send is refused too
+    return;
+  }
+  if (!data.ok) {
+    settle();
+    p.note.textContent = APPLIED + " · couldn't run";
+    addSysRow(data.error || `The notebook couldn't be run (${status}).`);
+    btn.disabled = false;
+    return;
+  }
+  if (data.ran_clean) {
+    settle();
+    p.note.textContent = APPLIED + " · ran clean ✓"; // ✓
+    btn.textContent = "Ran clean";
+    addSysRow("Ran the notebook: every cell ran clean. Nothing to report.");
+    return;
+  }
+  p.note.textContent = APPLIED + " · the run failed";
+  if (!data.sent) {
+    // It failed, but marimo's stderr held no line mooring recognises — so there is
+    // nothing value-safe to hand over. Say that rather than inventing a summary.
+    settle();
+    btn.disabled = false;
+    addSysRow(
+      "Ran the notebook: it failed, but mooring couldn't read a value-safe reason " +
+      "from the run. Open the notebook to see the error."
+    );
+    return;
+  }
+  btn.textContent = "Reported";
+  addRunReportSent(data.sent, data.redactions || []);
+  // The report IS a turn — the assistant answers it with a new proposal. Skipped when
+  // a turn the analyst started is already streaming: startTurn resets the streaming
+  // row, which would split that reply in two.
+  if (!isBusy()) startTurn();
+}
+
+// Show the EXACT text the assistant was given. The click was the consent; this is the
+// receipt — the analyst never saw the raw message, so showing them the rewrite after
+// the fact is the only honest account of what left the machine.
+function addRunReportSent(sent, redactions) {
+  const wrap = addRow("row-sys row-pii", "");
+  const p = document.createElement("p");
+  p.textContent = "Reported the failure to the assistant. This is exactly what was sent:";
+  const pre = document.createElement("pre");
+  pre.className = "cell-code";
+  pre.textContent = sent; // textContent — model-adjacent text is data, never markup
+  wrap.append(p, pre);
+  if (redactions.length) {
+    const note = document.createElement("p");
+    note.className = "muted";
+    note.textContent =
+      redactions.length +
+      (redactions.length === 1 ? " part was" : " parts were") +
+      " withheld as possibly value-bearing: " +
+      summarizeKinds(redactions) + ".";
+    wrap.appendChild(note);
+  }
+  maybeScroll();
 }
 
 async function undoLast(srcBtn) {
@@ -717,7 +836,7 @@ function copyCode(code, note) {
 // A walkthrough that lives only in this transcript rots; one that syncs with the
 // notebook greets the next inheritor. After an explain turn goes idle, offer to
 // send the canned follow-up (chat_core.js notesCellPrompt — one appended markdown
-// cell via mooring_propose_cell only). The resulting proposal rides the normal
+// cell via the propose tool's `appends` only). The resulting proposal rides the normal
 // card → Apply → Undo path untouched, so it still gets the human review step.
 function offerNotesCell() {
   const rows = $("messages").querySelectorAll(".row-assistant");

@@ -63,7 +63,12 @@ if TYPE_CHECKING:
 
 _START_TIMEOUT = 60.0
 _MAX_TOOL_ITERS = 12  # backstop: bound the model's tool round-trips per turn
-_DEFAULT_MODEL = "gpt-4o"
+# The model when ``[ai] model`` is unset — a CURRENT id on purpose, not merely a widely
+# available one: this loop's output is code the analyst can Apply, and an applied cell RUNS,
+# so a model that mis-authors a marimo cell costs a broken notebook, not just a weak
+# suggestion. Set ``[ai] model`` (the dropdown lists what the account can use) to pick
+# another. Only reached when nothing is configured; a custom endpoint always names its own.
+_DEFAULT_MODEL = "gpt-5.1"
 _TOOL_BUDGET_MSG = (
     "(Stopped: reached the tool-call limit for one turn. Ask me to continue if needed.)"
 )

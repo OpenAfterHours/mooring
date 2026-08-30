@@ -168,15 +168,16 @@ const ChatCore = (function () {
   }
 
   // The canned follow-up behind "Add as notes cell": ONE new appended markdown
-  // documentation cell via mooring_propose_cell SPECIFICALLY — the edit/rewrite
-  // tools are forbidden so the walkthrough can never clobber an existing cell.
-  // The proposal still rides the normal card → Apply → undo path.
+  // documentation cell. There is now ONE propose tool, so the forbidden thing is no
+  // longer a set of tool names but the other FIELDS of that tool — `appends` only,
+  // never `edits`, `deletes` or `cells` — so the walkthrough can never clobber an
+  // existing cell. The proposal still rides the normal card → Apply → undo path.
   function notesCellPrompt() {
     return (
       "Now add that walkthrough to the notebook as a notes cell. Propose ONE new " +
-      "markdown documentation cell using the mooring_propose_cell tool only — never " +
-      "mooring_propose_cell_edit, mooring_propose_notebook_edit or " +
-      "mooring_propose_notebook_rewrite, and do not touch any existing cell.\n" +
+      "markdown documentation cell using mooring_propose_notebook_edit with `appends` " +
+      "only — never its `edits`, `deletes` or `cells` fields, and do not touch any " +
+      "existing cell.\n" +
       "\n" +
       "The cell's text must begin with this disclaimer line:\n" +
       EXPLAIN_DISCLAIMER +
@@ -202,7 +203,7 @@ const ChatCore = (function () {
       "\n" +
       "First call mooring_read_notebook_source to see the current cells, and " +
       "mooring_get_schema for the datasets involved, so you pick real column and key " +
-      "names. Then propose ONE new cell (mooring_propose_cell) that:\n" +
+      "names. Then propose ONE new cell (mooring_propose_notebook_edit, using `appends`) that:\n" +
       "- begins with `import mooring_checks as mc` and `mc.reset()`;\n" +
       "- asserts the checks that fit THIS notebook — e.g. mc.unique_key(df, \"id\") on any " +
       "key you expect to be unique, mc.no_fanout(left, right, on=\"key\") before a join, " +
@@ -232,7 +233,7 @@ const ChatCore = (function () {
       "\n" +
       "First call mooring_read_notebook_source to see the current cells, and " +
       "mooring_get_schema for the datasets involved, so you use real dataframe and " +
-      "column names. Then propose ONE new cell (mooring_propose_cell) that:\n" +
+      "column names. Then propose ONE new cell (mooring_propose_notebook_edit, using `appends`) that:\n" +
       '- runs the query with `result = mo.sql("""...""")` (assign it to a well-named ' +
       "dataframe variable so later cells can use it);\n" +
       "- queries the dataframes already in scope BY THEIR VARIABLE NAME;\n" +
@@ -597,6 +598,50 @@ const ChatCore = (function () {
       confirmLabel: floor ? "Run it anyway" : "Apply anyway",
       cancelLabel: "Don't apply",
     };
+  }
+
+  // -- the Apply repair loop's attempt bound --------------------------------
+  // How many corrective re-proposals ONE proposal may ask the assistant for. Two, not
+  // one: a weaker model routinely gets the shape right on its second try and the first
+  // bound (a single boolean, "triedFix") gave up exactly there. Not unbounded either —
+  // every attempt is a billed turn, and a model that has failed twice on the same error
+  // is looping, not converging.
+  const MAX_FIX_ATTEMPTS = 2;
+
+  // What an Apply failure should do next. Pure, so the bound is testable rather than
+  // buried in a click handler.
+  //   status — the HTTP status the apply endpoint answered with
+  //   tried  — how many corrective re-proposals this proposal has already asked for
+  //   noFix  — a refusal that re-proposing cannot answer (a 428 we could not read)
+  // Returns {action, tried}. "conflict": a staleness 409, where the notebook moved under
+  // the proposal — re-READING is what's needed, not another attempt at the same write.
+  // "fix": hand the error back. "report": say it and stop.
+  //
+  // A 409 never consumes an attempt, and a 428 (gate hold / re-hold) never reaches here
+  // at all: a staleness conflict and a gate hold are not the model getting it wrong, and
+  // spending the analyst's second attempt on either would leave nothing for the failure
+  // that IS the model's to fix.
+  function applyFailureAction(status, tried, noFix) {
+    const used = Number.isFinite(tried) && tried > 0 ? tried : 0;
+    if (status === 409) return { action: "conflict", tried: used };
+    if (noFix || used >= MAX_FIX_ATTEMPTS) return { action: "report", tried: used };
+    return { action: "fix", tried: used + 1 };
+  }
+
+  // The prompt handed back to the assistant on attempt `tried` (1-based). The second
+  // attempt SAYS it is the second — a model told only "this failed" a second time tends
+  // to re-send what it just sent.
+  function applyFixPrompt(error, tried) {
+    const again =
+      tried > 1
+        ? " This is your second attempt: your previous correction did not apply either, " +
+          "so change the approach rather than resending it."
+        : "";
+    return (
+      "The change you proposed could not be applied: " + error + again +
+      " Please re-propose a corrected version. Remember each cell is the BODY only — " +
+      "no @app.cell, no def, and no return statements."
+    );
   }
 
   // -- the reviewer's view of the same findings ------------------------------
@@ -1168,6 +1213,9 @@ const ChatCore = (function () {
     gateFindingRows,
     gateHoldSummary,
     gateHoldWording,
+    MAX_FIX_ATTEMPTS,
+    applyFailureAction,
+    applyFixPrompt,
     codeFindingRows,
     codeFindingLead,
     codeFindingTag,

@@ -50,11 +50,14 @@ DAX), but never the data itself.
   dtypes — see [Live dataframe schemas](#live-dataframe-schemas-data-outside-the-workspace)),
   but never a stored value or other kernel state.
 - **Raw error tracebacks.** A traceback can embed values (`KeyError: 'ACME Ltd'`),
-  and mooring never captures one itself — but an analyst can *paste* one into the
-  chat. That paste is structurally rewritten value-safe and held for an explicit
-  confirm before anything leaves; the raw paste is never stored, so no code path
-  can forward it. What survives the rewrite is best-effort, not structural — see
-  [Pasted tracebacks](#pasted-tracebacks) for the exact contract.
+  and mooring never captures one. Two things can put an error message *near* the
+  model, and both are rewritten value-safe first by the same sanitiser: an analyst
+  can *paste* a traceback into the chat (rewritten and held for an explicit confirm;
+  the raw paste is never stored, so no code path can forward it), and an analyst can
+  click **Run & report** after an Apply (mooring runs the notebook and reads only
+  marimo's own error lines). What survives the rewrite is best-effort, not
+  structural — see [Pasted tracebacks](#pasted-tracebacks) and
+  [Run & report](#run-and-report) for the exact contracts.
 - **The contents of any data file.**
 
 ## The four structural guarantees
@@ -69,8 +72,27 @@ DAX), but never the data itself.
    [structured-PII scan](#structured-pii-pre-flight-scan-opt-in-best-effort) runs at
    all of these, not only `build_system_context`.
 2. **Value-free tools only.** The agent is given mooring's own tools (`ai/tools.py`):
-   list datasets, get a schema, read the notebook source, and *propose* a cell —
-   each value-free by construction. When a data dictionary is configured, three more
+   list datasets, get a schema, read the notebook source, and *propose* a change —
+   each value-free by construction. There is exactly **one** propose tool,
+   `mooring_propose_notebook_edit`, and it covers every change the copilot can make
+   (new cells, edits, deletions, a wholesale rewrite) as one reviewable patch. It
+   answers with mooring's **static
+   check** of the notebook that proposal would produce (`marimo_rt.validate_notebook_source`):
+   the candidate is composed in memory, never written, and checked on the AST alone —
+   nothing is executed, so there is no runtime value for a finding to carry. A finding is
+   a rule code, a rule slug, a line number, and the rule's own wording. That text is the
+   one thing here mooring does not author (marimo's `message`/`fix` are forwarded as
+   written), so it goes through `egress.scrub_text` like every other tool result before it
+   can leave. An edit or a deletion is checked once more before that: the model has to
+   state which cell it *believes* is at the index it is targeting, and mooring refuses
+   the whole change unless that description fits the targeted cell **and no other cell
+   whose source differs**. Both halves are load-bearing — marimo writes every markdown
+   cell with the same opening line, so a one-line description on its own would fit any of
+   them and prove nothing. What this establishes is that the model knows what is at the
+   index it named; it does not establish that the model *read* it, which no static check
+   can. The refusal tells it to re-read or to describe the cell more fully; it never
+   quotes back what is actually there.
+   When a data dictionary is configured, three more
    tools (`list_tables`, `describe_table`, `search_dictionary`) serve it; they look
    up tables by name in an **in-memory parsed index** (never a filesystem path) and
    return only the five allowlisted fields (see [Team context](#team-context-opt-in-not-a-structural-guarantee)).
@@ -186,8 +208,9 @@ It preserves every guarantee above, and its safety rests on one load-bearing inv
   exactly a branch's job). Note the compounding: a fan-out runs up to 8 sub-agents at
   once, so anything they can read is read in parallel. That is a large part of why the
   catalog carries no free prose and is opt-in. The
-  read-only tool subset is enforced in one place (`ai/tools.py`: the propose tool is gated
-  on the `emit_proposal` callback, which a sub-agent is never given) and pinned by a test.
+  read-only tool subset is enforced in one place (`ai/tools.py`: the one propose tool is
+  gated on the proposal callbacks, neither of which a sub-agent is ever given) and pinned
+  by a test.
   The merge still applies the checksum-PII floor as defence-in-depth, but that floor is
   *beneath* the structural guarantee, not the guarantee itself.
 - **Investigations cannot recurse.** `mooring_investigate` is never in a sub-agent's own
@@ -281,7 +304,7 @@ endpoint:
 # OpenAI itself — leave the base URL empty
 [ai]
 provider = "openai"
-model = "gpt-4o"
+model = "gpt-5.1"
 
 # A local model server (no key needed)
 [ai]
@@ -676,9 +699,11 @@ value-free. See the roadmap page
 When a cell errors, the single most tempting act is to paste the traceback into
 the chat — and tracebacks routinely embed data values: `KeyError: 'ACME Ltd'`,
 `could not convert string to float: '£1,234'`, a repr of the offending row
-inside a library frame. Mooring never captures a traceback itself (it reads no
-cell outputs and never opens the marimo websocket), so a paste is the only way
-one can reach the model — and that paste no longer travels raw.
+inside a library frame. Mooring never captures a traceback (it reads no cell
+outputs and never opens the marimo websocket) — a paste is the only way one can
+reach the model at all, and that paste no longer travels raw. (The one *error
+message* mooring does read is marimo's own failure line from a run you asked for;
+it goes through this same rewrite — see [Run & report](#run-and-report).)
 
 The **traceback guard** (`[ai] traceback_guard`, **on by default**) detects a
 traceback block in an outbound message and rewrites it **fail-closed** before
@@ -728,6 +753,57 @@ Run **`mooring ai traceback check [FILE]`** (or pipe a traceback on stdin) to
 see the exact rewrite **offline** — no Copilot, no network — before trusting the
 guard. The offline preview has no chat session, so it redacts *more* than the
 chat would (no known-token rescue), never less.
+
+## "Run & report": telling the assistant a cell actually broke { #run-and-report }
+
+The copilot's static checks catch a cell that will not parse, a duplicate definition,
+a cycle. They structurally *cannot* catch a wrong column, a mis-called API, or a name
+that only resolves at runtime — seeing those means **running** the cell, and mooring
+never opens a marimo websocket. So after you Apply a change, the proposal card offers
+one button, **Run & report**, and the card says what it will do before you press it.
+
+It is worth being precise about what that button is, because it is the one place
+mooring reads an error message rather than being handed one:
+
+- **It is the Verify run, not a new one.** It executes the same `marimo export html`
+  smoke run behind the
+  [trust badge](../users/daily-workflow.md#verifying-a-notebook-runs) — the same workspace
+  run lock, the same value-bearing render written under `.mooring/` and deleted on
+  every path, the same process-tree kill, and the same value-free receipt. Your row
+  badges from it exactly as a hand-run Verify does.
+- **It never fires by itself.** The run re-executes *every* cell, which is precisely
+  what the [apply gate](#apply-gate) exists to keep deliberate, so it is reachable only
+  from that click — never from Apply, a timer, or opening a page.
+- **Only two things are read from the run.** marimo's stderr is not a log: the exporter
+  echoes each cell's own `print` output onto it, so a printed dataframe lands there in
+  full. Mooring therefore reads *only* the lines matching marimo's own closed error
+  taxonomy, and from each takes the error **kind** (returned as a fixed constant, never
+  as text lifted from the stream) and that one line's **message**. The console half has
+  no representation at all and no code path can reach it.
+- **The message goes through the traceback sanitiser** — `egress.sanitize_traceback`,
+  the same one gateway a pasted traceback uses, with the same rule: it survives only if
+  it is a fixed interpreter message or every quoted token in it is already in text the
+  model has seen this session. So `'revenue'` survives when `revenue` is a column in
+  your notebook (which is exactly what makes the loop useful), and `'ACME Ltd'` becomes
+  `<redacted: 10 chars>`. Unlike the paste guard, this rewrite is **unconditional**:
+  `[ai] traceback_guard = false` does not turn it off, because that switch is about text
+  *you* wrote and can see, and here you never see the raw message at all.
+- **You are shown exactly what was sent**, in the transcript, together with a value-free
+  count of what was withheld. There is deliberately **no second confirm**: you clicked a
+  button that said it would send a sanitised error summary, and a confirm card asking you
+  to approve a rewrite of text you never saw would be a rubber stamp — it would train the
+  reflex the apply gate works to break, without giving you anything to check it against.
+  The [structured-PII guard](#structured-pii-pre-flight-scan-opt-in-best-effort) still
+  applies to the summary like any other turn, and in block mode still holds it.
+- **The per-notebook opt-out is re-checked immediately before the send**, not just at the
+  click: the run takes minutes, and a teammate's sync or a hub toggle landing inside that
+  window stops the report.
+
+Two honest limits. There is **no cell index** — marimo's stderr does not carry one, and
+the only place it exists is the render, which is value-bearing and never parsed — so the
+assistant is told to locate the cell from the source it already has. And a message that
+cannot be proven value-free arrives as `<redacted: N chars>`, which is less useful than
+the real text; that is the trade this feature deliberately makes.
 
 ## Name detection (opt-in, local NER)
 
@@ -887,7 +963,11 @@ prose — so the rule stands regardless.
   `tests/test_traceback.py` proves a planted secret never survives the rewrite —
   from an exception message, a pasted source line, a frame path, or a workspace
   data file named by a crafted frame — and `tests/test_egress.py` pins that
-  nothing outside the egress gateway can reach the sanitiser.
+  nothing outside the egress gateway can reach the sanitiser. For
+  [Run & report](#run-and-report), `tests/test_run_report.py` drives the whole chain
+  against a faked marimo run whose stderr carries a printed dataframe beside the error
+  line, and proves that neither the printed values nor the raw message reach the
+  session — while a message made of tokens the model has already seen still does.
 - **Live spike.** `scripts/spike_copilot_chat.py` opens a real session and asks
   the agent to read a file; it has no tool to do so.
 

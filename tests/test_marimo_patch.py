@@ -42,6 +42,59 @@ def test_read_cells_returns_indexed_bodies():
     assert marimo_rt.read_cells(NB) == [(0, "seed = 1"), (1, "x = seed + 1"), (2, "y = x * 2")]
 
 
+# A notebook carrying every cell form that is NOT a plain `@app.cell`: a `with app.setup:`
+# block (a cell marimo counts but which has no decorator to carry options), an option that
+# stops the cell RUNNING, an option that is merely cosmetic, and a top-level `@app.function`.
+_OPTIONS_NB = (
+    "import marimo\n\n"
+    '__generated_with = "0.23.9"\n'
+    "app = marimo.App()\n\n"
+    "with app.setup:\n"
+    "    import polars as pl\n\n\n"
+    "@app.cell\ndef _():\n    seed = 1\n    return (seed,)\n\n\n"
+    "@app.cell(disabled=True)\ndef _(seed):\n    slow = seed * 2\n    return (slow,)\n\n\n"
+    "@app.cell(hide_code=True)\ndef _():\n    import marimo as mo\n    return (mo,)\n\n\n"
+    "@app.function\ndef helper(x):\n    return x + 1\n\n\n"
+    'if __name__ == "__main__":\n    app.run()\n'
+)
+
+
+def test_read_cells_with_options_pairs_each_body_with_its_own_options():
+    # The pairing is the whole point: `disabled` comes off the SAME cell object as the
+    # code. A caller that instead scanned the file for `@app.cell(...)` decorators and
+    # zipped the results positionally would slip by one here — the setup block is cell 0
+    # and has no decorator at all — and report the WRONG cell disabled. Reading a live
+    # cell as dead is the bad direction: a caller skips work on a cell that really runs.
+    assert marimo_rt.read_cells_with_options(_OPTIONS_NB) == [
+        (0, "import polars as pl", {}),  # the setup block: a cell, no options
+        (1, "seed = 1", {}),
+        (2, "slow = seed * 2", {"disabled": True}),
+        (3, "import marimo as mo", {"hide_code": True}),
+        (4, "def helper(x):\n    return x + 1", {}),  # @app.function is a cell too
+    ]
+
+
+def test_read_cells_with_options_agrees_with_read_cells():
+    # The two must never disagree about what the cells ARE — only about how much they say.
+    for source in (NB, _OPTIONS_NB):
+        assert [(i, code) for i, code, _opts in marimo_rt.read_cells_with_options(source)] == (
+            marimo_rt.read_cells(source)
+        )
+
+
+def test_read_cells_with_options_hands_back_a_copy_not_the_ir():
+    # Mutating what a caller got back must not reach into marimo's IR, or the next read
+    # of the same source would see the first caller's edit.
+    first = marimo_rt.read_cells_with_options(_OPTIONS_NB)
+    first[2][2]["disabled"] = False
+    assert marimo_rt.read_cells_with_options(_OPTIONS_NB)[2][2] == {"disabled": True}
+
+
+def test_read_cells_with_options_raises_like_read_cells():
+    with pytest.raises(ValueError):
+        marimo_rt.read_cells_with_options("import marimo\nx = 1\n")
+
+
 def test_edit_replaces_only_the_target_cell():
     cells = marimo_rt.read_cells(NB)
     out = marimo_rt.apply_cell_patch(

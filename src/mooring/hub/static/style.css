@@ -1144,6 +1144,14 @@ pre {
   font-size: 12px;
 }
 .chat-body .proposal-actions .applied { color: var(--term-add); }
+/* "Run & report" says what it will do BEFORE the click: it re-runs every cell. */
+.chat-body .run-report-note {
+  padding: 0.3rem 0.6rem;
+  border-top: 1px dashed var(--term-rule);
+  color: var(--term-dim);
+  font-size: 11px;
+  line-height: 1.45;
+}
 /* a still-pending proposal superseded by a newer one — dimmed, still applicable. */
 .chat-body .proposal-card.superseded { opacity: 0.55; }
 

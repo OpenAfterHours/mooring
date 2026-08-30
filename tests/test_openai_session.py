@@ -190,10 +190,12 @@ def test_every_request_is_value_blind(ws):
         assert SECRET not in json.dumps(call, default=str)
 
 
-def test_propose_cell_tool_emits_an_apply_proposal(ws):
+def test_the_propose_tool_emits_an_apply_proposal(ws):
     # The Apply card is driven by a "proposal" event, which fires ONLY when the model
     # calls a propose tool. Prove the OpenAI loop wires that end-to-end (the flow the
-    # user reported missing): a mooring_propose_cell call -> a proposal event with code.
+    # user reported missing): a mooring_propose_notebook_edit call -> a proposal event
+    # with code. The flat `code` shape is deliberate: it is the ONE tool's shape
+    # tolerance for a model that reaches for the retired append tool's arguments.
     scripted = [
         [
             _chunk(
@@ -201,7 +203,7 @@ def test_propose_cell_tool_emits_an_apply_proposal(ws):
                     _tc(
                         0,
                         tc_id="p1",
-                        name="mooring_propose_cell",
+                        name="mooring_propose_notebook_edit",
                         args='{"code": "summary = df.describe()", "rationale": "summarise"}',
                     )
                 ]
