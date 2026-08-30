@@ -76,7 +76,7 @@ _CELL_FORMAT = (
     "'def _():', or a trailing 'return (...)'; those are added automatically."
 )
 
-# How many of a cell's leading lines the model's ``expect`` is checked against.
+# What the model's ``expect`` claim is, and what checking it does and does not promise.
 #
 # ``expect`` is the model saying WHICH cell it believes index N holds. The server-captured
 # ``anchor`` cannot say that: it is read live at the index the model supplied, so it always
@@ -84,13 +84,21 @@ _CELL_FORMAT = (
 # system context's cell view is built once per session and never refreshed) or a forged one
 # sails straight past it, into a cell the model never read.
 #
-# Three lines is the compromise: enough to tell neighbouring cells apart, few enough that a
-# model quoting a whole cell back is not held to reproducing all of it. Comparison is on
-# non-blank lines with each line's whitespace collapsed, so indentation drift, a re-wrapped
-# copy and the render's own defused cell-boundary marker (``egress._DEFUSED_BOUNDARY_MARK``,
-# which wedges one space into a comment) all still match. It is deliberately tolerant: a
-# false PASS is the behaviour this replaces, a false FAIL blocks correct work.
-_EXPECT_LINES = 3
+# Two conditions, and BOTH are needed (see `_matching_cells`): the claim must fit the cell
+# at that index, and it must fit no OTHER cell whose source differs. The second is not a
+# nicety — marimo's codegen gives every markdown cell the same opening line, so without it
+# a one-line claim about `mo.md("""` is satisfied by any markdown cell in the notebook and
+# the check is theatre for the commonest cell shape mooring itself writes.
+#
+# What it does NOT promise: that the model READ the cell. A claim that fits exactly one
+# cell only shows the model knows what is there — which is the property the write needs,
+# and all a static check can establish.
+#
+# Comparison is on non-blank lines with each line's whitespace collapsed, so indentation
+# drift, a re-wrapped copy and the render's own defused cell-boundary marker
+# (``egress._DEFUSED_BOUNDARY_MARK``, which wedges one space into a comment) all still
+# match. Deliberately tolerant on FORM and strict on identity: a false PASS is the
+# behaviour this replaces, a false FAIL blocks correct work.
 
 
 def sql_cell_guide() -> str:
@@ -191,36 +199,54 @@ def _safe(workspace: Path, rel: str) -> Path:
     return target
 
 
-def _lead_lines(code: str) -> list[str]:
-    """``code``'s leading non-blank lines, whitespace-collapsed, capped at
-    :data:`_EXPECT_LINES` — the normalised form both sides of an ``expect`` check take."""
-    lines = [" ".join(line.split()) for line in code.splitlines() if line.strip()]
-    return lines[:_EXPECT_LINES]
+def _norm_lines(code: str, limit: int | None = None) -> list[str]:
+    """``code``'s non-blank lines, each whitespace-collapsed — the normalised form both
+    sides of an ``expect`` check take. ``limit`` stops after that many, which bounds the
+    work to the length of the CLAIM: every edit is now checked against every cell (see
+    :func:`_matching_cells`), so a long cell must not cost more than a short one."""
+    out: list[str] = []
+    for line in code.splitlines():
+        if not line.strip():
+            continue
+        out.append(" ".join(line.split()))
+        if limit is not None and len(out) >= limit:
+            break
+    return out
 
 
 def _expect_matches(expect: str, actual: str) -> bool:
     """Whether ``actual`` starts the way the model said it does.
 
-    A PREFIX comparison on normalised lines, so the model may send one line (cheap, and
-    what the tool asks for) or paste several; more lines make a stronger claim and still
-    pass. An empty ``expect`` never matches — a claim has to be made to be checked.
+    A PREFIX comparison on normalised lines, of exactly the length the model supplied:
+    one line is cheap and is what the tool asks for first, and every further line is a
+    STRONGER claim that still passes. Uncapped on purpose — when one line turns out to
+    name several cells (see :func:`_matching_cells`) the model is told to send more, and
+    a ceiling would leave it nothing further to say. An empty ``expect`` never matches;
+    a claim has to be made to be checked.
     """
-    want = _lead_lines(expect)
+    want = _norm_lines(expect)
     if not want:
         return False
-    return _lead_lines(actual)[: len(want)] == want
+    return _norm_lines(actual, len(want)) == want
 
 
-def _locate(expect: str, cells) -> int | None:
-    """The index of the ONE cell ``expect`` describes, or ``None`` if none or several do.
+def _matching_cells(expect: str, cells) -> list[int]:
+    """Every index ``expect`` describes — NOT just the one the model aimed at.
 
-    Only ever used to make a rejection actionable ("what you described is at index 5"),
-    which is the corrective half of a mis-target: it points the model at the cell it
-    actually meant, and — unlike quoting what is at the index it got wrong — it cannot be
+    Matching the target alone is not enough to know the model read the target. marimo's
+    own codegen is what makes that bite: every markdown cell in a mooring-written
+    notebook opens with the identical line ``mo.md(\"\"\"`` (escaped only so it does not
+    close this docstring), so a model that read one and aims at another passes a
+    first-line check trivially and writes over a cell it never looked at — the exact
+    stale-index case ``expect`` exists to catch, with no attacker involved. So a claim
+    that fits several DIFFERENT cells identifies none of them.
+
+    Also the corrective half of a mis-target: when the claim fits exactly one OTHER cell,
+    the refusal can say where that cell is now. That points the model at what it actually
+    meant and — unlike quoting back what sits at the index it got wrong — cannot be
     copied back to succeed at writing over a cell it never read.
     """
-    hits = [i for i, code in cells if _expect_matches(expect, code)]
-    return hits[0] if len(hits) == 1 else None
+    return [i for i, code in cells if _expect_matches(expect, code)]
 
 
 def _as_list(value) -> list:
@@ -391,7 +417,11 @@ def build_tool_specs(
     def _coerce_index(value):
         try:
             return int(value)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
+            # OverflowError is not hypothetical: a JSON number too large for a float
+            # parses as `inf`, and `int(inf)` raises it — so without it a model sending
+            # `index: 1e400` takes down the tool call with an unhandled exception
+            # instead of being told its index is not a cell number.
             return None
 
     # --- the propose gate: check the notebook a proposal WOULD produce ---------
@@ -716,18 +746,31 @@ def build_tool_specs(
                 "applied since has renumbered it. mooring will not tell you what is there; "
                 "read it."
             )
-        if _expect_matches(text, cells[idx][1]):
-            return None
-        moved = _locate(text, cells)
-        where = (
-            f" What you described is at index {moved} in the notebook as it is now."
-            if moved is not None
-            else ""
-        )
-        return _mistargeted(
-            f"- cell {idx} does not begin the way your 'expect' says it does, so it is not "
-            f"the cell you meant to change.{where}"
-        )
+        hits = _matching_cells(text, cells)
+        if idx not in hits:
+            where = (
+                f" What you described is at index {hits[0]} in the notebook as it is now."
+                if len(hits) == 1
+                else ""
+            )
+            return _mistargeted(
+                f"- cell {idx} does not begin the way your 'expect' says it does, so it is "
+                f"not the cell you meant to change.{where}"
+            )
+        # The claim fits the target — but if it fits other cells whose source DIFFERS, it
+        # does not show WHICH of them the model read, so it shows nothing. Cells that are
+        # byte-identical are exempt: the model read exactly this content, and there is no
+        # unseen cell for the write to land on. Without that carve-out two identical
+        # separator cells would be permanently uneditable.
+        rival = {cells[i][1] for i in hits}
+        if len(rival) > 1:
+            return _mistargeted(
+                f"- cell {idx}: your 'expect' describes {len(hits)} of this notebook's "
+                "cells, so it does not show which one you read — marimo writes every "
+                "markdown cell with the same opening line, for instance. Send MORE of the "
+                "cell (the next line or two, as you saw them) so it identifies exactly one."
+            )
+        return None
 
     def propose_notebook_edit(invocation):
         args = _args(invocation)
@@ -742,10 +785,26 @@ def build_tool_specs(
         # change still goes through every check below — including `expect`, which an
         # `index` here does not get to skip. One tool, one schema; this only stops a
         # near-miss costing a whole round-trip.
+        #
+        # A tolerance may only decide how an argument is READ, never which OPERATION runs.
+        # An `index` that will not parse is therefore an error: reading it as "no index"
+        # would turn a model's EDIT into an APPEND — silently producing the second
+        # definition of a name that stops both cells, which is the exact slip this
+        # consolidation exists to remove. An explicitly null `index` is absence, not a
+        # malformed value: models routinely emit null for a parameter they are omitting.
         top_code = args.get("code")
         if isinstance(top_code, str) and top_code.strip():
+            wants_edit = args.get("index") is not None
             top_index = _coerce_index(args.get("index"))
-            if top_index is None:
+            if wants_edit and top_index is None:
+                return _err(
+                    "'index' must be an integer cell number. It is not clear whether you "
+                    "meant to edit that cell or to add a new one, and mooring will not "
+                    "guess: adding a cell that redefines a name an existing cell defines "
+                    "stops both. Re-send with an integer 'index' (plus 'expect') to edit, "
+                    "or with 'appends' to add a new cell."
+                )
+            if not wants_edit:
                 appends = [*appends, top_code]
             else:
                 edits = [
@@ -1181,9 +1240,10 @@ def build_tool_specs(
                 "AS IT IS NOW — call mooring_read_notebook_source first if anything has "
                 "been applied since the cell view you were given. Every 'edits' and "
                 "'deletes' entry MUST carry 'expect' (the first line of the cell you "
-                "believe is at that index); mooring checks it against the real cell and "
-                "refuses the whole change if they disagree, which is what stops a stale "
-                "index writing over a cell you never read." + _CELL_FORMAT,
+                "believe is at that index, plus the next line or two when that line is not "
+                "unique to one cell); mooring checks it against the real cell and refuses "
+                "the whole change unless it matches that cell and no other, which is what "
+                "stops a stale index writing over a cell you never read." + _CELL_FORMAT,
                 handler=propose_notebook_edit,
                 parameters={
                     "type": "object",
@@ -1203,8 +1263,11 @@ def build_tool_specs(
                                         "description": (
                                             "the FIRST LINE of the cell you believe is at "
                                             "that index, copied from the cell view you were "
-                                            "shown (checked; the edit is refused if it does "
-                                            "not match)"
+                                            "shown. Checked: the edit is refused if it does "
+                                            "not match, and also if that line is not unique "
+                                            "to one cell (every markdown cell opens with "
+                                            "the same line) — then send the next line or "
+                                            "two as well"
                                         ),
                                     },
                                     "code": {
@@ -1234,7 +1297,9 @@ def build_tool_specs(
                                         "type": "string",
                                         "description": (
                                             "the FIRST LINE of the cell you believe is at "
-                                            "that index (checked, as for an edit)"
+                                            "that index — plus the next line or two when "
+                                            "that line is not unique to one cell (checked, "
+                                            "as for an edit)"
                                         ),
                                     },
                                 },

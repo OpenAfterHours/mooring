@@ -335,7 +335,9 @@ def render_notebook_for_model(source: str) -> str:
         "cell has been applied, added or deleted since, call mooring_read_notebook_source "
         "for current indices before editing with mooring_propose_notebook_edit. Each "
         "cell's FIRST LINE below is what that tool's `expect` wants, so keep this view to "
-        "hand — it is checked against the real cell and a mismatch refuses the change."
+        "hand — it is checked against the real cell and a mismatch refuses the change. "
+        "Where that line does not tell two cells apart (every markdown cell opens the "
+        "same way), send the next line or two with it."
     ]
     if header.strip():
         parts.append(f"{_NOTEBOOK_HEADER_LABEL}\n{header.strip()}")

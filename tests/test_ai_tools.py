@@ -1335,3 +1335,134 @@ def test_expect_matches_the_defused_form_the_model_was_actually_shown(ws):
     )
     assert not out.is_error, out.text
     assert len(patches) == 1
+
+
+# --- `expect` must identify ONE cell, not merely fit the target -------------
+#
+# Matching the target alone proves nothing about which cell the model read, and marimo's
+# own codegen makes that the NORMAL case: every markdown cell in a mooring-written
+# notebook opens with the identical line `mo.md("""`. A model that read one markdown cell
+# and aims at another satisfies a first-line check trivially — the stale-index write the
+# whole control exists to stop, with no attacker involved.
+
+_MD = 'mo.md("""\n## {}\n""")'
+
+
+def _markdown_nb(*headings: str) -> str:
+    """`import marimo as mo`, then one markdown cell per heading (indices 1..N)."""
+    return _nb("import marimo as mo", *(_MD.format(h) for h in headings))
+
+
+def test_an_expect_that_fits_several_cells_identifies_none_of_them(ws):
+    # THE repro. Cells 1, 2 and 3 are markdown; the model read cell 1 and aims at cell 3,
+    # sending exactly what the schema asks for. Before the uniqueness check this landed.
+    (ws / "nb.py").write_text(_markdown_nb("Revenue", "Costs", "Margin"), "utf-8")
+    patches = []
+    specs = _specs(ws, patches=patches)
+    out = specs["mooring_propose_notebook_edit"].handler(
+        _invocation(
+            edits=[{"index": 3, "expect": 'mo.md("""', "code": _MD.format("Rewritten")}]
+        )
+    )
+    assert out.is_error and "NOT proposed" in out.text
+    assert "describes 3 of this notebook's cells" in out.text
+    assert "## Revenue" not in out.text and "## Margin" not in out.text  # no content leak
+    assert patches == []
+
+
+def test_more_lines_disambiguate_and_the_edit_lands(ws):
+    # The retry the refusal asks for: one more line names exactly one cell, so a correct
+    # model pays a single round-trip and the valid path still sails through.
+    (ws / "nb.py").write_text(_markdown_nb("Revenue", "Costs", "Margin"), "utf-8")
+    patches = []
+    specs = _specs(ws, patches=patches)
+    out = specs["mooring_propose_notebook_edit"].handler(
+        _invocation(
+            edits=[
+                {
+                    "index": 3,
+                    "expect": 'mo.md("""\n## Margin',
+                    "code": _MD.format("Rewritten"),
+                }
+            ]
+        )
+    )
+    assert not out.is_error, out.text
+    assert patches[-1]["ops"][0]["index"] == 3
+    assert patches[-1]["ops"][0]["anchor"] == _MD.format("Margin")
+
+
+def test_a_delete_is_held_to_the_same_uniqueness(ws):
+    # Deleting the wrong markdown cell is silent in a way an edit is not: nothing
+    # redefines a name, so the static gate sees a perfectly healthy notebook.
+    (ws / "nb.py").write_text(_markdown_nb("Revenue", "Costs", "Margin"), "utf-8")
+    patches = []
+    specs = _specs(ws, patches=patches)
+    out = specs["mooring_propose_notebook_edit"].handler(
+        _invocation(deletes=[{"index": 2, "expect": 'mo.md("""'}])
+    )
+    assert out.is_error and "describes 3 of this notebook's cells" in out.text
+    assert patches == []
+    assert not specs["mooring_propose_notebook_edit"].handler(
+        _invocation(deletes=[{"index": 2, "expect": 'mo.md("""\n## Costs'}])
+    ).is_error
+
+
+def test_identical_cells_are_not_ambiguous(ws):
+    # The carve-out. Two byte-identical separator cells are legal marimo (they define
+    # nothing), and the risk `expect` guards — writing over content you never saw — is
+    # nil when every candidate holds exactly the content the model described. Without
+    # this they would be permanently uneditable: no extra line could ever tell them apart.
+    (ws / "nb.py").write_text(
+        _nb("import marimo as mo", 'mo.md("""---""")', 'mo.md("""---""")'), "utf-8"
+    )
+    patches = []
+    specs = _specs(ws, patches=patches)
+    out = specs["mooring_propose_notebook_edit"].handler(
+        _invocation(edits=[{"index": 2, "expect": 'mo.md("""---""")', "code": _MD.format("New")}])
+    )
+    assert not out.is_error, out.text
+    assert patches[-1]["ops"][0]["index"] == 2
+
+
+def test_a_unique_first_line_still_costs_only_one_line(ws):
+    # The uniqueness rule must not tax the ordinary case: a cell whose first line is its
+    # own still verifies from that one line.
+    patches = []
+    specs = _specs(_real(ws), patches=patches)
+    assert not specs["mooring_propose_notebook_edit"].handler(
+        _invocation(edits=[{"index": 1, "expect": "x = seed + 1", "code": "x = seed + 9"}])
+    ).is_error
+    assert len(patches) == 1
+
+
+# --- a tolerance may decide how an argument READS, never which OP runs ------
+
+
+def test_a_malformed_index_is_an_error_not_a_silent_append(ws):
+    # The flat shape read a non-numeric `index` as "no index" and appended. That turns a
+    # model's EDIT into an APPEND with no error — producing the second definition of a
+    # name that stops both cells, which is the exact slip this consolidation removes.
+    proposals, patches = [], []
+    specs = _specs(_real(ws), proposals, patches)
+    for bad in ("three", {}, [1], 1.5e400):
+        out = specs["mooring_propose_notebook_edit"].handler(
+            _invocation(index=bad, expect="x = seed + 1", code="x = seed + 9")
+        )
+        assert out.is_error, bad
+        assert "must be an integer cell number" in out.text, bad
+    assert proposals == [] and patches == []
+
+
+def test_an_absent_or_null_index_still_means_append(ws):
+    # ...but absence is not malformation: models routinely emit null for a parameter they
+    # are omitting, and that has always meant "add a new cell".
+    proposals = []
+    specs = _specs(_real(ws), proposals)
+    assert not specs["mooring_propose_notebook_edit"].handler(
+        _invocation(code="fresh = 1")
+    ).is_error
+    assert not specs["mooring_propose_notebook_edit"].handler(
+        _invocation(index=None, code="fresh2 = 1")
+    ).is_error
+    assert proposals == [("fresh = 1", ""), ("fresh2 = 1", "")]

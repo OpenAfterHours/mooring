@@ -82,9 +82,13 @@ DAX), but never the data itself.
    written), so it goes through `egress.scrub_text` like every other tool result before it
    can leave. An edit or a deletion is checked once more before that: the model has to
    state which cell it *believes* is at the index it is targeting, and mooring refuses
-   the whole change when the notebook disagrees — so a model working from a cell view
-   that has since been renumbered is stopped rather than writing over a cell it never
-   read. The refusal tells it to re-read; it never quotes back what is actually there.
+   the whole change unless that description fits the targeted cell **and no other cell
+   whose source differs**. Both halves are load-bearing — marimo writes every markdown
+   cell with the same opening line, so a one-line description on its own would fit any of
+   them and prove nothing. What this establishes is that the model knows what is at the
+   index it named; it does not establish that the model *read* it, which no static check
+   can. The refusal tells it to re-read or to describe the cell more fully; it never
+   quotes back what is actually there.
    When a data dictionary is configured, three more
    tools (`list_tables`, `describe_table`, `search_dictionary`) serve it; they look
    up tables by name in an **in-memory parsed index** (never a filesystem path) and
