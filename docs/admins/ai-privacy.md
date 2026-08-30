@@ -70,7 +70,14 @@ DAX), but never the data itself.
    all of these, not only `build_system_context`.
 2. **Value-free tools only.** The agent is given mooring's own tools (`ai/tools.py`):
    list datasets, get a schema, read the notebook source, and *propose* a cell —
-   each value-free by construction. When a data dictionary is configured, three more
+   each value-free by construction. A propose tool answers with mooring's **static
+   check** of the notebook that proposal would produce (`marimo_rt.validate_notebook_source`):
+   the candidate is composed in memory, never written, and checked on the AST alone —
+   nothing is executed, so there is no runtime value for a finding to carry. A finding is
+   a rule code, a rule slug, a line number, and the rule's own wording. That text is the
+   one thing here mooring does not author (marimo's `message`/`fix` are forwarded as
+   written), so it goes through `egress.scrub_text` like every other tool result before it
+   can leave. When a data dictionary is configured, three more
    tools (`list_tables`, `describe_table`, `search_dictionary`) serve it; they look
    up tables by name in an **in-memory parsed index** (never a filesystem path) and
    return only the five allowlisted fields (see [Team context](#team-context-opt-in-not-a-structural-guarantee)).

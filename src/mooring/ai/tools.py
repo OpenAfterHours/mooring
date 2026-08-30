@@ -13,6 +13,11 @@ SOURCE code, or a list of dataset paths. None can reach a data value, a cell
 output, or the kernel. ``propose_cell`` does NOT write the notebook; it surfaces
 a proposal to the chat UI, and the analyst Applies it.
 
+Before it surfaces anything, every propose tool composes the notebook its change
+would produce IN MEMORY and statically validates it (see the propose gate below,
+on ``marimo_rt.validate_notebook_source``): a proposal that would break the
+notebook comes back to the model as the diagnostics, not as a success.
+
 Combined with ``available_tools`` allowlisting exactly these names (so the SDK's
 built-in file/shell tools are dropped) and a deny-all permission backstop, the
 agent has no path to data.
@@ -20,6 +25,7 @@ agent has no path to data.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
@@ -196,6 +202,14 @@ class ToolSpec:
     blocking: bool = False
 
 
+# A cell ORDINAL inside a diagnostic's message. mooring writes one into its own MOOR001 /
+# MOOR002 / MOOR003 messages ("cell 2 is not valid Python: …"), and the propose gate
+# compares a diagnostic found on the CANDIDATE against the same fault on the notebook as
+# it was — where a delete has shifted every ordinal below it. Normalised out of the
+# comparison key only (see `_diag_key`); what the model is shown keeps the real number.
+_DIAG_ORDINAL = re.compile(r"\bcell \d+\b")
+
+
 def build_tool_specs(
     *,
     workspace: Path,
@@ -237,6 +251,7 @@ def build_tool_specs(
     :func:`build_tools` adapts these to the copilot SDK; a second backend reuses the
     same handlers and only re-expresses the spec and result shapes.
     """
+    from collections import Counter
     from dataclasses import replace
 
     from mooring import marimo_rt, pbip_model, schema
@@ -305,9 +320,12 @@ def build_tool_specs(
         rationale = str(args.get("rationale", ""))
         if not code.strip():
             return _err("code required")
+        refusal, note = _gate([{"op": "append", "code": code}])
+        if refusal is not None:
+            return refusal
         emit_proposal(code, rationale)
         return _ok(
-            "Proposed the cell to the analyst, who will review and apply it."
+            "Proposed the cell to the analyst, who will review and apply it." + note
         )
 
     def _coerce_index(value):
@@ -315,6 +333,275 @@ def build_tool_specs(
             return int(value)
         except (TypeError, ValueError):
             return None
+
+    # --- the propose gate: check the notebook a proposal WOULD produce ---------
+    #
+    # Every propose handler runs its ops through `_gate` before it emits. Until this
+    # existed they checked only that the code string was non-empty and then told the
+    # model it had succeeded — so a cell that redefines a name another cell already
+    # defines, closes a dependency cycle, or pastes whole `@app.cell` blocks into a
+    # cell BODY was reported as a success, and the analyst found out by Applying it.
+    # A strong model re-reads its own work; a weaker one believes the environment,
+    # and mooring's environment congratulated it either way.
+    #
+    # The candidate is built the way Apply itself builds it — the same wire op dicts,
+    # through the same cellwrite converter, into the same `marimo_rt.apply_cell_patch`
+    # — so what is checked is the file that would land, not a re-derivation of it.
+    # `apply_cell_patch` is PURE (source in, source out), so nothing is written here.
+
+    # A refusal only helps while the model can still act on it. After this many failed
+    # validations IN A ROW the gate stops handing back diagnostics it has already
+    # proved it cannot act on, and tells it to take the problem to the analyst: the
+    # copilot SDK drives its own tool loop with no mooring-side iteration bound at all,
+    # and the OpenAI loop's bound (`openai_session._MAX_TOOL_ITERS`, 12) covers the
+    # WHOLE turn — so a stuck model must not be able to spend the lot re-proposing one
+    # cell. Any accepted proposal resets it: the budget measures "stuck", not "has been
+    # wrong before".
+    _VALIDATION_BUDGET = 3
+    _consecutive_failures = [0]  # a one-slot list: a closure may mutate, not rebind
+
+    # Diagnostics that do NOT refuse a proposal, and why.
+    #
+    #   MOOR000 / MOOR005 — the CHECKER was unavailable or declined (marimo too old, a
+    #     pass that overran, a notebook past the ceilings). Nothing is known to be wrong
+    #     with the proposal, and refusing would turn a checker outage into a dead
+    #     copilot — strictly worse than the behaviour this gate replaced. Fail OPEN, but
+    #     SAY so: "checked and clean" and "not checked" must never read the same.
+    #   MOOR003 — a name no cell defines. The one diagnostic whose correctness depends
+    #     on what happens NEXT: a model may legitimately propose a cell using a name it
+    #     will define in the following proposal, and refusing would break that plan.
+    #     It also breaks one cell, visibly, when it runs — where a duplicate definition
+    #     or a cycle stops those cells and everything downstream of them. So it rides
+    #     along as a note. (It is also inert on this path today — marimo's codegen writes
+    #     each cell's refs into its `def _(name):` signature, which the validator's own
+    #     `_bound_names` backstop then reads as a binding. See
+    #     `test_an_unresolved_name_is_a_note_not_a_refusal`.)
+    #
+    # Everything else refuses, INCLUDING a code on neither list: marimo's rule allowlist
+    # (`marimo_rt.VALIDATE_LINT_RULES`) is curated and every entry is `breaking`, so an
+    # unrecognised code is far likelier to be a new breaking rule than a new advisory.
+    # A maintainer who adds one classifies it here.
+    _UNCHECKED_CODES = frozenset(
+        {marimo_rt.DIAG_VALIDATOR_UNAVAILABLE, marimo_rt.DIAG_TOO_LARGE}
+    )
+    _ADVISORY_CODES = frozenset({marimo_rt.DIAG_UNRESOLVED_REFERENCE})
+    _NON_BLOCKING_CODES = _UNCHECKED_CODES | _ADVISORY_CODES
+
+    # Enough for the model to see the pattern, few enough that it reads them. A wall of
+    # diagnostics is as useless as none.
+    _MAX_REPORTED = 3
+
+    # The three headers a proposal can come back under, kept apart on purpose: each makes
+    # a DIFFERENT claim about who caused what, and only one of them may ever say "not
+    # you". Telling a model it did not cause a fault it did cause is worse than telling it
+    # nothing, so "could not tell" has its own wording rather than borrowing either.
+    _PRE_EXISTING = (
+        "The notebook ALREADY had these problems before your change — it neither caused "
+        "nor fixed them:"
+    )
+    _UNATTRIBUTABLE = (
+        "mooring could not check the notebook as it was BEFORE this change, so it cannot "
+        "tell whether these are yours or were already there — but the result has them:"
+    )
+    _WORTH_KNOWING = "Not blocking, but worth knowing:"
+
+    def _scrubbed(text: str, fallback: str) -> str:
+        """``text`` through the egress floor, or ``fallback`` if the scrub empties it.
+
+        Diagnostics are the one tool result here NOT authored in mooring: the validator
+        forwards marimo's `message`/`fix` verbatim and `MOOR000` embeds `str(exc)` from
+        a marimo internal, so they get the same `egress.scrub_text` every other result in
+        this module gets. No marimo rule quotes notebook text today, but nothing
+        structurally stops one starting — which is exactly what ruff's messages do.
+        """
+        out, _ = egress.scrub_text(text)
+        return out.strip() or fallback
+
+    def _render_diagnostics(diagnostics) -> str:
+        """The diagnostics as short, actionable, value-free lines."""
+        lines = []
+        for d in diagnostics[:_MAX_REPORTED]:
+            plural = "s" if len(d.lines) > 1 else ""
+            where = f" (line{plural} {', '.join(str(n) for n in d.lines)})" if d.lines else ""
+            lines.append(f"- [{d.code}] {d.name}{where}: {d.message}")
+            if d.fix:
+                lines.append(f"  fix: {d.fix}")
+        extra = len(diagnostics) - _MAX_REPORTED
+        if extra > 0:
+            lines.append(f"- (and {extra} more)")
+        # The fallback keeps the rule CODES: fixed identifiers authored in mooring and
+        # marimo's rule registry, never anything read out of the notebook.
+        return _scrubbed(
+            "\n".join(lines),
+            "\n".join(f"- [{d.code}] {d.name}" for d in diagnostics[:_MAX_REPORTED]),
+        )
+
+    def _refused(detail: str) -> "ToolOutput":
+        """The result for a proposal the gate is holding back. Nothing was emitted."""
+        _consecutive_failures[0] += 1
+        if _consecutive_failures[0] > _VALIDATION_BUDGET:
+            return _err(
+                f"NOT proposed. {_consecutive_failures[0]} proposals in a row have failed "
+                "mooring's static check, so re-proposing is not working. Stop calling the "
+                "propose tools for this change: tell the analyst in your reply what you were "
+                "trying to write and what the notebook does not allow, and let them decide."
+            )
+        return _err(
+            "NOT proposed — the analyst was shown nothing. mooring built the notebook this "
+            "change would produce and checked it statically; it would not work:\n"
+            f"{detail}\n"
+            "Fix the cause and call the tool again."
+        )
+
+    def _gate(op_dicts) -> tuple["ToolOutput | None", str]:
+        """Statically check the notebook ``op_dicts`` would produce.
+
+        Returns ``(refusal, note)``. A non-None ``refusal`` is the tool result to return
+        INSTEAD of emitting anything; otherwise emit as before and append ``note``
+        (usually empty) to the success message.
+        """
+        try:
+            return _gate_inner(op_dicts)
+        except Exception:  # noqa: BLE001  # a gate that can break a turn is worse than none
+            return None, ""
+
+    def _gate_inner(op_dicts) -> tuple["ToolOutput | None", str]:
+        from mooring.ai import cellwrite
+
+        try:
+            base = _safe(workspace, notebook_rel).read_text("utf-8")
+            marimo_rt.read_cells(base)
+        except _NB_READ_ERRORS:
+            # There is no readable notebook to build a candidate ON. A missing or
+            # unparseable file is the analyst's, not something the model can fix, and it
+            # leaves nothing to judge the proposal against — so behave exactly as this
+            # tool did before the gate existed.
+            return None, ""
+        try:
+            # `cellwrite._ops_from_wire` on purpose: the Apply endpoint converts these
+            # same dicts with it (`cellwrite.apply_wire_patch`), so the candidate checked
+            # here is the file that would land.
+            candidate = marimo_rt.apply_cell_patch(base, cellwrite._ops_from_wire(op_dicts))
+        except (ValueError, SyntaxError, cellwrite.CellWriteError) as exc:
+            # The base parsed a moment ago, so the PATCH is at fault: a cell that does not
+            # compile, an op that would empty the notebook, a stale index or anchor.
+            # (`CellPatchConflict` is a ValueError.) Apply would have failed the same way.
+            return _refused(
+                _scrubbed(
+                    f"- the change could not be applied to the notebook: {exc}",
+                    "- the change could not be applied to the notebook",
+                )
+            ), ""
+        diagnostics = marimo_rt.validate_notebook_source(candidate)
+        blocking = [d for d in diagnostics if d.code not in _NON_BLOCKING_CODES]
+        notes = [d for d in diagnostics if d.code in _NON_BLOCKING_CODES]
+        if not blocking:
+            _consecutive_failures[0] = 0
+            return None, _note([(_WORTH_KNOWING, notes)])
+        # Only now is the base worth checking, so the clean path pays for one validation
+        # pass and not two.
+        base_faults = _already_broken(base)
+        if base_faults is None:
+            # THE one place an unattributable result is decided. The base could not be
+            # checked, so nothing here can be shown to be the change's doing — and a gate
+            # that refuses on what it cannot show is the failure mode this whole design
+            # rejects (see `_already_broken`). Report, never refuse.
+            _consecutive_failures[0] = 0
+            return None, _note([(_UNATTRIBUTABLE, blocking), (_WORTH_KNOWING, notes)])
+        introduced, pre_existing = _split_by_blame(blocking, base_faults)
+        if introduced:
+            return _refused(_render_diagnostics(introduced)), ""
+        _consecutive_failures[0] = 0
+        return None, _note([(_PRE_EXISTING, pre_existing), (_WORTH_KNOWING, notes)])
+
+    def _note(sections) -> str:
+        """The block appended to a success message: each ``(header, diagnostics)`` that
+        has anything to report, or ``""`` when none do."""
+        parts = [f"{header}\n{_render_diagnostics(found)}" for header, found in sections if found]
+        return ("\n\n" + "\n\n".join(parts)) if parts else ""
+
+    def _diag_key(d) -> tuple:
+        """The identity a diagnostic is compared BY when deciding who caused it.
+
+        Three things go into it, and each earns its place:
+
+        * the **code**;
+        * the **message with cell ordinals normalised out** (:data:`_DIAG_ORDINAL`).
+          mooring writes the ordinal into its own MOOR001/MOOR002/MOOR003 messages, and a
+          DELETE renumbers every cell below it — so the identical pre-existing fault
+          reads as "cell 2" on the base and "cell 1" on the candidate. Same reason line
+          numbers are excluded; the ordinal was just line numbers wearing a hat;
+        * how MANY lines the finding names — NOT which. marimo reports one MB002 per
+          duplicated NAME, so a third definition of an already-duplicated name carries
+          the same code and the same message as the second, and the count of findings
+          does not change either. What changes is that its `lines` grow from 2 to 3,
+          which is precisely the change in the fault.
+        """
+        return (d.code, _DIAG_ORDINAL.sub("cell _", d.message), len(d.lines))
+
+    def _split_by_blame(blocking, existing) -> tuple[list, list]:
+        """Split ``blocking`` into ``(introduced, pre_existing)`` against the base.
+
+        By COUNT, not membership. Three of the five allowlisted marimo rules carry a
+        CONSTANT message — MB001 "Notebook contains unparsable code", MB003 "Cell is
+        part of a circular dependency", MB004 "Setup cell cannot have dependencies" — so
+        a set test would let ONE pre-existing instance whitelist every new one: a model
+        could add a whole new cycle to a notebook that already had one and be told the
+        notebook "already had" it. Counting also stays correct when a change REMOVES one
+        of several instances (the candidate's count is lower, so nothing reads as new).
+
+        Only ever reached with a real ``Counter``: an unattributable base is decided by
+        the caller, at the one branch above.
+        """
+        seen: Counter = Counter()
+        introduced: list = []
+        pre_existing: list = []
+        for d in blocking:
+            key = _diag_key(d)
+            seen[key] += 1
+            (introduced if seen[key] > existing[key] else pre_existing).append(d)
+        return introduced, pre_existing
+
+    def _already_broken(base_source: str):
+        """What is wrong with the notebook BEFORE the change, as a ``Counter`` of
+        :func:`_diag_key` — or ``None`` when the base could not be checked at all.
+
+        An analyst opens the copilot on a broken notebook more often than on a healthy
+        one — a duplicate definition is among the commonest ways a marimo notebook stops
+        — and a fault that was already there is not the model's to fix before it may
+        propose anything else. Without this, one pre-existing MB002 would refuse EVERY
+        proposal, spend the retry budget, and end with the model told to give up: the
+        gate would be at its most obstructive in exactly the situation the copilot is
+        most often opened for. (A proposal that FIXES the fault still passes either way,
+        because the candidate is then clean.)
+
+        The ``None`` matters as much as the count. ``MOOR000``/``MOOR005`` mean the base
+        was NOT checked — not that it was found clean — so folding them in as if they
+        were findings would make every pre-existing fault read as newly introduced. There
+        are three ways in, and none is a corner case:
+
+        * the base is over ``VALIDATE_MAX_CELLS`` while the candidate is not — a 151-cell
+          notebook and a proposal DELETING a cell;
+        * the same across ``VALIDATE_MAX_BYTES``, for a delete that crosses 512 KB
+          downward;
+        * an orphaned validator thread. ``marimo_rt`` reports ``MOOR000`` for as long as
+          an overrun pass is still alive, so ONE timeout poisons every base check that
+          follows it — session-wide, not for one call.
+
+        Each of those would have refused a correct change three times and then hit the
+        retry bound and declared the propose tools dead, on the shape most likely to need
+        one: large, already broken. So the rule that governs an unavailable checker
+        everywhere else in this gate governs it here — what could not be checked cannot
+        refuse — and it is enforced at ONE branch in the caller rather than at each
+        symptom.
+
+        Run only when the candidate has something blocking to explain, so the clean path
+        still pays for one validation pass, not two.
+        """
+        found = marimo_rt.validate_notebook_source(base_source)
+        if any(d.code in _UNCHECKED_CODES for d in found):
+            return None
+        return Counter(_diag_key(d) for d in found)
 
     def propose_cell_edit(invocation):
         args = _args(invocation)
@@ -332,17 +619,21 @@ def build_tool_specs(
         if not 0 <= idx < len(cells):
             return _err(f"index must be 0..{len(cells) - 1} (the notebook has {len(cells)} cells)")
         anchor = cells[idx][1]
+        ops = [{"op": "edit", "index": idx, "anchor": anchor, "code": code}]
+        refusal, note = _gate(ops)
+        if refusal is not None:
+            return refusal
         assert emit_proposal_patch is not None  # tool only registered when the callback exists
         emit_proposal_patch(
             {
                 "kind": "edit",
                 "rationale": rationale,
-                "ops": [{"op": "edit", "index": idx, "anchor": anchor, "code": code}],
+                "ops": ops,
                 "diffs": [{"label": f"cell {idx}", "before": anchor, "after": code}],
             }
         )
         return _ok(
-            f"Proposed an edit to cell {idx} for the analyst to review and apply."
+            f"Proposed an edit to cell {idx} for the analyst to review and apply." + note
         )
 
     def propose_notebook_edit(invocation):
@@ -395,10 +686,14 @@ def build_tool_specs(
             diffs.append({"label": "new cell", "before": "", "after": code})
         if not ops:
             return _err("provide at least one of edits, appends, or deletes")
+        refusal, note = _gate(ops)
+        if refusal is not None:
+            return refusal
         assert emit_proposal_patch is not None  # tool only registered when the callback exists
         emit_proposal_patch({"kind": "patch", "rationale": rationale, "ops": ops, "diffs": diffs})
         return _ok(
             f"Proposed {len(ops)} change(s) to the notebook for the analyst to review and apply."
+            + note
         )
 
     def propose_notebook_rewrite(invocation):
@@ -415,12 +710,19 @@ def build_tool_specs(
             before = "\n\n".join(code for _, code in _current_cells())
         except _NB_READ_ERRORS:
             before = ""  # still allow the rewrite; the diff just reads as all-additions
+        # A rewrite replaces every cell, so its candidate is these cells wholesale —
+        # the path where a weak model's output is LEAST constrained by existing code,
+        # and the one where an unchecked proposal costs the whole notebook.
+        ops = [{"op": "replace_all", "cells": new_cells}]
+        refusal, note = _gate(ops)
+        if refusal is not None:
+            return refusal
         assert emit_proposal_patch is not None  # tool only registered when the callback exists
         emit_proposal_patch(
             {
                 "kind": "rewrite",
                 "rationale": rationale,
-                "ops": [{"op": "replace_all", "cells": new_cells}],
+                "ops": ops,
                 "diffs": [
                     {"label": "whole notebook", "before": before, "after": "\n\n".join(new_cells)}
                 ],
@@ -428,6 +730,7 @@ def build_tool_specs(
         )
         return _ok(
             f"Proposed a full rewrite ({len(new_cells)} cells) for the analyst to review and apply."
+            + note
         )
 
     # The dictionary tools render TEAM-AUTHORED content (already value-minimised by
@@ -688,9 +991,19 @@ def build_tool_specs(
                     "required": ["code"],
                 },
                 skip_permission=True,  # only surfaces a proposal to the analyst; never injects
+                blocking=True,  # runs the static check off the SDK's loop (see below)
             )
         )
 
+    # Every propose tool is `blocking`: each now builds the candidate notebook and runs
+    # `marimo_rt.validate_notebook_source` on it — measured end to end at ~50 ms for a
+    # 12-cell notebook, ~170 ms at 48 cells and ~370 ms at 100, with the validator's own
+    # 5 s cap under it — and that validator is not safe to call from a coroutine: it
+    # joins its own worker thread, and it serializes on a module-wide lock, so a propose
+    # in one chat session can queue behind another's. On the copilot path handlers run ON
+    # the SDK's event-loop thread, which must stay free for streaming and teardown, so the
+    # adapter hands a blocking handler to a worker thread. (The OpenAI session already
+    # runs its loop on its own thread, where the flag is a no-op.)
     if emit_proposal_patch is not None:
         specs += [
             ToolSpec(
@@ -715,6 +1028,7 @@ def build_tool_specs(
                     "required": ["index", "code"],
                 },
                 skip_permission=True,  # surfaces a proposal only; the analyst applies it
+                blocking=True,  # static check off the loop (see the note above)
             ),
             ToolSpec(
                 "mooring_propose_notebook_edit",
@@ -752,6 +1066,7 @@ def build_tool_specs(
                     },
                 },
                 skip_permission=True,  # surfaces a proposal only; the analyst applies it
+                blocking=True,  # static check off the loop (see the note above)
             ),
             ToolSpec(
                 "mooring_propose_notebook_rewrite",
@@ -773,6 +1088,7 @@ def build_tool_specs(
                     "required": ["cells"],
                 },
                 skip_permission=True,  # surfaces a proposal only; the analyst applies it
+                blocking=True,  # static check off the loop (see the note above)
             ),
         ]
 
