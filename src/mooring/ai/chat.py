@@ -31,11 +31,24 @@ if TYPE_CHECKING:
 from mooring.ai.egress import build_system_context  # noqa: F401
 
 # Event kinds the frontend understands. "proposal" carries a cell the agent
-# suggests; the analyst Applies it (we never inject autonomously). "pii" carries
-# a value-free outbound-PII warning (and, when the turn is held, a confirm token).
-# "traceback" carries a held turn's sanitised rewrite: the preview, value-free
-# redaction/PII findings, and the one confirm token — never the raw paste.
+# suggests; the analyst Applies it (we never inject autonomously). "applied"
+# carries the value-free RECEIPT for a write the model made inside its own tool
+# call (edit mode — see _apply_edit); it is the same hand-off the proposal card
+# used to make, after the fact. "cancelled" says the analyst pressed stop and the
+# turn is winding down — the turn's real end still arrives as the usual "idle".
+# "pii" carries a value-free outbound-PII warning (and, when the turn is held, a
+# confirm token). "traceback" carries a held turn's sanitised rewrite: the preview,
+# value-free redaction/PII findings, and the one confirm token — never the raw paste.
 _QUEUE_MAX = 1000
+
+# The ONE cancellation wording, shared by the "cancelled" event and by the notice a
+# provider loop ends its turn with, so the UI and the transcript agree.
+CANCELLED_NOTICE = "(Stopped at your request.)"
+
+# How many ``applied`` receipts a session keeps for replay to a reconnecting subscriber.
+# Mirrors hub.sse.MAX_APPLIED_REPLAY: the consumer caps too, so this is belt and braces
+# rather than one number two modules depend on being read the same way.
+_APPLIED_REPLAY_MAX = 25
 
 
 def _finding_dicts(findings) -> list[dict]:
@@ -45,8 +58,38 @@ def _finding_dicts(findings) -> list[dict]:
 
 @dataclass
 class ChatEvent:
-    kind: str  # delta | message | proposal | tool | idle | error | closed
+    kind: str  # delta | message | proposal | applied | tool | idle | cancelled | error | closed
     data: dict = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class _ApplyOutcome:
+    """The apply outcome mooring synthesises when the injected applier could not run.
+
+    A SHAPE, not a subclass: the real outcome object belongs to ``app/`` (L3.5) and
+    ``ai/`` (L3) may never import it, so both are reached the same way — by reading
+    ``.status`` / ``.text`` / ``.is_error``.
+    """
+
+    status: str
+    text: str
+    is_error: bool = True
+
+
+def _event_payload(outcome) -> dict:
+    """The value-free event body an apply outcome carries for the LOCAL UI, if any.
+
+    Duck-typed for the same layering reason as the outcome itself: ``.payload`` is the
+    name mooring's own applier uses (:class:`mooring.app.auto_apply.ApplyOutcome`), and
+    it is the only one — an ``.data`` alias used to be accepted here for an outcome that
+    named the body the other way, but nothing produces one, so it was a second contract
+    that could only ever drift from the first. Anything else (or a non-dict) yields
+    ``{}`` — the model still gets ``.text``; only the local receipt is thinner. The dict
+    is COPIED, so a broadcast can never be mutated after the fact by whoever handed it
+    over.
+    """
+    value = getattr(outcome, "payload", None)
+    return dict(value) if isinstance(value, dict) else {}
 
 
 class ChatBroadcaster:
@@ -105,6 +148,34 @@ class ChatBroadcaster:
         # their own pool) must stop when the chat is closed / idle-reaped / repo-switched,
         # or it runs to its branch timeout, burning spend the analyst tried to cancel.
         self._close_hooks: list = []
+        # The analyst's stop button. An Event because the hub route that sets it runs on
+        # Starlette's event loop while the turn runs on a worker/loop thread — see
+        # request_cancel for why cancellation is a FLAG rather than an exception. Its own
+        # lock (not the subscriber lock, which _broadcast holds) makes "raise it, and say
+        # so ONCE" one atomic decision rather than a check followed by a set.
+        self._cancel = threading.Event()
+        self._cancel_lock = threading.Lock()
+        # The optional in-turn write capability (see _apply_edit). None is the shipped
+        # default and keeps the propose→analyst-Applies path byte-identical.
+        self._applier = None
+        # Receipts for writes this session has already made, oldest first, so an SSE
+        # subscriber that reconnects mid-turn can be shown the changes it missed. Bounded
+        # because it is a replay buffer, not a history: the transcript is the history.
+        # Only ever the applier's own value-free payload — never a cell, never a value.
+        self._applied_replay: list[dict] = []
+
+    @property
+    def applied_replay(self) -> list[dict]:
+        """The value-free ``applied`` receipts broadcast this session, oldest first.
+
+        Read by :func:`mooring.hub.sse.applied_replay` when a subscriber attaches. An
+        EventSource reconnects on its own, and a write that already landed is not a lost
+        suggestion — it is a change sitting in the analyst's notebook — so the receipt
+        that offers Revert has to survive a dropped stream. The consumer replays only
+        payloads carrying a non-empty ``id`` and de-duplicates on it.
+        """
+        with self._lock:
+            return list(self._applied_replay)
 
     def subscribe(self) -> queue.Queue[ChatEvent]:
         q: queue.Queue[ChatEvent] = queue.Queue(maxsize=_QUEUE_MAX)
@@ -152,6 +223,10 @@ class ChatBroadcaster:
         if self._closed:
             return
         self._closed = True
+        # A closing session's turn is over by definition: raise the stop flag (quietly —
+        # "closed" is the event that says so) so a tool loop still in flight converges at
+        # its next tool boundary instead of running on against a dead session.
+        self._cancel.set()
         # Cancel outliving work FIRST, so a blocked tool sees the abort as early as
         # possible; a broken hook must never stop the rest of the teardown.
         for hook in self._close_hooks:
@@ -195,6 +270,138 @@ class ChatBroadcaster:
         if reason:
             data["reason"] = reason
         self._broadcast(ChatEvent("fail", data))
+
+    # -- cancellation (the analyst's stop button) ---------------------------
+
+    def request_cancel(self) -> bool:
+        """Ask the turn in flight to stop. Thread-safe, idempotent, never raises.
+
+        Returns whether THIS call is the one that raised the flag — so a subclass with
+        more to do on a stop (the Copilot session also asks the SDK to abort) acts
+        exactly once without repeating the check-then-act race this method closes.
+
+        Cancellation is a FLAG, not an exception, because the two providers stop in
+        different places and only one of the loops is mooring's to break out of:
+
+        * At the TOOL BOUNDARY — the portable mechanism, and the only one that works
+          for GitHub Copilot, whose SDK drives its own tool loop from inside. Every
+          tool call made after this returns a terminal "the analyst cancelled this;
+          stop and reply" error (:func:`mooring.ai.tools.build_tool_specs` takes
+          :meth:`cancel_requested` as its ``cancelled`` predicate), which converges the
+          model's loop within a call or two instead of letting it run to completion.
+        * In the loop mooring OWNS (:class:`mooring.ai.openai_session.OpenAIChatSession`)
+          the flag additionally ends the turn at the next checkpoint and closes the open
+          stream, so a cancel does not still pay for the whole completion.
+
+        Broadcasts ONE ``cancelled`` event, so the UI can say the turn is stopping the
+        moment the analyst asks rather than only once the model gets the message. Exactly
+        one: raising the flag and deciding to announce it happen under one lock, because
+        two near-simultaneous presses (two browser tabs, a double click) could otherwise
+        both see it unset and both announce. The turn's real end still arrives as the
+        usual ``idle``, from whichever provider finished it — nothing downstream needs a
+        second "turn over" rule.
+        """
+        self.touch()
+        with self._cancel_lock:
+            first = not self._cancel.is_set()
+            if first:
+                self._cancel.set()
+        if not first:
+            return False
+        # Outside the lock on purpose: _broadcast takes the subscriber lock, and a
+        # subscriber's queue is not this method's business to hold a lock across.
+        self._broadcast(ChatEvent("cancelled", {"text": CANCELLED_NOTICE}))
+        return True
+
+    def cancel_requested(self) -> bool:
+        """Whether a stop is pending for the CURRENT turn — the tool-boundary predicate."""
+        return self._cancel.is_set()
+
+    def clear_cancel(self) -> None:
+        """Re-arm for the next turn.
+
+        Called at the START of every turn, never at the end: a cancel belongs to the
+        turn it stopped, and a flag left standing would silently kill every turn after
+        it (each tool call refusing to run, for a session the analyst thinks is live).
+        """
+        self._cancel.clear()
+
+    # -- the model's own write (edit mode) ----------------------------------
+
+    def _apply_edit(self, ops, rationale: str = ""):
+        """Perform ONE model-driven notebook write and mirror it onto the chat's events.
+
+        Wired into the write tool as ``apply_edit`` only when an applier was injected
+        AND the session is not read-only — the same shape as ``emit_proposal``, and for
+        the same reason: with no applier the tool stays in propose mode and the analyst
+        still clicks Apply, which is what ``[ai] auto_apply = false`` and the policy
+        escape hatch both rely on.
+
+        The outcome object comes from ``app/`` and is DUCK-TYPED (``ai/`` is L3, ``app/``
+        L3.5 — importing it would invert the layering). It is returned to the tool
+        unchanged, so the model reads exactly the observation the applier wrote; what
+        happens here is only the LOCAL echo:
+
+        * ``applied`` → an ``applied`` receipt for the browser ("changed cell 3 · revert").
+        * ``held``    → the EXISTING ``proposal`` event, so today's hold card appears
+          exactly as it always did. There is deliberately no second hold UI.
+        * anything else (``conflict`` / ``disabled`` / ``cancelled`` / ``error``) → no
+          event at all: the model is told, the analyst is not interrupted by a card for
+          a change that did not happen.
+
+        Neither channel carries a data value: the receipt is the applier's own value-free
+        payload, and it goes to the local browser, never to the model.
+
+        What a cancel guarantees here, precisely: no NEW write is STARTED once the flag
+        is up. The applier reads it before it begins (returning ``cancelled``), and every
+        later tool call is refused at the boundary — but a cancel that lands after that
+        read, while the write is already in flight, does not un-write it. That is what
+        Revert is for, and why one turn's writes share ONE undo checkpoint. "A cancelled
+        turn writes nothing" would be the stronger claim, and it is not the one the code
+        makes.
+        """
+        applier = self._applier
+        self.touch()  # a long self-correcting turn must never be idle-reaped mid-write
+        if applier is None:  # defensive: the tool is only ever built when one exists
+            return _ApplyOutcome("disabled", "Editing the notebook is switched off for this chat.")
+        try:
+            outcome = applier(list(ops or []), rationale or "")
+        except Exception:  # noqa: BLE001 - a broken applier must not break the turn
+            # Value-free on purpose: whatever the applier failed on is not something we
+            # can safely repeat back to the model.
+            return _ApplyOutcome("error", "The change could not be applied. Nothing was written.")
+        status = str(getattr(outcome, "status", "") or "")
+        if status == "applied":
+            payload = _event_payload(outcome)
+            self._remember_receipt(payload)
+            self._broadcast(ChatEvent("applied", payload))
+        elif status == "held":
+            payload = _event_payload(outcome)
+            if payload:
+                self._broadcast(ChatEvent("proposal", payload))
+        else:
+            # conflict / disabled / cancelled / error. The analyst IS told the write did
+            # not happen, because the alternative reads as silence: a tool row ending in a
+            # cross says something went wrong without saying the notebook is untouched,
+            # and "the write failed" and "the write worked and something else broke" are
+            # the two readings they most need told apart. Value-free: ``text`` is the same
+            # string the model is given, which the applier composes from fixed wording.
+            self._broadcast(
+                ChatEvent(
+                    "apply_failed",
+                    {"status": status, "text": str(getattr(outcome, "text", "") or "")},
+                )
+            )
+        return outcome
+
+    def _remember_receipt(self, payload: dict) -> None:
+        """Keep one receipt for replay; the newest are kept when the buffer is full."""
+        if not isinstance(payload, dict) or not payload:
+            return
+        with self._lock:
+            self._applied_replay.append(payload)
+            if len(self._applied_replay) > _APPLIED_REPLAY_MAX:
+                del self._applied_replay[:-_APPLIED_REPLAY_MAX]
 
     # -- outbound PII guard (Channel A) -------------------------------------
 

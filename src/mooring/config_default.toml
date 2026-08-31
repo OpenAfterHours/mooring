@@ -151,6 +151,28 @@ apply_runs = true           # an applied cell RUNS immediately (mooring writes m
                             # ("lazy"): the cell appears in the notebook marked stale and you
                             # press run. Slower, but nothing the copilot writes executes until
                             # a human asks for it — so a team policy may pin this false.
+auto_apply = true           # a reversible change the copilot writes LANDS as soon as it is
+                            # written — no Apply button — and mooring hands the model back a
+                            # value-free observation of what happened, so it can spot its own
+                            # mistake and fix it in the same turn. This does NOT widen what may
+                            # land: `apply_guard` above still reads every cell first and still
+                            # HOLDS anything Undo cannot take back for your confirm. Set false
+                            # to go back to propose-then-click: the copilot suggests, nothing
+                            # touches the notebook until you press Apply. A team policy may pin
+                            # this false (never true) — see docs/admins/policy.md.
+auto_run_report = true      # when the observation says an applied cell did not complete,
+                            # mooring may re-run the existing value-free smoke path itself so
+                            # the failure reaches the model without you relaying it. That
+                            # RE-EXECUTES the notebook, which is why it is its own switch; set
+                            # false and the model is told what happened but nothing is re-run
+                            # on your behalf. A team policy may pin this false (never true).
+max_tool_iters = 200        # SAFETY CEILING on the model's tool calls within one turn — a
+                            # backstop against a runaway loop, not a work budget. It is set
+                            # high on purpose: a hard analysis should run to the end, and the
+                            # control for "that is enough" is the chat's Stop button (or Esc),
+                            # not a small cap that stops the model mid-thought. A value below 1 is
+                            # ignored (it would end every turn before the first tool call).
+                            # Not policy-governed — see docs/admins/policy.md.
 traceback_guard = true      # when a chat message contains a pasted Python traceback,
                             # rewrite it value-safe before it leaves (exception types and
                             # workspace frames kept — their source re-read from disk —

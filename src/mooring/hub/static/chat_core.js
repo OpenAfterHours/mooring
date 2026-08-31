@@ -17,17 +17,24 @@ const ChatCore = (function () {
     { name: "help", help: "show commands and key bindings" },
     { name: "explain", help: "walk through what this notebook does" },
     { name: "review", help: "review the notebook's logic for correctness risks" },
-    { name: "checks", help: "propose tie-out / data-quality checks" },
-    { name: "sql", help: "propose a marimo SQL (DuckDB) cell for this notebook" },
+    // Worded so each line is true in BOTH modes. With `[ai] auto_apply` on the copilot
+    // writes the cell itself; with it off it proposes one and waits for Apply. "ask for"
+    // covers both; "propose" only described the second, and silently stopped being true
+    // for every user the day auto-apply became the default.
+    { name: "checks", help: "ask for tie-out / data-quality checks" },
+    { name: "sql", help: "ask for a marimo SQL (DuckDB) cell for this notebook" },
     {
       name: "investigate",
       help: "research independent sub-questions in parallel — /investigate <topic>",
     },
     { name: "clear", help: "clear the transcript (keeps the session)" },
     { name: "model", help: "switch model — /model [name]" },
-    { name: "apply", help: "apply the latest proposal" },
-    { name: "diff", help: "jump to the latest proposal" },
-    { name: "undo", help: "undo the last applied change" },
+    // These three act on a change that is WAITING — a held one, or (in propose mode)
+    // every one. When the copilot applies its own changes there is usually nothing
+    // waiting, and "the latest proposal" described a card that was no longer there.
+    { name: "apply", help: "apply a change that is waiting for you" },
+    { name: "diff", help: "jump to the change waiting for you" },
+    { name: "undo", help: "put the notebook back one step (same as Revert)" },
     { name: "retry", help: "resend your last message" },
   ];
 
@@ -470,14 +477,21 @@ const ChatCore = (function () {
   }
 
   // The canned follow-up behind "Add as notes cell": ONE new appended markdown
-  // documentation cell. There is now ONE propose tool, so the forbidden thing is no
+  // documentation cell. There is now ONE write tool, so the forbidden thing is no
   // longer a set of tool names but the other FIELDS of that tool — `appends` only,
   // never `edits`, `deletes` or `cells` — so the walkthrough can never clobber an
-  // existing cell. The proposal still rides the normal card → Apply → undo path.
+  // existing cell.
+  //
+  // It says "the notebook-editing tool" rather than naming one: that tool is registered
+  // under TWO names, one per mode (ai/tools.py: WRITE_TOOL_NAMES), and this page is
+  // never told which mode the session is in — naming the wrong one would be an
+  // instruction to call a tool the model has not been given. The session's own system
+  // prompt names it exactly once, and does know. What THIS prompt has to pin is the
+  // FIELD, which is the same in both modes.
   function notesCellPrompt() {
     return (
-      "Now add that walkthrough to the notebook as a notes cell. Propose ONE new " +
-      "markdown documentation cell using mooring_propose_notebook_edit with `appends` " +
+      "Now add that walkthrough to the notebook as a notes cell. Add ONE new " +
+      "markdown documentation cell using the notebook-editing tool with `appends` " +
       "only — never its `edits`, `deletes` or `cells` fields, and do not touch any " +
       "existing cell.\n" +
       "\n" +
@@ -496,8 +510,10 @@ const ChatCore = (function () {
   // -- /checks: propose value-free tie-out checks ----------------------------
   // A fixed prompt (no user text, no values) asking the copilot to author a
   // mooring_checks cell from the schema + source it already sees. Value-free by
-  // construction, over the EXISTING chat channel: the copilot proposes; the analyst
-  // reviews and applies. Pinned by tests/js/chat_core.test.js.
+  // construction, over the EXISTING chat channel. It does not say who applies the
+  // result: with `[ai] auto_apply` on the model's write lands and runs inside its own
+  // tool call, and this page is not told which mode it is in. Pinned by
+  // tests/js/chat_core.test.js.
   function checksPrompt() {
     return (
       "Add tie-out / data-quality checks for this notebook using the value-free " +
@@ -505,7 +521,7 @@ const ChatCore = (function () {
       "\n" +
       "First call mooring_read_notebook_source to see the current cells, and " +
       "mooring_get_schema for the datasets involved, so you pick real column and key " +
-      "names. Then propose ONE new cell (mooring_propose_notebook_edit, using `appends`) that:\n" +
+      "names. Then add ONE new cell (the notebook-editing tool, using `appends`) that:\n" +
       "- begins with `import mooring_checks as mc` and `mc.reset()`;\n" +
       "- asserts the checks that fit THIS notebook — e.g. mc.unique_key(df, \"id\") on any " +
       "key you expect to be unique, mc.no_fanout(left, right, on=\"key\") before a join, " +
@@ -514,7 +530,7 @@ const ChatCore = (function () {
       "should match a control.\n" +
       "\n" +
       "Choose the columns and keys from the schema and the source only — never ask for " +
-      "data values. Briefly say why each check matters. The analyst reviews and applies it."
+      "data values. Briefly say why each check matters."
     );
   }
 
@@ -527,15 +543,16 @@ const ChatCore = (function () {
   // A fixed prompt (no user text, no values) asking the copilot to author a marimo
   // `mo.sql` cell from the schema + source it already sees. Value-free by construction:
   // SQL is authored code run locally by marimo; the model never sees the result. Over
-  // the EXISTING chat channel — the copilot proposes, the analyst reviews and applies.
-  // Pinned by tests/js/chat_core.test.js.
+  // the EXISTING chat channel. Like /checks it does not say who applies the result —
+  // the page is not told whether this session auto-applies. Pinned by
+  // tests/js/chat_core.test.js.
   function sqlPrompt() {
     return (
       "Propose a marimo SQL cell for this notebook, running on DuckDB.\n" +
       "\n" +
       "First call mooring_read_notebook_source to see the current cells, and " +
       "mooring_get_schema for the datasets involved, so you use real dataframe and " +
-      "column names. Then propose ONE new cell (mooring_propose_notebook_edit, using `appends`) that:\n" +
+      "column names. Then add ONE new cell (the notebook-editing tool, using `appends`) that:\n" +
       '- runs the query with `result = mo.sql("""...""")` (assign it to a well-named ' +
       "dataframe variable so later cells can use it);\n" +
       "- queries the dataframes already in scope BY THEIR VARIABLE NAME;\n" +
@@ -547,8 +564,7 @@ const ChatCore = (function () {
       "column headers (e.g. DuckDB PIVOT); the resulting column names would be data values.\n" +
       "\n" +
       "Choose the tables and columns from the schema and the source only — never inline a " +
-      "data value or ask for one. Briefly say what the query returns. The analyst reviews " +
-      "and applies it."
+      "data value or ask for one. Briefly say what the query returns."
     );
   }
 
@@ -986,6 +1002,499 @@ const ChatCore = (function () {
   // The per-row tag. Fixed strings that name the BAND, never the code.
   function codeFindingTag(row) {
     return row && row.floor ? GATE_MARK : "side effect";
+  }
+
+  // -- auto-apply: the receipt --------------------------------------------
+  // With `[ai] auto_apply` on, the model's write lands inside its own tool call and
+  // marimo runs it; the analyst gets a RECEIPT after the fact instead of an Apply
+  // button before it. That is the whole design bet: the Apply button asked someone who
+  // does not read Python to judge code at the one moment they could not — before it
+  // ran. The judgement moves to after the run, where there are results.
+  //
+  // Which is exactly why every string on the receipt is decided HERE, pinned by tests,
+  // the same way the gate's wording is. The reader of these words does not read Python.
+  // "Changed cell 3 · Added cell 8" is their language; `{"op": "edit", "index": 3}`,
+  // "append_cell" and "status: applied" are not, and must never surface.
+
+  // The wire summary is {edited: [...], appended: [...], deleted: [...]} — cell numbers
+  // in whatever order the applier wrote them. Verb order is fixed so a multi-op write
+  // always reads the same way round.
+  //
+  // Those numbers are ZERO-BASED indices into the file, which is a number the analyst
+  // has no way to see: marimo does not print it, and "cell 0" is not a thing that
+  // exists on their screen. So they are rendered as a POSITION counted from the top —
+  // "the 4th cell" — which is a number they can arrive at by scrolling. Appends have no
+  // useful position at all (they are always the new last cells), so they say where they
+  // went instead of pretending to a number.
+  // Past this many cells the list stops being readable, so say how many instead.
+  const RECEIPT_MAX_LISTED = 4;
+
+  // "1st" / "2nd" / "3rd" / "4th"… for a ONE-based position.
+  function ordinal(n) {
+    const teens = n % 100;
+    if (teens >= 11 && teens <= 13) return n + "th";
+    return n + ({ 1: "st", 2: "nd", 3: "rd" }[n % 10] || "th");
+  }
+
+  // Cell numbers, cleaned: integers only, deduped, ascending. Anything else is dropped
+  // rather than rendered — a receipt that says "cell undefined" is worse than one that
+  // says less.
+  function receiptCells(value) {
+    const list = Array.isArray(value) ? value : [];
+    const seen = new Set();
+    const out = [];
+    for (const raw of list) {
+      // Number(null) is 0 and Number(true) is 1 — coercing blindly would invent a
+      // "cell 0" out of a hole in the payload, which is precisely the kind of confident
+      // wrong number a receipt must never print.
+      const n =
+        typeof raw === "number"
+          ? raw
+          : typeof raw === "string" && raw.trim() !== ""
+            ? Number(raw)
+            : NaN;
+      if (!Number.isInteger(n) || n < 0) continue;
+      if (seen.has(n)) continue;
+      seen.add(n);
+      out.push(n);
+    }
+    out.sort((a, b) => a - b);
+    return out;
+  }
+
+  // "the 4th cell" / "the 2nd and 4th cells" / "5 cells" — from ZERO-based indices.
+  function receiptCellPhrase(nums) {
+    if (nums.length > RECEIPT_MAX_LISTED) return nums.length + " cells";
+    const pos = nums.map((n) => ordinal(n + 1));
+    if (pos.length === 1) return "the " + pos[0] + " cell";
+    return "the " + pos.slice(0, -1).join(", ") + " and " + pos[pos.length - 1] + " cells";
+  }
+
+  // Appends land at the END of the notebook, always. Their index is therefore a fact
+  // about the file's length rather than about the change, and naming it would invite
+  // the analyst to go looking for a number nothing on their screen agrees with.
+  function receiptAppendPhrase(n) {
+    return n === 1 ? "Added a new cell at the end" : "Added " + n + " new cells at the end";
+  }
+
+  // "Changed the 4th cell · Added a new cell at the end". Never empty: a write with no
+  // readable summary still happened, and saying nothing would hide it.
+  function receiptHeadline(summary) {
+    const s = summary && typeof summary === "object" && !Array.isArray(summary) ? summary : {};
+    const parts = [];
+    const edited = receiptCells(s.edited);
+    if (edited.length) parts.push("Changed " + receiptCellPhrase(edited));
+    const appended = receiptCells(s.appended);
+    if (appended.length) parts.push(receiptAppendPhrase(appended.length));
+    const deleted = receiptCells(s.deleted);
+    if (deleted.length) parts.push("Removed " + receiptCellPhrase(deleted));
+    return parts.length ? parts.join(" · ") : "Changed the notebook";
+  }
+
+  // The observation is the value-free line the applier read back off the run ("cell 8
+  // ran · sales_q3: 12 columns, 40331 rows"). It is DATA, not markup — chat.js renders
+  // it with textContent — so all this does is make it readable.
+  const OBSERVATION_MAX = 240;
+
+  // Thousands separators for standalone integers of five or more digits, so a row count
+  // reads as a magnitude ("40,331 rows") instead of a digit soup. Deliberately narrow:
+  // four digits are left alone (a year is not a count), and a run glued to a letter,
+  // dot, dash or underscore is left exactly as written, so an id, a version or a column
+  // name is never rewritten.
+  function groupDigits(text) {
+    return String(text).replace(
+      /(^|[^0-9A-Za-z._-])(\d{5,})(?![0-9A-Za-z_-])/g,
+      (_m, before, digits) => before + digits.replace(/\B(?=(\d{3})+$)/g, ","),
+    );
+  }
+
+  // The whole tidied line, however long. The applier appends the clause that names what
+  // is NOT bound — the half of the observation that says the change did not work — LAST,
+  // so a hard truncation removes exactly the failure and leaves the good news. Nothing
+  // may be dropped on the floor: the short form is what is shown, this is what "show
+  // more" reveals, and the caller must offer that whenever the two differ.
+  function receiptObservationFull(text) {
+    const s = typeof text === "string" ? text.replace(/\s+/g, " ").trim() : "";
+    return s ? groupDigits(s) : "";
+  }
+
+  function receiptObservation(text) {
+    const grouped = receiptObservationFull(text);
+    if (!grouped) return "";
+    return grouped.length > OBSERVATION_MAX
+      ? grouped.slice(0, OBSERVATION_MAX - 1).trimEnd() + "…"
+      : grouped;
+  }
+
+  // Whether the short form left something out — i.e. whether a "show more" is owed.
+  function receiptObservationTruncated(text) {
+    const full = receiptObservationFull(text);
+    return !!full && full !== receiptObservation(text);
+  }
+
+  // Where the next receipt goes. One turn can write several times, and those receipts
+  // must read as a numbered sequence rather than a stack of unrelated cards — but ONLY
+  // while the group they would join is still the same turn's and still on the page.
+  // `attached` is the caller's answer to "is that group still in the document?": /clear
+  // empties the transcript, and appending into the detached node it left behind would
+  // silently swallow every later receipt. (A tray rebuild eating a live card is a
+  // mistake this codebase has already made once; this is the pure part of not repeating
+  // it.) `prev` is the last group as {turnId, count}, or null when there is none.
+  function receiptSequence(prev, turnId, attached) {
+    const id = typeof turnId === "string" ? turnId : "";
+    const reuse = !!prev && attached === true && prev.turnId === id;
+    const count = reuse ? (Number(prev.count) || 0) + 1 : 1;
+    // Numbers appear only once there IS a sequence — a lone "1" beside one receipt is
+    // noise, so the first receipt is numbered retroactively when the second arrives.
+    return { reuse, turnId: id, count, numbered: count >= 2 };
+  }
+
+  // -- auto-apply: what Revert actually reverts -----------------------------
+  // The one control that makes auto-apply safe, and the one that was lying. mooring
+  // takes ONE undo checkpoint per TURN, not per write: five writes in a turn share a
+  // single snapshot, so the Revert beside the fifth receipt puts back all five. The
+  // button said "Put the notebook back the way it was before this change" and the
+  // confirmation said "Reverted the last applied change" — for someone who does not
+  // read Python and cannot see the notebook diff, that is the difference between
+  // knowing what happened and not.
+  //
+  // The granularity is not even fixed: the guard refuses to EXTEND a checkpoint after a
+  // manual Apply or an Undo lands mid-turn (app/apply.py:_extends_turn), so inside one
+  // visually identical group some Reverts undo four writes and some undo one. Only the
+  // server can tell them apart, and only if it says so.
+  //
+  // `writes` is that answer: the server's `checkpoint_writes` — how many model writes
+  // the checkpoint this Revert would restore currently covers, counting this one. When
+  // it is absent (an older hub, or a payload this client could not read) NOTHING is
+  // guessed: `undo_depth` cannot distinguish the two cases (the undo stack is capped at
+  // 25, so "the depth did not move" also means "the oldest snapshot was pruned"), and a
+  // confident wrong number is the defect being fixed, not a smaller version of it. The
+  // wording then says what is actually known — that a turn's changes go back together
+  // and the earlier ones MAY go with this one.
+  //
+  // `position` is which write of the current TURN this is (1-based), counted by the
+  // caller across the whole turn rather than off the visible group — /clear empties the
+  // transcript without un-writing anything, and the first receipt after it is still not
+  // the first write of the turn.
+  const REVERT_LABEL = "Revert";
+  const REVERT_ONE_TITLE = "Put the notebook back to how it was just before this change.";
+  const REVERT_MAYBE_TITLE =
+    "Put the notebook back one step. mooring undoes a turn's changes together, so the " +
+    "earlier changes from this turn may go back with it.";
+  const REVERT_MAYBE_NOTE = "may also undo the earlier changes in this turn";
+
+  function revertScope(writes, position) {
+    const n = Number.isInteger(writes) && writes >= 1 ? writes : null;
+    const pos = Number.isInteger(position) && position >= 1 ? position : 1;
+    if (n === null) {
+      // The first write of a turn always opens a fresh checkpoint (the recorded turn id
+      // cannot match one that has only just been minted), so this one case is knowable
+      // without the server's help.
+      if (pos <= 1) return { covers: 1, label: REVERT_LABEL, title: REVERT_ONE_TITLE, note: "" };
+      return { covers: null, label: REVERT_LABEL, title: REVERT_MAYBE_TITLE, note: REVERT_MAYBE_NOTE };
+    }
+    if (n === 1) return { covers: 1, label: REVERT_LABEL, title: REVERT_ONE_TITLE, note: "" };
+    return {
+      covers: n,
+      label: REVERT_LABEL + " " + n + " changes",
+      title:
+        "Put the notebook back to how it was before the assistant's last " +
+        n +
+        " changes — not just this one.",
+      note: "undoes " + n + " changes together",
+    };
+  }
+
+  // What the transcript says AFTER a revert lands. `covers` is the scope the button
+  // showed (a number, or null for "not known"); `remaining` is the undo depth left.
+  function revertedNotice(covers, remaining) {
+    const left = Number(remaining);
+    const more = Number.isFinite(left) && left > 0 ? Math.floor(left) : 0;
+    const earlier = more
+      ? " (" + more + " earlier change" + (more > 1 ? "s" : "") + " still undoable with /undo)"
+      : "";
+    if (covers === null || covers === undefined) {
+      return (
+        "Put the notebook back one step — any earlier changes from the same turn may " +
+        "have gone back with it. Check the notebook." +
+        earlier
+      );
+    }
+    const n = Number.isInteger(covers) && covers >= 1 ? covers : 1;
+    if (n === 1) return "Reverted the last applied change." + earlier;
+    return "Put the notebook back to before the assistant's last " + n + " changes." + earlier;
+  }
+
+  // A receipt whose Revert has been taken away by a NEWER change. Only one control may
+  // be live at a time (they all pop the same stack), so the older receipt has to say
+  // what happened to its own way back.
+  //
+  // `sameTurn` is the load-bearing distinction. A later write in the SAME turn usually
+  // joined this one's checkpoint, so this change has no undo step of its own and telling
+  // the analyst that "/undo steps further back" to it is false. A later TURN's write
+  // really does sit on its own step above this one.
+  function receiptDisplacedNote(sameTurn) {
+    return sameTurn === true
+      ? "the Revert moved to the newest change in this turn"
+      : "superseded · /undo steps back one change at a time";
+  }
+
+  // How a receipt reads once a revert has swept over it. The receipt that carried the
+  // button knows it went back; the earlier ones it covered only know so when the server
+  // said how far the checkpoint reached.
+  const RECEIPT_REVERTED_NOTE = "reverted";
+  const RECEIPT_MAYBE_REVERTED_NOTE = "may have been reverted with it";
+
+  // -- auto-apply: the stop control ---------------------------------------
+  // A turn with no small iteration cap needs a way out, and the way out is the analyst's
+  // to press. These decide what the control SAYS, which is the whole safety property: a
+  // stop that reads as done while the assistant is still replying is worse than no stop.
+
+  // The turn is winding down, not over: `request_cancel` broadcasts `cancelled` the
+  // moment it is asked, and the model still finishes the step it had already started
+  // (the turn's real end arrives later, as the usual `idle`). So the wording says the
+  // stop registered WITHOUT claiming the assistant has gone quiet.
+  // `windingDown` is the caller's answer to "is the turn still live?". It is normally
+  // true — but a frame that arrives after the turn already ended must not promise a
+  // wind-up that has already happened.
+  function cancelledNotice(reason, windingDown) {
+    const r = typeof reason === "string" ? reason.trim().toLowerCase() : "";
+    const tail =
+      windingDown === false
+        ? ""
+        : " The assistant is wrapping up the step it had already started.";
+    // "analyst" is the only reason the stop button produces. Anything else is the
+    // session ending a turn for its own reasons, and saying "you stopped this" then
+    // would be a lie about who is in control.
+    if (!r || r === "analyst" || r === "user") return "You stopped this turn." + tail;
+    if (r === "timeout") return "This turn was stopped — it ran out of time." + tail;
+    return "This turn was stopped." + tail;
+  }
+
+  const STOP_LABEL = "Stop";
+  const STOPPING_LABEL = "Stopping…";
+
+  // What the composer's stop control shows. `cancelPending` stays true from the click
+  // until the turn actually ends, so the button reads "Stopping…" for exactly as long
+  // as that is true — and is insensitive, because the ask is already in flight.
+  function stopButtonState(turnState, cancelPending) {
+    const busy = turnState === "thinking" || turnState === "streaming";
+    if (!busy) return { visible: false, disabled: true, label: STOP_LABEL, title: "" };
+    if (cancelPending) {
+      return {
+        visible: true,
+        disabled: true,
+        label: STOPPING_LABEL,
+        title: "Stopping — the assistant is finishing the step it had already started.",
+      };
+    }
+    return { visible: true, disabled: false, label: STOP_LABEL, title: "Stop this turn (Esc)" };
+  }
+
+  // The two ways a stop does NOT end in a stopped turn. Both must be said out loud: a
+  // "stopping…" line that quietly becomes an ordinary finish teaches the analyst that
+  // the button is decorative.
+  function stopOutcomeNotice(outcome) {
+    if (outcome === "finished") return "That turn finished on its own before the stop reached it.";
+    return "The stop didn't reach the assistant — the turn is still running.";
+  }
+
+  // Whether a stop may be STARTED right now — shared by the button and the Esc key so
+  // the two routes to the same action cannot drift apart. There must be a session, a
+  // live turn, and no ask already in flight.
+  function canStopTurn(turnState, cancelPending, hasSession) {
+    if (!hasSession || cancelPending) return false;
+    return stopButtonState(turnState, false).visible;
+  }
+
+  // What the END of a turn should say, given whether a stop was asked for and whether
+  // the session acknowledged it. Three ways out and each names itself: a turn that
+  // reached its own end while a "stopping…" was on screen must SAY it finished first —
+  // letting that line quietly become an ordinary finish is how a stop control stops
+  // being believed. `status` is the status-line word, "" to leave the state's own.
+  function turnEndOutcome(asked, acknowledged) {
+    if (acknowledged) return { status: "stopped", notice: "" };
+    if (asked) return { status: "", notice: stopOutcomeNotice("finished") };
+    return { status: "", notice: "" };
+  }
+
+  // Whether a `cancelled` frame should be reported at all.
+  //
+  // `request_cancel` broadcasts unconditionally — it cannot know whether the turn had
+  // already finished — so a stop that arrives a beat late produces TWO endings for one
+  // turn: `idle` first says "that turn finished on its own before the stop reached it",
+  // then this frame says "You stopped this turn" and parks the status on "stopped" for a
+  // session that is idle and ready. Both cannot be true, and the second one is the one
+  // that is wrong, so a frame for a turn whose end has already been reported is dropped.
+  // `turnClosed` starts TRUE (no turn has run yet), which also drops the frame a stream
+  // replays on reconnect.
+  function cancelEventAction(turnClosed, sawCancelled) {
+    if (sawCancelled === true) return "drop"; // one acknowledgement per turn
+    return turnClosed === true ? "drop" : "report";
+  }
+
+  // A `message` frame carrying `notice: true` is mooring's OWN aside (the stop's
+  // "(Stopped at your request.)", the tool-ceiling line) — not something the assistant
+  // said. Rendering it as assistant prose put words in the model's mouth; rendering the
+  // stop notice at all repeated a stop the transcript has already reported in the
+  // analyst's own terms.
+  function noticeMessageAction(notice, stopped) {
+    if (notice !== true) return "prose";
+    return stopped === true ? "drop" : "sys";
+  }
+
+  // How a finished tool line is marked. Under a stop every remaining call in the batch
+  // comes back as the terminal refusal, so the ✗ that follows would blame the assistant
+  // for the analyst's own decision. Those close as stopped — neither ✓ nor ✗ — which is
+  // what style.css has always said the intent was.
+  function toolDoneMark(success, stopping) {
+    if (success === true) return { cls: "ok", glyph: "⏺" }; // ⏺
+    if (stopping === true) return { cls: "stopped", glyph: "⏹" }; // ⏹
+    return { cls: "fail", glyph: "✗" }; // ✗
+  }
+
+  // -- auto-apply: saying which mode this chat is in ------------------------
+  // `[ai] auto_apply` defaults ON, so an existing user's copilot stops asking without
+  // ever announcing it, and the first evidence is a receipt for a change that has
+  // already landed and run. The mode is a fact about what the next turn will DO to their
+  // notebook, so it is stated up front, in the transcript, before the first turn.
+  function autoApplyBanner(on) {
+    if (on === true) {
+      return (
+        "This copilot changes your notebook itself. When it writes a cell the change " +
+        "lands and marimo runs it straight away — you get a receipt here, with a " +
+        "Revert. A change a Revert could not take back (deleting files, running a " +
+        "program, overwriting a report) still stops and asks you first. Press Stop, or " +
+        "Esc, to end a turn. To approve every change yourself instead, turn off “Let " +
+        "the copilot apply reversible changes itself” in Settings ▸ AI copilot."
+      );
+    }
+    return (
+      "This copilot proposes changes and waits: nothing touches your notebook until " +
+      "you press Apply ▸."
+    );
+  }
+
+  // /help, in the mode the chat is actually in. The rows used to advertise /apply as
+  // "apply the latest proposal" and offer an "a/s apply or skip" key hint — three
+  // controls that do nothing at all unless a change is being HELD for the analyst.
+  function helpRows(autoApply) {
+    const waiting = autoApply === true ? "a change the copilot is holding for you" : "the latest proposal";
+    return [
+      ["/help", "show this help"],
+      ["/explain", "walk through what this notebook does"],
+      ["/review", "review the notebook's logic for correctness risks"],
+      ["/checks", "ask for tie-out / data-quality checks"],
+      ["/sql", "ask for a marimo SQL (DuckDB) cell"],
+      ["/investigate <topic>", "research independent sub-questions in parallel"],
+      ["/clear", "clear the transcript (keeps the session)"],
+      ["/model [name]", "list or switch the model"],
+      ["/apply", "apply " + waiting],
+      ["/diff", "jump to " + waiting],
+      ["/undo", "put the notebook back one step (same as Revert)"],
+      ["/retry", "resend your last message"],
+    ];
+  }
+
+  function helpKeys(autoApply) {
+    const applySkip =
+      autoApply === true
+        ? "a/s apply or skip a change the copilot is holding for you"
+        : "a/s apply or skip a proposal";
+    return (
+      "Keys: Enter send · Shift+Enter newline · ↑/↓ recall input · @ reference a " +
+      "dataset · " +
+      applySkip +
+      " (when the prompt is empty/unfocused) · Esc clear the draft / close a menu — or " +
+      "stop the turn in flight"
+    );
+  }
+
+  // -- transcript entries for events this page did not write --------------
+  // The stream is the analyst's only account of what happened to their notebook, so an
+  // event that cannot be read must still leave a row: silence reads as "nothing
+  // happened", and by this point something already has. These take an arbitrary payload
+  // and get a sentence out of it, degrading rather than dropping.
+
+  // The first readable sentence in a payload, whatever the sender chose to call it.
+  function eventNoteText(data) {
+    if (!data || typeof data !== "object" || Array.isArray(data)) return "";
+    for (const key of ["text", "detail", "message", "summary", "error"]) {
+      const value = data[key];
+      if (typeof value === "string" && value.trim()) return value.trim();
+    }
+    return "";
+  }
+
+  // The AUTOMATIC run report — mooring re-running the whole notebook by itself when a
+  // change the model wrote did not complete. Today that happens inside a tool call with
+  // nothing on screen for minutes. Whatever shape the event settles on, this renders it:
+  // `{state}`, `{ran_clean}`, `{sent, redactions}` and a bare `{text}` are all understood.
+  function runReportNote(data) {
+    const d = data && typeof data === "object" && !Array.isArray(data) ? data : {};
+    const state = typeof d.state === "string" ? d.state.trim().toLowerCase() : "";
+    const redactions = Array.isArray(d.redactions) ? d.redactions : [];
+    if (state === "running" || state === "start" || state === "started") {
+      return {
+        text:
+          "Running your whole notebook to find out why that change did not complete. " +
+          "This can take a few minutes; the assistant gets the result, never a value.",
+        sent: "",
+        redactions: [],
+      };
+    }
+    if (d.ran_clean === true) {
+      return { text: "Ran the notebook: every cell ran clean. Nothing to report.", sent: "", redactions: [] };
+    }
+    const sent = typeof d.sent === "string" ? d.sent.trim() : "";
+    if (sent) {
+      return {
+        text: "Ran the notebook: it failed. This is exactly what was sent to the assistant:",
+        sent,
+        redactions,
+      };
+    }
+    const fallback = eventNoteText(d);
+    return {
+      text: fallback || "mooring ran the notebook and told the assistant what came back.",
+      sent: "",
+      redactions,
+    };
+  }
+
+  // A model write that did NOT land. Today the model is told and the analyst is not, so
+  // "the write failed" and "the write worked and something else broke" look identical
+  // from the transcript — with a notebook that may or may not have changed.
+  const APPLY_FAILED_LEAD = {
+    conflict:
+      "The assistant tried to change a cell that had moved underneath it, so nothing " +
+      "was written. Your notebook is unchanged.",
+    disabled:
+      "The assistant tried to change this notebook, but the copilot is switched off " +
+      "for it. Nothing was written.",
+    cancelled: "You stopped the turn before that change was written. Nothing was written.",
+  };
+
+  function applyFailedNote(data) {
+    const d = data && typeof data === "object" && !Array.isArray(data) ? data : {};
+    const status = typeof d.status === "string" ? d.status.trim().toLowerCase() : "";
+    const lead =
+      APPLY_FAILED_LEAD[status] ||
+      "The assistant tried to change the notebook and it did not land. Nothing was written.";
+    const detail = eventNoteText(d);
+    return detail && detail !== lead ? lead + " " + detail : lead;
+  }
+
+  // The stream dropped mid-turn and came back. A reconnect replays readiness, not
+  // receipts — so a change the model made while the connection was down is on disk with
+  // no row here and no way back on screen. Say that, rather than let the gap read as
+  // "the assistant did nothing".
+  function streamResumedNotice() {
+    return (
+      "The connection to the assistant dropped and came back. Anything it changed " +
+      "while it was down is in your notebook but not in this transcript — check the " +
+      "notebook, and use /undo if you need to step back."
+    );
   }
 
   // -- reasoning effort -----------------------------------------------------
@@ -1546,6 +2055,31 @@ const ChatCore = (function () {
     codeFindingRows,
     codeFindingLead,
     codeFindingTag,
+    receiptHeadline,
+    receiptObservation,
+    receiptObservationFull,
+    receiptObservationTruncated,
+    receiptSequence,
+    revertScope,
+    revertedNotice,
+    receiptDisplacedNote,
+    RECEIPT_REVERTED_NOTE,
+    RECEIPT_MAYBE_REVERTED_NOTE,
+    cancelledNotice,
+    cancelEventAction,
+    noticeMessageAction,
+    toolDoneMark,
+    autoApplyBanner,
+    helpRows,
+    helpKeys,
+    eventNoteText,
+    runReportNote,
+    applyFailedNote,
+    streamResumedNotice,
+    stopButtonState,
+    stopOutcomeNotice,
+    canStopTurn,
+    turnEndOutcome,
     effortKey,
     adoptLegacyEffort,
     chooseEffort,

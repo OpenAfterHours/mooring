@@ -556,6 +556,25 @@ class AppConfig:
         return self.ai.apply_runs
 
     @property
+    def ai_auto_apply(self) -> bool:
+        return self.ai.auto_apply
+
+    @property
+    def ai_auto_run_report(self) -> bool:
+        return self.ai.auto_run_report
+
+    @property
+    def ai_max_tool_iters(self) -> int:
+        """The per-turn tool-call ceiling, never below 1.
+
+        :func:`mooring.ai_config.load_ai_config` already clamps what it reads, so the
+        floor here is for the other door: an ``AiConfig`` built in code (a test, a
+        caller that constructs one directly) can still carry a 0, and a 0 reaching the
+        loop would end every turn before the model's first tool call.
+        """
+        return max(1, int(self.ai.max_tool_iters))
+
+    @property
     def ai_pii(self) -> bool:
         return self.ai.pii.enabled
 

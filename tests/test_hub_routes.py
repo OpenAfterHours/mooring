@@ -123,6 +123,9 @@ EXPECTED_ROUTES = {
     ("/api/ai/chat/open", ("POST",), "api_chat_open"),
     ("/api/ai/chat/stream/{sid}", ("GET",), "api_chat_stream"),
     ("/api/ai/chat/send", ("POST",), "api_chat_send"),
+    # The analyst's stop for a self-correcting turn — the control that replaces the
+    # small iteration cap the edit loop removed.
+    ("/api/ai/chat/cancel", ("POST",), "api_chat_cancel"),
     ("/api/ai/chat/apply", ("POST",), "api_chat_apply"),
     ("/api/ai/chat/rollback", ("POST",), "api_chat_rollback"),
     ("/api/ai/chat/run-report", ("POST",), "api_chat_run_report"),

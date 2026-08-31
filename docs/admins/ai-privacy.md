@@ -144,14 +144,20 @@ routing is enabled.
 - **Cell outputs / dataframe previews** — these are where real values appear.
 - **Variable *values*.** Mooring may read a live dataframe's **schema** (names +
   dtypes — see [Live dataframe schemas](#live-dataframe-schemas-data-outside-the-workspace)),
-  but never a stored value or other kernel state.
+  and — for names it asked about itself — whether a name is **bound** and which of
+  sixteen fixed words mooring's own probe **classifies** it as
+  ([the probe's second question](#the-probes-second-question-is-this-name-bound)).
+  Never a stored value, never anything derived from one, and never a string read off
+  the object — a class name included.
 - **Raw error tracebacks.** A traceback can embed values (`KeyError: 'ACME Ltd'`),
   and mooring never captures one. Two things can put an error message *near* the
   model, and both are rewritten value-safe first by the same sanitiser: an analyst
   can *paste* a traceback into the chat (rewritten and held for an explicit confirm;
-  the raw paste is never stored, so no code path can forward it), and an analyst can
-  click **Run & report** after an Apply (mooring runs the notebook and reads only
-  marimo's own error lines). What survives the rewrite is best-effort, not
+  the raw paste is never stored, so no code path can forward it), and the
+  **Run & report** path can run the notebook and read only marimo's own error lines —
+  started by your click, or, when
+  [`[ai] auto_run_report`](#apply-gate) is on, by mooring itself after a change the
+  model wrote did not complete. What survives the rewrite is best-effort, not
   structural — see [Pasted tracebacks](#pasted-tracebacks) and
   [Run & report](#run-and-report) for the exact contracts.
 - **The contents of any data file.**
@@ -168,10 +174,14 @@ routing is enabled.
    [structured-PII scan](#structured-pii-pre-flight-scan-opt-in-best-effort) runs at
    all of these, not only `build_system_context`.
 2. **Value-free tools only.** The agent is given mooring's own tools (`ai/tools.py`):
-   list datasets, get a schema, read the notebook source, and *propose* a change —
-   each value-free by construction. There is exactly **one** propose tool,
-   `mooring_propose_notebook_edit`, and it covers every change the copilot can make
-   (new cells, edits, deletions, a wholesale rewrite) as one reviewable patch. It
+   list datasets, get a schema, read the notebook source, and *change* the notebook —
+   each value-free by construction. There is exactly **one** write tool, and it covers
+   every change the copilot can make (new cells, edits, deletions, a wholesale rewrite)
+   as one patch. It is registered under one of **two** names, chosen per session by
+   [`[ai] auto_apply`](#apply-gate): `mooring_propose_notebook_edit` when the analyst
+   applies (it emits a card and writes nothing), and `mooring_edit_notebook` when the
+   change lands inside the call. Same handler, same JSON schema, same checks — the name
+   differs because it is an instruction to the model about what happens next. It
    answers with mooring's **static
    check** of the notebook that proposal would produce (`marimo_rt.validate_notebook_source`):
    the candidate is composed in memory, never written, and checked on the AST alone —
@@ -206,17 +216,32 @@ routing is enabled.
    agent runs with an **empty working directory** so there are no data files within
    its reach.
 3. **Applying a cell only writes source; mooring never opens a marimo websocket.**
-   When you Apply a proposed cell, mooring writes the cell's **source code** into
+   When a cell is applied — by your click, or, with
+   [`[ai] auto_apply`](#apply-gate) on, by the model inside its own tool call — mooring
+   writes the cell's **source code** into
    the notebook's `.py` file (via marimo's own codegen); the editor, launched with
    `--watch`, reloads and runs it (unless you have turned
    [*Run an applied cell straight away*](#apply-gate) off, in which case it reloads
    the cell marked stale and runs nothing). mooring never reads cell outputs, and never
    connects a marimo *websocket* — and outputs, dataframe previews, and variable
-   values are delivered *only* over that websocket. So a value cannot travel back
+   values are delivered *only* over that websocket. So a **value** cannot travel back
    through mooring to the model. (The cell runs in *your* kernel; only your browser
    sees the result.) Live-schema introspection ([below](#live-dataframe-schemas-data-outside-the-workspace))
    keeps this invariant: it pushes a fixed probe in over HTTP and reads back only a
    names-and-dtypes file that probe wrote — never a cell output, never the websocket.
+
+   What has changed with `auto_apply` is that the model now learns **that** a cell ran,
+   not what it produced. A write it makes itself comes back as an **observation** built
+   from that same probe: which of the names the change should have bound are now bound
+   and a one-word classification of each from mooring's own fixed vocabulary, plus the
+   names + dtypes + row count of *those* dataframes, and mooring's own words for the
+   status. It is the live-schema channel, asked a second question — no output, no repr,
+   no value, no websocket — and it is governed by the same `[ai] live_schema` switch,
+   so a machine with live schema off gets "could not see it run" rather than a kernel
+   read through another door. That is what lets the model correct its own mistake in the
+   turn instead of handing you a broken cell; see
+   [the probe's second question](#the-probes-second-question-is-this-name-bound) for the
+   exact shape and its boundary.
 4. **marimo's own AI is turned off.** marimo ships a built-in AI assistant that
    *does* send sample values to whatever model it's configured with. Mooring
    disables it in every editor it launches by writing a `.marimo.toml`
@@ -228,9 +253,9 @@ discovery, skills, file hooks, and host-git access are all switched off.
 
 ## Applying a cell: the check, and whether it runs { #apply-gate }
 
-Apply is the one moment the copilot's code touches your machine, so two settings
-govern it. Both live on the hub's **Settings** page under *AI copilot*, and both
-can be pinned by a [team policy](policy.md).
+Apply is the one moment the copilot's code touches your machine, so four settings
+govern it. All four live on the hub's **Settings** page under *AI copilot*, and all
+four can be pinned by a [team policy](policy.md).
 
 **`[ai] apply_guard` (default `true`) — read the cell before it lands.** mooring
 scans every proposed cell and holds the ones Undo cannot take back. Undo restores
@@ -266,6 +291,13 @@ the labels, never a line number, never anything from the cell. That is deliberat
 (`hub/routes/chat.py`: *"Count + band only: the central sink never carries kinds"*),
 and the value-free kinds go to the **local** activity ledger instead.
 
+That holds for **every** Apply, including the ones the model makes itself. The two
+ledgers are filled by the writer (`app/auto_apply.py`), not by the Apply button's route,
+so a change that lands inside a tool call is as visible in your telemetry and your local
+activity journal as one you clicked — same event names, same split. (It was not, briefly:
+when auto-apply first landed, both were still emitted only by the route, so the
+commonest Apply in the product recorded nothing. Fixed, and pinned by tests.)
+
 **`[ai] apply_runs` (default `true`) — does an applied cell run?** By default Apply
 means *add and run*: mooring writes marimo's `runtime.watcher_on_save = "autorun"`
 into the workspace's `.marimo.toml`, so the `--watch` reload runs the cell that just
@@ -274,9 +306,89 @@ writes marimo's `"lazy"` instead: the cell arrives in your notebook marked **sta
 and nothing executes until you press run. Slower, and worth it for a team that wants
 a human between the model's code and the kernel every time.
 
-A policy may pin `apply_guard = true` and `apply_runs = false` — the strict end of
-each. It cannot pin either the other way: there is no policy that disarms the check,
-and none that makes a teammate's applied cells run.
+With it off, that human stays between them **all the way**, which settles two things
+about the loop below. Nothing has run, so mooring reports that it could not see
+anything — never a verdict, and in particular never "the code that defines them did not
+run to completion", which would be flatly false about a cell nobody has run yet. And
+`auto_run_report` cannot fire either: re-running the whole notebook to diagnose a cell
+you deliberately staged would defeat the setting that staged it.
+
+**`[ai] auto_apply` (default `true`) — who presses the button.** By default a change
+the copilot writes lands as soon as it is written, and mooring hands the model back a
+value-free observation of what happened, so it can see its own mistake and fix it in
+the same turn instead of waiting a round trip for a human to click. This does **not**
+widen what may land: `apply_guard` above still reads every proposed cell first and
+still holds anything Undo cannot take back for your explicit confirm — the
+irreversible cells still stop and ask. What it removes is your look at the *ordinary*
+ones before they land, and Undo remains the remedy for those by construction. Set it
+`false` and the copilot goes back to proposing: nothing touches the notebook until you
+press **Apply**. That is the setting for a team that wants a human decision on every
+write, and a policy may pin it.
+
+**`[ai] auto_run_report` (default `true`) — may mooring re-run your notebook?** When
+the observation says an applied cell did not complete, mooring may run the same
+value-free smoke path described under
+["Run & report"](#run-and-report) itself, so the failure reaches the model without you
+relaying it. Nothing about *what* is read changes — the same closed error taxonomy, the
+same unconditional sanitiser, the same value-free receipt — but it re-executes the
+notebook without you asking, which is why it is a switch of its own rather than a
+detail of `auto_apply`. Set it `false` and the model is still told the cell did not
+complete; mooring just will not re-run anything on your behalf, and **Run & report**
+stays the button it always was. When it does fire, the summary goes through the same
+[outbound PII valve](#structured-pii-pre-flight-scan-opt-in-best-effort) your own turns
+do, and **fails closed**: where block mode would hold the text for your confirmation,
+nothing is sent at all (there is no-one at a tool result to press "Send anyway"), the
+model is told to ask you instead, and you are told why. Whatever *is* sent appears in
+your transcript, verbatim.
+
+A policy may pin `apply_guard = true`, and `apply_runs`, `auto_apply` and
+`auto_run_report` to `false` — the strict end of each. It cannot pin any of them the
+other way: there is no policy that disarms the check, none that makes a teammate's
+applied cells run, none that takes a teammate's Apply button away, and none that makes
+mooring re-run their notebook.
+
+One nearby setting is **not** part of this gate and is not policy-governed:
+`[ai] max_tool_iters` (default `200`) is a ceiling on how many tool calls the model may
+make within one turn — a backstop against a runaway loop, not a work budget. It is set
+high on purpose, because the control for "that is enough" is the chat's **Cancel**
+button, not a small cap that stops a long analysis mid-thought. Raising or lowering it
+changes nothing about what the model sees or what may land; a value below 1 is ignored
+(it would end every turn before the first tool call). See
+[the policy reference](policy.md) for why an integer is deliberately outside the
+policy model.
+
+### The honest limit of auto-apply { #the-honest-limit-of-auto-apply }
+
+Everything above is about what mooring *reads*. There is one thing `auto_apply` changes
+about the model's own reach, and it deserves saying plainly rather than being left to be
+discovered.
+
+Without it, the model can propose code that a human runs. With it, the model can **run
+code** — inside the apply gate, which still holds anything Undo cannot take back, but
+without a person reading the ordinary cells first. That matters here because several of
+the value-free readbacks on this page report **names**, and names are strings that
+running code can choose. A cell can bind a dataframe to a variable named after a value
+(`globals()[str(value)] = df`) or rename a column to one (`df.rename(...)`), and those
+names are exactly what the live-schema channel reports back. The channel is not new —
+it is the same one an analyst has always been able to point at a pivot table — but the
+human click that used to sit in front of it does not.
+
+What mooring does about it, and what it does not:
+
+- **It does not claim a filter fixes this.** A name is arbitrary text by design; no
+  scanner makes arbitrary text value-free. The [PII scan](#structured-pii-pre-flight-scan-opt-in-best-effort)
+  still runs over column names and still withholds a well-formed one, and that remains
+  what it has always been — a floor, not a guarantee.
+- **It narrows the surface where narrowing is free.** The observation a model-written
+  change gets back reports the frames it *asked about* and no others (it used to also
+  list every frame in the session), and its one classification field is a closed
+  vocabulary rather than a string read off the object — see
+  [the probe's second question](#the-probes-second-question-is-this-name-bound).
+- **It gives you the switch that removes the premise.** `[ai] auto_apply = false` puts
+  the human click back in front of every write; `[ai] live_schema = false` stops the
+  kernel being read at all. Both can be [pinned by policy](policy.md), and a policy can
+  only ever pin them off. For a repo where this class of risk is unacceptable, that
+  pair — not a detector — is the control.
 
 ## Parallel "investigate": read-only sub-agents (on by default) { #investigate }
 
@@ -307,9 +419,9 @@ It preserves every guarantee above, and its safety rests on one load-bearing inv
   exactly a branch's job). Note the compounding: a fan-out runs up to 8 sub-agents at
   once, so anything they can read is read in parallel. That is a large part of why the
   catalog carries no free prose and is opt-in. The
-  read-only tool subset is enforced in one place (`ai/tools.py`: the one propose tool is
-  gated on the proposal callbacks, neither of which a sub-agent is ever given) and pinned
-  by a test.
+  read-only tool subset is enforced in one place (`ai/tools.py`: the one write tool is
+  gated on the two proposal callbacks *and* the apply callback, none of which a sub-agent
+  is ever given — so it registers under neither of its names) and pinned by a test.
   The merge still applies the checksum-PII floor as defence-in-depth, but that floor is
   *beneath* the structural guarantee, not the guarantee itself.
 - **Investigations cannot recurse.** `mooring_investigate` is never in a sub-agent's own
@@ -600,6 +712,12 @@ like team context, its safety comes from *how it is built*, not from physical
 impossibility, so it is documented here in full. Turn it off with
 `[ai] live_schema = false`.
 
+That switch governs **every** read of your kernel, not just the schema in the chat
+context: the [observation](#apply-gate) a model-written change gets back is this same
+probe asked a second question, so with live schema off it is not run either — the model
+is told mooring could not see the change run. A single switch that means what it says,
+rather than one path that respects it and another that does not.
+
 How it stays value-blind (`ai/introspect.py`):
 
 - **The code is fixed, never model-authored.** Mooring pushes one frozen probe into
@@ -628,6 +746,62 @@ correctness of that frozen probe plus the fail-closed reader — pinned by the
 full of secret values (including an `Enum` whose categories are secret) and prove
 none reach the readback. If introspection can't run (no live session, frames not yet
 loaded), mooring silently falls back to the file-based schema.
+
+### The probe's second question: "is this name bound?" { #the-probes-second-question-is-this-name-bound }
+
+The same frozen probe answers a **second** question, used only by the observation a
+model-written change gets back (see
+[guarantee 3](#the-four-structural-guarantees) and [`[ai] auto_apply`](#apply-gate)):
+*are these particular names bound in the kernel, and what are they?* Its readback adds
+one section, `names`, holding one entry per name mooring asked about:
+
+- **`present`** — a bool. Bound in the kernel globals, or not.
+- **`kind`** — one word from a **closed vocabulary mooring wrote**: `dataframe`,
+  `lazyframe`, `series`, `str`, `int`, `float`, `bool`, `bytes`, `list`, `dict`,
+  `tuple`, `set`, `none`, `function`, `class`, or `other`. The probe *classifies* the
+  object — by identity against real type objects (`type(x) is str`, `type(x) is
+  polars.DataFrame`) — and answers with its own constant. **Nothing read off the object
+  is ever part of an answer**: not `repr(obj)`, not `str(obj)`, not a length, a
+  row/element count, a dict key or an attribute walk — and not the class name either.
+
+That last exclusion is the point, and it is a correction. This field used to report
+`type(obj).__name__`, described as "the identifier from a `class` statement". It is not:
+`__name__` is a **writable** class attribute, and can be a metaclass property computed
+at read time — so it is an arbitrary string the executing cell chooses, ~64 characters
+per asked name, with no cap on the number of names. A cell doing
+`c = type("T", (), {}); c.__name__ = "c" + chunk` scans **clean** under the
+[Apply check](#apply-gate), so with `auto_apply` on no human need ever read it, and a
+confidential row could be chunked across a handful of names and reassembled by the
+model. No reader-side filter on a free string closes that ("an identifier of sane
+length" passes base32 and raw text alike); a closed vocabulary does, because the answer
+no longer depends on the object's own strings. A subclass — of anything, including a
+real dataframe — lands in `other` rather than borrowing a label.
+`tests/test_introspect.py::test_a_class_name_cannot_be_used_to_smuggle_a_value_out`
+runs that attack, with an assigned `__name__` and a metaclass property, and proves both
+land in the catch-all.
+
+The names mooring asks about are **its own**: they come from static analysis of the
+cell it just wrote (`marimo_rt.cell_defs`), so the asker already knew them before the
+probe ran, and a name it did not ask for is dropped on the way back. Cell-local
+(`_`-prefixed) names and anything that is not a plain identifier are filtered out
+*before* the probe is built. The reader (`_parse_names`) is fail-closed in the same way
+`_parse_frames` is, plus one extra lock: a `kind` that is not a member of that fixed set
+becomes `other`, while `present` survives — failing a kind closed must not also lose the
+fact that the name is bound.
+
+The observation reports the **dataframe schemas of the names it asked about, and no
+others.** The session's other frames still reach the model, but through the
+[live-schema channel](#live-dataframe-schemas-data-outside-the-workspace) above, which
+`[ai] live_schema` governs — and which also governs this probe, since it is the same
+one: with live schema off, a model-written change gets "mooring could not see it run",
+not a kernel read by another route.
+
+State the remaining boundary honestly rather than overselling it. A *variable name* and
+a *column name* are strings the executing code can set from data (`globals()[value] =
+df`, `df.rename(...)`), and with `auto_apply` on, the code that executes is code the
+model wrote. That is a real channel and it is not closed by any filter — see
+[the honest limit of auto-apply](#the-honest-limit-of-auto-apply), and the same point in
+the [threat model](threat-model.md).
 
 ## Team context (opt-in): not a structural guarantee
 
@@ -872,9 +1046,13 @@ mooring reads an error message rather than being handed one:
   run lock, the same value-bearing render written under `.mooring/` and deleted on
   every path, the same process-tree kill, and the same value-free receipt. Your row
   badges from it exactly as a hand-run Verify does.
-- **It never fires by itself.** The run re-executes *every* cell, which is precisely
-  what the [apply gate](#apply-gate) exists to keep deliberate, so it is reachable only
-  from that click — never from Apply, a timer, or opening a page.
+- **It fires from your click, or from the one setting that says otherwise.** The run
+  re-executes *every* cell, which is precisely what the [apply gate](#apply-gate) exists
+  to keep deliberate. It is never reachable from a timer or from opening a page. The one
+  path that does not begin with the button is
+  [`[ai] auto_run_report`](#apply-gate) (default `true`), which lets mooring start this
+  same run itself when an applied cell did not complete — set it `false`, or have your
+  team pin it `false`, and the button is once again the only way in.
 - **Only two things are read from the run.** marimo's stderr is not a log: the exporter
   echoes each cell's own `print` output onto it, so a printed dataframe lands there in
   full. Mooring therefore reads *only* the lines matching marimo's own closed error
@@ -896,6 +1074,13 @@ mooring reads an error message rather than being handed one:
   reflex the apply gate works to break, without giving you anything to check it against.
   The [structured-PII guard](#structured-pii-pre-flight-scan-opt-in-best-effort) still
   applies to the summary like any other turn, and in block mode still holds it.
+  Both halves of that hold for the **automatic** run too, and neither comes for free
+  there — an automatic report is a tool result, not a turn, so it passes through neither
+  the transcript nor `send`'s valve by itself. So mooring runs the same valve explicitly
+  and puts the summary in your transcript explicitly. The one difference is what a block
+  means: with no-one to press "Send anyway", a hold **stops** the report rather than
+  waiting on it. Nothing reaches the model, you are told the guard held it, and the model
+  is told to ask you what the error says.
 - **The per-notebook opt-out is re-checked immediately before the send**, not just at the
   click: the run takes minutes, and a teammate's sync or a hub toggle landing inside that
   window stops the report.
@@ -1060,7 +1245,13 @@ prose — so the rule stands regardless.
   it: the H1 **title** is scanned, not structural, so its test asserts only what the
   scanner actually catches and is labelled best-effort. For live-kernel
   schemas, `tests/test_introspect.py` runs the exact probe the kernel runs and proves
-  the names-and-dtypes readback never carries a value. For the traceback guard,
+  the names-and-dtypes readback never carries a value — including the attack that made
+  the *kind* field a closed vocabulary: it plants a chunked confidential row in a set of
+  writable `__name__`s (and one computed by a metaclass property) and proves every one
+  lands in the catch-all. `tests/test_observe.py` covers the other half of that path:
+  that a verdict — either way — needs positive evidence the reloaded cell actually ran,
+  so a stale look at the namespace as it was *before* an edit is never reported as the
+  result of the edit, and that the observation reports only the frames it asked about. For the traceback guard,
   `tests/test_traceback.py` proves a planted secret never survives the rewrite —
   from an exception message, a pasted source line, a frame path, or a workspace
   data file named by a crafted frame — and `tests/test_egress.py` pins that
@@ -1069,6 +1260,11 @@ prose — so the rule stands regardless.
   against a faked marimo run whose stderr carries a printed dataframe beside the error
   line, and proves that neither the printed values nor the raw message reach the
   session — while a message made of tokens the model has already seen still does.
+  `tests/test_auto_apply.py` pins what the **automatic** version of that run owes you:
+  that it goes through the same outbound PII valve and sends nothing when block mode
+  would hold it, that whatever it does send appears in your transcript verbatim, that a
+  staged (`apply_runs = false`) or unobserved change never starts one at all, and that
+  the model's own Apply fills the same telemetry and activity ledgers your click does.
 - **Live spike.** `scripts/spike_copilot_chat.py` opens a real session and asks
   the agent to read a file; it has no tool to do so.
 

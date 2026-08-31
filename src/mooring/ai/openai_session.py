@@ -24,6 +24,18 @@ no hosted tool (web_search / file_search / code_interpreter) is ever attached, a
 tool result crosses to the model through the egress minter
 (:func:`mooring.ai.egress.to_openai_tool_message`).
 
+Because mooring owns this loop, the analyst's Cancel is enforced in THREE places
+rather than one: the tool boundary (the portable flag every provider shares), the
+top of each loop iteration, and between streamed chunks — where the open stream is
+also closed, so a stop is not still billed for the whole completion. The turn ends
+with a fixed notice and the ordinary ``idle``, and the session stays usable for the
+next message; the flag is re-armed when a turn is ENQUEUED (:meth:`_enqueue`, on the
+caller's thread, as the Copilot backend does), so one cancel can never poison the
+turns after it and a stop pressed while a turn waits in the queue is still honoured.
+Cancel — not a small iteration cap — is the control on a turn that is going nowhere:
+``max_tool_iters`` is a runaway CEILING on the turn's tool calls (see
+:class:`mooring.ai.tools.TurnCallBudget`), and hitting it is an abnormal stop.
+
 Which request fields a given model accepts is SERVER-side policy that no name
 prefix can predict, so ``reasoning_effort`` is settled by asking rather than by
 guessing: :meth:`OpenAIChatSession._create_stream` walks a short ladder when the
@@ -36,6 +48,7 @@ false positive would disable the analyst's setting for the whole session.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import queue
 import threading
@@ -45,7 +58,7 @@ from typing import TYPE_CHECKING, Any
 
 from mooring.ai import egress
 from mooring.ai.base import AIError, AINotConnectedError
-from mooring.ai.chat import ChatBroadcaster, ChatEvent
+from mooring.ai.chat import CANCELLED_NOTICE, ChatBroadcaster, ChatEvent
 from mooring.ai.session import (
     _CATALOG_TOOL_GUIDE,
     _DICT_TOOL_GUIDE,
@@ -54,24 +67,44 @@ from mooring.ai.session import (
     _INVESTIGATE_GUIDE,
     _INVESTIGATOR_GUIDE,
     _MODEL_TOOL_GUIDE,
-    _PROPOSE_ONLY_GUIDE,
-    _TOOL_GUIDE,
+    _tool_guide,
+    _write_only_guide,
 )
-from mooring.ai.tools import build_openai_tools
+from mooring.ai.tools import (
+    DEFAULT_MAX_TOOL_ITERS,
+    TurnCallBudget,
+    build_openai_tools,
+    write_tool_name,
+)
+
+# ``DEFAULT_MAX_TOOL_ITERS`` (the fallback when no ceiling is passed in) and
+# ``TurnCallBudget`` (what spends it) live in :mod:`mooring.ai.tools`, one layer down,
+# because BOTH backends enforce the same ceiling and only one of them has a loop of its
+# own to count. The constant is re-exported here, where it has always been imported
+# from. The real value reaches the ctor from the policy-folded ``AppConfig`` (see
+# max_tool_iters) — deliberately passed IN rather than read here, because reading config
+# from inside a session would read it un-folded and a policy that tightened the ceiling
+# would not bite.
+__all__ = ["DEFAULT_MAX_TOOL_ITERS", "OpenAIChatSession"]
 
 if TYPE_CHECKING:
     from mooring.ai.ner import ModelRef
 
 _START_TIMEOUT = 60.0
-_MAX_TOOL_ITERS = 12  # backstop: bound the model's tool round-trips per turn
 # The model when ``[ai] model`` is unset — a CURRENT id on purpose, not merely a widely
 # available one: this loop's output is code the analyst can Apply, and an applied cell RUNS,
 # so a model that mis-authors a marimo cell costs a broken notebook, not just a weak
 # suggestion. Set ``[ai] model`` (the dropdown lists what the account can use) to pick
 # another. Only reached when nothing is configured; a custom endpoint always names its own.
 _DEFAULT_MODEL = "gpt-5.1"
+# Hitting the ceiling is an ABNORMAL stop, so the wording says so: the assistant stopped
+# ITSELF, the work is unfinished, and continuing is one message away. The old text ("the
+# tool-call limit for one turn") read like a completed turn that had simply run its
+# course, which at a ceiling of 200 is exactly the wrong thing to imply.
 _TOOL_BUDGET_MSG = (
-    "(Stopped: reached the tool-call limit for one turn. Ask me to continue if needed.)"
+    "(Stopped: I took {n} steps on this one turn without finishing, which is mooring's "
+    "runaway ceiling — not a finished answer. Nothing has been lost; tell me to continue "
+    "and I will pick up from here.)"
 )
 _STOP = object()  # sentinel queued by close() to end the worker loop
 # What the ladder settled on, remembered for the life of the session (_effort_mode):
@@ -124,6 +157,8 @@ class OpenAIChatSession(ChatBroadcaster):
         catalog=None,
         read_only: bool = False,
         run_investigation=None,
+        applier=None,
+        max_tool_iters: int | None = None,
         pii_enabled: bool = False,
         pii_block: bool = True,
         pii_names: bool = False,
@@ -168,10 +203,31 @@ class OpenAIChatSession(ChatBroadcaster):
         # mooring_investigate (so it cannot write or recurse). Force it off even if a
         # run_investigation were mis-wired in — belt-and-suspenders for the depth-1 rule.
         self._run_investigation = None if read_only else run_investigation
+        # The in-turn write capability, wired exactly like emit_proposal and gated by the
+        # same read_only rule (see _worker). None -> the tool stays in propose mode.
+        self._applier = None if read_only else applier
+        # The runaway ceiling for ONE turn's TOOL CALLS. Comes from the caller (the
+        # policy-folded `[ai] max_tool_iters`), and is the same object, the same unit and
+        # the same number the Copilot backend enforces at its tool boundary — so a
+        # ceiling the analyst sets means one thing, not two. It is spent HERE, in the loop
+        # mooring owns, and NOT in the tool wrapper (`build_openai_tools` takes no
+        # budget): charging both would silently halve it, and this loop is also the only
+        # place that sees a call for a tool that does not exist.
+        self._budget = TurnCallBudget(max_tool_iters)
+        self._max_tool_iters = self._budget.ceiling
+        # The name the write tool will actually be REGISTERED under in _worker (which
+        # passes the same `self._applier is not None` through to build_openai_tools),
+        # from the one helper both sides share — so the prompt can never name a tool
+        # this session does not have.
+        write_tool = write_tool_name(self._applier is not None)
         guide = (
             _INVESTIGATOR_GUIDE
             if read_only
-            else (_TOOL_GUIDE if self._allow_read_tools else _PROPOSE_ONLY_GUIDE)
+            else (
+                _tool_guide(write_tool)
+                if self._allow_read_tools
+                else _write_only_guide(write_tool)
+            )
         )
         if self._allow_read_tools and dictionary is not None and not dictionary.is_empty():
             guide += _DICT_TOOL_GUIDE
@@ -248,6 +304,13 @@ class OpenAIChatSession(ChatBroadcaster):
                 # (+ dictionary/model/helper reads) are built.
                 emit_proposal=None if self._read_only else self._emit_proposal,
                 emit_proposal_patch=None if self._read_only else self._emit_proposal_patch,
+                # The same gate again for the WRITE capability (strictly stronger than a
+                # proposal): no applier, or a read-only sub-agent, leaves the tool in
+                # propose mode exactly as it shipped.
+                apply_edit=None if self._read_only or self._applier is None else self._apply_edit,
+                # The tool-boundary stop, kept even though this loop is mooring's own: a
+                # tool call already dispatched cannot be un-dispatched from the loop.
+                cancelled=self.cancel_requested,
                 dictionary=self._dictionary,
                 semantic_models=self._semantic_models,
                 code_index=self._helpers,
@@ -311,9 +374,27 @@ class OpenAIChatSession(ChatBroadcaster):
     # -- the agent loop (mooring drives it; OpenAI keeps no state) -----------
 
     def _run_turn(self, user_text: str) -> None:
+        # The stop flag was re-armed by `send`, SYNCHRONOUSLY, before this turn was
+        # queued — not here. Re-arming on the worker thread left a window between send()
+        # returning and this dequeuing it in which a Stop was broadcast to the UI as
+        # "cancelled" and then silently cleared, so the analyst was told the turn had
+        # stopped and it ran to completion. A cancel that lands in that window now stands,
+        # and ends the turn before a single request is paid for. (`CopilotChatSession`
+        # clears in `_forward`, inside send, and never had the window; the two agree now.)
+        if self.cancel_requested():
+            self._end_cancelled("")
+            return
         self._messages.append({"role": "user", "content": user_text})
-        for _ in range(_MAX_TOOL_ITERS):
-            full_text, calls = self._stream_once()
+        budget = self._budget
+        budget.start_turn()
+        while True:
+            full_text, calls, cancelled = self._stream_once()
+            if cancelled:
+                # Nothing was appended for this completion, so the conversation is still
+                # well-formed (no tool_call_id is left unanswered) and the NEXT message
+                # runs normally on this same session.
+                self._end_cancelled(full_text)
+                return
             if not calls:
                 if full_text:
                     self._broadcast(ChatEvent("message", {"text": full_text}))
@@ -336,19 +417,53 @@ class OpenAIChatSession(ChatBroadcaster):
                     ],
                 }
             )
+            # EVERY call above is dispatched even under a cancel, because the assistant
+            # turn just recorded promises exactly one role:"tool" reply per tool_call_id
+            # and the API rejects the conversation otherwise. That costs nothing: a
+            # cancelled turn's handlers return their terminal refusal immediately.
             for c in calls:
                 self._broadcast(ChatEvent("tool", {"name": c["name"]}))
-                out = self._dispatch_call(c["name"], c["args"])
+                if budget.spend():
+                    out = self._dispatch_call(c["name"], c["args"])
+                else:
+                    # Past the ceiling: answer, but do not RUN it. The reply is still
+                    # required (every tool_call_id must have exactly one), and a batch
+                    # of parallel calls must not run 50 tools on a budget of one.
+                    out = egress.ToolOutput(text=budget.runaway_text(), is_error=True)
                 self._broadcast(ChatEvent("tool_done", {"success": not out.is_error}))
                 self._messages.append(egress.to_openai_tool_message(c["id"], out))
-        # Exceeded the per-turn tool budget — end the turn rather than loop forever.
-        self._broadcast(ChatEvent("message", {"text": _TOOL_BUDGET_MSG}))
+            if self.cancel_requested():
+                # Stop before paying for another completion. The tool replies are all in
+                # place, so the next turn continues from a well-formed conversation.
+                self._end_cancelled("")
+                return
+            if budget.exhausted():
+                break
+        # The runaway ceiling, not a finished turn — say so, and mark it as mooring's own
+        # aside (like the effort notice) so a consumer collecting the ANSWER can skip it.
+        self._broadcast(
+            ChatEvent("message", {"text": _TOOL_BUDGET_MSG.format(n=budget.used), "notice": True})
+        )
         self._broadcast(ChatEvent("idle"))
 
-    def _stream_once(self) -> tuple[str, list[dict]]:
+    def _end_cancelled(self, partial_text: str) -> None:
+        """Close out a turn the analyst stopped, leaving the session ready for the next.
+
+        Any text the model had already streamed is kept (it was broadcast as deltas and
+        the UI swaps in the final ``message``), then one fixed notice records WHY the
+        turn ended, then the ordinary ``idle`` — so every "turn over" rule downstream,
+        including the routed wrapper's turn gate, fires exactly as it does normally."""
+        if partial_text:
+            self._broadcast(ChatEvent("message", {"text": partial_text}))
+        self._broadcast(ChatEvent("message", {"text": CANCELLED_NOTICE, "notice": True}))
+        self._broadcast(ChatEvent("idle"))
+
+    def _stream_once(self) -> tuple[str, list[dict], bool]:
         """One streamed completion. Emits ``delta`` events, returns
-        ``(assistant_text, tool_calls)`` — ``tool_calls`` is non-empty only when the
-        model finished asking for tools."""
+        ``(assistant_text, tool_calls, cancelled)`` — ``tool_calls`` is non-empty only
+        when the model finished asking for tools, and ``cancelled`` says the analyst
+        stopped the turn part-way through the stream (in which case any half-accumulated
+        tool calls are dropped, never returned half-built)."""
         kwargs: dict[str, Any] = {
             "model": self._model or _DEFAULT_MODEL,
             "messages": self._messages,
@@ -368,12 +483,19 @@ class OpenAIChatSession(ChatBroadcaster):
             kwargs["reasoning_effort"] = effort
 
         # Only the create() call is retryable; the iteration below is NOT, because a
-        # delta broadcast from a half-consumed stream can never be un-broadcast.
+        # delta broadcast from a half-consumed stream can never be un-broadcast. A cancel
+        # respects that reasoning rather than bending it: it never re-issues the request,
+        # it just stops adding to what has already gone out — and CLOSES the stream, so
+        # the analyst is not still paying for a completion they asked us to stop.
         stream = self._create_stream(kwargs)
         text_parts: list[str] = []
         acc: dict[int, dict] = {}
         finish: str | None = None
+        stopped = False
         for chunk in stream:
+            if self.cancel_requested():
+                stopped = True
+                break
             # Azure emits a leading content-filter chunk with empty choices, and a
             # usage-only final chunk also has choices == []; skip both.
             if not getattr(chunk, "choices", None):
@@ -395,8 +517,16 @@ class OpenAIChatSession(ChatBroadcaster):
                         slot["args"] += fn.arguments
             if choice.finish_reason:
                 finish = choice.finish_reason
+        if stopped:
+            # Duck-typed and swallowed: the injected client may be any OpenAI-compatible
+            # stand-in, and a stream that will not close is not worth failing the turn on.
+            closer = getattr(stream, "close", None)
+            if callable(closer):
+                with contextlib.suppress(Exception):
+                    closer()
+            return "".join(text_parts), [], True
         calls = [acc[i] for i in sorted(acc)] if finish == "tool_calls" else []
-        return "".join(text_parts), calls
+        return "".join(text_parts), calls, False
 
     # -- the reasoning-effort ladder (the server is the authority) -----------
 
@@ -510,7 +640,7 @@ class OpenAIChatSession(ChatBroadcaster):
             return  # held pending the analyst's "Send anyway" (see send_confirmed)
         # The live-schema prefix is machine-rendered and already value-free, so it is
         # added AFTER the PII gate — it must not trip the warn-and-hold flow.
-        self._queue.put(self._live_prefix(live_schema_text) + gated)
+        self._enqueue(self._live_prefix(live_schema_text) + gated)
 
     def send_confirmed(self, token: str, live_schema_text: str = "") -> None:
         self.touch()
@@ -519,7 +649,21 @@ class OpenAIChatSession(ChatBroadcaster):
         text = self._pii_take(token)
         if text is None:
             raise AIError("That message has expired — please retype it.")
-        self._queue.put(self._live_prefix(live_schema_text) + text)
+        self._enqueue(self._live_prefix(live_schema_text) + text)
+
+    def _enqueue(self, text: str) -> None:
+        """Queue one turn for the worker — the ONE place both send paths meet, so this is
+        where the stop flag is re-armed.
+
+        SYNCHRONOUSLY, on the caller's thread, exactly as ``CopilotChatSession._forward``
+        does: re-arming on the worker (where this used to happen) left a window in which
+        a Stop pressed after ``send`` returned but before the worker picked the turn up
+        was announced to the analyst and then wiped, and the turn ran anyway. A prompt
+        held by the PII/traceback valve never reaches here, so a hold does not clear a
+        cancel for a turn that was never sent.
+        """
+        self.clear_cancel()
+        self._queue.put(text)
 
     def close(self) -> None:
         super().close()  # broadcast "closed" (idempotent); clears any held prompt

@@ -105,9 +105,9 @@ code change to break, and are pinned by tests):
 | Hardened session | `ai/copilot.py:465` (`hardened_session_kwargs`) | Deny-all permissions + all persistence/discovery off. |
 | Session runtime | `ai/session.py` | Long-lived streaming session in an empty working dir. |
 | File schema | `schema.py` | Parquet-footer / CSV-header / XLSX-header inspection; names + dtypes + row count only. |
-| Live-kernel schema | `ai/introspect.py` | A **frozen** probe over HTTP returning names + dtypes; fail-closed reader. |
+| Live-kernel schema | `ai/introspect.py` | A **frozen** probe over HTTP returning names + dtypes, and (for names mooring asked about) bound-or-not + one word from a **closed vocabulary the probe classifies into** — never a string read off the object; fail-closed reader that re-checks that vocabulary. Governed by `[ai] live_schema`, the observation included. |
 | marimo transport seam | `marimo_rt.py` | The only module touching marimo internals (codegen + HTTP control); never the websocket. |
-| Cell writer | `ai/cellwrite.py` | Writes proposed **source** into the `.py`; the analyst applies it. |
+| Cell writer | `ai/cellwrite.py` | Writes proposed **source** into the `.py`. Applied by the analyst's click, or — with `[ai] auto_apply` on — by the model inside its own tool call, through the same `app/apply.py` guard and lock. |
 | Traceback sanitiser | `ai/traceback.py` via `egress.sanitize_traceback` | Fail-closed rewrite of a pasted traceback; only the rewrite is stored. |
 | Scrubbers (defence-in-depth) | `ai/pii.py`, `ai/secrets.py`, `ai/ner.py` | Best-effort structured-PII / secret / name detection. |
 | Batch planner | `ai/batch.py` | Unattended multi-notebook generation — **still propose-only**; a human applies. |
@@ -193,7 +193,7 @@ sanitise it where it becomes a path, a URL, or prompt text.
 
 | Asset | Where it lives | Primary control |
 |---|---|---|
-| **Data values** (cell contents, variable values, file bytes) | Kernel, workspace data files | Schema-only tools; no websocket; propose-only writes (structural). |
+| **Data values** (cell contents, variable values, file bytes) | Kernel, workspace data files | Schema-only tools; no websocket; every write goes through the one apply guard, which holds anything Undo cannot take back. |
 | **GitHub sync token** | OS keyring, else plaintext file (`auth.py:197`) | Never loaded into model context; keyring at rest. |
 | **Copilot login credential** | Managed by the Copilot CLI (`~/.copilot`), reused via `use_logged_in_user=True` | Not handled by mooring; never enters context. |
 | **marimo control token** | In-process (`editor.token`) | Loopback-only; the probe reads back names + dtypes only. |
@@ -217,9 +217,21 @@ the model, not deliberate exfiltration by the operator).
 
 **Threat actors considered:**
 
-- **The model / a prompt-injected model.** Can call any allowlisted tool and
-  propose any cell, but has no tool that reads data, and cannot apply a cell.
-  *Mitigated structurally.*
+- **The model / a prompt-injected model.** Can call any allowlisted tool, and — with
+  `[ai] auto_apply` on, which is the default — can **apply and therefore RUN** a cell
+  without a human reading it first. It still has no tool that reads data, every write
+  still goes through the one apply guard (which holds anything Undo cannot take back for
+  an explicit human confirm), and no cell output ever returns to it. But "it can only
+  propose" is no longer true, and the difference is not cosmetic: running code chooses
+  the **variable and column names** that mooring's value-free readbacks report back, so
+  a determined prompt-injected model has a low-bandwidth channel that no filter closes
+  (see [ai-privacy.md](ai-privacy.md#the-honest-limit-of-auto-apply)).
+  ***Partially* mitigated: structurally for the *tools* (nothing it can call reads a
+  value) and for irreversible effects (the gate); best-effort for names, which is a
+  real residual.** For a high-sensitivity repo the mitigation is the switch, not a
+  detector: `[ai] auto_apply = false` (pinnable by policy, and pinnable only to `false`)
+  restores propose-only, and `[ai] live_schema = false` closes the kernel readback
+  entirely.
 - **A curious or careless analyst.** May type a value into a prompt or cell, paste
   a traceback, or apply a cell that pivots data into column headers. *Partially
   mitigated (best-effort, opt-in); this is where the real residual risk sits.*
@@ -294,14 +306,35 @@ returned (`_finish`, `marimo_rt.py:455`).
   making network requests. **Applied cells execute against real data in the
   analyst's kernel** — that is the intended behaviour.
 - The **security-relevant** invariant is elsewhere: because mooring never reads
-  cell outputs and never opens the websocket, whatever an applied cell computes
+  cell outputs and never opens the websocket, whatever an applied cell **computes**
   stays in the analyst's kernel and browser and does **not** return to the model.
   A reviewer should evaluate *that* claim (rows 1 and 4 of the vectors table), not
-  the AST check.
-- Every write is **human-gated**: the model can only *propose*; the analyst
-  reviews a diff and applies it (`ai/tools.py`, `app/apply.py:50` is the sole
-  writer). Even unattended **batch** generation is propose-only
-  (`ai/batch.py:15-16`) — there is no autonomous write path.
+  the AST check. What *does* return, when the model applied the change itself, is the
+  value-free **observation**: whether the names the change should have bound are bound,
+  a one-word classification of each from a vocabulary mooring wrote, and the
+  names/dtypes/row count of *those* dataframes — the same frozen probe and fail-closed
+  reader as the live-schema channel, asked a second question, and off entirely when
+  `[ai] live_schema` is. No output, no repr, no value. See
+  [`ai-privacy.md`](ai-privacy.md#the-probes-second-question-is-this-name-bound).
+- **The residual channel a reviewer should actually price.** Every readback above is
+  keyed by NAMES — a variable's, a column's — and with auto-apply on, the code that
+  chooses those names is code the model wrote and nobody read. That makes them a
+  low-bandwidth, model-drivable channel out of the kernel. It predates auto-apply (an
+  analyst could always apply a pivot that puts values in headers) but the human click in
+  front of it does not survive the change. mooring's answers are narrowing (the
+  observation reports only the frames it asked about; its one classification field is a
+  closed vocabulary rather than a class name the executing cell can write) and the two
+  switches below — not a scanner, which cannot make an arbitrary identifier value-free.
+- **Every write goes through one gate; not every write is a human click.** With
+  `[ai] auto_apply` on (the default), the model's change lands inside its own tool call.
+  It still travels the single writer (`app/apply.py`'s `ApplyGuard.apply_with_undo`,
+  under the same per-notebook lock as a manual Apply, an Undo and a sync rollback), and
+  `[ai] apply_guard` still **holds for an explicit human confirm** any cell whose effects
+  Undo cannot take back. What auto-apply removes is the click on a *reversible* change,
+  where Undo is the remedy; the irreversible ones still stop and ask. Set
+  `[ai] auto_apply = false` (or pin it off by policy) and the model can only *propose*.
+  Unattended **batch** generation is propose-only either way (`ai/batch.py:15-16`): it
+  wires no applier at all.
 
 ## Out of scope (non-goals)
 

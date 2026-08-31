@@ -39,6 +39,14 @@ def chat_replay(session) -> list[str]:
     backgrounded) provider handshake finished — or failed — still learns the
     outcome and unblocks the input; and the current NER-model prepare status so
     a subscriber joining mid-download immediately sees progress.
+
+    …and, when the session keeps them, the RECEIPTS for writes the model already made.
+    A dropped stream used to cost only a suggestion; with ``[ai] auto_apply`` on it costs
+    the only record of a change that is ON DISK — no receipt, no Revert, and a notebook
+    that has silently moved. Every replay here is duck-typed and optional (the batch
+    stub, the test sessions and an older session object simply expose nothing), so a
+    session that retains nothing degrades to today's behaviour rather than failing; the
+    browser separately warns when a drop happened mid-turn.
     """
     out: list[str] = []
     start_status = getattr(session, "start_status", None)
@@ -56,7 +64,45 @@ def chat_replay(session) -> list[str]:
     route_replay = getattr(session, "route_replay", None)
     if isinstance(route_replay, dict):
         out.append(sse_event("routing", route_replay))
+    out.extend(applied_replay(session))
     return out
+
+
+# A ceiling on the receipts one reconnect replays. A turn with no iteration cap can write
+# a great many times, and a reconnect must not stall on a wall of history; the newest are
+# the ones that still carry a live way back.
+MAX_APPLIED_REPLAY = 25
+
+
+def applied_replay(session) -> list[str]:
+    """``applied`` frames for writes this subscriber may have missed, newest last.
+
+    The session exposes ``applied_replay`` — the value-free receipt payloads it has
+    broadcast this session, oldest first (a list, or a callable returning one). Anything
+    else, including the common case of a session that keeps none, replays nothing.
+
+    A receipt is replayed ONLY if it carries a non-empty string ``id``. An EventSource
+    reconnects by itself, so a replay lands in a transcript that may already hold most of
+    these rows; the id is what lets the browser drop the ones it has already drawn.
+    Without one, a reconnect would double every receipt — which is a worse account of
+    what happened to the notebook than the missing rows this exists to restore. The rule
+    is enforced here rather than asked for in a comment, so a payload that forgets the id
+    degrades to today's behaviour instead of to duplicates.
+    """
+    receipts = getattr(session, "applied_replay", None)
+    if callable(receipts):
+        try:
+            receipts = receipts()
+        except Exception:  # noqa: BLE001 - a broken hook must never break the stream
+            return []
+    if not isinstance(receipts, (list, tuple)):
+        return []
+    kept = [
+        item
+        for item in receipts
+        if isinstance(item, dict) and isinstance(item.get("id"), str) and item["id"]
+    ]
+    return [sse_event("applied", item) for item in kept[-MAX_APPLIED_REPLAY:]]
 
 
 def batch_replay(run) -> list[str]:

@@ -16,17 +16,27 @@ const C = require("../../src/mooring/hub/static/chat_core.js");
 // chat.js's printHelp keeps its OWN hand-written rows, so a command added to COMMANDS
 // (which drives the "/" autocomplete) can silently go undocumented — /review, /checks and
 // /sql all did. Pin the two lists together.
-test("every slash command in COMMANDS is documented in chat.js's /help", () => {
+test("every slash command in COMMANDS is documented in /help, in both modes", () => {
+  // The rows moved into ChatCore.helpRows so they can differ by MODE: /apply, /diff and
+  // the a/s keys act on a change that is WAITING, which once the copilot applies its own
+  // changes means only the ones it is holding for a confirm. Both listings must still
+  // cover every command.
+  for (const autoApply of [true, false]) {
+    const documented = new Set(
+      C.helpRows(autoApply).map(([name]) => name.replace(/^\//, "").split(" ")[0]),
+    );
+    const missing = C.COMMANDS.map((c) => c.name).filter((n) => !documented.has(n));
+    assert.deepEqual(missing, [], `commands missing from /help (auto_apply=${autoApply}): ${missing.join(", ")}`);
+  }
+});
+
+test("chat.js renders /help through ChatCore, so the two cannot drift", () => {
   const chatJs = fs.readFileSync(
     path.join(__dirname, "..", "..", "src", "mooring", "hub", "static", "chat.js"),
     "utf8",
   );
-  // printHelp rows look like  ["/name", "…"]  or  ["/name <topic>", "…"].
-  const documented = new Set(
-    [...chatJs.matchAll(/\["\/([a-z]+)[^"]*",/g)].map((m) => m[1]),
-  );
-  const missing = C.COMMANDS.map((c) => c.name).filter((n) => !documented.has(n));
-  assert.deepEqual(missing, [], `commands missing from /help: ${missing.join(", ")}`);
+  assert.match(chatJs, /ChatCore\.helpRows\(/);
+  assert.match(chatJs, /ChatCore\.helpKeys\(/);
 });
 
 // A copy of chat.js's escapeHtml so we can prove highlightCode is safe on
@@ -410,8 +420,13 @@ test("checksPrompt: a pure constant that names the value-free mooring_checks API
   for (const fn of ["unique_key", "no_fanout", "not_null", "reconciles", "row_delta"]) {
     assert.ok(p.includes(fn), fn);
   }
-  // It must propose (review-then-apply), never ask for data values.
-  assert.match(p, /mooring_propose_notebook_edit, using `appends`/);
+  // It must go through the write tool's `appends` field, never ask for data values.
+  // The tool is deliberately NOT named: it is registered under two names by mode
+  // (ai/tools.py WRITE_TOOL_NAMES) and the page is not told which one this session has.
+  assert.match(p, /the notebook-editing tool, using `appends`/);
+  for (const n of ["mooring_propose_notebook_edit", "mooring_edit_notebook"]) {
+    assert.ok(!p.includes(n), n);
+  }
   assert.match(p, /never ask for data values/);
 });
 
@@ -426,8 +441,12 @@ test("sqlPrompt: a pure constant that names the value-free mo.sql/DuckDB idiom",
   assert.equal(p, C.sqlPrompt()); // no interpolation, no user text, no values
   assert.match(p, /mo\.sql/);
   assert.match(p, /DuckDB/);
-  // Propose (review-then-apply), schema-only, no SELECT * to "peek" and no data values.
-  assert.match(p, /mooring_propose_notebook_edit, using `appends`/);
+  // The write tool's `appends` field (named by mode in the system prompt, not here),
+  // schema-only, no SELECT * to "peek" and no data values.
+  assert.match(p, /the notebook-editing tool, using `appends`/);
+  for (const n of ["mooring_propose_notebook_edit", "mooring_edit_notebook"]) {
+    assert.ok(!p.includes(n), n);
+  }
   assert.match(p, /no SELECT \*/);
   assert.match(p, /never inline a /);
   // The applied cell must actually run: the import + the duckdb dependency (review).
@@ -500,8 +519,11 @@ test("notesCellPrompt: `appends` ONLY — the destructive fields are forbidden",
   const p = C.notesCellPrompt();
   assert.equal(p, C.notesCellPrompt()); // constant
   assert.match(p, /ONE new/);
-  assert.match(p, /mooring_propose_notebook_edit with `appends`/);
-  // The walkthrough may never clobber an existing cell. With ONE propose tool the
+  assert.match(p, /the notebook-editing tool with `appends`/);
+  for (const n of ["mooring_propose_notebook_edit", "mooring_edit_notebook"]) {
+    assert.ok(!p.includes(n), n);
+  }
+  // The walkthrough may never clobber an existing cell. With ONE write tool the
   // thing to forbid is no longer a set of tool names but that tool's other FIELDS,
   // so a model can't "helpfully" reach for a rewrite.
   assert.match(p, /never its `edits`, `deletes` or `cells` fields/);

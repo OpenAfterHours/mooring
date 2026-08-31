@@ -73,14 +73,30 @@ CLI/agent policy enabled. If the extra isn't installed, the chat will tell you.
 3. Ask for what you want — e.g. *"filter to 2024 and total `amount` by `region`"*.
    While it works you'll see a thinking indicator and a status line
    (*"Looking up the schema…"*); the reply then streams in with formatted code.
-4. Click **Apply ▸** on a proposed cell: it's written into your notebook and runs
-   there. Review it like any other cell.
-5. If the cell breaks something, click **Run & report** on the applied card. mooring
-   runs the whole notebook locally (it can take a while) and hands the assistant a
-   value-safe summary of the errors, so it can fix its own mistake instead of you
-   describing it. You're shown exactly what was sent, and it only ever happens when
-   you press the button — see
-   [Run & report](../admins/ai-privacy.md#run-and-report).
+4. The change lands in your notebook and marimo runs it, and you get a **receipt** in
+   the chat — *"Changed the 4th cell · Added a new cell at the end"* — with a **Revert**
+   to put the notebook back. The assistant is told, in names and types only, whether its
+   cell actually ran, so it usually fixes its own mistake before you have read the
+   receipt. **Stop** (beside the composer, or `Esc`) ends a turn at any point. Review the
+   cells like any other.
+    - **Revert works a turn at a time, not a change at a time.** One turn can write
+      several times, and mooring takes a single checkpoint for the whole turn — so the
+      Revert beside the last change usually puts the *earlier ones from that turn* back
+      as well. The button says which it is before you press it, and the chat says what
+      went back afterwards. `/undo` steps back further, one checkpoint at a time.
+    - A change whose effects a Revert could **not** undo — deleting files, running a
+      program, overwriting a report — still **stops and asks you first**, as an ordinary
+      **Apply ▸** card with the diff.
+    - Prefer to approve everything yourself? Turn off *"Let the copilot apply reversible
+      changes itself"* in **Settings ▸ AI copilot** and the assistant goes back to
+      proposing: nothing touches the notebook until you click **Apply ▸**. Your admin may
+      have pinned it off for the team.
+5. If a cell breaks something, **Run & report** runs the whole notebook locally (it can
+   take a while) and hands the assistant a value-safe summary of the errors, so it can
+   fix its own mistake instead of you describing it. You're shown exactly what was sent.
+   It runs when you press the button — and, unless your admin has switched that off,
+   mooring may start the same run itself when a change the assistant wrote did not
+   complete. See [Run & report](../admins/ai-privacy.md#run-and-report).
 
 Keep both tabs side by side: chat on one, the marimo notebook on the other.
 

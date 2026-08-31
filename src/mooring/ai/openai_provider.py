@@ -519,6 +519,8 @@ class OpenAIProvider:
         catalog=None,
         read_only: bool = False,
         run_investigation=None,
+        applier=None,
+        max_tool_iters: int | None = None,
         pii=None,
         traceback_guard: bool = True,
         background: bool = False,
@@ -577,6 +579,11 @@ class OpenAIProvider:
             catalog=catalog,
             read_only=read_only,
             run_investigation=run_investigation,
+            # Edit mode (None = propose mode) and the runaway ceiling for THIS backend's
+            # own tool loop — the two the copilot path splits on, because only this one
+            # drives the loop itself.
+            applier=applier,
+            max_tool_iters=max_tool_iters,
             pii_enabled=pii.enabled,
             pii_block=pii.block_prompt,
             pii_names=pii.enabled and pii.names,

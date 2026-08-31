@@ -10,16 +10,40 @@ tool serialisation.
 Every tool here is **value-free by construction** — it returns only a dataset's
 SCHEMA (names + dtypes, via the trusted ``schema`` module), the notebook's
 SOURCE code, or a list of dataset paths. None can reach a data value, a cell
-output, or the kernel. ``propose_notebook_edit`` does NOT write the notebook; it
-surfaces a proposal to the chat UI, and the analyst Applies it.
+output, or the kernel.
 
-Before it surfaces anything, the propose tool composes the notebook its change
+The ONE write tool has TWO modes, and the caller picks which by wiring a callback:
+
+* **propose** (``apply_edit`` absent) — the historical behaviour. The tool does NOT
+  write the notebook; it surfaces a proposal to the chat UI as
+  ``mooring_propose_notebook_edit`` and the analyst Applies it.
+* **edit** (``apply_edit`` injected) — the write happens INSIDE the tool call, and
+  the tool returns a value-free OBSERVATION of what happened (did the cell run,
+  what schema came back) so the model can check its own work and correct it in the
+  same turn. It is then registered as ``mooring_edit_notebook``, because a tool
+  called "propose" teaches the model to say "I've proposed this, let me know" when
+  the cell is already running in front of the analyst.
+
+Same handler, same schema, same gate — only the name, the description, and what
+happens after the gate differ. The observation is produced by the injected
+``apply_edit`` (an ``app/`` service), which is reached by DUCK TYPING only: ``ai``
+is L3 and ``app`` is L3.5, so importing the concrete outcome class here would be a
+layering violation.
+
+Before EITHER mode does anything, the write tool composes the notebook its change
 would produce IN MEMORY and statically validates it (see the propose gate below,
-on ``marimo_rt.validate_notebook_source``): a proposal that would break the
-notebook comes back to the model as the diagnostics, not as a success. An
+on ``marimo_rt.validate_notebook_source``): a change that would break the
+notebook comes back to the model as the diagnostics, not as a success. That check
+matters more in edit mode, not less — it is the last thing standing between a
+weak model's output and the analyst's open, auto-running notebook. An
 edit/delete is checked once more before that — against what the model SAYS is at
 the index it is targeting (``expect``; see :func:`_expect_matches`) — so a stale
 or forged index is refused instead of writing to a cell the model never read.
+
+``cancelled`` is the portable stop signal. The Copilot SDK drives its own tool loop
+and cannot be broken out of from mooring's side, so the analyst's Cancel is enforced
+at the TOOL BOUNDARY: every handler — reads included, so a cancelled turn stops
+spending money on schema lookups — is checked once, in one place, before it runs.
 
 Combined with ``available_tools`` allowlisting exactly these names (so the SDK's
 built-in file/shell tools are dropped) and a deny-all permission backstop, the
@@ -28,7 +52,10 @@ agent has no path to data.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
@@ -40,9 +67,12 @@ if TYPE_CHECKING:
 # from the tools actually built (these plus the dictionary tools when a data
 # dictionary is present), so it stays in lock-step with what is registered.
 #
-# ``mooring_propose_notebook_edit`` is the ONE write surface, and it is only on when the
-# caller wires a proposal callback — a read-only investigate sub-agent gets the three
-# reads and nothing else (see the gate on the spec below).
+# The write tool (``mooring_propose_notebook_edit``, or ``mooring_edit_notebook`` when it
+# applies its own change — see below) is the ONE write surface, and it is only on when the
+# caller wires a proposal or apply callback — a read-only investigate sub-agent gets the
+# three reads and nothing else (see the gate on the spec below). ``TOOL_NAMES`` names the
+# default, propose-mode toolset, which is what the copilot session advertises unless the
+# analyst has auto-apply on.
 #
 # There used to be FOUR propose tools — ``mooring_propose_cell`` (append),
 # ``mooring_propose_cell_edit`` (edit one), this one (the general patch) and
@@ -57,12 +87,135 @@ if TYPE_CHECKING:
 # ``available_tools`` IS the advertised list, so a "hidden alias" cannot exist there. An
 # alias would therefore have been a fourth tool for the model to choose between, which is
 # the thing being removed.
+
+# The ONE write tool's two names — one per mode, because the name is instruction.
+#
+# In propose mode the model really does only propose: the analyst reads a diff and
+# clicks Apply, and "propose" is the honest word for that. In edit mode there is no
+# click — the write lands in the open notebook and marimo runs it — and a tool still
+# called "propose" would teach the model to sign off with "I've proposed this, let me
+# know", handing control back at the exact moment it should be reading the observation
+# and correcting itself. Same handler, same JSON schema; only the name and the
+# description change.
+#
+# Anything that MATCHES a write tool by name must match both (that is what
+# :data:`WRITE_TOOL_NAMES` is for): which one is registered depends on a per-session
+# config knob, so a matcher that knows only one is right half the time.
+PROPOSE_TOOL_NAME = "mooring_propose_notebook_edit"
+EDIT_TOOL_NAME = "mooring_edit_notebook"
+WRITE_TOOL_NAMES = (PROPOSE_TOOL_NAME, EDIT_TOOL_NAME)
+
+
+def write_tool_name(applies_own_change: bool) -> str:
+    """The name the ONE write tool is registered under for a session in this mode.
+
+    THE single derivation of that name, shared by the registration below
+    (:func:`build_tool_specs`) and by everything that has to TELL the model about it —
+    the per-session tool guide in :mod:`mooring.ai.session`, and the SQL capability
+    note in :func:`sql_cell_guide`. Naming a tool the model has not been given is worse
+    than naming none, and the prompt text sits in a different module from the
+    registration, so the two are kept in step by calling one function rather than by
+    two matching literals.
+
+    ``applies_own_change`` is exactly ``apply_edit is not None`` / ``applier is not
+    None`` at the call site: the write tool is in edit mode when, and only when, it has
+    somewhere to apply to.
+    """
+    return EDIT_TOOL_NAME if applies_own_change else PROPOSE_TOOL_NAME
+
+
 TOOL_NAMES = [
     "mooring_list_datasets",
     "mooring_get_schema",
     "mooring_read_notebook_source",
-    "mooring_propose_notebook_edit",
+    PROPOSE_TOOL_NAME,
 ]
+
+# --- the runaway ceiling on ONE turn's tool calls -----------------------------
+#
+# `[ai] max_tool_iters` is a RUNAWAY ceiling, never a work budget: a hard analysis is
+# meant to be worked all the way through — write a cell, see it fail, fix it, look at
+# the schema again — and the analyst's control over a turn that is going nowhere is the
+# Stop button, not a number that cuts them off at twelve. What the ceiling is for is
+# the turn that will never converge on its own, and there the cost is real: every call
+# is a completion the analyst pays for.
+#
+# ONE number, ONE unit (a tool call), spent exactly ONCE per call — but at a different
+# place per backend, because only one of the two tool loops is mooring's:
+#
+# * :class:`mooring.ai.openai_session.OpenAIChatSession` drives its own loop, so it
+#   spends the budget there. It has to: that loop is also the only place that sees a
+#   call for a tool which does not exist, and such a call never reaches a handler.
+# * The Copilot SDK drives its loop from INSIDE the session and cannot be broken out
+#   of from mooring's side. But every call it makes still comes back through the tool
+#   wrapper built here, so that is where the ceiling bites on that backend — the same
+#   place, and for the same reason, as the cancel check.
+#
+# The two therefore never both charge one call. A session hands the budget to exactly
+# one of them (see ``budget`` on :func:`build_tool_specs`).
+DEFAULT_MAX_TOOL_ITERS = 200
+
+# What a call past the ceiling is told. Worded as an abnormal SELF-stop with the work
+# intact and one message back to it — not as a finished turn — so the model reports
+# where it got to instead of inventing a conclusion. Mirrors the OpenAI loop's own
+# notice (``openai_session._TOOL_BUDGET_MSG``), which says the same thing to the
+# ANALYST; both must read as "unfinished", because at a ceiling of 200 it is.
+_RUNAWAY_TEXT = (
+    "STOP — you have made more than {n} tool calls in this ONE turn, which is mooring's "
+    "runaway ceiling. This is not a finished answer and nothing you have already done "
+    "has been lost. Make NO further tool calls: reply to the analyst now, saying what "
+    "you did, what you found, and what is left. They can tell you to continue and you "
+    "will pick up from here."
+)
+
+
+class TurnCallBudget:
+    """How many tool calls ONE turn may still make. Thread-safe, reset per turn.
+
+    Thread-safe because a call is not always answered on the thread that dispatched
+    it: the copilot adapter hands a ``blocking`` handler (the write tool, the
+    investigate fan-out) to a worker thread, so two calls can be in flight at once.
+    """
+
+    def __init__(self, ceiling: int | None = None) -> None:
+        try:
+            n = int(ceiling)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            n = 0
+        # Anything that is not a usable ceiling — missing, zero, negative,
+        # unparseable — falls back to the shipped default rather than being clamped:
+        # a ceiling below 1 would end every turn before its first step, which is a
+        # worse answer to a bad value than the default is.
+        self.ceiling = n if n >= 1 else DEFAULT_MAX_TOOL_ITERS
+        self._used = 0
+        self._lock = threading.Lock()
+
+    def start_turn(self) -> None:
+        """Re-arm for a new turn. The ceiling is PER TURN: a turn that hit it must not
+        leave the next one with nothing, because "tell me to continue" is the documented
+        way out of one."""
+        with self._lock:
+            self._used = 0
+
+    def spend(self) -> bool:
+        """Charge one tool call. ``False`` once this turn is past its ceiling."""
+        with self._lock:
+            self._used += 1
+            return self._used <= self.ceiling
+
+    @property
+    def used(self) -> int:
+        with self._lock:
+            return self._used
+
+    def exhausted(self) -> bool:
+        with self._lock:
+            return self._used >= self.ceiling
+
+    def runaway_text(self) -> str:
+        """The fixed, value-free result a call past the ceiling gets."""
+        return _RUNAWAY_TEXT.format(n=self.ceiling)
+
 
 # Cell-source format reminder for every propose tool: a cell's source is the BODY ONLY
 # — mooring regenerates marimo's wrapper (`@app.cell` / `def _()` / a trailing
@@ -74,6 +227,58 @@ _RATIONALE_DESC = "a one-line reason (optional)"
 _CELL_FORMAT = (
     " Each cell is the BODY ONLY (top-level statements) — do NOT include '@app.cell', "
     "'def _():', or a trailing 'return (...)'; those are added automatically."
+)
+
+# The write tool's description, in three parts: a shared opening, the ONE sentence that
+# differs by mode, and the shared rules. Split rather than duplicated so the rules (which
+# are what actually stop a weak model breaking the notebook) cannot drift between modes.
+_WRITE_HEAD = (
+    "THE one tool that changes the notebook: propose new cells, edits to "
+    "existing cells, deletions, or a wholesale rewrite — any mix, as ONE "
+    "reviewable patch. "
+)
+
+_PROPOSE_MODE = "You never write the file; the analyst sees a diff and applies it. "
+
+# Edit mode's contract with the model, in the terms the model needs to act on: the write
+# ALREADY happened, it ALREADY ran, and the result of this call is the evidence. Said
+# plainly because the behaviour it is asking for — read the observation, correct yourself,
+# call again — is the entire point of applying in-loop rather than handing back a diff.
+_EDIT_MODE = (
+    "This WRITES to the analyst's open notebook and marimo RUNS the change immediately "
+    "— there is no Apply click and no confirmation step. The result of this call is the "
+    "OBSERVATION of what actually happened: whether the cell ran, the error if it did "
+    "not, and the schema (column names and dtypes) of what it produced. READ it, check "
+    "your work against it, and call this tool again to correct anything that is wrong — "
+    "keep going until the analysis is right rather than handing a half-finished notebook "
+    "back. Values are never returned; only names, types and status. "
+)
+
+_WRITE_RULES = (
+    "To CHANGE what the notebook already does, EDIT the cell that "
+    "does it: appending a second cell that defines the same name stops both "
+    "cells and everything downstream. Indices are 0-based against the notebook "
+    "AS IT IS NOW — call mooring_read_notebook_source first if anything has "
+    "been applied since the cell view you were given. Every 'edits' and "
+    "'deletes' entry MUST carry 'expect' (the first line of the cell you "
+    "believe is at that index, plus the next line or two when that line is not "
+    "unique to one cell); mooring checks it against the real cell and refuses "
+    "the whole change unless it matches that cell and no other, which is what "
+    "stops a stale index writing over a cell you never read."
+)
+
+# Propose mode's description is byte-for-byte the one this tool has always carried.
+_PROPOSE_DESC = _WRITE_HEAD + _PROPOSE_MODE + _WRITE_RULES + _CELL_FORMAT
+_EDIT_DESC = _WRITE_HEAD + _EDIT_MODE + _WRITE_RULES + _CELL_FORMAT
+
+# What every tool says once the analyst has cancelled the turn. Terminal on purpose:
+# the copilot SDK runs its own tool loop, which mooring cannot break out of, so the only
+# lever left is what the loop is TOLD — and it has to be unambiguous enough that a model
+# stops rather than tries the next tool.
+_CANCELLED_TEXT = (
+    "CANCELLED by the analyst. This turn has been stopped: nothing was run and nothing "
+    "was written. Stop calling tools now and reply with one short line saying where you "
+    "got to — any further tool call will be refused the same way."
 )
 
 # What the model's ``expect`` claim is, and what checking it does and does not promise.
@@ -101,7 +306,7 @@ _CELL_FORMAT = (
 # behaviour this replaces, a false FAIL blocks correct work.
 
 
-def sql_cell_guide() -> str:
+def sql_cell_guide(tool_name: str = PROPOSE_TOOL_NAME) -> str:
     """A value-free capability note telling the copilot it can author marimo SQL cells.
 
     Threaded into the system context as ``sql_help`` (mirrors
@@ -124,7 +329,11 @@ def sql_cell_guide() -> str:
     names the output columns after the row VALUES it pivots on, and the live-kernel schema
     probe reports column NAMES back to the model — so a value→header pivot would smuggle
     data values into the schema the model sees. The value-blind contract holds only if the
-    copilot never generates one."""
+    copilot never generates one.
+
+    ``tool_name`` is the write tool as THIS session advertises it (see
+    :data:`WRITE_TOOL_NAMES`): naming a tool the model has not been given is worse than
+    naming none, so the guide follows the mode rather than hard-coding one name."""
     return (
         "SQL CELLS (value-free): propose a marimo SQL cell that runs on DuckDB via "
         '`result = mo.sql("""<query>""")` (marimo detects the SQL). It requires '
@@ -138,7 +347,7 @@ def sql_cell_guide() -> str:
         "inline a data value, and prefer an explicit column list over SELECT *. Do NOT pivot or "
         "crosstab row VALUES into column headers (e.g. DuckDB PIVOT): the resulting column names "
         "would BE data values. Assign the result to a well-named dataframe variable so later "
-        "cells can use it, and propose it with mooring_propose_notebook_edit's `appends` "
+        "cells can use it, and propose it with " + tool_name + "'s `appends` "
         "(the BODY only)."
     )
 
@@ -262,8 +471,6 @@ def _as_list(value) -> list:
 
 def _args(invocation) -> dict:
     """The tool's arguments as a dict (the SDK passes a dict; tolerate a JSON string)."""
-    import json
-
     raw = getattr(invocation, "arguments", None)
     if isinstance(raw, str):
         try:
@@ -324,6 +531,9 @@ def build_tool_specs(
     allow_read_tools: bool = True,
     trusted_customer_data: bool = False,
     output_guard: Callable[[str], bool] | None = None,
+    apply_edit: Callable[[list[dict], str], object] | None = None,
+    cancelled: Callable[[], bool] | None = None,
+    budget: "TurnCallBudget | None" = None,
 ) -> list["ToolSpec"]:
     """Build the safe tools as provider-neutral :class:`ToolSpec`s, bound to one
     workspace + target notebook.
@@ -343,13 +553,32 @@ def build_tool_specs(
     key) — the second, dynamic schema egress (besides the system context) that the
     agent can reach at any time.
 
-    Either proposal callback enables the ONE write tool,
+    Either proposal callback enables the ONE write tool, and so does ``apply_edit``.
+    In PROPOSE mode (no ``apply_edit``) it is registered as
     ``mooring_propose_notebook_edit``: it captures each targeted cell's current source
     as an ``anchor`` and emits a proposal to the local UI for the analyst to review and
     Apply (never an autonomous write). ``emit_proposal_patch`` (the real chat session
     supplies both) carries the structured ``{kind, ops, diffs}`` payload; a proposal
     that is exactly one appended cell still goes out on ``emit_proposal`` as
     ``{code, rationale}``, the shape the chat UI renders as an additive block.
+
+    ``apply_edit(op_dicts, rationale)`` switches it to EDIT mode
+    (``mooring_edit_notebook``): once the gate passes, the ops go straight to that
+    callback instead of to a proposal card, and its outcome becomes the tool result.
+    The outcome is DUCK-TYPED — ``.status`` (``applied`` / ``held`` / ``conflict`` /
+    ``disabled`` / ``cancelled`` / ``error``), ``.text`` (value-free text for the
+    model), ``.is_error`` — and is never imported: it belongs to ``app/``, which sits
+    ABOVE ``ai/`` in the layering (see ``.importlinter``).
+
+    ``cancelled()`` is checked before EVERY handler runs (reads included), and a
+    cancelled turn gets one terminal error telling the model to stop calling tools.
+
+    ``budget`` (a :class:`TurnCallBudget`) is the per-turn RUNAWAY ceiling for a
+    backend whose tool loop mooring does NOT own — the Copilot SDK. Each call charges
+    one step, and a call past the ceiling is answered with the same kind of terminal
+    result a cancel gets, telling the model to stop and reply. A session that drives
+    its own loop (OpenAI) passes ``None`` here and spends the SAME budget object in
+    that loop instead, so a call is never charged twice.
 
     :func:`build_tools` adapts these to the copilot SDK; a second backend reuses the
     same handlers and only re-expresses the spec and result shapes.
@@ -368,6 +597,16 @@ def build_tool_specs(
         # at the mint (egress.to_error_result / egress.to_openai_tool_message both
         # apply egress.scrub_error_text), so no egress channel sees it unscrubbed.
         return egress.ToolOutput(text=msg, is_error=True)
+
+    def _cancelled_result() -> "ToolOutput":
+        """The one terminal result a cancelled turn ever gets.
+
+        Two ways in, one wording: the boundary check below (the analyst pressed Cancel
+        before this handler ran) and an ``apply_edit`` outcome of ``cancelled`` (they
+        pressed it while the write was in flight). An error, because a success would
+        read as "done" and keep the model going — which is the one thing cancel is for.
+        """
+        return _err(_CANCELLED_TEXT)
 
     def list_datasets(_invocation):
         found = schema.list_datasets(workspace, folders)
@@ -446,14 +685,39 @@ def build_tool_specs(
 
     # A refusal only helps while the model can still act on it. After this many failed
     # validations IN A ROW the gate stops handing back diagnostics it has already
-    # proved it cannot act on, and tells it to take the problem to the analyst: the
-    # copilot SDK drives its own tool loop with no mooring-side iteration bound at all,
-    # and the OpenAI loop's bound (`openai_session._MAX_TOOL_ITERS`, 12) covers the
-    # WHOLE turn — so a stuck model must not be able to spend the lot re-proposing one
-    # cell. Any accepted proposal resets it: the budget measures "stuck", not "has been
-    # wrong before".
-    _VALIDATION_BUDGET = 3
+    # proved it cannot act on, and tells it to take the problem to the analyst. The
+    # per-turn ceiling (`[ai] max_tool_iters`, default :data:`DEFAULT_MAX_TOOL_ITERS`
+    # = 200) is a RUNAWAY ceiling on the WHOLE turn, not a work budget — so a stuck
+    # model must not be able to spend the lot re-proposing one cell. Any accepted
+    # proposal resets it: the budget measures "stuck", not "has been wrong before".
+    #
+    # Six, not three, since the write tool applies its own change. A model that only ever
+    # heard "no" had nothing to converge ON, so three strikes was the right ceiling on
+    # guessing; one that gets the notebook's REAL answer back — it ran, it did not, this
+    # is the schema — is doing work, not thrashing, and a hard analysis legitimately takes
+    # several passes. The give-up path stays: six refusals in a row is a model that has
+    # not read a single one of them, and the right answer is still to hand back to the
+    # analyst. Note this bounds only REJECTED writes; there is deliberately NO cap on how
+    # many changes a turn may successfully make.
+    _VALIDATION_BUDGET = 6
     _consecutive_failures = [0]  # a one-slot list: a closure may mutate, not rebind
+
+    # A SECOND, separate brake, for the outcomes that are not the model being wrong.
+    #
+    # A `held` change passed every check; a human is simply being asked. A `disabled`
+    # one is a switch the model cannot see, let alone fix. Neither is a validation
+    # failure and neither may spend the budget above — a legitimate single hold must
+    # cost a working model nothing.
+    #
+    # What they CAN become is a loop: the hold text says "Do NOT send this change
+    # again", and a model that does not read it can re-send the identical change for
+    # as long as its turn lasts, being told "held" every time. So repeats of the SAME
+    # change get their own, deliberately generous, count — it is measured on the ops,
+    # so re-sending byte-identical work is what spends it and a model that CHANGES its
+    # change (or moves on and comes back) starts over. Nine, because a hold is not
+    # evidence of anything being wrong; six refusals in a row is.
+    _REPEAT_BUDGET = 9
+    _repeat = {"key": "", "count": 0}
 
     # Diagnostics that do NOT refuse a proposal, and why.
     #
@@ -531,32 +795,64 @@ def build_tool_specs(
             "\n".join(f"- [{d.code}] {d.name}" for d in diagnostics[:_MAX_REPORTED]),
         )
 
+    # What a refusal claims did NOT happen, in the terms of the mode actually running.
+    # In propose mode the loss is that the analyst saw nothing; in edit mode it is that
+    # the notebook was not touched. Telling an editing model "the analyst was shown
+    # nothing" would describe a channel this session does not have.
+    _NOTHING_HAPPENED = (
+        "NOT applied — nothing was written to the notebook."
+        if apply_edit is not None
+        else "NOT proposed — the analyst was shown nothing."
+    )
+
     def _spent_the_budget() -> "ToolOutput | None":
         """Count one rejection, and return the give-up result once the budget is gone.
 
-        Shared by BOTH ways a proposal comes back refused — the static check and the
-        ``expect`` mis-target check — because they are the same problem from the model's
-        side: it has been told no, repeatedly, and is not converging. A model that cannot
-        aim at the right cell after three tries is exactly as stuck as one that cannot
-        write a cell the notebook accepts.
+        Shared by every way a change comes back refused — the static check, the
+        ``expect`` mis-target check, and a write the notebook moved out from under —
+        because they are the same problem from the model's side: it has been told no,
+        repeatedly, and is not converging. A model that cannot aim at the right cell
+        after six tries is exactly as stuck as one that cannot write a cell the notebook
+        accepts.
         """
         _consecutive_failures[0] += 1
-        if _consecutive_failures[0] > _VALIDATION_BUDGET:
-            return _err(
-                f"NOT proposed. {_consecutive_failures[0]} proposals in a row have been "
-                "rejected, so re-proposing is not working. Stop calling the propose tools "
-                "for this change: tell the analyst in your reply what you were trying to "
-                "write and what the notebook does not allow, and let them decide."
-            )
-        return None
+        if _consecutive_failures[0] <= _VALIDATION_BUDGET:
+            return None
+        n = _consecutive_failures[0]
+        lead = (
+            f"NOT applied. {n} changes in a row have been rejected, so retrying is not "
+            f"working. Stop calling {EDIT_TOOL_NAME} for this change: "
+            if apply_edit is not None
+            else f"NOT proposed. {n} proposals in a row have been rejected, so "
+            "re-proposing is not working. Stop calling the propose tools for this change: "
+        )
+        return _err(
+            lead + "tell the analyst in your reply what you were trying to write and what "
+            "the notebook does not allow, and let them decide."
+        )
+
+    def _gate_passed() -> None:
+        """Clear the thrash brake for a candidate the static check accepts.
+
+        Only in PROPOSE mode, where a clean gate pass IS the acceptance: the proposal
+        is emitted a line later and nothing else can reject it. In EDIT mode the change
+        has not landed yet — the write can still come back ``conflict`` — and resetting
+        here would make a conflict loop unbounded, because every attempt passes the gate
+        cleanly before the write is tried. Edit mode clears it on ``applied`` instead
+        (see :func:`_apply_now`), which is what "an accepted write resets the counter"
+        actually means.
+        """
+        if apply_edit is None:
+            _consecutive_failures[0] = 0
 
     def _refused(detail: str) -> "ToolOutput":
-        """The result for a proposal the gate is holding back. Nothing was emitted."""
+        """The result for a change the gate is holding back. Nothing was emitted, and in
+        edit mode nothing was written — the gate runs BEFORE ``apply_edit`` is called."""
         spent = _spent_the_budget()
         if spent is not None:
             return spent
         return _err(
-            "NOT proposed — the analyst was shown nothing. mooring built the notebook this "
+            f"{_NOTHING_HAPPENED} mooring built the notebook this "
             "change would produce and checked it statically; it would not work:\n"
             f"{detail}\n"
             "Fix the cause and call the tool again."
@@ -574,11 +870,30 @@ def build_tool_specs(
         if spent is not None:
             return spent
         return _err(
-            "NOT proposed — the analyst was shown nothing. What you said is at that index "
+            f"{_NOTHING_HAPPENED} What you said is at that index "
             "is not what is there, so mooring did not write to a cell you have not read:\n"
             f"{detail}\n"
             "Call mooring_read_notebook_source for the notebook as it is NOW, then propose "
             "again against the current cells."
+        )
+
+    def _conflicted(detail: str) -> "ToolOutput":
+        """The result for a write the notebook moved out from under.
+
+        Reached only in edit mode, and deliberately the same shape as
+        :func:`_mistargeted`: from the model's side a conflict IS a stale index — the
+        anchor it captured is no longer at that cell — so the corrective action is the
+        same one, re-read then aim again, and it spends the same thrash brake so a
+        notebook that keeps moving cannot become an unbounded retry loop.
+        """
+        spent = _spent_the_budget()
+        if spent is not None:
+            return spent
+        return _err(
+            "NOT applied — the notebook changed under you, so nothing was written:\n"
+            f"{detail}\n"
+            "Call mooring_read_notebook_source for the notebook as it is NOW, then send "
+            "the change again against the current cells."
         )
 
     def _gate(op_dicts) -> tuple["ToolOutput | None", str]:
@@ -624,7 +939,7 @@ def build_tool_specs(
         blocking = [d for d in diagnostics if d.code not in _NON_BLOCKING_CODES]
         notes = [d for d in diagnostics if d.code in _NON_BLOCKING_CODES]
         if not blocking:
-            _consecutive_failures[0] = 0
+            _gate_passed()
             return None, _note([(_WORTH_KNOWING, notes)])
         # Only now is the base worth checking, so the clean path pays for one validation
         # pass and not two.
@@ -634,12 +949,12 @@ def build_tool_specs(
             # checked, so nothing here can be shown to be the change's doing — and a gate
             # that refuses on what it cannot show is the failure mode this whole design
             # rejects (see `_already_broken`). Report, never refuse.
-            _consecutive_failures[0] = 0
+            _gate_passed()
             return None, _note([(_UNATTRIBUTABLE, blocking), (_WORTH_KNOWING, notes)])
         introduced, pre_existing = _split_by_blame(blocking, base_faults)
         if introduced:
             return _refused(_render_diagnostics(introduced)), ""
-        _consecutive_failures[0] = 0
+        _gate_passed()
         return None, _note([(_PRE_EXISTING, pre_existing), (_WORTH_KNOWING, notes)])
 
     def _note(sections) -> str:
@@ -731,10 +1046,196 @@ def build_tool_specs(
             return None
         return Counter(_diag_key(d) for d in found)
 
+    # --- edit mode: apply the change and hand back the observation --------------
+    #
+    # Reached only once `_gate` has passed, and only when the caller injected
+    # `apply_edit`. The static check therefore still stands between a weak model's
+    # output and the analyst's open notebook — it is the LAST such check, since after
+    # this the cell is running.
+    #
+    # The outcome object is duck-typed on purpose: it is built in `app/`, which sits
+    # ABOVE `ai/` in the layering, so importing its class here would fail lint-imports.
+    # Every attribute is read defensively — an outcome missing `.status` must degrade to
+    # "something went wrong", never to an AttributeError that kills the turn.
+
+    def _outcome_text(text: str, fallback: str) -> str:
+        """The outcome's text, through the same egress floor the read tools use.
+
+        `apply_edit` is mooring's own service and its observation is value-free by
+        construction (status + names + dtypes), so this is defence in depth, not the
+        guarantee — exactly as it is for the dictionary and catalog renders. It honours
+        `trusted_customer_data` the way `read_notebook_source` does, so the approved-data
+        path is not scrubbed differently here than everywhere else."""
+        if trusted_customer_data:
+            return text.strip() or fallback
+        out, _ = egress.scrub_text(text)
+        return out.strip() or fallback
+
+    def _landed(outcome) -> str:
+        """Where the change actually went — the cell numbers, and nothing else.
+
+        The applier's receipt already carries them (``payload["summary"]``), but until
+        now that went only to the browser, so a model that had just edited cell 3 had to
+        spend a whole ``mooring_read_notebook_source`` round-trip to find out where its
+        next edit should aim — or guess, and get refused by ``expect``, which spends the
+        thrash brake for a mistake mooring caused.
+
+        Read defensively and rendered from INTEGERS only (anything else is dropped), so
+        this can carry nothing but cell numbers whatever an applier puts in its payload.
+        """
+        payload = getattr(outcome, "payload", None)
+        summary = payload.get("summary") if isinstance(payload, dict) else None
+        if not isinstance(summary, dict):
+            return ""
+
+        def _nums(key: str) -> list[int]:
+            value = summary.get(key)
+            if not isinstance(value, (list, tuple)):
+                return []
+            return [n for n in value if isinstance(n, int) and not isinstance(n, bool)]
+
+        edited, appended, deleted = _nums("edited"), _nums("appended"), _nums("deleted")
+        parts = [
+            f"{label} {', '.join(str(n) for n in nums)}"
+            for label, nums in (
+                ("edited cell", edited),
+                ("added cell", appended),
+                ("deleted cell", deleted),
+            )
+            if nums
+        ]
+        if not parts:
+            return ""
+        line = "\nWHERE IT LANDED: " + "; ".join(parts) + "."
+        if deleted:
+            # Edits and deletes are reported by the index they TARGETED, so once a cell
+            # has gone the numbers below it have moved. Say so rather than let the model
+            # aim at a stale one and be refused for it.
+            line += (
+                " Deleting a cell renumbers every cell after it, so call "
+                "mooring_read_notebook_source before targeting one by index again."
+            )
+        return line
+
+    def _repeat_key(ops: list[dict], status: str) -> str:
+        """A stable fingerprint of THIS change, for the repeat brake. Hashed, so a
+        notebook's source is never held in a closure any longer than the call."""
+        try:
+            body = json.dumps(ops, sort_keys=True, default=str)
+        except (TypeError, ValueError):  # pragma: no cover - json takes anything with default=str
+            body = repr(ops)
+        return f"{status}:{hashlib.sha256(body.encode('utf-8', 'replace')).hexdigest()}"
+
+    def _spent_the_repeat_budget(ops: list[dict], status: str) -> "ToolOutput | None":
+        """Count one identical re-send of a held/disabled change; give up past the budget.
+
+        Separate from :func:`_spent_the_budget` on purpose: that one counts the model
+        being WRONG, and neither of these outcomes is that. This one counts only "you
+        have sent me this exact change again after being told a human has to act".
+        """
+        key = _repeat_key(ops, status)
+        if key != _repeat["key"]:
+            _repeat["key"], _repeat["count"] = key, 1
+            return None
+        _repeat["count"] += 1
+        if _repeat["count"] <= _REPEAT_BUDGET:
+            return None
+        n = _repeat["count"]
+        # Say WHICH of the two it is: a hold is waiting on a person, and being switched
+        # off is not. Telling a model it is waiting for a confirm that is not coming is
+        # the kind of near-miss that makes it wait rather than explain.
+        why = (
+            "it is waiting on a person"
+            if status == "held"
+            else "writing is switched off for this notebook"
+        )
+        return _err(
+            f"NOT applied. You have now sent this same change {n} times and it has not "
+            f"been written once — {why}, and repeating it cannot change that. Stop "
+            f"calling {EDIT_TOOL_NAME} with it: tell the analyst in your reply what the "
+            "change does and what you need from them, and stop."
+        )
+
+    def _apply_now(ops: list[dict], rationale: str, note: str) -> "ToolOutput":
+        try:
+            outcome = apply_edit(ops, rationale)
+        except Exception as exc:  # noqa: BLE001 - an applier fault must not kill the turn
+            return _err(
+                f"the change could not be written to the notebook: {exc}. Do not retry it; "
+                "tell the analyst what you were trying to do."
+            )
+        status = str(getattr(outcome, "status", "") or "")
+        raw = str(getattr(outcome, "text", "") or "")
+        # `.status` is the discriminator, not `.is_error` — a status is one of six known
+        # things, where a bare boolean cannot tell `held` from `conflict`. `.is_error` is
+        # still honoured as a veto below, so an outcome that says "applied" and "error" at
+        # once is not reported to the model as a running cell.
+
+        if status == "applied" and not getattr(outcome, "is_error", False):
+            # An accepted write resets the thrash brake — and this is the ONLY place it is
+            # reset in edit mode. `_gate_passed` deliberately leaves it alone here: a
+            # candidate that passes the static check has not landed yet, and resetting on
+            # the gate would make a run of conflicts unbounded.
+            _consecutive_failures[0] = 0
+            _repeat["key"], _repeat["count"] = "", 0  # a write that LANDED ends any repeat
+            body = _outcome_text(raw, "(no observation was returned)")
+            return _ok(
+                "APPLIED. The change is in the analyst's notebook and marimo has run it. "
+                f"What happened:\n{body}{_landed(outcome)}\n"
+                "Check this against what you intended. If it is wrong, fix it with another "
+                f"{EDIT_TOOL_NAME} call; if it is right, carry on." + note
+            )
+
+        if status == "held":
+            # NOT an error, and NOT retryable. The change is sitting in front of the
+            # analyst waiting for a confirm, so calling again writes nothing and burns the
+            # turn — the model's job now is to explain, not to write.
+            spent = _spent_the_repeat_budget(ops, status)
+            if spent is not None:
+                return spent
+            body = _outcome_text(raw, "(no reason was given)")
+            return _ok(
+                "HELD — the change is NOT running yet. mooring is waiting for the analyst "
+                f"to confirm it, because:\n{body}\n"
+                "Do NOT send this change again — a repeat writes nothing. Stop writing, "
+                "and reply to the analyst saying what the change does and what you need "
+                "them to confirm." + note
+            )
+
+        if status == "conflict":
+            _repeat["key"], _repeat["count"] = "", 0  # a different problem entirely
+            return _conflicted(_outcome_text(raw, "- the cell you targeted has moved"))
+
+        if status == "cancelled":
+            return _cancelled_result()
+
+        if status == "disabled":
+            # Same brake as `held`, and for the same reason: nothing here says the model
+            # was wrong, but a switch it cannot see will answer the same way forever.
+            spent = _spent_the_repeat_budget(ops, status)
+            if spent is not None:
+                return spent
+            body = _outcome_text(raw, "(no reason was given)")
+            return _err(
+                f"NOT applied — this session may not write to the notebook:\n{body}\n"
+                "Retrying will not change that. Tell the analyst what you would have "
+                "written and let them decide."
+            )
+
+        # `error`, and anything unrecognised: an unknown status is a failure, because
+        # reading it as a success would tell the model a cell is running when it is not.
+        body = _outcome_text(raw, "(no reason was given)")
+        return _err(
+            f"NOT applied — the write failed:\n{body}\n"
+            "Do not just send the same change again; if you cannot see a cause, tell the "
+            "analyst what you were trying to do."
+        )
+
     # --- the ONE write tool ----------------------------------------------------
     #
     # Every kind of change the copilot can make to the notebook arrives here: append,
-    # edit, delete, and the wholesale rewrite. What it EMITS is unchanged per op shape,
+    # edit, delete, and the wholesale rewrite. In PROPOSE mode what it EMITS is unchanged
+    # per op shape,
     # so the analyst's card and both Apply routes see exactly the payloads they saw when
     # four tools produced them — a lone append still goes out as the legacy
     # `{code, rationale}`, a lone edit as `kind: "edit"`, a `cells` rewrite as
@@ -875,6 +1376,8 @@ def build_tool_specs(
         refusal, note = _gate(ops)
         if refusal is not None:
             return refusal
+        if apply_edit is not None:
+            return _apply_now(ops, rationale, note)
         if emit_proposal_patch is None:
             return _err("this session can only propose appended cells")
         emit_proposal_patch(
@@ -960,6 +1463,10 @@ def build_tool_specs(
         refusal, note = _gate(ops)
         if refusal is not None:
             return refusal
+        # Edit mode short-circuits the whole emit fan-out below: there is no card to
+        # shape, because the change goes to the notebook rather than to a review UI.
+        if apply_edit is not None:
+            return _apply_now(ops, rationale, note)
 
         # One appended cell keeps the legacy `{code, rationale}` event: the chat renders it
         # as an additive block rather than a diff against nothing, which is the better card
@@ -1215,13 +1722,17 @@ def build_tool_specs(
         ),
     ] if allow_read_tools else []
 
-    # The propose tool is the WRITE surface, and there is exactly ONE of it. It is gated
-    # on a proposal callback, so a READ-ONLY session — an investigate sub-agent, built
-    # with emit_proposal=None and emit_proposal_patch=None — registers NO way to write:
-    # only the value-free read tools above (plus dictionary/model/helper reads). This gate
+    # The write tool is the WRITE surface, and there is exactly ONE of it — under one of
+    # two names, depending on whether it applies its own change (see PROPOSE_TOOL_NAME /
+    # EDIT_TOOL_NAME). It is gated on a proposal OR apply callback, so a READ-ONLY session
+    # — an investigate sub-agent, built with emit_proposal=None, emit_proposal_patch=None
+    # and apply_edit=None — registers NO way to write under EITHER name: only the
+    # value-free read tools above (plus dictionary/model/helper reads). This gate
     # is a LOAD-BEARING privacy invariant: a sub-agent's finding is trusted because the
     # sub-agent is structurally value-blind (docs/admins/ai-privacy.md), which holds only
-    # if no write/value-returning tool is ever added to a read-only session.
+    # if no write/value-returning tool is ever added to a read-only session. `apply_edit`
+    # had to join the gate, not sit beside it: a session given only an applier would
+    # otherwise have been able to write with no tool registered to do it.
     #
     # It is `blocking`: it builds the candidate notebook and runs
     # `marimo_rt.validate_notebook_source` on it — measured end to end at ~50 ms for a
@@ -1232,23 +1743,11 @@ def build_tool_specs(
     # SDK's event-loop thread, which must stay free for streaming and teardown, so the
     # adapter hands a blocking handler to a worker thread. (The OpenAI session already
     # runs its loop on its own thread, where the flag is a no-op.)
-    if emit_proposal is not None or emit_proposal_patch is not None:
+    if emit_proposal is not None or emit_proposal_patch is not None or apply_edit is not None:
         specs.append(
             ToolSpec(
-                "mooring_propose_notebook_edit",
-                "THE one tool that changes the notebook: propose new cells, edits to "
-                "existing cells, deletions, or a wholesale rewrite — any mix, as ONE "
-                "reviewable patch. You never write the file; the analyst sees a diff and "
-                "applies it. To CHANGE what the notebook already does, EDIT the cell that "
-                "does it: appending a second cell that defines the same name stops both "
-                "cells and everything downstream. Indices are 0-based against the notebook "
-                "AS IT IS NOW — call mooring_read_notebook_source first if anything has "
-                "been applied since the cell view you were given. Every 'edits' and "
-                "'deletes' entry MUST carry 'expect' (the first line of the cell you "
-                "believe is at that index, plus the next line or two when that line is not "
-                "unique to one cell); mooring checks it against the real cell and refuses "
-                "the whole change unless it matches that cell and no other, which is what "
-                "stops a stale index writing over a cell you never read." + _CELL_FORMAT,
+                write_tool_name(apply_edit is not None),
+                _EDIT_DESC if apply_edit is not None else _PROPOSE_DESC,
                 handler=propose_notebook_edit,
                 parameters={
                     "type": "object",
@@ -1335,8 +1834,15 @@ def build_tool_specs(
                         "rationale": {"type": "string", "description": _RATIONALE_DESC},
                     },
                 },
-                skip_permission=True,  # surfaces a proposal only; the analyst applies it
-                blocking=True,  # static check off the loop (see the note above)
+                # The SDK's own permission prompt is not mooring's gate in either mode: in
+                # propose mode nothing is written at all, and in edit mode the write is
+                # gated by the injected applier (which holds a risky change for the
+                # analyst's confirm and reports it back as `held`), not by a prompt the
+                # model can see coming.
+                skip_permission=True,
+                # Static check off the loop (see the note above) — and in edit mode the
+                # write and its observation as well, which are slower still.
+                blocking=True,
             )
         )
 
@@ -1622,35 +2128,91 @@ def build_tool_specs(
                 blocking=True,  # drives N sub-sessions; must not run on an event loop
             )
         )
-    if output_guard is None:
-        return specs
+    if output_guard is not None:
+        # Wrap the provider-neutral handler itself so every adapter gets the same final
+        # egress gate. This covers successes, ordinary `_err` results, and unexpected
+        # exceptions before either SDK can mint or transmit a tool result.
+        def guarded(spec: ToolSpec) -> ToolSpec:
+            raw_handler = spec.handler
 
-    # Wrap the provider-neutral handler itself so every adapter gets the same final
-    # egress gate. This covers successes, ordinary `_err` results, and unexpected
-    # exceptions before either SDK can mint or transmit a tool result.
-    def guarded(spec: ToolSpec) -> ToolSpec:
-        raw_handler = spec.handler
+            def handler(invocation):
+                try:
+                    output = raw_handler(invocation)
+                except Exception as exc:  # noqa: BLE001 - inspect/withhold exception text
+                    output = egress.ToolOutput(
+                        text=f"tool {spec.name} failed: {exc}", is_error=True
+                    )
+                try:
+                    allowed = output_guard(output.text)
+                except Exception:  # noqa: BLE001 - a guard fault must withhold the output
+                    allowed = False
+                if not allowed:
+                    return egress.ToolOutput(
+                        text="tool output withheld by the approved data policy", is_error=True
+                    )
+                return output
 
-        def handler(invocation):
-            try:
-                output = raw_handler(invocation)
-            except Exception as exc:  # noqa: BLE001 - inspect/withhold exception text
-                output = egress.ToolOutput(
-                    text=f"tool {spec.name} failed: {exc}", is_error=True
-                )
-            try:
-                allowed = output_guard(output.text)
-            except Exception:  # noqa: BLE001 - a guard fault must withhold the output
-                allowed = False
-            if not allowed:
-                return egress.ToolOutput(
-                    text="tool output withheld by the approved data policy", is_error=True
-                )
-            return output
+            return replace(spec, handler=handler)
 
-        return replace(spec, handler=handler)
+        specs = [guarded(spec) for spec in specs]
 
-    return [guarded(spec) for spec in specs]
+    if budget is not None:
+        # --- the runaway ceiling, at that same boundary -----------------------------
+        #
+        # Only ever wired by a session whose tool loop mooring does NOT own (see
+        # `budget` above, and :class:`TurnCallBudget`). It sits OUTSIDE the output
+        # guard for the same reason the cancel check does — the refusal is mooring's
+        # own fixed sentence and must not be withheld by a policy check — and INSIDE
+        # the cancel wrapper, so an analyst who pressed Stop is told that, not this.
+        def bounded(spec: ToolSpec) -> ToolSpec:
+            raw_handler = spec.handler
+
+            def handler(invocation):
+                if not budget.spend():
+                    return _err(budget.runaway_text())
+                return raw_handler(invocation)
+
+            return replace(spec, handler=handler)
+
+        specs = [bounded(spec) for spec in specs]
+
+    if cancelled is not None:
+        # --- the stop signal, at the ONE boundary every tool crosses ---------------
+        #
+        # The analyst's Cancel cannot interrupt the model: the Copilot SDK owns its tool
+        # loop and there is no mooring-side way to break out of it. What mooring does own
+        # is what every tool call ANSWERS, so the check lives here — once, wrapping each
+        # spec — rather than copy-pasted into twenty handlers where the twenty-first would
+        # be forgotten.
+        #
+        # Reads are checked too, not just writes. A cancelled turn that still services
+        # schema lookups is a turn the analyst stopped and is still paying for, and a
+        # model told "no" only by the write tool will happily spend its remaining
+        # iterations reading.
+        #
+        # It wraps OUTSIDE the output guard so the refusal is mooring's own fixed
+        # sentence, minted here, and cannot be withheld by a policy check on text the
+        # model was never going to see anyway.
+        def stoppable(spec: ToolSpec) -> ToolSpec:
+            raw_handler = spec.handler
+
+            def handler(invocation):
+                try:
+                    stop = bool(cancelled())
+                except Exception:  # noqa: BLE001 - a broken probe must not kill every tool
+                    # Fail OPEN, the house rule for a check that cannot run: a cancel
+                    # signal that raises would otherwise refuse every tool call in every
+                    # turn, which is worse than the cancel arriving one call late.
+                    stop = False
+                if stop:
+                    return _cancelled_result()
+                return raw_handler(invocation)
+
+            return replace(spec, handler=handler)
+
+        specs = [stoppable(spec) for spec in specs]
+
+    return specs
 
 
 def build_tools(
@@ -1670,6 +2232,9 @@ def build_tools(
     allow_read_tools: bool = True,
     trusted_customer_data: bool = False,
     output_guard: Callable[[str], bool] | None = None,
+    apply_edit: Callable[[list[dict], str], object] | None = None,
+    cancelled: Callable[[], bool] | None = None,
+    budget: "TurnCallBudget | None" = None,
 ) -> list:
     """The GitHub Copilot adapter over :func:`build_tool_specs`.
 
@@ -1683,6 +2248,12 @@ def build_tools(
     it still returns ``copilot.tools.Tool`` objects with the same ``name`` /
     ``parameters`` / ``skip_permission`` and handlers that return a ``ToolResult``.
     The SDK import stays function-local (``copilot`` is the optional extra).
+
+    ``apply_edit`` / ``cancelled`` / ``budget`` are passed straight through: the mode
+    switch, the stop signal and the runaway ceiling live in :func:`build_tool_specs`, so
+    both adapters get them from one implementation rather than two. Note the SDK loop
+    cannot be interrupted OR counted from outside, which is exactly why both
+    ``cancelled`` and ``budget`` are answered per tool call on this backend.
     """
     from copilot.tools import Tool
 
@@ -1704,6 +2275,9 @@ def build_tools(
         allow_read_tools=allow_read_tools,
         trusted_customer_data=trusted_customer_data,
         output_guard=output_guard,
+        apply_edit=apply_edit,
+        cancelled=cancelled,
+        budget=budget,
     )
 
     def _to_tool(spec: ToolSpec):
@@ -1755,6 +2329,8 @@ def build_openai_tools(
     allow_read_tools: bool = True,
     trusted_customer_data: bool = False,
     output_guard: Callable[[str], bool] | None = None,
+    apply_edit: Callable[[list[dict], str], object] | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> tuple[list[dict], dict[str, Callable[[object], "ToolOutput"]]]:
     """The OpenAI adapter over :func:`build_tool_specs`.
 
@@ -1771,6 +2347,15 @@ def build_openai_tools(
     tools are ever produced; a backend that runs this NEVER registers a hosted tool
     (web_search / file_search / code_interpreter), which is how value-blindness stays
     structural for a self-driven loop.
+
+    ``apply_edit`` / ``cancelled`` pass straight through to :func:`build_tool_specs`, so
+    ``dispatch`` is keyed by whichever write-tool name that mode registers — the session
+    dispatches by the key it is given and never by a hard-coded name.
+
+    There is deliberately NO ``budget`` here. This adapter's caller owns its tool loop
+    and spends the same :class:`TurnCallBudget` there, where it also sees the calls that
+    never reach a handler at all (an unknown tool name); charging one call in both
+    places would silently halve the analyst's configured ceiling.
     """
     specs = build_tool_specs(
         workspace=workspace,
@@ -1788,6 +2373,8 @@ def build_openai_tools(
         allow_read_tools=allow_read_tools,
         trusted_customer_data=trusted_customer_data,
         output_guard=output_guard,
+        apply_edit=apply_edit,
+        cancelled=cancelled,
     )
     tool_specs = [
         {

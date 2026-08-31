@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Callable
 
 from mooring import marimo_rt
+from mooring.ai.tools import WRITE_TOOL_NAMES
 
 if TYPE_CHECKING:
     from evals.harness import Attempt
@@ -61,10 +62,14 @@ def proposed() -> Check:
         if a.proposals:
             return ""
         if a.refusals:
-            return f"no proposal: {a.refusals} propose call(s) were refused by the gate"
-        if any(name.startswith("mooring_propose") for name in a.tool_calls):
-            return "no proposal: the propose tool was called but emitted nothing"
-        return "no proposal: the model answered in prose without calling the propose tool"
+            return f"no proposal: {a.refusals} write call(s) were refused by the gate"
+        # Membership of WRITE_TOOL_NAMES, not a `mooring_propose` prefix: the same tool
+        # is registered as `mooring_edit_notebook` in edit mode, and a prefix test
+        # misreported an edit-mode run as "answered in prose" — the exact opposite of
+        # what happened.
+        if any(name in WRITE_TOOL_NAMES for name in a.tool_calls):
+            return "no proposal: the write tool was called but emitted nothing"
+        return "no proposal: the model answered in prose without calling the write tool"
 
     return Check("proposed", run)
 
@@ -296,8 +301,9 @@ def _render(diagnostics) -> str:
 
 # -- did it reach for the right tool -----------------------------------------
 
-# There is ONE write tool now (``mooring_propose_notebook_edit``), so a tool-choice
-# mistake is no longer a wrong TOOL — it is the wrong FIELD of the right tool. The
+# There is ONE write tool now (registered under one of the two names in
+# :data:`~mooring.ai.tools.WRITE_TOOL_NAMES`, depending on the session's mode), so a
+# tool-choice mistake is no longer a wrong TOOL — it is the wrong FIELD of it. The
 # proposal payload's shape names the field the model reached for, so that choice is
 # read off the proposal rather than sniffed out of the event stream.
 _FIELD_FOR_KIND = {

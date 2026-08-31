@@ -52,6 +52,10 @@
         <textarea id="chat-input" rows="1" spellcheck="false" autocomplete="off"
           aria-label="Chat message"
           placeholder="Ask for help — try /help, or @ to reference a dataset"></textarea>
+        <!-- A turn locks the composer, so while one is in flight the affordance in this
+             row IS the stop: the analyst's one way to end a long self-correcting turn.
+             Hidden (and inert) whenever there is nothing to stop. -->
+        <button id="stop-btn" type="button" class="small stop-btn hidden">Stop</button>
       </div>
     </div>
 

@@ -452,6 +452,70 @@ EDITABLE: tuple[SettingSpec, ...] = (
         "read it. Slower, but no code the copilot wrote ever runs unasked.",
     ),
     SettingSpec(
+        key="ai.auto_apply",
+        accessor="ai_auto_apply",
+        label="Let the copilot apply reversible changes itself",
+        group="ai",
+        type="bool",
+        control="toggle",
+        default=True,
+        # "needs_care", not "weakens", for the same reason as ai.apply_guard: the page
+        # renders "weakens" as *Weakens privacy*, and nothing the model SEES changes
+        # here. What changes is who presses the button — spelled out in the confirm.
+        sensitivity="needs_care",
+        env_var="MOORING_AI_AUTO_APPLY",
+        weaken_value=True,
+        confirm="With this ON, a change the copilot writes lands in your notebook as "
+        "soon as it is written — there is no Apply button in between — and mooring "
+        "hands the model back what happened so it can correct itself. The check above "
+        "still reads every cell first and still HOLDS anything Undo cannot take back, "
+        "so this never lets an irreversible cell through unasked; what it removes is "
+        "your look at the ordinary ones before they land. Continue?",
+        help="Apply without the click, for changes Undo can take back: the copilot "
+        "writes, sees the result, and fixes its own mistakes in one turn. Turn this "
+        "off to go back to propose-then-Apply — nothing touches the notebook until you "
+        "press the button. Either way, the check above still holds the irreversible "
+        "cells for your confirm.",
+    ),
+    SettingSpec(
+        key="ai.auto_run_report",
+        accessor="ai_auto_run_report",
+        label="Re-run the notebook to report a failure back",
+        group="ai",
+        type="bool",
+        control="toggle",
+        default=True,
+        sensitivity="needs_care",
+        env_var="MOORING_AI_AUTO_RUN_REPORT",
+        weaken_value=True,
+        confirm="With this ON, mooring may RE-RUN your notebook by itself when an "
+        "applied cell did not complete, so the copilot gets the failure back without "
+        "you relaying it. That executes your notebook's code again without you asking "
+        "— which is fine for a read-and-compute notebook and is not free for one that "
+        "writes somewhere. The run is the same value-free smoke path mooring already "
+        "uses, and no value ever comes back to the model. Continue?",
+        help="When a change the copilot made does not complete, let mooring re-run the "
+        "value-free smoke check itself and hand the model the failure, instead of "
+        "waiting for you to paste it. Turn it off and the model is still told what "
+        "happened — mooring just will not re-run anything on your behalf.",
+    ),
+    SettingSpec(
+        key="ai.max_tool_iters",
+        accessor="ai_max_tool_iters",
+        label="Tool-call ceiling per turn",
+        group="ai",
+        type="int",
+        control="number",
+        minimum=1,
+        maximum=10000,
+        default=200,
+        env_var="MOORING_AI_MAX_TOOL_ITERS",
+        help="A backstop against a runaway loop, not a work budget — set high on "
+        "purpose so a long analysis runs to the end. Press Stop in the chat (or Esc) to "
+        "end a turn you have seen enough of; lowering this only makes the copilot give "
+        "up mid-thought.",
+    ),
+    SettingSpec(
         key="ai.context",
         accessor="ai_context",
         label="Team context (instructions + data dictionary)",

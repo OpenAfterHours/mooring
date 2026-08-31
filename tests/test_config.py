@@ -5,13 +5,14 @@ import pytest
 
 from mooring import paths
 from mooring.ai_config import (
+    MAX_TOOL_ITERS_CEILING,
     SELF_CONFIGURED_LABEL,
     AiConfig,
     BatchConfig,
     PiiConfig,
     RoutingConfig,
 )
-from mooring.config import load_app_config, load_config
+from mooring.config import AppConfig, load_app_config, load_config
 
 
 def test_defaults_when_no_user_config(tmp_path):
@@ -293,6 +294,80 @@ def test_ai_semantic_model_toml_and_env_override(tmp_path):
     user.write_text("", "utf-8")
     off = load_app_config(user_config_path=user, env={"MOORING_AI_SEMANTIC_MODEL": "0"})
     assert off.ai_semantic_model is False
+
+
+def test_ai_auto_apply_defaults_on_with_flat_shims(tmp_path):
+    # The copilot's write lands without an Apply click, it may re-run the value-free
+    # smoke path to report a failure back, and the tool-call loop has a high ceiling
+    # (a runaway backstop, not a work budget — Cancel is the control).
+    app = load_app_config(user_config_path=tmp_path / "missing.toml", env={})
+    assert app.ai.auto_apply is True and app.ai_auto_apply is True
+    assert app.ai.auto_run_report is True and app.ai_auto_run_report is True
+    assert app.ai.max_tool_iters == 200 and app.ai_max_tool_iters == 200
+
+
+def test_ai_auto_apply_toml_and_env_override(tmp_path):
+    user = tmp_path / "config.toml"
+    user.write_text(
+        "[ai]\nauto_apply = false\nauto_run_report = false\nmax_tool_iters = 12\n", "utf-8"
+    )
+    app = load_app_config(user_config_path=user, env={})
+    assert app.ai_auto_apply is False
+    assert app.ai_auto_run_report is False
+    assert app.ai_max_tool_iters == 12
+    # MOORING_* is the top LOCAL layer and overrides the file in both directions
+    # (policy still sits above all three — see tests/test_policy.py).
+    on = load_app_config(
+        user_config_path=user,
+        env={
+            "MOORING_AI_AUTO_APPLY": "1",
+            "MOORING_AI_AUTO_RUN_REPORT": "true",
+            "MOORING_AI_MAX_TOOL_ITERS": "500",
+        },
+    )
+    assert on.ai_auto_apply is True and on.ai_auto_run_report is True
+    assert on.ai_max_tool_iters == 500
+    user.write_text("", "utf-8")
+    off = load_app_config(
+        user_config_path=user,
+        env={"MOORING_AI_AUTO_APPLY": "0", "MOORING_AI_AUTO_RUN_REPORT": "off"},
+    )
+    assert off.ai_auto_apply is False and off.ai_auto_run_report is False
+
+
+@pytest.mark.parametrize("bad", [0, -1, -200])
+def test_max_tool_iters_ignores_a_file_value_that_would_kill_every_turn(tmp_path, bad):
+    """config.toml is hand-editable, and a ceiling of 0 is a plausible thing to type.
+    It would end every turn BEFORE the model's first tool call — which reads as a
+    broken copilot, not as a setting — so it falls back to the shipped default."""
+    user = tmp_path / "config.toml"
+    user.write_text(f"[ai]\nmax_tool_iters = {bad}\n", "utf-8")
+    assert load_app_config(user_config_path=user, env={}).ai_max_tool_iters == 200
+
+
+@pytest.mark.parametrize("bad", ["0", "-5", "lots", ""])
+def test_max_tool_iters_ignores_a_bad_env_value_and_keeps_the_file_choice(tmp_path, bad):
+    """The env var is typed at a shell, so a typo must not raise inside the loader
+    (that would take the hub out) nor silently zero the ceiling: the file's own good
+    value survives."""
+    user = tmp_path / "config.toml"
+    user.write_text("[ai]\nmax_tool_iters = 50\n", "utf-8")
+    app = load_app_config(user_config_path=user, env={"MOORING_AI_MAX_TOOL_ITERS": bad})
+    assert app.ai_max_tool_iters == 50
+
+
+def test_max_tool_iters_is_capped_rather_than_unbounded(tmp_path):
+    user = tmp_path / "config.toml"
+    user.write_text("[ai]\nmax_tool_iters = 999999999\n", "utf-8")
+    app = load_app_config(user_config_path=user, env={})
+    assert app.ai_max_tool_iters == MAX_TOOL_ITERS_CEILING
+
+
+def test_the_tool_call_ceiling_accessor_floors_a_hand_built_config():
+    """The loader clamps what it READS; the flat accessor closes the other door, so a
+    zero can never reach the tool loop from an AiConfig built in code."""
+    assert AppConfig(ai=AiConfig(max_tool_iters=0)).ai_max_tool_iters == 1
+    assert AppConfig(ai=AiConfig(max_tool_iters=-9)).ai_max_tool_iters == 1
 
 
 def test_ai_pii_name_backend_defaults_and_parses(tmp_path):

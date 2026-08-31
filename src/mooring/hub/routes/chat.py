@@ -104,6 +104,11 @@ async def api_chat_open(request: Request) -> JSONResponse:
     except FileNotFoundError as exc:
         return JSONResponse({"error": f"No such file: {exc}"}, status_code=404)
     hub._reap_idle_chats()
+    # The model's in-turn writer, or None when `[ai] auto_apply` is off — in which case
+    # NOTHING is wired and the write tool stays in propose mode. Built before the session
+    # because it is an argument to it, and bound to the session afterwards (it needs the
+    # cancel flag, which cannot exist before the session does).
+    applier = hub._make_applier(workspace, notebook)
     try:
         if bundle is not None:
             session = await run_in_threadpool(
@@ -116,6 +121,7 @@ async def api_chat_open(request: Request) -> JSONResponse:
                 reasoning_effort=reasoning_effort,
                 trusted_model=trusted_model,
                 routing_preference=routing_preference,
+                applier=applier,
             )
         else:
             session = hub._make_chat_session(
@@ -128,9 +134,14 @@ async def api_chat_open(request: Request) -> JSONResponse:
                 semantic_models=models,
                 helpers=code_index,
                 catalog=catalog,
+                applier=applier,
             )
     except Exception as exc:  # noqa: BLE001  # AIError surfaces to the UI in Phase 1
         return JSONResponse({"error": str(exc)}, status_code=502)
+    if applier is not None:
+        # Late-bound on purpose (see above). For a routed chat this is the WRAPPER, which
+        # is what `request_cancel` reaches whichever child is live.
+        applier.bind(session)
     # The live-kernel schema is deferred off the open path (see _build_chat_context),
     # so live_text is ""; the first turn picks it up. This seeds the (empty) snapshot.
     session.set_initial_live_schema(live_text)
@@ -148,6 +159,7 @@ async def api_chat_open(request: Request) -> JSONResponse:
         trusted_model=trusted_model,
         routing_preference=routing_preference,
         profile_label=profile_label,
+        applier=applier,
     )
     if refusal:
         # The session was never registered, so lifecycle cleanup is ours. Keep
@@ -201,6 +213,18 @@ async def api_chat_open(request: Request) -> JSONResponse:
             # waits for the "ready"/"fail" event on the stream. The stub/already-
             # ready sessions report True and the UI enables the input immediately.
             "ready": session.is_ready(),
+            # Which MODE this chat is in: True = the copilot writes its own reversible
+            # changes and reports them as receipts, False = it proposes and waits for
+            # Apply. `[ai] auto_apply` defaults ON, so without this the page has no way
+            # to say so and an existing user's copilot simply stops asking — the first
+            # evidence being a receipt for a change that has already landed and run.
+            #
+            # Read off the applier rather than the config: `_make_applier` returning
+            # None IS manual mode (the write tool is never wired), so this cannot
+            # disagree with what the session will actually do. The knob is re-read at
+            # every write, so a mid-session change still bites — this is the open-time
+            # answer, which is what the opening line of the transcript is about.
+            "auto_apply": applier is not None,
         }
     )
 
@@ -237,9 +261,24 @@ async def api_chat_send(request: Request) -> JSONResponse:
     # this _chat_targets re-check, not the hidden button, is the real guarantee.
     if (blocked := hub._disabled_block(sid)) is not None:
         return blocked
+    # A turn is starting. Everything the model writes from here shares ONE undo
+    # checkpoint and ONE receipt group, because "undo the assistant's last turn" is the
+    # unit an analyst thinks in — not "undo its fourth write". Nothing happens in manual
+    # mode (no applier).
+    #
+    # Minted on the two paths that actually FORWARD text, immediately before each send,
+    # rather than once up here. Up here it rotated the turn id for sends that never
+    # happened — an empty message, and (the one that costs something) a second message
+    # typed while the assistant is still working, which a routed session refuses outright.
+    # The running turn's next write then no longer matched the checkpoint map, so it took
+    # a second snapshot and "revert what the assistant just did" only undid part of it.
+    # It must still be minted BEFORE the send: on a backend that drives its tool loop in
+    # this thread, the writes happen inside the call.
+    #
     # "Send anyway" path: forward a prompt the PII guard held, verbatim, once.
     confirm = str(data.get("confirm_token", "")).strip()
     if confirm:
+        hub.chat.begin_turn(sid)
         try:
             await asyncio.to_thread(session.send_confirmed, confirm, live_text)  # ty: ignore[unresolved-attribute]
         except Exception as exc:  # noqa: BLE001  # AIError surfaces to the UI
@@ -249,12 +288,39 @@ async def api_chat_send(request: Request) -> JSONResponse:
     text = str(data.get("text", "")).strip()
     if not text:
         return JSONResponse({"error": "Type a message."}, status_code=400)
+    hub.chat.begin_turn(sid)
     try:
         await asyncio.to_thread(session.send, text, live_text)  # ty: ignore[unresolved-attribute]
     except Exception as exc:  # noqa: BLE001  # AIError surfaces to the UI in Phase 1
         return JSONResponse({"error": str(exc)}, status_code=502)
     telemetry.log_event("ai_chat_send")
     return JSONResponse({"ok": True, "pii": live_banner})
+
+
+async def api_chat_cancel(request: Request) -> JSONResponse:
+    """Stop the turn in flight.
+
+    The counterweight to the whole feature: with the model writing, running and
+    re-checking its own work, a hard analysis is meant to run as long as it takes — so
+    the analyst's control is not an iteration cap, it is this. It raises the session's
+    portable flag (every tool call from now on comes back as a terminal "cancelled", and
+    the applier refuses to write) and, on the Copilot backend, additionally asks the SDK
+    to end the completion it is processing right now.
+
+    Deliberately unconditional: no per-notebook gate, no policy check. Stopping is the
+    one action that can only ever do LESS, and a Cancel that could be refused would be
+    worse than none. Off the event loop because ``request_cancel`` blocks briefly on the
+    SDK's abort round-trip.
+    """
+    hub = request.app.state.hub
+    data = await request.json()
+    sid = str(data.get("sid", ""))
+    session = hub.chat.get(sid)
+    if session is None:
+        return _unknown_session()
+    await asyncio.to_thread(session.request_cancel)
+    telemetry.log_event("ai_chat_cancel")
+    return JSONResponse({"ok": True})
 
 
 async def api_chat_apply(request: Request) -> JSONResponse:
@@ -343,9 +409,12 @@ async def api_chat_run_report(request: Request) -> JSONResponse:
     the analyst gets one explicit action that runs the existing value-free verify smoke path
     (:mod:`mooring.app.run_report`) and hands the assistant the sanitised failure summary.
 
-    **Never automatic.** This re-executes every cell in the notebook, which is precisely
-    what the apply gate exists to keep deliberate. It fires only on a click, on a button
-    that says so first; nothing here is reachable from Apply, a timer, or a page load.
+    **This ENDPOINT is never automatic.** It re-executes every cell in the notebook, so it
+    fires only on a click, on a button that says so first; nothing here is reachable from a
+    timer or a page load. (:mod:`mooring.app.run_report` does now have an automatic sibling
+    — the model's own write asks for the same run when its observation says a cell did not
+    complete — but that path is gated on a ``clean`` codeguard band and its own config knob,
+    and it never comes through this route. See that module's docstring.)
 
     Gated exactly like apply/rollback: the per-notebook opt-out (unioned with the policy's
     ``ai_off`` globs by ``policy.ai_gate``) is checked here AND re-checked in the app layer
@@ -370,6 +439,9 @@ async def api_chat_run_report(request: Request) -> JSONResponse:
         )
     from mooring.app import run_report
 
+    # The report arrives as a new turn, so it opens a new undo checkpoint: anything the
+    # model writes in reply to it must not fold into the turn that came before.
+    hub.chat.begin_turn(sid)
     try:
         # The live-kernel schema is deliberately NOT refreshed for this turn: it comes from
         # the EDITOR's session, which this headless export run does not touch, and a kernel

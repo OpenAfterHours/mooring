@@ -302,6 +302,8 @@ class CopilotProvider:
         catalog=None,
         read_only: bool = False,
         run_investigation=None,
+        applier=None,
+        max_tool_iters: int | None = None,
         pii: PiiConfig | None = None,
         traceback_guard: bool = True,
         background: bool = False,
@@ -358,6 +360,16 @@ class CopilotProvider:
             catalog=catalog,
             read_only=read_only,
             run_investigation=run_investigation,
+            # Edit mode. None keeps the write tool in propose mode, which is what
+            # `[ai] auto_apply = false` and a read-only sub-agent both rely on (the
+            # session forces it to None under read_only as well).
+            applier=applier,
+            # The SDK drives its own tool loop, so there is no loop HERE to bound — but
+            # mooring still owns what every call that loop makes comes back through, and
+            # the ceiling is enforced there (see CopilotChatSession._budget). It has to
+            # be: without it this backend has no runaway bound at all. One number for
+            # both backends, so a ceiling the analyst sets means the same thing on each.
+            max_tool_iters=max_tool_iters,
             pii_enabled=pii.enabled,
             pii_block=pii.block_prompt,
             # NER name detection only acts when the whole guard is on.

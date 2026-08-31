@@ -36,6 +36,7 @@ from typing import Callable, Iterable
 
 from mooring import marimo_rt, schema
 from mooring.ai import cellwrite
+from mooring.ai.tools import WRITE_TOOL_NAMES
 from mooring.app.chat_service import ChatService
 from mooring.config import AppConfig
 
@@ -81,11 +82,14 @@ class Attempt:
 
     @property
     def refusals(self) -> int:
-        """Propose calls the gate handed back instead of emitting. The direct
-        measure of whether the in-loop diagnostics are doing anything."""
-        return sum(
-            1 for name, ok in self.tool_results if name.startswith("mooring_propose") and not ok
-        )
+        """Write calls the gate handed back instead of letting through. The direct
+        measure of whether the in-loop diagnostics are doing anything.
+
+        Matched against :data:`~mooring.ai.tools.WRITE_TOOL_NAMES` — BOTH names the one
+        write tool is registered under — not a ``mooring_propose`` prefix: in edit mode
+        the tool is ``mooring_edit_notebook``, and a prefix test silently scored every
+        such run as zero refusals, which reads as "the gate never fired"."""
+        return sum(1 for name, ok in self.tool_results if name in WRITE_TOOL_NAMES and not ok)
 
     def last_proposal(self) -> dict | None:
         return self.proposals[-1] if self.proposals else None

@@ -8,6 +8,7 @@ import re
 import pytest
 
 from mooring.ai.chat import build_system_context
+from mooring.ai.tools import WRITE_TOOL_NAMES
 
 BASE = {"schema_text": "DATASET", "notebook_source": "import marimo", "notebook_rel": "nb.py"}
 _INSTR_HEADER = "TEAM INSTRUCTIONS (user-authored"
@@ -138,7 +139,7 @@ def _notebook_section(context: str, rel: str = "nb.py") -> str:
 
 
 def test_notebook_is_shown_as_indexed_unwrapped_cells():
-    # The gap this closes: the model READ marimo's wrapped file, but every propose tool
+    # The gap this closes: the model READ marimo's wrapped file, but the write tool
     # takes an unwrapped cell BODY (and an integer index for an edit) — so it had to
     # translate between two formats on every proposal and spend a tool round-trip just
     # to learn the indices. The context now shows exactly what the tools consume.
@@ -146,7 +147,13 @@ def test_notebook_is_shown_as_indexed_unwrapped_cells():
     assert "The notebook has 2 cell(s)" in section
     assert "# === cell 0 ===" in section and "# === cell 1 ===" in section
     assert "seed = 1" in section and "x = seed + 1" in section
-    assert "mooring_propose_notebook_edit" in section  # the index line names its consumer
+    # The index line names its CONSUMER, but not by name: the write tool is registered
+    # under one of two names depending on the session's mode, and this renderer is shared
+    # by the system context and the read tool — neither of which is told the mode. See
+    # test_ai_edit_tool.py for the pin that the session's own prompt names the right one.
+    assert "the notebook-editing tool" in section
+    for name in WRITE_TOOL_NAMES:
+        assert name not in section
 
 
 def test_notebook_wrapper_never_reaches_the_model():
@@ -277,10 +284,13 @@ def test_the_index_view_says_that_it_is_a_snapshot():
     assert "FIRST LINE" in section and "`expect`" in section
     # ...and the tool guide must not pull the other way (it used to say only "read the
     # source first for the index", which reads as optional once indices are in context).
-    from mooring.ai.session import _TOOL_GUIDE
+    from mooring.ai.session import _tool_guide
+    from mooring.ai.tools import WRITE_TOOL_NAMES
 
-    assert "SNAPSHOT" in _TOOL_GUIDE and "mooring_read_notebook_source" in _TOOL_GUIDE
-    assert "`expect`" in _TOOL_GUIDE
+    for write_tool in WRITE_TOOL_NAMES:  # the guide says this in BOTH of the tool's modes
+        guide = _tool_guide(write_tool)
+        assert "SNAPSHOT" in guide and "mooring_read_notebook_source" in guide
+        assert "`expect`" in guide
 
 
 def test_the_dependency_header_is_scrubbed_like_any_other_notebook_text():

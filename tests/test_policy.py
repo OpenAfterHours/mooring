@@ -97,6 +97,56 @@ def test_policy_outranks_an_env_override(tmp_path, monkeypatch):
     assert policy.tighten(app_cfg, pol).ai_pii is True
 
 
+def test_a_policy_can_force_the_manual_apply_back_but_never_take_it_away(tmp_path):
+    """``ai.auto_apply``'s asymmetry, spelled out rather than left to the sweep above,
+    because its safe value is ``false``: a regulated team can put the Apply button
+    back for everyone and no repo can take a teammate's button away. The mirror of
+    ``ai.apply_guard``, whose safe value is ``true`` — "stricter" is a property of
+    each knob, never "true". ``ai.auto_run_report`` rides the same direction: a repo
+    may stop mooring re-running your notebook, never start it.
+    """
+    user = tmp_path / "config.toml"
+    user.write_text("[ai]\nauto_apply = true\nauto_run_report = true\n", "utf-8")
+    auto = config.load_app_config(user_config_path=user, env={})
+    assert auto.ai_auto_apply is True and auto.ai_auto_run_report is True
+
+    tight = policy.parse(
+        tomllib.loads('[policy.settings]\n"ai.auto_apply" = false\n"ai.auto_run_report" = false\n')
+    )
+    assert tight.settings == {"ai.auto_apply": False, "ai.auto_run_report": False}
+    tightened = policy.tighten(auto, tight)
+    assert tightened.ai_auto_apply is False and tightened.ai_auto_run_report is False
+
+    # The permissive spelling is unexpressible: dropped with a reason, and a machine
+    # that chose the manual Apply (here via the env layer) keeps it.
+    manual = config.load_app_config(
+        user_config_path=user,
+        env={"MOORING_AI_AUTO_APPLY": "0", "MOORING_AI_AUTO_RUN_REPORT": "0"},
+    )
+    loose = policy.parse(
+        tomllib.loads('[policy.settings]\n"ai.auto_apply" = true\n"ai.auto_run_report" = true\n')
+    )
+    assert loose.settings == {}
+    assert any("ai.auto_apply" in reason for reason in loose.ignored)
+    assert any("ai.auto_run_report" in reason for reason in loose.ignored)
+    assert policy.tighten(manual, loose).ai_auto_apply is False
+    assert policy.tighten(manual, loose).ai_auto_run_report is False
+
+
+def test_the_tool_call_ceiling_is_deliberately_not_policy_governed(tmp_path):
+    """``KNOBS`` models BOOLEAN knobs with ONE safe value, and that is what makes
+    tighten-only a property of the data. An int has no single safe value — it would
+    need a comparison direction this design does not have — so ``[ai] max_tool_iters``
+    is left out on purpose and a policy naming it is ignored like any unknown key.
+    Pinned so the omission reads as a decision, not an oversight."""
+    assert "ai.max_tool_iters" not in policy.KNOB_BY_KEY
+    pol = policy.parse(tomllib.loads('[policy.settings]\n"ai.max_tool_iters" = 5\n'))
+    assert pol.settings == {}
+    assert any("ai.max_tool_iters" in reason for reason in pol.ignored)
+    with pytest.raises(ValueError):
+        policy.set_rule(tmp_path, policy.RULE_SETTING, ["ai.max_tool_iters", "5"])
+
+
 def test_guard_mode_only_ever_rises():
     """The scale knob: MAX on ("warn", "block"), so a policy saying "warn" can
     never lower a repo that already sets [guard] push = "block"."""

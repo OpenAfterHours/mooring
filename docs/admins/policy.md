@@ -197,6 +197,7 @@ mid-session takes effect immediately.
 "ai.pii.enabled"   = true
 "ai.traceback_guard" = true
 "ai.apply_guard"   = true
+"ai.auto_apply"    = false
 "ai.context"       = false
 "ai.code_index"    = false
 "ai.batch.enabled" = false
@@ -211,22 +212,45 @@ mid-session takes effect immediately.
 | `ai.traceback_guard` | `true` | Pasted tracebacks are always sanitised. |
 | `ai.apply_guard` | `true` | The Apply check cannot be turned off locally. |
 | `ai.apply_runs` | `false` | An applied cell is staged, never run by the act of applying. |
+| `ai.auto_apply` | `false` | Nothing the copilot writes lands without a human pressing **Apply**. |
+| `ai.auto_run_report` | `false` | mooring never re-runs a notebook by itself to report a failure back to the model. |
 | `ai.context` | `false` | Team context files are never sent. |
 | `ai.code_index` | `false` | The team code library is never sent. |
 | `ai.notebook_catalog` | `false` | No repo-wide notebook catalog. |
-| `ai.live_schema` | `false` | No live kernel schema reads. |
+| `ai.live_schema` | `false` | No live kernel schema reads — *of any kind*: neither the schema of the dataframes in your kernel, nor the [observation](ai-privacy.md#apply-gate) a model-written change gets back, which is the same probe asked a second question. |
 | `ai.semantic_model` | `false` | No Power BI semantic-model reads. |
 | `ai.batch.enabled` | `false` | No unattended batch builds. |
 
 Writing the *other* value is refused when authoring (`mooring policy set`) and
 ignored when parsing — the same rule from both directions.
 
-Note that the two Apply keys point in **opposite directions**, and both are the
-stricter end of their own setting. `ai.apply_guard` may be pinned to `true` (the
-check is armed) and `ai.apply_runs` to `false` (an applied cell is staged rather
-than run). Neither can be spelled the other way round: there is no way to write a
-policy that switches the Apply check off, and none that forces a teammate's
-applied cells to run. See [the Apply check](ai-privacy.md#apply-gate).
+Note that the Apply keys point in **opposite directions**, and each is the
+stricter end of its own setting. `ai.apply_guard` may be pinned to `true` (the
+check is armed) while `ai.apply_runs`, `ai.auto_apply` and `ai.auto_run_report`
+may be pinned to `false` (an applied cell is staged rather than run; a human
+presses Apply; mooring does not re-run your notebook on its own). None of them can
+be spelled the other way round: there is no way to write a policy that switches
+the Apply check off, none that forces a teammate's applied cells to run, none that
+takes a teammate's Apply button away, and none that makes mooring re-run their
+notebook. `ai.auto_apply = false` is the setting a regulated team pins: the
+copilot goes back to proposing, and every change waits for a click. See
+[the Apply check](ai-privacy.md#apply-gate).
+
+The three of them compose, and each is enforced at the write itself (re-read from
+disk and policy-folded every time, so a pinned value bites on the very next write
+rather than the next restart). `ai.apply_runs = false` also settles what the model
+is *told*: a staged cell has not run, so mooring reports that it could not see
+anything rather than a verdict, and never starts an automatic re-run of a notebook
+the analyst has not run themselves.
+
+One `[ai]` setting near these is deliberately **not** governable: `max_tool_iters`,
+the per-turn tool-call ceiling. Every governed key above is a boolean with exactly
+one value a policy may name, which is what makes "a policy can only tighten" a
+property of the file format rather than a promise. A number has no single safe
+value — it would need a comparison direction the design does not have — and the
+ceiling is a runaway-loop backstop, not a safety boundary: nothing a policy
+protects becomes reachable because a turn was allowed more tool calls. Set it in
+the deployed `config_default.toml` or via `MOORING_AI_MAX_TOOL_ITERS` instead.
 
 On each machine, a pinned setting shows on the hub's **Settings** page as
 *Set by your team*, with its control disabled and a note saying where the lock

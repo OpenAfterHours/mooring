@@ -53,8 +53,10 @@ graph TD
 - **`ai/`** — the opt-in copilot subpackage. Everything the model sees is
   assembled in **one** place, `ai/egress.py` (`build_system_context`): a
   dataset's schema (column names + dtypes) and the notebook source — never
-  values. `ai/tools.py` exposes value-free, propose-only agent tools and Apply
-  lands through `ai/cellwrite.py`; `ai/introspect.py` reads live-kernel schemas
+  values. `ai/tools.py` exposes value-free agent tools — one write tool, which
+  either proposes for the analyst to Apply or (with `[ai] auto_apply`) applies its
+  own change and reports back a value-free observation — and every write lands
+  through `ai/cellwrite.py`; `ai/introspect.py` reads live-kernel schemas
   with a fixed, fail-closed probe; `ai/pii.py`, `ai/ner.py` / `ai/ner_spacy.py`,
   and `ai/secrets.py` are opt-in scanners; `ai/datadictionary/` parses team
   context into a five-slot allowlist.
@@ -90,7 +92,7 @@ src/mooring/
   ai/                    opt-in copilot (schema-only)
     egress.py            single context assembler — the one place context is built
     copilot.py           GitHub Copilot provider + chat session
-    tools.py             value-free, propose-only agent tools
+    tools.py             value-free agent tools (one write tool: propose OR apply-and-observe)
     cellwrite.py         applies a reviewed cell patch via marimo codegen
     introspect.py        fail-closed live-kernel schema probe
     pii.py / secrets.py  opt-in outbound scanners (value-free findings)
