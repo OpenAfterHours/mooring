@@ -886,7 +886,7 @@ pre {
   font-size: 12px;
 }
 .chat-body #topbar { border-bottom: 1px solid var(--term-bar-rule); }
-.chat-body #statusbar { border-top: 1px solid var(--term-bar-rule); }
+.chat-body #statusbar { border-top: 1px solid var(--term-bar-rule); flex-wrap: wrap; }
 .chat-body #topbar .topbar-title { font-weight: 600; letter-spacing: 0.02em; }
 .chat-body #topbar #chat-target { flex: 1; color: var(--term-bar-dim); font-size: 11px; }
 .chat-body #topbar .badge.synced {
@@ -957,6 +957,11 @@ pre {
   background: var(--oah-slate-700);
   color: var(--term-bar-ink);
 }
+.chat-body #statusbar select:disabled {
+  cursor: default;
+  opacity: 0.8;
+}
+.chat-body #statusbar .status-profile { color: var(--term-bar-ink); }
 .chat-body .status-sep { color: var(--term-bar-edge); }
 .chat-body .status-seg { color: var(--term-bar-dim); }
 .chat-body .status-state { margin-left: auto; color: var(--term-bar-dim); }

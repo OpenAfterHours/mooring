@@ -15,6 +15,8 @@ const NOTEBOOK = new URLSearchParams(location.search).get("notebook") || "";
 const EXPLAIN = new URLSearchParams(location.search).get("explain") === "1";
 const REVIEW = new URLSearchParams(location.search).get("review") === "1";
 const LS_MODEL = "mooring.ai.model";
+const LS_TRUSTED_MODEL = "mooring.ai.trusted_model";
+const LS_ROUTING_PREFERENCE = "mooring.ai.routing_preference";
 // The effort pick is stored PER PROVIDER (ChatCore.effortKey) — see chat_core.js.
 // PROVIDER and DEFAULT_EFFORT are both learned from /api/ai/models and kept for the
 // life of the window: populateEfforts re-runs on every model switch, and without the
@@ -46,6 +48,7 @@ const STATE_LABEL = {
   thinking: "thinking…",
   streaming: "streaming…",
   error: "error",
+  unavailable: "unavailable",
 };
 
 let sid = null;
@@ -53,6 +56,7 @@ let source = null; // EventSource
 let turnState = "idle"; // idle | thinking | streaming | error
 let stick = true; // auto-scroll only when the user is near the bottom
 let MODELS = [];
+let ROUTING = null; // safe picker metadata only; endpoint/key/classifier never reach this page
 let DATASETS = []; // value-free dataset paths, for @-mentions (from /api/state)
 
 // per-turn render state
@@ -73,11 +77,14 @@ let reviewFired = false; // &review=1 auto-runs /review at most ONCE per window 
 let explainTurnActive = false; // the turn answering /explain (offers "Add as notes cell")
 let currentGuard = null; // outbound-PII guard status for this session (topbar badge)
 const history = new ChatCore.HistoryRing(); // in-memory ONLY (never persisted)
+const openGate = ChatCore.latestRequestGate();
+let openController = null;
 
-async function api(path, body) {
+async function api(path, body, { signal } = {}) {
   const opts = body === undefined
     ? {}
     : { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) };
+  if (signal) opts.signal = signal;
   const resp = await fetch(path, opts);
   const data = await resp.json().catch(() => ({}));
   if (!resp.ok && !data.error) data.error = `Request failed (${resp.status})`;
@@ -883,25 +890,8 @@ function showPiiBanner(items) {
 }
 
 function showRoutingNotice(route, switched = false) {
-  if (!route?.zone) return;
-  if (route.zone === "trusted") {
-    const carried = route.conversation_carried;
-    let text = switched
-      ? "This conversation switched to your firm's approved customer-data model."
-      : "Your firm's approved customer-data model is handling this conversation.";
-    if (switched && carried === true) text += " The earlier conversation was carried forward.";
-    if (switched && carried === false) {
-      text += " The earlier conversation could not be carried; make follow-up requests self-contained.";
-    }
-    addSysRow(text);
-    return;
-  }
-  if (!switched) {
-    addSysRow(
-      "The approved data checker found this context suitable for the selected general coding model. " +
-      "Mooring will switch this conversation if later content needs the approved customer-data model."
-    );
-  }
+  const text = ChatCore.routingNotice(route, switched);
+  if (text) addSysRow(text);
 }
 
 // A held chat turn (block_prompt): nothing was sent; offer "Send anyway".
@@ -1015,8 +1005,22 @@ function setTurnState(state) {
   turnState = state;
   // "connecting" disables input too: the session isn't ready to take a turn until
   // the provider handshake finishes (a "ready" event flips it to idle).
-  const busy = state === "thinking" || state === "streaming" || state === "connecting";
+  const busy = state === "thinking" || state === "streaming" || state === "connecting" || state === "unavailable";
   $("chat-input").disabled = busy;
+  const generalRelevant = ChatCore.generalModelRelevant(
+    ROUTING,
+    $("chat-routing-preference").value,
+  );
+  $("chat-model").disabled = busy || !generalRelevant;
+  $("chat-effort").disabled = busy || !generalRelevant;
+  const generalHint = generalRelevant
+    ? ""
+    : "Not used while routing is set to Always use approved";
+  $("chat-model").closest("label").title = generalHint;
+  $("effort-wrap").title = generalHint;
+  const trustedOptions = ChatCore.trustedModelOptions(ROUTING);
+  $("chat-trusted-model").disabled = busy || trustedOptions.length <= 1;
+  $("chat-routing-preference").disabled = busy || trustedOptions.length === 0;
   setStatus(STATE_LABEL[state] || state);
   if (state === "idle" || state === "error") {
     clearPending();
@@ -1058,20 +1062,55 @@ function selectedEffort() {
 }
 
 async function openChat() {
+  const generation = openGate.begin();
+  if (openController) openController.abort();
+  const controller = new AbortController();
+  openController = controller;
   closeStream();
+  sid = null;
   clearSigninNotice();
   showError("");
+  setTurnState("connecting");
   const model = $("chat-model").value;
   const reasoning_effort = selectedEffort();
-  const { status, data } = await api("/api/ai/chat/open", {
-    notebook: NOTEBOOK, model, reasoning_effort,
-  });
+  const body = { notebook: NOTEBOOK, model, reasoning_effort };
+  if (ROUTING?.enabled === true) {
+    body.trusted_model = $("chat-trusted-model").value;
+    body.routing_preference = $("chat-routing-preference").value;
+  }
+  if (ROUTING && !ChatCore.trustedRoutingAvailable(ROUTING)) {
+    openController = null;
+    showError("Approved customer-data routing is unavailable. Reload or contact your administrator.");
+    setTurnState("unavailable");
+    return;
+  }
+  let response;
+  try {
+    response = await api("/api/ai/chat/open", body, { signal: controller.signal });
+  } catch (error) {
+    if (!openGate.isCurrent(generation) || error?.name === "AbortError") return;
+    openController = null;
+    showError("Could not start the copilot.");
+    setTurnState(ROUTING ? "unavailable" : "error");
+    return;
+  }
+  if (!openGate.isCurrent(generation)) return;
+  openController = null;
+  const { status, data } = response;
   if (data.reason === "notebook_disabled") {
     lockForDisabled();
     return;
   }
   if (!data.sid) {
     showError(data.error || `Could not start the copilot (${status}).`);
+    setTurnState(ROUTING ? "unavailable" : "error");
+    return;
+  }
+  if (!ChatCore.routingExpectationMatches(ROUTING, data.route)) {
+    showError("Approved routing changed while this chat was opening. Reload before sending anything.");
+    setPrivacyChrome({ enabled: true, trusted_models: [], error: true });
+    addSysRow("Approved routing changed; the earlier privacy guidance is no longer current. Reload this chat.");
+    setTurnState("unavailable");
     return;
   }
   sid = data.sid;
@@ -1157,9 +1196,11 @@ async function openChat() {
   });
   source.addEventListener("closed", () => setStatus("closed"));
   source.onerror = () => setStatus("reconnecting…");
-  currentGuard = data.guard || null;
+  // Routed chat uses the approved classifier rather than the legacy PII guard;
+  // never paint that intentionally-disabled legacy guard as a red "PII-off" warning.
+  currentGuard = ROUTING ? null : (data.guard || null);
   setPiiBadge(currentGuard);
-  showPiiBanner(data.pii);
+  if (!ROUTING) showPiiBanner(data.pii);
   showRoutingNotice(data.route);
   // If the session is still starting (backgrounded handshake), show "connecting…"
   // and keep the input disabled until the "ready" event arrives; an already-ready
@@ -1553,20 +1594,19 @@ function handleModelCommand(arg) {
 }
 
 function printBanner() {
+  const copy = ChatCore.privacyChrome(ROUTING);
   addRow("row-sys", (el) => {
     const a = document.createElement("div");
     const b = document.createElement("b");
-    b.textContent = "mooring copilot · schema-only.";
+    b.textContent = copy.lead;
     a.appendChild(b);
     a.appendChild(
       document.createTextNode(
-        " The assistant sees this notebook's code and the schema (column names & types) " +
-        "of your datasets and loaded dataframes — never the data itself. It looks schemas up " +
-        "on its own; just ask."
+        copy.body
       )
     );
     const c = document.createElement("div");
-    c.textContent = "Type /help for commands. Don't paste real values into a cell or this chat.";
+    c.textContent = copy.footer;
     el.append(a, c);
   });
 }
@@ -1684,7 +1724,76 @@ function updateAutocomplete(input) {
   closeAutocomplete();
 }
 
-// -- models / effort --------------------------------------------------------
+// -- models / effort / trusted routing -------------------------------------
+
+function populateTrustedRouting(routing) {
+  ROUTING = routing?.enabled === true ? routing : null;
+  const modelWrap = $("trusted-model-wrap");
+  const preferenceWrap = $("routing-preference-wrap");
+  const modelSelect = $("chat-trusted-model");
+  const preferenceSelect = $("chat-routing-preference");
+  modelSelect.innerHTML = "";
+  if (!ROUTING) {
+    modelWrap.classList.add("hidden");
+    preferenceWrap.classList.add("hidden");
+    modelSelect.disabled = true;
+    preferenceSelect.disabled = true;
+    return;
+  }
+  const options = ChatCore.trustedModelOptions(ROUTING);
+  const available = ChatCore.trustedRoutingAvailable(ROUTING);
+  const profileLabel = $("trusted-profile-label");
+  const profile = typeof ROUTING.profile_label === "string" ? ROUTING.profile_label.trim() : "";
+  profileLabel.textContent = profile ? `(${profile})` : "";
+  profileLabel.classList.toggle("hidden", !profile);
+  for (const model of options) {
+    const option = document.createElement("option");
+    option.value = model.id;
+    option.textContent = model.name;
+    modelSelect.appendChild(option);
+  }
+  if (!options.length) {
+    const option = document.createElement("option");
+    option.value = "";
+    option.textContent = "Not configured";
+    modelSelect.appendChild(option);
+  }
+  modelSelect.value = ChatCore.chooseTrustedModel(
+    ROUTING,
+    localStorage.getItem(LS_TRUSTED_MODEL),
+  );
+  preferenceSelect.value = ChatCore.chooseRoutingPreference(
+    ROUTING,
+    localStorage.getItem(LS_ROUTING_PREFERENCE),
+  );
+  const selectable = options.length > 1;
+  modelSelect.title = selectable
+    ? "Choose from the customer-data models approved by your firm"
+    : options.length === 1
+      ? "This is the only customer-data model approved by your firm"
+      : "No approved customer-data model is configured";
+  modelSelect.disabled = !available || !selectable;
+  preferenceSelect.disabled = !available;
+  modelWrap.classList.remove("hidden");
+  preferenceWrap.classList.remove("hidden");
+}
+
+function setPrivacyChrome(routing = ROUTING) {
+  const copy = ChatCore.privacyChrome(routing);
+  const badge = $("privacy-badge");
+  badge.textContent = copy.badge;
+  badge.title = copy.title;
+  badge.classList.remove("hidden", "synced", "danger", "warn");
+  badge.classList.add(copy.badgeClass);
+}
+
+function reopenForRoutingChange(message) {
+  // Controls are disabled while a turn/handshake is active. This guard also
+  // protects programmatic change events and keeps the current session intact.
+  if (!ChatCore.routingChangeAllowed(turnState)) return;
+  addSysRow(`— ${message}; starting a fresh conversation —`);
+  openChat();
+}
 
 // Takes no argument on purpose: the configured default is remembered in
 // DEFAULT_EFFORT, so a model switch (/model, the dropdown) can't lose it.
@@ -1717,6 +1826,8 @@ async function loadModels() {
   MODELS = data.models || [];
   PROVIDER = data.provider || "";
   DEFAULT_EFFORT = data.default_effort || "";
+  populateTrustedRouting(data.routing);
+  setPrivacyChrome();
   const sel = $("chat-model");
   sel.innerHTML = "";
   const wrap = sel.closest("label");
@@ -1768,7 +1879,6 @@ async function init() {
     return;
   }
   setStatus("loading…");
-  printBanner();
   // Only the model list is needed before opening (it decides the model sent to
   // /chat/open). The dataset list just feeds @-mention autocomplete, so it loads
   // fire-and-forget and hydrates after the chat is already usable — it no longer
@@ -1777,6 +1887,7 @@ async function init() {
   // One-time: hand the old un-namespaced effort pick to the provider that made it.
   ChatCore.adoptLegacyEffort(localStorage);
   await loadModels();
+  printBanner();
 
   $("chat-model").addEventListener("change", () => {
     localStorage.setItem(LS_MODEL, $("chat-model").value);
@@ -1786,6 +1897,22 @@ async function init() {
   $("chat-effort").addEventListener("change", () => {
     localStorage.setItem(effortStore(), $("chat-effort").value);
     openChat();
+  });
+  $("chat-trusted-model").addEventListener("change", () => {
+    const selected = ChatCore.chooseTrustedModel(ROUTING, $("chat-trusted-model").value);
+    if (!selected) return;
+    localStorage.setItem(LS_TRUSTED_MODEL, selected);
+    reopenForRoutingChange(`customer-data model changed to ${selected}`);
+  });
+  $("chat-routing-preference").addEventListener("change", () => {
+    const preference = ChatCore.chooseRoutingPreference(
+      ROUTING,
+      $("chat-routing-preference").value,
+    );
+    $("chat-routing-preference").value = preference;
+    localStorage.setItem(LS_ROUTING_PREFERENCE, preference);
+    const label = preference === "trusted" ? "routing set to Always use approved" : "routing set to Automatic";
+    reopenForRoutingChange(label);
   });
   $("messages").addEventListener("scroll", () => {
     stick = isNearBottom();

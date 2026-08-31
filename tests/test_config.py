@@ -66,6 +66,8 @@ def test_ai_routing_defaults_off_with_no_credentials_in_config(tmp_path):
     assert app.ai.routing == RoutingConfig()
     assert app.ai_routing_enabled is False
     assert app.ai_trusted_base_url == ""
+    assert app.ai_trusted_coding_models == ()
+    assert app.ai_trusted_profile_label == "Approved AI"
     assert not hasattr(app.ai.routing, "api_key")
 
 
@@ -100,6 +102,43 @@ def test_ai_routing_ignores_toml_and_accepts_only_managed_env(tmp_path):
         classifier_model="admin-classifier",
         coding_model="admin-coder",
     )
+    assert overridden.ai_trusted_coding_models == ("admin-coder",)
+
+
+def test_ai_trusted_model_allowlist_is_trimmed_deduped_and_exact(tmp_path):
+    app = load_app_config(
+        user_config_path=tmp_path / "missing.toml",
+        env={
+            "MOORING_AI_ROUTING": "1",
+            "MOORING_AI_TRUSTED_BASE_URL": "https://admin.example/openai",
+            "MOORING_AI_TRUSTED_CLASSIFIER_MODEL": "classifier",
+            "MOORING_AI_TRUSTED_CODING_MODEL": "coder-default",
+            "MOORING_AI_TRUSTED_CODING_MODELS": (
+                " coder-default, coder-fast, coder-default ,Coder-Fast "
+            ),
+            "MOORING_AI_TRUSTED_PROFILE_LABEL": " Firm Azure OpenAI ",
+        },
+    )
+
+    assert app.ai.routing.coding_models == (
+        "coder-default",
+        "coder-fast",
+        "Coder-Fast",
+    )
+    assert app.ai_trusted_coding_models == app.ai.routing.coding_models
+    assert app.ai_trusted_profile_label == "Firm Azure OpenAI"
+
+
+@pytest.mark.parametrize("models", ["", "other-coder, another-coder"])
+def test_ai_trusted_model_allowlist_must_include_default(tmp_path, models):
+    with pytest.raises(ValueError, match="must be non-empty and include"):
+        load_app_config(
+            user_config_path=tmp_path / "missing.toml",
+            env={
+                "MOORING_AI_TRUSTED_CODING_MODEL": "coder-default",
+                "MOORING_AI_TRUSTED_CODING_MODELS": models,
+            },
+        )
 
 
 def test_ai_batch_config_defaults_off_with_caps(tmp_path):

@@ -68,6 +68,140 @@ const ChatCore = (function () {
     );
   }
 
+  // -- trusted routing picker ---------------------------------------------
+  // Treat routing metadata as an allowlist, never as a hint that lets a saved
+  // browser value invent a model. These helpers are deliberately DOM/storage-free
+  // so the fail-safe selection rules stay pinned by the Node suite.
+  function trustedModelOptions(routing) {
+    if (!routing || routing.enabled !== true || !Array.isArray(routing.trusted_models)) return [];
+    const seen = new Set();
+    const options = [];
+    for (const raw of routing.trusted_models) {
+      if (!raw || typeof raw !== "object") continue;
+      const id = typeof raw.id === "string" ? raw.id.trim() : "";
+      if (!id || seen.has(id)) continue;
+      const suppliedName = typeof raw.name === "string" ? raw.name.trim() : "";
+      options.push({ id, name: suppliedName || id });
+      seen.add(id);
+    }
+    return options;
+  }
+
+  function chooseTrustedModel(routing, saved) {
+    const options = trustedModelOptions(routing);
+    const allowed = new Set(options.map((m) => m.id));
+    const candidates = [saved, routing?.default_trusted_model, options[0]?.id];
+    for (const value of candidates) {
+      if (typeof value === "string" && allowed.has(value.trim())) return value.trim();
+    }
+    return "";
+  }
+
+  function trustedRoutingAvailable(routing) {
+    return routing?.enabled === true && !routing.error && trustedModelOptions(routing).length > 0;
+  }
+
+  function chooseRoutingPreference(routing, saved) {
+    if (!trustedRoutingAvailable(routing)) return "auto";
+    return saved === "trusted" ? "trusted" : "auto";
+  }
+
+  function routingNotice(route, switched) {
+    if (!route || (route.zone !== "trusted" && route.zone !== "general")) return "";
+    const modelValue = route.model || route.trusted_model || route.model_id;
+    const model = typeof modelValue === "string" ? modelValue.trim() : "";
+    const profile = typeof route.profile_label === "string" ? route.profile_label.trim() : "";
+    const identity = [...new Set([profile, model].filter(Boolean))].join(" · ");
+    if (route.zone === "trusted") {
+      let text = switched
+        ? "This conversation switched to your firm's approved customer-data model"
+        : "Your firm's approved customer-data model is handling this conversation";
+      if (identity) text += ` (${identity})`;
+      text += ".";
+      if (switched && route.conversation_carried === true) {
+        text += " The earlier conversation was carried forward.";
+      }
+      if (switched && route.conversation_carried === false) {
+        text += " The earlier conversation could not be carried; make follow-up requests self-contained.";
+      }
+      return text;
+    }
+    if (switched) return "";
+    const general = model ? ` (${model})` : "";
+    return (
+      "The approved data checker found this context suitable for the selected general coding model" +
+      general +
+      ". Mooring will switch this conversation if later content needs the approved customer-data model."
+    );
+  }
+
+  function privacyChrome(routing) {
+    if (routing?.enabled === true) {
+      if (!trustedRoutingAvailable(routing)) {
+        return {
+          badge: "approved routing unavailable",
+          badgeClass: "danger",
+          title: "Approved customer-data routing is unavailable; messages cannot be sent",
+          lead: "mooring copilot · approved routing unavailable.",
+          body: " Customer-data routing is not ready, so this chat cannot send messages.",
+          footer: "Reload or ask your administrator to check the approved model configuration.",
+        };
+      }
+      return {
+        badge: "approved routing",
+        badgeClass: "synced",
+        title:
+          "An approved checker routes customer information to your firm's approved model; " +
+          "raw dataset values and cell results are not automatically read",
+        lead: "mooring copilot · approved routing.",
+        body:
+          " An approved checker routes each turn. Customer information you deliberately put in " +
+          "notebook code or this chat may be sent to the selected approved model. Mooring does " +
+          "not automatically read raw dataset values or cell results, and recognized credential " +
+          "patterns are blocked locally.",
+        footer: "Type /help for commands.",
+      };
+    }
+    return {
+      badge: "schema-only",
+      badgeClass: "synced",
+      title: "The assistant only ever sees column names & types, never data values",
+      lead: "mooring copilot · schema-only.",
+      body:
+        " The assistant sees this notebook's code and the schema (column names & types) " +
+        "of your datasets and loaded dataframes — never the data itself. It looks schemas up " +
+        "on its own; just ask.",
+      footer: "Type /help for commands. Don't paste real values into a cell or this chat.",
+    };
+  }
+
+  function routingChangeAllowed(turnState) {
+    return turnState === "idle" || turnState === "error";
+  }
+
+  function latestRequestGate() {
+    let generation = 0;
+    return {
+      begin() {
+        generation += 1;
+        return generation;
+      },
+      isCurrent(candidate) {
+        return candidate === generation;
+      },
+    };
+  }
+
+  function routingExpectationMatches(routing, route) {
+    const zone = route?.zone;
+    if (zone && zone !== "general" && zone !== "trusted") return false;
+    return Boolean(routing) === Boolean(zone);
+  }
+
+  function generalModelRelevant(routing, preference) {
+    return !(trustedRoutingAvailable(routing) && preference === "trusted");
+  }
+
   // -- /explain: the handover walkthrough ------------------------------------
   // Fixed prompts for the "explain this notebook" flow. All three are pure
   // CONSTANTS — no user text, no dataset values, no interpolation — so the same
@@ -1187,6 +1321,16 @@ const ChatCore = (function () {
     unescapeSlash,
     filterCommands,
     isSlashTyping,
+    trustedModelOptions,
+    chooseTrustedModel,
+    trustedRoutingAvailable,
+    chooseRoutingPreference,
+    routingNotice,
+    privacyChrome,
+    routingChangeAllowed,
+    latestRequestGate,
+    routingExpectationMatches,
+    generalModelRelevant,
     explainPrompt,
     explainLabel,
     reviewPrompt,

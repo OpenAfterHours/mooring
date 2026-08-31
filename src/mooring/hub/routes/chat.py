@@ -30,6 +30,8 @@ async def api_chat_open(request: Request) -> JSONResponse:
     notebook = str(data.get("notebook", "")).strip()
     dataset = str(data.get("dataset", "")).strip()
     model = str(data.get("model", "")).strip()
+    requested_trusted_model = str(data.get("trusted_model", "")).strip()
+    routing_preference = str(data.get("routing_preference", "auto")).strip().lower() or "auto"
     # An explicit pick from the effort picker wins; "" means the page had no picker
     # to offer (a model that takes no effort, or a provider that advertises none), so
     # the configured default stands in. A page WITH a picker always sends a concrete
@@ -39,6 +41,21 @@ async def api_chat_open(request: Request) -> JSONResponse:
     reasoning_effort = (
         str(data.get("reasoning_effort", "")).strip() or hub.app_cfg.ai_reasoning_effort
     )
+    routing_enabled = hub.app_cfg.ai_routing_enabled
+    trusted_model = ""
+    try:
+        if routing_enabled:
+            trusted_model, routing_preference, _profile_label = hub._trusted_chat_options(
+                requested_trusted_model, routing_preference
+            )
+        elif routing_preference != "auto" or requested_trusted_model:
+            raise ValueError("Approved routing is not enabled; remove trusted routing options.")
+    except ValueError as exc:
+        # Browser-controlled values are rejected before the notebook context is
+        # read or either approved AI client can be constructed.
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    except Exception as exc:  # noqa: BLE001 - managed profile/configuration failure
+        return JSONResponse({"error": str(exc)}, status_code=502)
     if not notebook:
         return JSONResponse({"error": "A notebook is required."}, status_code=400)
     workspace = hub.cfg.workspace()
@@ -50,7 +67,7 @@ async def api_chat_open(request: Request) -> JSONResponse:
         # File IO (notebook source, dataset schema, team context, semantic-model
         # extraction) — off the event loop so a slow read can't stall the hub's
         # other requests.
-        if hub.app_cfg.ai_routing_enabled:
+        if routing_enabled:
             bundle = await run_in_threadpool(
                 hub._build_chat_context,
                 workspace,
@@ -79,6 +96,8 @@ async def api_chat_open(request: Request) -> JSONResponse:
                 dataset,
                 model=model,
                 reasoning_effort=reasoning_effort,
+                trusted_model=trusted_model,
+                routing_preference=routing_preference,
             )
         else:
             session = hub._make_chat_session(
@@ -110,12 +129,25 @@ async def api_chat_open(request: Request) -> JSONResponse:
             "sid": sid,
             "notebook": notebook,
             "pii": pii_banner,
-            "guard": (
-                {"enabled": False, "block": False, "names": False, "names_active": False}
+            # Approved routing supersedes the legacy local PII hold. ``null`` is
+            # intentional: reporting ``enabled: false`` made the UI imply that
+            # protection had been switched off rather than replaced.
+            "guard": None if bundle is not None else hub._pii_status(),
+            "route": (
+                {
+                    "zone": session.zone,
+                    **(
+                        {
+                            "profile_label": session.profile_label,
+                            "model": session.trusted_model,
+                        }
+                        if session.zone == "trusted"
+                        else {}
+                    ),
+                }
                 if bundle is not None
-                else hub._pii_status()
+                else None
             ),
-            "route": {"zone": session.zone} if bundle is not None else None,
             # Whether the chat is usable NOW. A backgrounded provider session is
             # still starting (Copilot handshake) — the UI shows "connecting…" and
             # waits for the "ready"/"fail" event on the stream. The stub/already-
@@ -411,7 +443,22 @@ async def api_chat_models(request: Request) -> JSONResponse:
         # words mean different money on different backends, so a pick made under one
         # must never select under another (chat.js/batch.js -> ChatCore.effortKey).
         "provider": getattr(provider, "name", "") or hub.app_cfg.ai_provider or "",
+        "routing": {"enabled": False},
     }
+    if hub.app_cfg.ai_routing_enabled:
+        try:
+            payload["routing"] = hub._trusted_routing_metadata()
+        except Exception:  # noqa: BLE001 - keep the general picker usable
+            # An incomplete deployment profile yields no selectable model and no
+            # sensitive configuration detail. Chat-open will surface the managed
+            # configuration error if a caller nevertheless attempts routed chat.
+            payload["routing"] = {
+                "enabled": True,
+                "profile_label": "Approved AI",
+                "trusted_models": [],
+                "default_trusted_model": "",
+                "error": "The approved AI profile is unavailable.",
+            }
     # When the list is empty because the provider REJECTED the request (e.g. a
     # 403 "not authorized to use this Copilot feature" — a signed-in but
     # unlicensed account), pass the reason through so the page can show it

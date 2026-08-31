@@ -250,13 +250,25 @@ Set all of these in the managed process environment:
 | `MOORING_AI_TRUSTED_BASE_URL` | Explicit HTTPS OpenAI-compatible or Azure endpoint approved for customer data. |
 | `MOORING_AI_TRUSTED_API_VERSION` | Azure API version; leave empty for a standard OpenAI-compatible endpoint. |
 | `MOORING_AI_TRUSTED_CLASSIFIER_MODEL` | Pinned model/deployment that classifies every outbound context and turn. |
-| `MOORING_AI_TRUSTED_CODING_MODEL` | Pinned coding model/deployment used after a sensitive or uncertain decision. |
+| `MOORING_AI_TRUSTED_CODING_MODEL` | Default trusted coding model/deployment. When no allowlist is supplied, this is also the only trusted choice. |
+| `MOORING_AI_TRUSTED_CODING_MODELS` | Optional comma-separated allowlist of trusted coding models/deployments shown in the chat UI. The default above must be a member. |
+| `MOORING_AI_TRUSTED_PROFILE_LABEL` | Optional user-facing name for the approved service, such as `Firm Azure OpenAI`. Endpoint details are never exposed to the browser. |
 | `MOORING_AI_TRUSTED_API_KEY` | Dedicated credential for this approved endpoint; it never falls back to the user's general OpenAI key. |
 
 The profile must name an explicit HTTPS endpoint, redirects are disabled, and a
-per-chat model choice never overrides the pinned trusted coding model. This first
-release applies to interactive notebook chat; batch building is disabled while
-trusted routing is active, as is parallel investigate.
+per-chat model choice can select only an exact member of the deployment-managed
+trusted allowlist. The endpoint, credential, and classifier are never user-selectable.
+If the plural allowlist is set, startup validation fails closed unless the default
+model is included; model discovery from the endpoint is deliberately not used.
+
+When routing is available, the chat status bar shows separate **General model** and
+**Customer-data model** controls. A single approved customer-data model is shown as a
+fixed choice; a larger allowlist becomes a selector. Users can leave routing on
+**Automatic** or choose **Always use approved**. The latter can only move a conversation
+upward to the approved service: local secret blocking and the approved classifier's
+`block` decision still apply, and there is no “always general” bypass. Changing a
+selection starts a fresh chat. This release applies to interactive notebook chat;
+batch building is disabled while trusted routing is active, as is parallel investigate.
 
 ### `[guard]` — in the synced `mooring.toml`, not here
 

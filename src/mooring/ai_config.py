@@ -130,6 +130,8 @@ class RoutingConfig:
     trusted_api_version: str = ""
     classifier_model: str = ""
     coding_model: str = ""
+    coding_models: tuple[str, ...] = ()
+    profile_label: str = "Approved AI"
 
 
 @dataclass(frozen=True)
@@ -236,6 +238,25 @@ def _str_list(raw: object, default: tuple[str, ...]) -> tuple[str, ...]:
     raise ValueError("[ai.pii] name_labels must be an array of strings")
 
 
+def _csv_list(raw: object) -> tuple[str, ...]:
+    """Normalise a deployment-managed comma-separated list.
+
+    Model IDs are case-sensitive opaque provider values, so normalisation is
+    deliberately limited to trimming whitespace, dropping empty entries, and
+    stable de-duplication.
+    """
+    if raw is None:
+        return ()
+    seen: set[str] = set()
+    values: list[str] = []
+    for item in str(raw).split(","):
+        value = item.strip()
+        if value and value not in seen:
+            seen.add(value)
+            values.append(value)
+    return tuple(values)
+
+
 def load_ai_config(ai: Mapping, env: Mapping[str, str]) -> AiConfig:
     """Build an :class:`AiConfig` from the merged ``[ai]`` table and env overrides.
 
@@ -306,12 +327,25 @@ def load_ai_config(ai: Mapping, env: Mapping[str, str]) -> AiConfig:
     )
     # Trust is a deployment policy, not a user preference. Values in the editable
     # config.toml must never designate an arbitrary endpoint as "approved".
+    trusted_coding_model = env.get("MOORING_AI_TRUSTED_CODING_MODEL", "").strip()
+    trusted_coding_models = _csv_list(env.get("MOORING_AI_TRUSTED_CODING_MODELS"))
+    if "MOORING_AI_TRUSTED_CODING_MODELS" in env and (
+        not trusted_coding_models or trusted_coding_model not in trusted_coding_models
+    ):
+        raise ValueError(
+            "MOORING_AI_TRUSTED_CODING_MODELS must be non-empty and include "
+            "MOORING_AI_TRUSTED_CODING_MODEL"
+        )
     routing = RoutingConfig(
         enabled=_as_bool(env.get("MOORING_AI_ROUTING"), False),
-        trusted_base_url=env.get("MOORING_AI_TRUSTED_BASE_URL", ""),
-        trusted_api_version=env.get("MOORING_AI_TRUSTED_API_VERSION", ""),
-        classifier_model=env.get("MOORING_AI_TRUSTED_CLASSIFIER_MODEL", ""),
-        coding_model=env.get("MOORING_AI_TRUSTED_CODING_MODEL", ""),
+        trusted_base_url=env.get("MOORING_AI_TRUSTED_BASE_URL", "").strip(),
+        trusted_api_version=env.get("MOORING_AI_TRUSTED_API_VERSION", "").strip(),
+        classifier_model=env.get("MOORING_AI_TRUSTED_CLASSIFIER_MODEL", "").strip(),
+        coding_model=trusted_coding_model,
+        coding_models=trusted_coding_models,
+        profile_label=(
+            env.get("MOORING_AI_TRUSTED_PROFILE_LABEL", "").strip() or "Approved AI"
+        ),
     )
     return AiConfig(
         enabled=_as_bool(env.get("MOORING_AI_ENABLED"), _as_bool(ai.get("enabled"), True)),

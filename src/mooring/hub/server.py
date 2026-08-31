@@ -1017,17 +1017,36 @@ class Hub:
                 self._provider_key = key
             return self._provider
 
-    def _trusted_provider_for(self):
-        """The deployment-pinned OpenAI-compatible provider for customer data."""
+    def _trusted_model_profile(self) -> tuple[str, tuple[str, ...], str]:
+        """Return the exact deployment-managed model allowlist and label."""
+        from mooring.ai.base import AIError
+
+        default_model = self.app_cfg.ai_trusted_coding_model.strip()
+        allowed_models = self.app_cfg.ai_trusted_coding_models
+        profile_label = self.app_cfg.ai_trusted_profile_label
+        if not default_model or not allowed_models or default_model not in allowed_models:
+            raise AIError(
+                "Trusted AI routing is enabled but its managed coding-model allowlist "
+                "is incomplete or does not include the default model."
+            )
+        return default_model, allowed_models, profile_label
+
+    def _trusted_profile(self) -> tuple[str, tuple[str, ...], str]:
+        """Return the fully validated deployment-managed trusted profile.
+
+        This is intentionally value-free and client-independent: routes can reject
+        an unapproved browser selection before reading notebook context or creating
+        either the classifier or coding client.
+        """
         from urllib.parse import urlsplit
 
         from mooring.ai.base import AIError
-        from mooring.ai.openai_provider import OpenAIProvider, resolve_trusted_api_key
+        from mooring.ai.openai_provider import resolve_trusted_api_key
 
         endpoint = self.app_cfg.ai_trusted_base_url.strip()
         classifier_model = self.app_cfg.ai_trusted_classifier_model.strip()
-        coding_model = self.app_cfg.ai_trusted_coding_model.strip()
-        if not endpoint or not classifier_model or not coding_model:
+        default_model, allowed_models, profile_label = self._trusted_model_profile()
+        if not endpoint or not classifier_model:
             raise AIError(
                 "Trusted AI routing is enabled but its managed endpoint/model profile is incomplete."
             )
@@ -1043,6 +1062,55 @@ class Hub:
             raise AIError(
                 "The managed trusted AI endpoint must be an explicit HTTPS URL without "
                 "credentials, query parameters, or fragments."
+            )
+        try:
+            credential = resolve_trusted_api_key()
+        except Exception:  # noqa: BLE001 - never surface keyring/backend detail
+            credential = ""
+        if not credential:
+            raise AIError("The managed trusted AI credential is unavailable.")
+        return default_model, allowed_models, profile_label
+
+    def _trusted_chat_options(
+        self,
+        trusted_model: str = "",
+        routing_preference: str = "auto",
+    ) -> tuple[str, str, str]:
+        """Validate browser routing choices against the exact admin allowlist."""
+        preference = str(routing_preference or "auto").strip().lower()
+        if preference not in {"auto", "trusted"}:
+            raise ValueError("routing_preference must be 'auto' or 'trusted'.")
+        # Reject browser tampering from the static allowlist first, even if the
+        # approved service is temporarily unavailable. Invalid input is a 400;
+        # deployment/credential readiness remains a separate 502.
+        default_model, allowed_models, label = self._trusted_model_profile()
+        selected = str(trusted_model or "").strip() or default_model
+        if selected not in allowed_models:
+            raise ValueError("The selected customer-data model is not approved.")
+        self._trusted_profile()
+        return selected, preference, label
+
+    def _trusted_routing_metadata(self) -> dict:
+        """Safe picker metadata; never expose the endpoint, key, or classifier."""
+        default_model, allowed_models, profile_label = self._trusted_profile()
+        return {
+            "enabled": True,
+            "profile_label": profile_label,
+            "trusted_models": [{"id": model, "name": model} for model in allowed_models],
+            "default_trusted_model": default_model,
+        }
+
+    def _trusted_provider_for(self):
+        """The deployment-pinned OpenAI-compatible provider for customer data."""
+        from mooring.ai.base import AIError
+        from mooring.ai.openai_provider import OpenAIProvider, resolve_trusted_api_key
+
+        endpoint = self.app_cfg.ai_trusted_base_url.strip()
+        classifier_model = self.app_cfg.ai_trusted_classifier_model.strip()
+        coding_model, _allowed_models, _profile_label = self._trusted_profile()
+        if not endpoint or not classifier_model or not coding_model:
+            raise AIError(
+                "Trusted AI routing is enabled but its managed endpoint/model profile is incomplete."
             )
         key = (
             endpoint,
@@ -1111,6 +1179,7 @@ class Hub:
         helpers=None,
         catalog=None,
         routing_zone: str | None = None,
+        trusted_model: str = "",
         background: bool = True,
     ):
         """Open a streaming Copilot chat session bound to this notebook.
@@ -1130,6 +1199,10 @@ class Hub:
 
         routed = routing_zone in (GENERAL_ZONE, TRUSTED_ZONE)
         trusted = routing_zone == TRUSTED_ZONE
+        if trusted:
+            trusted_model, _preference, _label = self._trusted_chat_options(
+                trusted_model, "trusted"
+            )
         provider = self._trusted_provider_for() if trusted else self._provider_for()
         # Wire the fan-out "investigate" tool: a value-free coordinator closure that opens
         # READ-ONLY sub-agents per branch and returns their merged findings. None when the
@@ -1175,7 +1248,7 @@ class Hub:
             workspace=workspace,
             folders=self.cfg.folders,
             notebook_rel=notebook_rel,
-            model=self.app_cfg.ai_trusted_coding_model if trusted else model,
+            model=trusted_model if trusted else model,
             reasoning_effort=None if trusted else reasoning_effort,
             dictionary=dictionary if (not routed or trusted) else None,
             semantic_models=semantic_models if (not routed or trusted) else None,
@@ -1213,6 +1286,8 @@ class Hub:
         *,
         model: str = "",
         reasoning_effort: str | None = None,
+        trusted_model: str = "",
+        routing_preference: str = "auto",
     ):
         """Inspect one captured context before constructing any coding provider."""
         from mooring.ai import secrets as ai_secrets
@@ -1220,6 +1295,9 @@ class Hub:
         from mooring.ai.routed_session import GENERAL_ZONE, TRUSTED_ZONE, RoutedChatSession
         from mooring.ai.trusted import BLOCK, TRUSTED_REQUIRED
 
+        trusted_model, routing_preference, profile_label = self._trusted_chat_options(
+            trusted_model, routing_preference
+        )
         inspector = self._trusted_inspector_for()
         trusted_ctx = bundle.trusted
         raw_context = trusted_ctx[0]
@@ -1231,7 +1309,11 @@ class Hub:
 
         initial_zone = (
             TRUSTED_ZONE
-            if verdict.decision == TRUSTED_REQUIRED or self._has_extended_context(trusted_ctx)
+            if (
+                routing_preference == "trusted"
+                or verdict.decision == TRUSTED_REQUIRED
+                or self._has_extended_context(trusted_ctx)
+            )
             else GENERAL_ZONE
         )
 
@@ -1248,6 +1330,7 @@ class Hub:
                 helpers=helpers,
                 catalog=catalog,
                 routing_zone=zone,
+                trusted_model=trusted_model,
                 background=background,
             )
 
@@ -1290,6 +1373,8 @@ class Hub:
             notebook_rel=notebook_rel,
             initial_source_digest=bundle.source_digest,
             traceback_guard=self.app_cfg.ai.traceback_guard,
+            trusted_model=trusted_model,
+            profile_label=profile_label,
         )
 
     def _make_investigator_session(
@@ -1300,6 +1385,7 @@ class Hub:
         model: str = "",
         reasoning_effort=None,
         routing_zone: str | None = None,
+        trusted_model: str = "",
     ):
         """A READ-ONLY value-blind sub-agent for ONE investigate branch: the same session
         as the interactive chat, but built with NO propose/edit tool and NO
@@ -1316,6 +1402,10 @@ class Hub:
         from mooring.ai.trusted import BLOCK
 
         trusted = routing_zone == TRUSTED_ZONE
+        if trusted:
+            trusted_model, _preference, _label = self._trusted_chat_options(
+                trusted_model, "trusted"
+            )
         inspector = self._trusted_inspector_for() if trusted else None
         if trusted:
             if ai_secrets.has_secrets(system_context):
@@ -1329,7 +1419,7 @@ class Hub:
             workspace=workspace,
             folders=self.cfg.folders,
             notebook_rel=notebook_rel,
-            model=self.app_cfg.ai_trusted_coding_model if trusted else model,
+            model=trusted_model if trusted else model,
             reasoning_effort=None if trusted else reasoning_effort,
             dictionary=index,
             semantic_models=models,

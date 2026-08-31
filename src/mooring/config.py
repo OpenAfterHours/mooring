@@ -400,6 +400,24 @@ class AppConfig:
         return self.ai.routing.coding_model
 
     @property
+    def ai_trusted_coding_models(self) -> tuple[str, ...]:
+        """The effective admin allowlist.
+
+        The singular setting predates the picker. When the plural setting is
+        absent it remains the one approved model; when present the loader requires
+        the default to be a member of that exact approval set.
+        """
+        default = self.ai.routing.coding_model.strip()
+        configured = tuple(
+            dict.fromkeys(model.strip() for model in self.ai.routing.coding_models if model.strip())
+        )
+        return configured or ((default,) if default else ())
+
+    @property
+    def ai_trusted_profile_label(self) -> str:
+        return self.ai.routing.profile_label.strip() or "Approved AI"
+
+    @property
     def ai_chat_idle_timeout(self) -> int:
         return self.ai.chat_idle_timeout
 
