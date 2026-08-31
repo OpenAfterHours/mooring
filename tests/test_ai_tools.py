@@ -94,6 +94,108 @@ def _spec_names(ws, **kw):
     ]
 
 
+def test_routed_general_toolset_has_no_workspace_reads_or_investigate(ws):
+    names = _spec_names(
+        ws,
+        emit_proposal=lambda *_args: None,
+        run_investigation=lambda *_args, **_kwargs: "findings",
+        allow_read_tools=False,
+    )
+    assert names == ["mooring_propose_notebook_edit"]
+
+
+def test_trusted_dynamic_tool_output_is_withheld_when_guard_refuses(ws):
+    seen = []
+    specs = {
+        spec.name: spec
+        for spec in build_tool_specs(
+            workspace=ws,
+            folders=("data",),
+            notebook_rel="nb.py",
+            trusted_customer_data=True,
+            output_guard=lambda text: seen.append(text) or False,
+        )
+    }
+    out = specs["mooring_read_notebook_source"].handler(_invocation())
+    assert seen and "notebook code" in seen[0]
+    assert out.is_error is True
+    assert out.text == "tool output withheld by the approved data policy"
+    assert "notebook code" not in out.text
+
+
+def test_output_guard_covers_error_results_for_both_provider_adapters(ws):
+    from mooring.ai.tools import build_openai_tools
+
+    seen = []
+
+    def refuse(text):
+        seen.append(text)
+        return False
+
+    copilot = {
+        tool.name: tool
+        for tool in build_tools(
+            workspace=ws,
+            folders=("data",),
+            notebook_rel="nb.py",
+            output_guard=refuse,
+        )
+    }
+    copilot_out = copilot["mooring_get_schema"].handler(_invocation())
+    assert copilot_out.result_type == "error"
+    assert copilot_out.error == "tool output withheld by the approved data policy"
+
+    _, dispatch = build_openai_tools(
+        workspace=ws,
+        folders=("data",),
+        notebook_rel="nb.py",
+        output_guard=refuse,
+    )
+    openai_out = dispatch["mooring_get_schema"](_invocation())
+    assert openai_out.is_error is True
+    assert openai_out.text == "tool output withheld by the approved data policy"
+    assert seen == ["dataset required", "dataset required"]
+
+
+def test_output_guard_withholds_unexpected_handler_exception_for_both_adapters(
+    ws, monkeypatch
+):
+    from mooring import schema
+    from mooring.ai.tools import build_openai_tools
+
+    def fail(_workspace, _folders):
+        raise RuntimeError(SECRET)
+
+    def guard(text):
+        return SECRET not in text
+
+    monkeypatch.setattr(schema, "list_datasets", fail)
+
+    copilot = {
+        tool.name: tool
+        for tool in build_tools(
+            workspace=ws,
+            folders=("data",),
+            notebook_rel="nb.py",
+            output_guard=guard,
+        )
+    }
+    copilot_out = copilot["mooring_list_datasets"].handler(_invocation())
+    assert copilot_out.result_type == "error"
+    assert copilot_out.error == "tool output withheld by the approved data policy"
+
+    _, dispatch = build_openai_tools(
+        workspace=ws,
+        folders=("data",),
+        notebook_rel="nb.py",
+        output_guard=guard,
+    )
+    openai_out = dispatch["mooring_list_datasets"](_invocation())
+    assert openai_out.is_error is True
+    assert openai_out.text == "tool output withheld by the approved data policy"
+    assert SECRET not in openai_out.text
+
+
 def test_tool_names_match_built_tools(ws):
     tools = _tools(ws, [])
     assert sorted(tools) == sorted(TOOL_NAMES)

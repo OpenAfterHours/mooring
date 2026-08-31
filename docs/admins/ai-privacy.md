@@ -2,9 +2,9 @@
 icon: lucide/shield-check
 ---
 
-# Why the copilot can't see your data
+# How Mooring controls what the copilot can see
 
-Mooring's AI copilot helps analysts write notebook code while being **structurally
+By default, Mooring's AI copilot helps analysts write notebook code while being **structurally
 unable to see the data itself**. This page is for analysts who want assurance and
 for security reviewers who need to verify the claim. The short version:
 
@@ -30,6 +30,49 @@ DAX), but never the data itself.
 
 > Running a frozen `.pyz`/`.exe` build? Use `python mooring.pyz <cmd>` (or
 > `mooring.exe <cmd>`) in place of the `mooring <cmd>` examples below.
+
+An administrator can separately deploy [trusted AI routing](#trusted-ai-routing).
+That mode deliberately permits a firm-approved endpoint to receive customer
+information authored in notebook source or chat messages. It still does not expose
+cell outputs, dataframe values, dataset rows, or arbitrary files.
+
+## Trusted AI routing { #trusted-ai-routing }
+
+Trusted routing lets analysts keep a broad choice of general coding models without
+using a best-effort PII detector as the final routing decision. Before Mooring
+constructs any general-provider session, the exact captured notebook context is sent
+to a deployment-approved OpenAI-compatible classifier. It returns one value-free
+decision:
+
+- `general_ok` — construct the user's selected general coding model;
+- `trusted_required` — use the pinned approved coding model; uncertainty takes this path;
+- `block` — send the content to no coding model.
+
+Every later prompt and changed notebook source is checked again. A conversation can
+move from general to trusted but never back, and its prior general conversation is
+carried only to the higher-trust destination. Recognized high-confidence credential
+and secret patterns are blocked locally before the classifier; this local scan is
+best-effort. The traceback guard and server-side Apply/code guard remain unchanged.
+The legacy PII prompt hold is disabled for routed chats, removing its false-positive
+confirmation flow; the approved classifier becomes the decision point.
+
+The Apply/code guard present in this repository is deterministic static analysis, not
+a second model call. If your deployment already adds a separate model-based destructive
+reviewer, keep that enforcement boundary in place around Mooring; trusted routing does
+not replace or invoke an external reviewer that is not configured in this codebase.
+
+The trust profile is not a Settings or `config.toml` preference. A managed deployment
+must pin an explicit HTTPS endpoint, classifier model, coding model, and dedicated
+`MOORING_AI_TRUSTED_API_KEY`. The trusted route never falls back to the user's general
+OpenAI credential, never follows redirects, and ignores the chat model picker. See
+[configuration](configuration.md#deployment-managed-trusted-ai-routing).
+
+For the first release, general routed sessions expose only the proposal tool. Mutable
+read tools become available after the conversation is on the trusted route, where each
+dynamic tool result is checked before the coding model receives it. The proposal tool's
+result is also checked while on the general route, closing a race with a notebook changed
+during a model turn. Investigate and batch build are disabled for the entire time trusted
+routing is enabled.
 
 ## What the assistant receives
 
@@ -183,6 +226,9 @@ each. It cannot pin either the other way: there is no policy that disarms the ch
 and none that makes a teammate's applied cells run.
 
 ## Parallel "investigate": read-only sub-agents (on by default) { #investigate }
+
+With trusted routing, investigate is unavailable for the entire conversation in this
+first release. This avoids creating branch prompts outside the per-turn routing gate.
 
 On by default (opt out with `[ai.investigate] enabled = false`, or
 `MOORING_AI_INVESTIGATE=false`). It defaults on because it adds **no** data surface — it
@@ -722,7 +768,9 @@ any egress, then **holds the turn**. What survives the rewrite:
 - The **exception message**, only when it is provably value-free: it matches a
   fixed allowlist of interpreter messages ("division by zero", …), or every
   quoted token in it already appears in text the model has been shown this
-  session (the dataset schema, the live-kernel schemas, the notebook source).
+  session (the dataset schema, the live-kernel schemas, and the captured notebook
+  source). The message rescue never re-reads the mutable notebook merely to treat a
+  newly added token as already shown.
   So `KeyError: 'revenue'` survives when `revenue` is a schema column — restating
   it reveals nothing new — while `KeyError: 'ACME Ltd'` becomes
   `KeyError: <redacted: 10 chars>`.

@@ -21,6 +21,11 @@ def _gates(hub) -> JSONResponse | None:
         return JSONResponse({"enabled": False}, status_code=404)
     if not hub.app_cfg.ai_batch_enabled:
         return JSONResponse({"enabled": False, "reason": "batch_disabled"}, status_code=403)
+    if hub.app_cfg.ai_routing_enabled:
+        return JSONResponse(
+            {"enabled": False, "reason": "trusted_routing_interactive_only"},
+            status_code=403,
+        )
     return None
 
 
@@ -107,7 +112,10 @@ async def api_batch_state(request: Request) -> JSONResponse:
     datasets = await run_in_threadpool(schema.list_datasets, cfg.workspace(), cfg.folders)
     return JSONResponse(
         {
-            "enabled": hub.app_cfg.ai_batch_enabled,
+            "enabled": hub.app_cfg.ai_batch_enabled and not hub.app_cfg.ai_routing_enabled,
+            "disabled_reason": (
+                "trusted_routing_interactive_only" if hub.app_cfg.ai_routing_enabled else ""
+            ),
             "max_jobs": hub.app_cfg.ai_batch_max_jobs,
             "max_concurrency": hub.app_cfg.ai_batch_max_concurrency,
             "pii_policy": hub.app_cfg.ai_batch_pii_policy,

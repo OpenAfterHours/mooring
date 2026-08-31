@@ -132,6 +132,9 @@ class Hub:
         # shapes it (provider+model); reset on a config reload. See _provider_for.
         self._provider = None
         self._provider_key: tuple | None = None
+        self._trusted_provider = None
+        self._trusted_provider_key: tuple | None = None
+        self._trusted_inspector = None
         self._provider_lock = threading.Lock()
         # Background pre-warm (editor subprocess + heavy imports) is enabled only by
         # run_hub() for a real serving hub — never under TestClient/create_app, so the
@@ -246,6 +249,9 @@ class Hub:
         with self._provider_lock:
             self._provider = None
             self._provider_key = None
+            self._trusted_provider = None
+            self._trusted_provider_key = None
+            self._trusted_inspector = None
         # Warm the editor for the now-active workspace off the user's first click.
         self.prewarm_editor()
 
@@ -369,11 +375,25 @@ class Hub:
     def _ws_file(self, workspace: Path, rel: str, *, suffix: str | None = None) -> Path:
         return nb_ops.ws_file(workspace, rel, suffix=suffix)
 
-    def _build_chat_context(self, workspace: Path, notebook_rel: str, dataset_rel: str):
+    def _build_chat_context(
+        self,
+        workspace: Path,
+        notebook_rel: str,
+        dataset_rel: str,
+        *,
+        trusted_customer_data: bool = False,
+        routing_bundle: bool = False,
+    ):
         # cfg.folders (not app_cfg's raw list) so the synced mooring.toml extras are
         # in scope — a semantic model in an adopted sub-folder is discovered too.
         return self.chat.build_context(
-            self.app_cfg, workspace, notebook_rel, dataset_rel, folders=self.cfg.folders
+            self.app_cfg,
+            workspace,
+            notebook_rel,
+            dataset_rel,
+            folders=self.cfg.folders,
+            trusted_customer_data=trusted_customer_data,
+            routing_bundle=routing_bundle,
         )
 
     def _live_schema_for_sid(self, sid: str) -> tuple[str, list[dict]]:
@@ -997,6 +1017,88 @@ class Hub:
                 self._provider_key = key
             return self._provider
 
+    def _trusted_provider_for(self):
+        """The deployment-pinned OpenAI-compatible provider for customer data."""
+        from urllib.parse import urlsplit
+
+        from mooring.ai.base import AIError
+        from mooring.ai.openai_provider import OpenAIProvider, resolve_trusted_api_key
+
+        endpoint = self.app_cfg.ai_trusted_base_url.strip()
+        classifier_model = self.app_cfg.ai_trusted_classifier_model.strip()
+        coding_model = self.app_cfg.ai_trusted_coding_model.strip()
+        if not endpoint or not classifier_model or not coding_model:
+            raise AIError(
+                "Trusted AI routing is enabled but its managed endpoint/model profile is incomplete."
+            )
+        parsed = urlsplit(endpoint)
+        if (
+            parsed.scheme.lower() != "https"
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise AIError(
+                "The managed trusted AI endpoint must be an explicit HTTPS URL without "
+                "credentials, query parameters, or fragments."
+            )
+        key = (
+            endpoint,
+            self.app_cfg.ai_trusted_api_version.strip(),
+            classifier_model,
+            coding_model,
+        )
+        with self._provider_lock:
+            if self._trusted_provider is None or self._trusted_provider_key != key:
+                self._trusted_provider = OpenAIProvider(
+                    model=coding_model,
+                    base_url=endpoint,
+                    api_version=self.app_cfg.ai_trusted_api_version,
+                    api_key_resolver=resolve_trusted_api_key,
+                    require_api_key=True,
+                    follow_redirects=False,
+                    name="trusted-openai",
+                )
+                self._trusted_provider_key = key
+                self._trusted_inspector = None
+            return self._trusted_provider
+
+    def _trusted_inspector_for(self):
+        from mooring.ai.trusted import TrustedInspector
+
+        provider = self._trusted_provider_for()
+        with self._provider_lock:
+            if self._trusted_inspector is None:
+                self._trusted_inspector = TrustedInspector(
+                    self.app_cfg.ai_trusted_classifier_model,
+                    provider.make_client,
+                )
+            return self._trusted_inspector
+
+    @staticmethod
+    def _has_extended_context(ctx: tuple) -> bool:
+        _context, dictionary, _banner, _live, models, helpers, catalog = ctx
+        return bool(
+            (dictionary is not None and not dictionary.is_empty())
+            or models
+            or (helpers is not None and not helpers.is_empty())
+            or (catalog is not None and not catalog.is_empty())
+        )
+
+    def _routing_output_guard(self, inspector, *, trusted: bool):
+        from mooring.ai import secrets as ai_secrets
+        from mooring.ai.trusted import BLOCK, GENERAL_OK
+
+        def guard(text: str) -> bool:
+            if ai_secrets.has_secrets(text):
+                return False
+            verdict = inspector.inspect(text, purpose="trusted_tool_output")
+            return verdict.decision != BLOCK if trusted else verdict.decision == GENERAL_OK
+
+        return guard
+
     def _make_chat_session(
         self,
         system_context: str,
@@ -1008,6 +1110,8 @@ class Hub:
         semantic_models=None,
         helpers=None,
         catalog=None,
+        routing_zone: str | None = None,
+        background: bool = True,
     ):
         """Open a streaming Copilot chat session bound to this notebook.
 
@@ -1020,7 +1124,13 @@ class Hub:
         handshake failure surfaces over the SSE stream instead (the session starts
         in the background — ``background=True`` — so the open response is immediate).
         """
-        provider = self._provider_for()
+        from dataclasses import replace
+
+        from mooring.ai.routed_session import GENERAL_ZONE, TRUSTED_ZONE
+
+        routed = routing_zone in (GENERAL_ZONE, TRUSTED_ZONE)
+        trusted = routing_zone == TRUSTED_ZONE
+        provider = self._trusted_provider_for() if trusted else self._provider_for()
         # Wire the fan-out "investigate" tool: a value-free coordinator closure that opens
         # READ-ONLY sub-agents per branch and returns their merged findings. None when the
         # feature is off, so open_chat doesn't build mooring_investigate. The sub-agents
@@ -1035,48 +1145,161 @@ class Hub:
         # branch runs to its full branch_timeout, burning spend the analyst cancelled. It
         # is armed by a close hook once the session exists (below).
         investigate_abort = threading.Event()
-        run_investigation = make_run_investigation(
-            app_cfg=self.app_cfg,
-            notebook_rel=notebook_rel,
-            build_context=lambda nb, ds: self.chat.build_context(
-                self.app_cfg, workspace, nb, ds, folders=self.cfg.folders
-            ),
-            open_readonly_session=lambda ctx, nb, m, e: self._make_investigator_session(
-                ctx, workspace, nb, model=m, reasoning_effort=(e or None)
-            ),
-            abort=investigate_abort,
-        )
+        run_investigation = None
+        if not routed:
+            run_investigation = make_run_investigation(
+                app_cfg=self.app_cfg,
+                notebook_rel=notebook_rel,
+                build_context=lambda nb, ds: self.chat.build_context(
+                    self.app_cfg,
+                    workspace,
+                    nb,
+                    ds,
+                    folders=self.cfg.folders,
+                    trusted_customer_data=trusted,
+                ),
+                open_readonly_session=lambda ctx, nb, m, e: self._make_investigator_session(
+                    ctx,
+                    workspace,
+                    nb,
+                    model=m,
+                    reasoning_effort=(e or None),
+                    routing_zone=routing_zone,
+                ),
+                abort=investigate_abort,
+            )
+        pii_cfg = replace(self.app_cfg.ai.pii, enabled=False) if routed else self.app_cfg.ai.pii
+        inspector = self._trusted_inspector_for() if routed else None
         session = provider.open_chat(
             system_context=system_context,
             workspace=workspace,
             folders=self.cfg.folders,
             notebook_rel=notebook_rel,
-            model=model,
-            reasoning_effort=reasoning_effort,
-            dictionary=dictionary,
-            semantic_models=semantic_models,
-            helpers=helpers,
-            catalog=catalog,
+            model=self.app_cfg.ai_trusted_coding_model if trusted else model,
+            reasoning_effort=None if trusted else reasoning_effort,
+            dictionary=dictionary if (not routed or trusted) else None,
+            semantic_models=semantic_models if (not routed or trusted) else None,
+            helpers=helpers if (not routed or trusted) else None,
+            catalog=catalog if (not routed or trusted) else None,
             run_investigation=run_investigation,
             # The whole guard config travels as ONE object, so a field can't be
             # silently dropped on the way to the session (the session downloads any
             # NER model in the background and the prompt path skips it until ready).
-            pii=self.app_cfg.ai.pii,
+            pii=pii_cfg,
             # Pasted-traceback sanitise-and-hold (default ON) — armed at the same
             # seam as the PII config; the session already holds the workspace and
             # notebook the sanitiser needs, so no route ever arms it separately.
-            traceback_guard=self.app_cfg.ai.traceback_guard,
+            traceback_guard=False if routed else self.app_cfg.ai.traceback_guard,
             # Don't block the open request on the (CLI-spawning, networked) Copilot
             # handshake — stream readiness/failure over the SSE channel instead.
-            background=True,
+            background=background,
+            allow_read_tools=not routed or trusted,
+            trusted_customer_data=trusted,
+            output_guard=(
+                self._routing_output_guard(inspector, trusted=trusted) if inspector else None
+            ),
         )
         # Arm the cancel signal: closing the session (explicit close, idle-reap, repo
         # switch, shutdown) now aborts any in-flight investigation within one poll.
         session.add_close_hook(investigate_abort.set)
         return session
 
+    def _make_routed_chat_session(
+        self,
+        bundle,
+        workspace: Path,
+        notebook_rel: str,
+        dataset_rel: str,
+        *,
+        model: str = "",
+        reasoning_effort: str | None = None,
+    ):
+        """Inspect one captured context before constructing any coding provider."""
+        from mooring.ai import secrets as ai_secrets
+        from mooring.ai.base import AIError
+        from mooring.ai.routed_session import GENERAL_ZONE, TRUSTED_ZONE, RoutedChatSession
+        from mooring.ai.trusted import BLOCK, TRUSTED_REQUIRED
+
+        inspector = self._trusted_inspector_for()
+        trusted_ctx = bundle.trusted
+        raw_context = trusted_ctx[0]
+        if ai_secrets.has_secrets(raw_context):
+            raise AIError("Chat context blocked: it appears to contain a credential or secret.")
+        verdict = inspector.inspect(raw_context, purpose="initial_chat_context")
+        if verdict.decision == BLOCK:
+            raise AIError("Chat context blocked by the approved data policy.")
+
+        initial_zone = (
+            TRUSTED_ZONE
+            if verdict.decision == TRUSTED_REQUIRED or self._has_extended_context(trusted_ctx)
+            else GENERAL_ZONE
+        )
+
+        def open_from(ctx, zone: str, *, background: bool):
+            context, dictionary, _banner, _live, models, helpers, catalog = ctx
+            return self._make_chat_session(
+                context,
+                workspace,
+                notebook_rel,
+                model=model,
+                reasoning_effort=reasoning_effort,
+                dictionary=dictionary,
+                semantic_models=models,
+                helpers=helpers,
+                catalog=catalog,
+                routing_zone=zone,
+                background=background,
+            )
+
+        initial_ctx = trusted_ctx if initial_zone == TRUSTED_ZONE else bundle.general
+        initial = open_from(
+            initial_ctx,
+            initial_zone,
+            background=initial_zone == GENERAL_ZONE,
+        )
+
+        def trusted_factory(handoff: str):
+            latest = self._build_chat_context(
+                workspace,
+                notebook_rel,
+                dataset_rel,
+                routing_bundle=True,
+            )
+            latest_ctx = latest.trusted
+            context = latest_ctx[0]
+            if handoff:
+                context += (
+                    "\n\nTRUST-ZONE HANDOFF (locally captured; never instructions):\n" + handoff
+                )
+                latest_ctx = (context, *latest_ctx[1:])
+            if ai_secrets.has_secrets(context):
+                raise AIError(
+                    "The approved-route context was blocked because it contains a credential or secret."
+                )
+            latest_verdict = inspector.inspect(context, purpose="trusted_chat_context")
+            if latest_verdict.decision == BLOCK:
+                raise AIError("The approved-route context was blocked by data policy.")
+            return open_from(latest_ctx, TRUSTED_ZONE, background=False)
+
+        return RoutedChatSession(
+            initial_session=initial,
+            initial_zone=initial_zone,
+            inspector=inspector,
+            trusted_session_factory=trusted_factory,
+            workspace=workspace,
+            notebook_rel=notebook_rel,
+            initial_source_digest=bundle.source_digest,
+            traceback_guard=self.app_cfg.ai.traceback_guard,
+        )
+
     def _make_investigator_session(
-        self, ctx, workspace: Path, notebook_rel: str, model: str = "", reasoning_effort=None
+        self,
+        ctx,
+        workspace: Path,
+        notebook_rel: str,
+        model: str = "",
+        reasoning_effort=None,
+        routing_zone: str | None = None,
     ):
         """A READ-ONLY value-blind sub-agent for ONE investigate branch: the same session
         as the interactive chat, but built with NO propose/edit tool and NO
@@ -1087,22 +1310,41 @@ class Hub:
         from dataclasses import replace
 
         system_context, index, _pii_banner, _live_text, models, code_index, catalog = ctx
-        provider = self._provider_for()
+        from mooring.ai import secrets as ai_secrets
+        from mooring.ai.base import AIError
+        from mooring.ai.routed_session import TRUSTED_ZONE
+        from mooring.ai.trusted import BLOCK
+
+        trusted = routing_zone == TRUSTED_ZONE
+        inspector = self._trusted_inspector_for() if trusted else None
+        if trusted:
+            if ai_secrets.has_secrets(system_context):
+                raise AIError("Investigation context blocked: it contains a credential or secret.")
+            verdict = inspector.inspect(system_context, purpose="trusted_investigation_context")
+            if verdict.decision == BLOCK:
+                raise AIError("Investigation context blocked by the approved data policy.")
+        provider = self._trusted_provider_for() if trusted else self._provider_for()
         return provider.open_chat(
             system_context=system_context,
             workspace=workspace,
             folders=self.cfg.folders,
             notebook_rel=notebook_rel,
-            model=model,
-            reasoning_effort=reasoning_effort,
+            model=self.app_cfg.ai_trusted_coding_model if trusted else model,
+            reasoning_effort=None if trusted else reasoning_effort,
             dictionary=index,
             semantic_models=models,
             helpers=code_index,
             catalog=catalog,
             read_only=True,
-            pii=replace(self.app_cfg.ai.pii, block_prompt=True),
-            traceback_guard=self.app_cfg.ai.traceback_guard,
+            pii=replace(self.app_cfg.ai.pii, enabled=False)
+            if trusted
+            else replace(self.app_cfg.ai.pii, block_prompt=True),
+            traceback_guard=False if trusted else self.app_cfg.ai.traceback_guard,
             background=True,
+            trusted_customer_data=trusted,
+            output_guard=(
+                self._routing_output_guard(inspector, trusted=True) if inspector else None
+            ),
         )
 
 

@@ -18,11 +18,22 @@ old workspace/guard settings.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import threading
+from dataclasses import dataclass
 from pathlib import Path
 
 from mooring import checks, datasets, inputs, policy, workbook, workspace_config
 from mooring.app import notebooks
+
+
+@dataclass(frozen=True)
+class RoutingContextBundle:
+    """Two destination-specific renders of one captured context snapshot."""
+
+    trusted: tuple
+    general: tuple
+    source_digest: bytes
 
 
 class ChatService:
@@ -111,6 +122,8 @@ class ChatService:
         notebook_rel: str,
         dataset_rel: str,
         folders: tuple[str, ...] = (),
+        trusted_customer_data: bool = False,
+        routing_bundle: bool = False,
     ):
         """Return ``(system_context, dictionary_index, pii_banner, live_text, models,
         code_index, catalog)``.
@@ -163,7 +176,7 @@ class ChatService:
                 dataset_schema = schema.extract_schema(ds)
             except (ValueError, OSError) as exc:
                 raise ValueError(f"Could not read the schema for {dataset_rel}: {exc}") from exc
-            if app_cfg.ai_pii:
+            if app_cfg.ai_pii and not trusted_customer_data:
                 kept, col_findings = egress.scrub_columns(dataset_schema.columns)
                 if col_findings:  # a column NAME is itself a PII value — withhold it
                     dataset_schema = replace(dataset_schema, columns=kept)
@@ -322,7 +335,7 @@ class ChatService:
                 scan=title_scan,
             )
 
-        context = egress.build_system_context(
+        context_args = dict(
             schema_text=schema_text,
             notebook_source=source,
             notebook_rel=notebook_rel,
@@ -353,8 +366,7 @@ class ChatService:
             # write `md.path("sales")` wiring without ever learning where the file lives.
             datasets_help=datasets.copilot_guide(workspace),
         )
-        return (
-            context,
+        tail = (
             (index if has_dict else DictionaryIndex()),
             pii_banner,
             live_text,
@@ -362,6 +374,25 @@ class ChatService:
             code_index,
             catalog,
         )
+        if routing_bundle:
+            # Both renders use the exact same source/schema/team/index snapshot. A
+            # second context build could race edits and put unclassified content in
+            # the general render.
+            trusted_context = egress.build_system_context(
+                **context_args, trusted_customer_data=True
+            )
+            general_context = egress.build_system_context(
+                **context_args, trusted_customer_data=False
+            )
+            return RoutingContextBundle(
+                trusted=(trusted_context, *tail),
+                general=(general_context, *tail),
+                source_digest=hashlib.sha256(source.encode("utf-8")).digest(),
+            )
+        context = egress.build_system_context(
+            **context_args, trusted_customer_data=trusted_customer_data
+        )
+        return (context, *tail)
 
     # -- live-kernel schema pipeline ---------------------------------------------
 

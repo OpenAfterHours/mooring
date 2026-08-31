@@ -228,6 +228,36 @@ because they gate what the copilot may *read*:
 | `notebook_catalog` | `false` | **Opt-in.** Let the copilot search **every notebook in the repo** — each one's `# H1` title, its imports, and the inputs/checks/SQL tables its *source declares* — so it can point at work a teammate already did. Never another notebook's code, a markdown paragraph, a cell output, or a `.mooring/` run receipt; a notebook in `disabled_notebooks` is left out. Off by default because it widens the assistant's view from the one open notebook to the whole repo, and the title is authored prose. The hub's own search box uses the same index locally and is not gated by this. Env override: `MOORING_AI_NOTEBOOK_CATALOG`. Preview with `mooring catalog`. See [the notebook catalog](ai-privacy.md#notebook-catalog). |
 | `live_schema` | `true` | Read dataframe schemas (names + types only) live from the running kernel. See [live dataframe schemas](ai-privacy.md#live-dataframe-schemas-data-outside-the-workspace). |
 
+#### Deployment-managed trusted AI routing
+
+Trusted AI routing is off by default. It cannot be enabled or designated through
+the user-editable Settings page or `config.toml`: a managed launcher, MDM profile,
+or equivalent administrator-controlled deployment must supply the complete profile.
+The approved endpoint receives the exact context first for classification and handles
+coding turns that contain, or may contain, customer information.
+
+Install a build that includes the official OpenAI SDK (`pip install "mooring[openai]"`),
+including when the general coding provider remains GitHub Copilot. For a packaged or
+frozen deployment, include that extra when building the artifact. The launcher must
+also own and lock the process environment: these variables are the administrative
+trust boundary, so allowing analysts to override them defeats endpoint approval.
+
+Set all of these in the managed process environment:
+
+| Variable | Purpose |
+|---|---|
+| `MOORING_AI_ROUTING=1` | Enable interactive trusted routing. |
+| `MOORING_AI_TRUSTED_BASE_URL` | Explicit HTTPS OpenAI-compatible or Azure endpoint approved for customer data. |
+| `MOORING_AI_TRUSTED_API_VERSION` | Azure API version; leave empty for a standard OpenAI-compatible endpoint. |
+| `MOORING_AI_TRUSTED_CLASSIFIER_MODEL` | Pinned model/deployment that classifies every outbound context and turn. |
+| `MOORING_AI_TRUSTED_CODING_MODEL` | Pinned coding model/deployment used after a sensitive or uncertain decision. |
+| `MOORING_AI_TRUSTED_API_KEY` | Dedicated credential for this approved endpoint; it never falls back to the user's general OpenAI key. |
+
+The profile must name an explicit HTTPS endpoint, redirects are disabled, and a
+per-chat model choice never overrides the pinned trusted coding model. This first
+release applies to interactive notebook chat; batch building is disabled while
+trusted routing is active, as is parallel investigate.
+
 ### `[guard]` — in the synced `mooring.toml`, not here
 
 The **push guard** scans every outgoing file for things that look like secrets,

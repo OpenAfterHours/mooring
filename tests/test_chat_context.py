@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 
 import pytest
@@ -303,6 +304,18 @@ def test_the_assembler_still_scrubs_the_notebook_after_rendering():
     assert "x = seed + 1" in section  # the clean cell around the leak survives
 
 
+def test_trusted_context_preserves_authored_customer_information():
+    leaky = _REAL_NB.replace("seed = 1", f"seed = {_VALID_CARD}")
+    general = build_system_context(**{**BASE, "notebook_source": leaky})
+    trusted = build_system_context(
+        **{**BASE, "notebook_source": leaky}, trusted_customer_data=True
+    )
+    assert _VALID_CARD not in general
+    assert _VALID_CARD in trusted
+    assert "APPROVED CUSTOMER-DATA ROUTE" in trusted
+    assert "# === cell 0 ===" in trusted
+
+
 def _read_source_spec(ws):
     """The mooring_read_notebook_source spec, bound to ``ws``/nb.py (read-only session)."""
     from mooring.ai import tools
@@ -530,6 +543,18 @@ def _service_setup(tmp_path, env=None):
     ws.mkdir(exist_ok=True)
     (ws / "nb.py").write_text("import marimo\n", "utf-8")
     return ChatService(), app_cfg, ws
+
+
+def test_routing_bundle_renders_both_destinations_from_one_source_snapshot(tmp_path):
+    service, app_cfg, ws = _service_setup(tmp_path)
+    source = f"customer_card = '{_VALID_CARD}'\n"
+    (ws / "nb.py").write_text(source, "utf-8")
+
+    bundle = service.build_context(app_cfg, ws, "nb.py", "", routing_bundle=True)
+
+    assert _VALID_CARD in bundle.trusted[0]
+    assert _VALID_CARD not in bundle.general[0]
+    assert bundle.source_digest == hashlib.sha256(source.encode("utf-8")).digest()
 
 
 def _write_model(ws):

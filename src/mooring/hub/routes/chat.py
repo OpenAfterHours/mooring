@@ -50,25 +50,48 @@ async def api_chat_open(request: Request) -> JSONResponse:
         # File IO (notebook source, dataset schema, team context, semantic-model
         # extraction) — off the event loop so a slow read can't stall the hub's
         # other requests.
-        ctx = await run_in_threadpool(hub._build_chat_context, workspace, notebook, dataset)
-        context, index, pii_banner, live_text, models, code_index, catalog = ctx
+        if hub.app_cfg.ai_routing_enabled:
+            bundle = await run_in_threadpool(
+                hub._build_chat_context,
+                workspace,
+                notebook,
+                dataset,
+                routing_bundle=True,
+            )
+            context, index, _pii_banner, live_text, models, code_index, catalog = bundle.trusted
+            pii_banner = []
+        else:
+            bundle = None
+            ctx = await run_in_threadpool(hub._build_chat_context, workspace, notebook, dataset)
+            context, index, pii_banner, live_text, models, code_index, catalog = ctx
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
     except FileNotFoundError as exc:
         return JSONResponse({"error": f"No such file: {exc}"}, status_code=404)
     hub._reap_idle_chats()
     try:
-        session = hub._make_chat_session(
-            context,
-            workspace,
-            notebook,
-            model=model,
-            reasoning_effort=reasoning_effort,
-            dictionary=index,
-            semantic_models=models,
-            helpers=code_index,
-            catalog=catalog,
-        )
+        if bundle is not None:
+            session = await run_in_threadpool(
+                hub._make_routed_chat_session,
+                bundle,
+                workspace,
+                notebook,
+                dataset,
+                model=model,
+                reasoning_effort=reasoning_effort,
+            )
+        else:
+            session = hub._make_chat_session(
+                context,
+                workspace,
+                notebook,
+                model=model,
+                reasoning_effort=reasoning_effort,
+                dictionary=index,
+                semantic_models=models,
+                helpers=code_index,
+                catalog=catalog,
+            )
     except Exception as exc:  # noqa: BLE001  # AIError surfaces to the UI in Phase 1
         return JSONResponse({"error": str(exc)}, status_code=502)
     # The live-kernel schema is deferred off the open path (see _build_chat_context),
@@ -87,7 +110,12 @@ async def api_chat_open(request: Request) -> JSONResponse:
             "sid": sid,
             "notebook": notebook,
             "pii": pii_banner,
-            "guard": hub._pii_status(),
+            "guard": (
+                {"enabled": False, "block": False, "names": False, "names_active": False}
+                if bundle is not None
+                else hub._pii_status()
+            ),
+            "route": {"zone": session.zone} if bundle is not None else None,
             # Whether the chat is usable NOW. A backgrounded provider session is
             # still starting (Copilot handshake) — the UI shows "connecting…" and
             # waits for the "ready"/"fail" event on the stream. The stub/already-

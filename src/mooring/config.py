@@ -380,6 +380,26 @@ class AppConfig:
         return self.ai.openai_api_version
 
     @property
+    def ai_routing_enabled(self) -> bool:
+        return self.ai.routing.enabled
+
+    @property
+    def ai_trusted_base_url(self) -> str:
+        return self.ai.routing.trusted_base_url
+
+    @property
+    def ai_trusted_api_version(self) -> str:
+        return self.ai.routing.trusted_api_version
+
+    @property
+    def ai_trusted_classifier_model(self) -> str:
+        return self.ai.routing.classifier_model
+
+    @property
+    def ai_trusted_coding_model(self) -> str:
+        return self.ai.routing.coding_model
+
+    @property
     def ai_chat_idle_timeout(self) -> int:
         return self.ai.chat_idle_timeout
 

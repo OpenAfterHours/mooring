@@ -316,17 +316,11 @@ class ChatBroadcaster:
         return ""
 
     def _traceback_known_text(self) -> str:
-        parts = [self._last_live_schema, self._known_text()]
-        if self._tb_workspace is not None and self._tb_notebook_rel:
-            try:
-                parts.append((self._tb_workspace / self._tb_notebook_rel).read_text("utf-8"))
-            except (OSError, UnicodeDecodeError):
-                # The notebook may be gone — or hold a stray non-UTF-8 byte (a
-                # hand-edit in a latin-1 editor). Either way the rescue just gets
-                # fewer tokens; it must never break EVERY send while the
-                # (default-on) guard is armed.
-                pass
-        return "\n".join(part for part in parts if part)
+        # Rescue only from text already delivered to this provider. Re-reading the
+        # mutable notebook here lets a post-open literal masquerade as in-channel.
+        return "\n".join(
+            part for part in (self._last_live_schema, self._known_text()) if part
+        )
 
     def _traceback_hold(self, text: str) -> bool:
         """Sanitise a traceback-bearing prompt and HOLD it. Returns True when held.

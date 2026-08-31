@@ -22,6 +22,11 @@ _AI_ENV = [
     "MOORING_AI_REASONING_EFFORT",
     "MOORING_AI_OPENAI_BASE_URL",
     "MOORING_AI_OPENAI_API_VERSION",
+    "MOORING_AI_ROUTING",
+    "MOORING_AI_TRUSTED_BASE_URL",
+    "MOORING_AI_TRUSTED_API_VERSION",
+    "MOORING_AI_TRUSTED_CLASSIFIER_MODEL",
+    "MOORING_AI_TRUSTED_CODING_MODEL",
     "MOORING_AI_CHAT_IDLE_SEC",
     "MOORING_AI_LIVE_SCHEMA",
     "MOORING_AI_SEMANTIC_MODEL",
@@ -153,6 +158,7 @@ def test_get_settings_shape(client):
     keys = {row["key"] for row in data["editable"]}
     assert "ui.theme" in keys
     assert "ai.pii.enabled" in keys
+    assert not any(key.startswith("ai.routing.") for key in keys)
     # Admin block is read-only display, never the literal client id / endpoint.
     labels = {row["label"] for row in data["admin"]}
     assert "Central logging" in labels

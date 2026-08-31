@@ -321,6 +321,9 @@ def build_tool_specs(
     run_investigation: Callable[..., str] | None = None,
     emit_tool_progress: Callable[[str], None] | None = None,
     pii_enabled: bool = False,
+    allow_read_tools: bool = True,
+    trusted_customer_data: bool = False,
+    output_guard: Callable[[str], bool] | None = None,
 ) -> list["ToolSpec"]:
     """Build the safe tools as provider-neutral :class:`ToolSpec`s, bound to one
     workspace + target notebook.
@@ -411,8 +414,10 @@ def build_tool_specs(
             raw = _safe(workspace, notebook_rel).read_text("utf-8")
         except (ValueError, OSError) as exc:
             return _err(str(exc))
-        scrubbed, _ = egress.scrub_text(egress.render_notebook_for_model(raw))
-        return _ok(scrubbed)
+        rendered = egress.render_notebook_for_model(raw)
+        if not trusted_customer_data:
+            rendered, _ = egress.scrub_text(rendered)
+        return _ok(rendered)
 
     def _coerce_index(value):
         try:
@@ -1208,7 +1213,7 @@ def build_tool_specs(
             parameters={"type": "object", "properties": {}},
             skip_permission=True,  # source only — value-free
         ),
-    ]
+    ] if allow_read_tools else []
 
     # The propose tool is the WRITE surface, and there is exactly ONE of it. It is gated
     # on a proposal callback, so a READ-ONLY session — an investigate sub-agent, built
@@ -1335,7 +1340,7 @@ def build_tool_specs(
             )
         )
 
-    if dictionary is not None and not dictionary.is_empty():
+    if allow_read_tools and dictionary is not None and not dictionary.is_empty():
         specs += [
             ToolSpec(
                 "mooring_list_tables",
@@ -1381,7 +1386,7 @@ def build_tool_specs(
             ),
         ]
 
-    if code_index is not None and not code_index.is_empty():
+    if allow_read_tools and code_index is not None and not code_index.is_empty():
         specs += [
             ToolSpec(
                 "mooring_list_helpers",
@@ -1429,7 +1434,7 @@ def build_tool_specs(
     # Registered OUTSIDE the emit_proposal gate on purpose: these are read tools, so a
     # read-only investigate sub-agent gets them too — "which notebook already does this?"
     # is exactly the kind of independent sub-question a branch is spawned to answer.
-    if catalog is not None and not catalog.is_empty():
+    if allow_read_tools and catalog is not None and not catalog.is_empty():
         specs += [
             ToolSpec(
                 "mooring_list_notebooks",
@@ -1481,7 +1486,7 @@ def build_tool_specs(
             ),
         ]
 
-    if models:
+    if allow_read_tools and models:
         _MODEL_ARG = {
             "type": "string",
             "description": "the semantic model's name (only needed when several exist)",
@@ -1535,7 +1540,7 @@ def build_tool_specs(
     # value-blind sub-agents and returns their scrubbed, merged findings — value-free text
     # the model reads back as this tool's result (through the one egress mint), then turns
     # into ONE proposal the analyst Applies.
-    if run_investigation is not None:
+    if allow_read_tools and run_investigation is not None:
 
         def _progress(event: dict) -> None:
             """Render a value-free in-flight cue for the analyst. Carries COUNTS and
@@ -1617,7 +1622,35 @@ def build_tool_specs(
                 blocking=True,  # drives N sub-sessions; must not run on an event loop
             )
         )
-    return specs
+    if output_guard is None:
+        return specs
+
+    # Wrap the provider-neutral handler itself so every adapter gets the same final
+    # egress gate. This covers successes, ordinary `_err` results, and unexpected
+    # exceptions before either SDK can mint or transmit a tool result.
+    def guarded(spec: ToolSpec) -> ToolSpec:
+        raw_handler = spec.handler
+
+        def handler(invocation):
+            try:
+                output = raw_handler(invocation)
+            except Exception as exc:  # noqa: BLE001 - inspect/withhold exception text
+                output = egress.ToolOutput(
+                    text=f"tool {spec.name} failed: {exc}", is_error=True
+                )
+            try:
+                allowed = output_guard(output.text)
+            except Exception:  # noqa: BLE001 - a guard fault must withhold the output
+                allowed = False
+            if not allowed:
+                return egress.ToolOutput(
+                    text="tool output withheld by the approved data policy", is_error=True
+                )
+            return output
+
+        return replace(spec, handler=handler)
+
+    return [guarded(spec) for spec in specs]
 
 
 def build_tools(
@@ -1634,6 +1667,9 @@ def build_tools(
     run_investigation: Callable[..., str] | None = None,
     emit_tool_progress: Callable[[str], None] | None = None,
     pii_enabled: bool = False,
+    allow_read_tools: bool = True,
+    trusted_customer_data: bool = False,
+    output_guard: Callable[[str], bool] | None = None,
 ) -> list:
     """The GitHub Copilot adapter over :func:`build_tool_specs`.
 
@@ -1665,6 +1701,9 @@ def build_tools(
         run_investigation=run_investigation,
         emit_tool_progress=emit_tool_progress,
         pii_enabled=pii_enabled,
+        allow_read_tools=allow_read_tools,
+        trusted_customer_data=trusted_customer_data,
+        output_guard=output_guard,
     )
 
     def _to_tool(spec: ToolSpec):
@@ -1713,6 +1752,9 @@ def build_openai_tools(
     run_investigation: Callable[..., str] | None = None,
     emit_tool_progress: Callable[[str], None] | None = None,
     pii_enabled: bool = False,
+    allow_read_tools: bool = True,
+    trusted_customer_data: bool = False,
+    output_guard: Callable[[str], bool] | None = None,
 ) -> tuple[list[dict], dict[str, Callable[[object], "ToolOutput"]]]:
     """The OpenAI adapter over :func:`build_tool_specs`.
 
@@ -1743,6 +1785,9 @@ def build_openai_tools(
         run_investigation=run_investigation,
         emit_tool_progress=emit_tool_progress,
         pii_enabled=pii_enabled,
+        allow_read_tools=allow_read_tools,
+        trusted_customer_data=trusted_customer_data,
+        output_guard=output_guard,
     )
     tool_specs = [
         {

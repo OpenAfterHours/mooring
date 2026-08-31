@@ -882,6 +882,28 @@ function showPiiBanner(items) {
     "notebook and avoid sending real values — this scan is best-effort, not a guarantee.";
 }
 
+function showRoutingNotice(route, switched = false) {
+  if (!route?.zone) return;
+  if (route.zone === "trusted") {
+    const carried = route.conversation_carried;
+    let text = switched
+      ? "This conversation switched to your firm's approved customer-data model."
+      : "Your firm's approved customer-data model is handling this conversation.";
+    if (switched && carried === true) text += " The earlier conversation was carried forward.";
+    if (switched && carried === false) {
+      text += " The earlier conversation could not be carried; make follow-up requests self-contained.";
+    }
+    addSysRow(text);
+    return;
+  }
+  if (!switched) {
+    addSysRow(
+      "The approved data checker found this context suitable for the selected general coding model. " +
+      "Mooring will switch this conversation if later content needs the approved customer-data model."
+    );
+  }
+}
+
 // A held chat turn (block_prompt): nothing was sent; offer "Send anyway".
 function addPiiHold(findings, token) {
   const wrap = addRow("row-sys row-pii", "");
@@ -1064,6 +1086,7 @@ async function openChat() {
   source.addEventListener("tool", (e) => onTool(JSON.parse(e.data)));
   source.addEventListener("tool_done", (e) => onToolDone(JSON.parse(e.data).success !== false));
   source.addEventListener("intent", (e) => onIntent(JSON.parse(e.data).text));
+  source.addEventListener("routing", (e) => showRoutingNotice(JSON.parse(e.data), true));
   source.addEventListener("idle", () => {
     setTurnState("idle");
     if (explainTurnActive) {
@@ -1137,6 +1160,7 @@ async function openChat() {
   currentGuard = data.guard || null;
   setPiiBadge(currentGuard);
   showPiiBanner(data.pii);
+  showRoutingNotice(data.route);
   // If the session is still starting (backgrounded handshake), show "connecting…"
   // and keep the input disabled until the "ready" event arrives; an already-ready
   // session (data.ready) is usable immediately.
