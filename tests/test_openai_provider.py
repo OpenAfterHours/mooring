@@ -11,8 +11,8 @@ import types
 import pytest
 
 from mooring.ai import base
-from mooring.ai.base import AIError
-from mooring.ai.openai_provider import OpenAIProvider, resolve_api_key
+from mooring.ai.base import AIError, AINotConnectedError
+from mooring.ai.openai_provider import OpenAIProvider, resolve_api_key, resolve_trusted_api_key
 
 
 @pytest.fixture(autouse=True)
@@ -38,6 +38,40 @@ def test_resolve_api_key_none_when_unset(monkeypatch):
     monkeypatch.delenv("MOORING_OPENAI_API_KEY", raising=False)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     assert resolve_api_key() is None
+
+
+def test_trusted_key_never_falls_back_to_general_credentials(monkeypatch):
+    monkeypatch.delenv("MOORING_AI_TRUSTED_API_KEY", raising=False)
+    monkeypatch.setenv("MOORING_OPENAI_API_KEY", "sk-general")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-sdk-general")
+    assert resolve_trusted_api_key() is None
+
+    monkeypatch.setenv("MOORING_AI_TRUSTED_API_KEY", "sk-approved")
+    assert resolve_trusted_api_key() == "sk-approved"
+
+
+def test_trusted_key_never_falls_back_to_user_keyring(monkeypatch):
+    class PopulatedKeyring:
+        @staticmethod
+        def get_password(_service, _user):
+            return "sk-user-controlled"
+
+    monkeypatch.delenv("MOORING_AI_TRUSTED_API_KEY", raising=False)
+    monkeypatch.setattr("mooring.ai.openai_provider._keyring", PopulatedKeyring)
+    assert resolve_trusted_api_key() is None
+
+
+def test_trusted_provider_requires_its_dedicated_key_even_with_base_url(monkeypatch):
+    provider = OpenAIProvider(
+        base_url="https://approved.example/v1",
+        api_key_resolver=lambda: None,
+        require_api_key=True,
+        follow_redirects=False,
+        name="trusted-openai",
+    )
+    monkeypatch.setattr(provider, "available", lambda: True)
+    with pytest.raises(AINotConnectedError, match="MOORING_AI_TRUSTED_API_KEY"):
+        provider.make_client()
 
 
 def test_chat_model_filter_canonical_openai():

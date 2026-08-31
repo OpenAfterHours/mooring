@@ -305,6 +305,9 @@ class CopilotProvider:
         pii: PiiConfig | None = None,
         traceback_guard: bool = True,
         background: bool = False,
+        allow_read_tools: bool = True,
+        trusted_customer_data: bool = False,
+        output_guard=None,
     ):
         """Open a long-lived, streaming, value-blind chat session (the copilot).
 
@@ -364,6 +367,9 @@ class CopilotProvider:
             pii_name_model=name_model,
             pii_name_backend=backend,
             traceback_guard=traceback_guard,
+            allow_read_tools=allow_read_tools,
+            trusted_customer_data=trusted_customer_data,
+            output_guard=output_guard,
         )
         # Default path blocks (and raises on failure); the hub passes background=True
         # to return the open response immediately and stream readiness instead. The

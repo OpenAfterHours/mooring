@@ -658,7 +658,7 @@ def test_traceback_known_tokens_rescue_from_system_context():
     assert "KeyError: 'revenue'" in preview  # already in-channel — nothing new revealed
 
 
-def test_traceback_known_tokens_rescue_from_notebook_on_disk(tmp_path):
+def test_traceback_known_tokens_do_not_reread_notebook_on_disk(tmp_path):
     (tmp_path / "nb.py").write_text('df = df.select("net revenue")\n', "utf-8")
     sess = StubChatSession(traceback_guard=True, workspace=tmp_path, notebook_rel="nb.py")
     q = sess.subscribe()
@@ -668,13 +668,13 @@ def test_traceback_known_tokens_rescue_from_notebook_on_disk(tmp_path):
         "KeyError: 'net revenue'"
     )
     preview = _drain(q)[0].data["preview"]
-    assert "KeyError: 'net revenue'" in preview
+    assert "net revenue" not in preview
+    assert "KeyError: <redacted: 13 chars>" in preview
 
 
 def test_traceback_guard_survives_a_non_utf8_notebook(tmp_path):
     # A stray latin-1 byte in the notebook (hand-edit in a wrong-encoding editor)
-    # must not break EVERY send while the default-on guard is armed: the
-    # known-token rescue just gets fewer tokens and the turn goes through.
+    # must not break EVERY send while the default-on guard is armed.
     (tmp_path / "nb.py").write_bytes(b"# caf\xe9\nrevenue = 1\n")
     sess = StubChatSession(traceback_guard=True, workspace=tmp_path, notebook_rel="nb.py")
     q = sess.subscribe()

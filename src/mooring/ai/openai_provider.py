@@ -24,7 +24,7 @@ from __future__ import annotations
 import os
 import re
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 
 from mooring.ai.base import AIError, AINotConnectedError, ProviderStatus
 
@@ -44,6 +44,10 @@ _OPENAI_UNAVAILABLE = (
 
 KEYRING_SERVICE = "mooring-openai"
 KEYRING_USER = "default"
+_NO_TRUSTED_KEY_DETAIL = (
+    "The approved AI route has no dedicated credential. "
+    "Set MOORING_AI_TRUSTED_API_KEY in the managed launch environment."
+)
 
 # Chat-capable model id prefixes for the listing filter; models.list also returns
 # embeddings / tts / whisper / image / moderation ids that are not chat models.
@@ -106,6 +110,18 @@ def resolve_api_key(env: Mapping[str, str] | None = None) -> str | None:
         except Exception:  # pragma: no cover - backend-dependent
             pass
     key = env.get("OPENAI_API_KEY")
+    return (key.strip() or None) if key else None
+
+
+def resolve_trusted_api_key(env: Mapping[str, str] | None = None) -> str | None:
+    """Resolve only the dedicated approved-route credential.
+
+    There is deliberately no fallback to the user's general OpenAI key. A deployment
+    cannot accidentally send customer information with a credential meant for a
+    different tenant or endpoint.
+    """
+    env = os.environ if env is None else env
+    key = env.get("MOORING_AI_TRUSTED_API_KEY")
     return (key.strip() or None) if key else None
 
 
@@ -204,7 +220,14 @@ def friendly_error(msg: str) -> str:
     return f"OpenAI request failed: {msg}"
 
 
-def build_client(api_key: str, *, base_url: str = "", api_version: str = "", timeout: float):
+def build_client(
+    api_key: str,
+    *,
+    base_url: str = "",
+    api_version: str = "",
+    timeout: float,
+    follow_redirects: bool = True,
+):
     """Construct the sync OpenAI client for the resolved key + endpoint.
 
     ``api_version`` set → a classic Azure deployment (``AzureOpenAI`` with
@@ -213,26 +236,50 @@ def build_client(api_key: str, *, base_url: str = "", api_version: str = "", tim
     """
     import openai
 
+    http_client = None
+    if not follow_redirects:
+        # A trust profile pins one HTTPS host. Following a gateway redirect to a
+        # different host would silently widen that approval.
+        http_client = openai.DefaultHttpxClient(follow_redirects=False)
     if api_version:
-        return openai.AzureOpenAI(
-            api_key=api_key,
-            azure_endpoint=base_url or None,
-            api_version=api_version,
-            timeout=timeout,
-        )
+        kwargs = {
+            "api_key": api_key,
+            "azure_endpoint": base_url or None,
+            "api_version": api_version,
+            "timeout": timeout,
+        }
+        if http_client is not None:
+            kwargs["http_client"] = http_client
+        return openai.AzureOpenAI(**kwargs)
     kwargs = {"api_key": api_key, "timeout": timeout}
     if base_url:
         kwargs["base_url"] = base_url
+    if http_client is not None:
+        kwargs["http_client"] = http_client
     return openai.OpenAI(**kwargs)
 
 
 class OpenAIProvider:
     name = "openai"
 
-    def __init__(self, model: str = "", base_url: str = "", api_version: str = "") -> None:
+    def __init__(
+        self,
+        model: str = "",
+        base_url: str = "",
+        api_version: str = "",
+        *,
+        api_key_resolver: Callable[[], str | None] | None = None,
+        require_api_key: bool = False,
+        follow_redirects: bool = True,
+        name: str = "openai",
+    ) -> None:
         self.model = (model or "").strip()
         self._base_url = (base_url or "").strip()
         self._api_version = (api_version or "").strip()
+        self._api_key_resolver = api_key_resolver or resolve_api_key
+        self._require_api_key = bool(require_api_key)
+        self._follow_redirects = bool(follow_redirects)
+        self.name = name
         self._cached_status: ProviderStatus | None = None
         self._cached_at = 0.0
         self._cached_models: list[dict] | None = None
@@ -249,7 +296,7 @@ class OpenAIProvider:
         return True
 
     def _key(self) -> str | None:
-        return resolve_api_key()
+        return self._api_key_resolver()
 
     def _make_client(self):
         """Resolve the key and build a client, or raise the typed not-connected error.
@@ -259,8 +306,9 @@ class OpenAIProvider:
         key surfaces the SAME :class:`AINotConnectedError` on either path.
         """
         key = self._key()
-        if not key and not self._base_url:
-            raise AINotConnectedError(_NO_KEY_DETAIL)
+        if not key and (self._require_api_key or not self._base_url):
+            detail = _NO_TRUSTED_KEY_DETAIL if self._require_api_key else _NO_KEY_DETAIL
+            raise AINotConnectedError(detail)
         # A base_url with no key = a keyless endpoint (local vLLM/Ollama/LM Studio);
         # the SDK still needs a non-empty api_key, so pass a harmless placeholder.
         return build_client(
@@ -268,7 +316,12 @@ class OpenAIProvider:
             base_url=self._base_url,
             api_version=self._api_version,
             timeout=_CLIENT_TIMEOUT,
+            follow_redirects=self._follow_redirects,
         )
+
+    def make_client(self):
+        """Public client factory for the trusted inspector sharing this profile."""
+        return self._make_client()
 
     # -- status --------------------------------------------------------------
 
@@ -421,6 +474,9 @@ class OpenAIProvider:
         pii=None,
         traceback_guard: bool = True,
         background: bool = False,
+        allow_read_tools: bool = True,
+        trusted_customer_data: bool = False,
+        output_guard=None,
     ):
         """Open a long-lived, streaming, value-blind chat session (Chat Completions).
 
@@ -483,6 +539,9 @@ class OpenAIProvider:
             traceback_guard=traceback_guard,
             client_factory=client_factory,
             store=store,
+            allow_read_tools=allow_read_tools,
+            trusted_customer_data=trusted_customer_data,
+            output_guard=output_guard,
         )
         session.start(block=not background)
         return session

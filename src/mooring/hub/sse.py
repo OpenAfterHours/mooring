@@ -53,6 +53,9 @@ def chat_replay(session) -> list[str]:
     ner_status = getattr(session, "ner_status", None)
     if ner_status:
         out.append(sse_event("ner", ner_status))
+    route_replay = getattr(session, "route_replay", None)
+    if isinstance(route_replay, dict):
+        out.append(sse_event("routing", route_replay))
     return out
 
 

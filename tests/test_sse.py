@@ -9,8 +9,9 @@ from __future__ import annotations
 
 import asyncio
 import queue
+import types
 
-from mooring.hub.sse import event_stream, sse_event
+from mooring.hub.sse import chat_replay, event_stream, sse_event
 
 
 class _Broadcaster:
@@ -55,3 +56,26 @@ def test_replayed_close_ends_the_stream_and_unsubscribes():
     chunks = asyncio.run(drain())
     assert len(chunks) == 2  # connected + closed, then the generator returned
     assert "unsubscribe" in order
+
+
+def test_chat_replay_restores_a_mid_conversation_route_switch():
+    session = types.SimpleNamespace(
+        start_status=None,
+        ner_status=None,
+        route_replay={
+            "zone": "trusted",
+            "reason_codes": ["customer_context"],
+            "conversation_carried": True,
+        },
+    )
+
+    assert chat_replay(session) == [
+        sse_event(
+            "routing",
+            {
+                "zone": "trusted",
+                "reason_codes": ["customer_context"],
+                "conversation_carried": True,
+            },
+        )
+    ]

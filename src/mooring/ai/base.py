@@ -82,6 +82,9 @@ class AIProvider(Protocol):
         read_only: bool = False,
         run_investigation=None,
         pii: "PiiConfig | None" = None,
+        allow_read_tools: bool = True,
+        trusted_customer_data: bool = False,
+        output_guard=None,
     ):
         """Open a long-lived, streaming chat session (a ``ChatBroadcaster``).
 

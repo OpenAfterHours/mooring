@@ -116,6 +116,23 @@ class InvestigateConfig:
 
 
 @dataclass(frozen=True)
+class RoutingConfig:
+    """Deployment-managed trusted AI routing. Default OFF.
+
+    Values are accepted only from ``MOORING_AI_*`` environment variables, which a
+    managed deployment can pin outside the user-editable Settings and TOML surfaces.
+    Credentials are deliberately absent: the trusted provider uses a separate
+    deployment-only variable and never ``config.toml``.
+    """
+
+    enabled: bool = False
+    trusted_base_url: str = ""
+    trusted_api_version: str = ""
+    classifier_model: str = ""
+    coding_model: str = ""
+
+
+@dataclass(frozen=True)
 class AiConfig:
     enabled: bool = True
     provider: str = "copilot"
@@ -179,6 +196,9 @@ class AiConfig:
     pii: PiiConfig = field(default_factory=PiiConfig)
     batch: BatchConfig = field(default_factory=BatchConfig)
     investigate: InvestigateConfig = field(default_factory=InvestigateConfig)
+    # Append new nested configuration to preserve the positional layout for any
+    # third-party callers that constructed older AiConfig versions positionally.
+    routing: RoutingConfig = field(default_factory=RoutingConfig)
 
 
 def _as_bool(value: object, default: bool) -> bool:
@@ -284,6 +304,15 @@ def load_ai_config(ai: Mapping, env: Mapping[str, str]) -> AiConfig:
             "MOORING_AI_INVESTIGATE_PII_POLICY", str(inv.get("pii_policy", "block_branch"))
         ),
     )
+    # Trust is a deployment policy, not a user preference. Values in the editable
+    # config.toml must never designate an arbitrary endpoint as "approved".
+    routing = RoutingConfig(
+        enabled=_as_bool(env.get("MOORING_AI_ROUTING"), False),
+        trusted_base_url=env.get("MOORING_AI_TRUSTED_BASE_URL", ""),
+        trusted_api_version=env.get("MOORING_AI_TRUSTED_API_VERSION", ""),
+        classifier_model=env.get("MOORING_AI_TRUSTED_CLASSIFIER_MODEL", ""),
+        coding_model=env.get("MOORING_AI_TRUSTED_CODING_MODEL", ""),
+    )
     return AiConfig(
         enabled=_as_bool(env.get("MOORING_AI_ENABLED"), _as_bool(ai.get("enabled"), True)),
         provider=env.get("MOORING_AI_PROVIDER", str(ai.get("provider", "copilot"))),
@@ -322,6 +351,7 @@ def load_ai_config(ai: Mapping, env: Mapping[str, str]) -> AiConfig:
         openai_api_version=env.get(
             "MOORING_AI_OPENAI_API_VERSION", str(ai.get("openai_api_version", ""))
         ),
+        routing=routing,
         pii=pii,
         batch=batch,
         investigate=investigate,

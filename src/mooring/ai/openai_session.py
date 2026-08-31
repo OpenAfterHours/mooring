@@ -54,6 +54,7 @@ from mooring.ai.session import (
     _INVESTIGATE_GUIDE,
     _INVESTIGATOR_GUIDE,
     _MODEL_TOOL_GUIDE,
+    _PROPOSE_ONLY_GUIDE,
     _TOOL_GUIDE,
 )
 from mooring.ai.tools import build_openai_tools
@@ -131,6 +132,9 @@ class OpenAIChatSession(ChatBroadcaster):
         pii_name_model: "ModelRef | str | None" = None,
         pii_name_backend: str = "auto",
         traceback_guard: bool = False,
+        allow_read_tools: bool = True,
+        trusted_customer_data: bool = False,
+        output_guard=None,
     ) -> None:
         super().__init__()
         self.configure_pii(
@@ -157,20 +161,27 @@ class OpenAIChatSession(ChatBroadcaster):
         self._effort_mode = "send"
         self._effort_notified = False
         self._read_only = read_only
+        self._allow_read_tools = bool(allow_read_tools)
+        self._trusted_customer_data = bool(trusted_customer_data)
+        self._output_guard = output_guard
         # A read-only investigate sub-agent: no propose/edit tool and no
         # mooring_investigate (so it cannot write or recurse). Force it off even if a
         # run_investigation were mis-wired in — belt-and-suspenders for the depth-1 rule.
         self._run_investigation = None if read_only else run_investigation
-        guide = _INVESTIGATOR_GUIDE if read_only else _TOOL_GUIDE
-        if dictionary is not None and not dictionary.is_empty():
+        guide = (
+            _INVESTIGATOR_GUIDE
+            if read_only
+            else (_TOOL_GUIDE if self._allow_read_tools else _PROPOSE_ONLY_GUIDE)
+        )
+        if self._allow_read_tools and dictionary is not None and not dictionary.is_empty():
             guide += _DICT_TOOL_GUIDE
-        if helpers is not None and not helpers.is_empty():
+        if self._allow_read_tools and helpers is not None and not helpers.is_empty():
             guide += _HELPER_TOOL_GUIDE
-        if catalog is not None and not catalog.is_empty():
+        if self._allow_read_tools and catalog is not None and not catalog.is_empty():
             guide += _CATALOG_TOOL_GUIDE
-        if semantic_models:
+        if self._allow_read_tools and semantic_models:
             guide += _MODEL_TOOL_GUIDE
-        if self._run_investigation is not None:
+        if self._allow_read_tools and self._run_investigation is not None:
             guide += _INVESTIGATE_GUIDE
         self._system_context = system_context + guide
         self._workspace = Path(workspace)
@@ -244,6 +255,9 @@ class OpenAIChatSession(ChatBroadcaster):
                 run_investigation=self._run_investigation,
                 emit_tool_progress=self._emit_tool_progress,
                 pii_enabled=self._pii_enabled,
+                allow_read_tools=self._allow_read_tools,
+                trusted_customer_data=self._trusted_customer_data,
+                output_guard=self._output_guard,
             )
         except AINotConnectedError as exc:
             self._start_error = exc

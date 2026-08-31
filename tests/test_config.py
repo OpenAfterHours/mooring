@@ -4,7 +4,7 @@ import platformdirs
 import pytest
 
 from mooring import paths
-from mooring.ai_config import AiConfig, BatchConfig, PiiConfig
+from mooring.ai_config import AiConfig, BatchConfig, PiiConfig, RoutingConfig
 from mooring.config import load_app_config, load_config
 
 
@@ -58,6 +58,48 @@ def test_ai_pii_toml_and_env_populate_the_nested_object(tmp_path):
     # env overrides the file, written straight onto the nested object
     app2 = load_app_config(user_config_path=user, env={"MOORING_AI_PII": "0"})
     assert app2.ai.pii.enabled is False
+
+
+def test_ai_routing_defaults_off_with_no_credentials_in_config(tmp_path):
+    app = load_app_config(user_config_path=tmp_path / "missing.toml", env={})
+    assert isinstance(app.ai.routing, RoutingConfig)
+    assert app.ai.routing == RoutingConfig()
+    assert app.ai_routing_enabled is False
+    assert app.ai_trusted_base_url == ""
+    assert not hasattr(app.ai.routing, "api_key")
+
+
+def test_ai_routing_ignores_toml_and_accepts_only_managed_env(tmp_path):
+    user = tmp_path / "config.toml"
+    user.write_text(
+        "[ai.routing]\n"
+        "enabled = true\n"
+        'trusted_base_url = "https://approved.example/v1"\n'
+        'trusted_api_version = "2026-01-01"\n'
+        'classifier_model = "privacy-classifier"\n'
+        'coding_model = "approved-coder"\n',
+        "utf-8",
+    )
+    app = load_app_config(user_config_path=user, env={})
+    assert app.ai.routing == RoutingConfig()
+
+    overridden = load_app_config(
+        user_config_path=user,
+        env={
+            "MOORING_AI_ROUTING": "1",
+            "MOORING_AI_TRUSTED_BASE_URL": "https://admin.example/openai",
+            "MOORING_AI_TRUSTED_API_VERSION": "2026-08-01",
+            "MOORING_AI_TRUSTED_CLASSIFIER_MODEL": "admin-classifier",
+            "MOORING_AI_TRUSTED_CODING_MODEL": "admin-coder",
+        },
+    )
+    assert overridden.ai.routing == RoutingConfig(
+        enabled=True,
+        trusted_base_url="https://admin.example/openai",
+        trusted_api_version="2026-08-01",
+        classifier_model="admin-classifier",
+        coding_model="admin-coder",
+    )
 
 
 def test_ai_batch_config_defaults_off_with_caps(tmp_path):
