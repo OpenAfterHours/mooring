@@ -62,18 +62,51 @@ a second model call. If your deployment already adds a separate model-based dest
 reviewer, keep that enforcement boundary in place around Mooring; trusted routing does
 not replace or invoke an external reviewer that is not configured in this codebase.
 
-The trust profile is not a Settings or `config.toml` preference. A managed deployment
-must pin an explicit HTTPS endpoint, classifier model, trusted coding-model allowlist,
-default model, and dedicated `MOORING_AI_TRUSTED_API_KEY`. The trusted route never falls
-back to the user's general OpenAI credential and never follows redirects. The browser
-receives only a safe profile label, the approved model IDs, and their default: it never
-receives the endpoint, credential, API version, or classifier ID.
+### Two profile sources
 
-Settings may store a user's **default selection within** that managed profile: a
+A routing profile comes from one of two places, and the managed one always wins.
+
+**Managed** is the `MOORING_AI_*` environment, supplied by a managed launcher, MDM
+profile, or equivalent administrator-controlled deployment: an explicit HTTPS endpoint,
+classifier model, trusted coding-model allowlist, default model, and dedicated
+`MOORING_AI_TRUSTED_API_KEY`. It cannot be created, changed, or overridden from the
+Settings page or `config.toml`. `MOORING_AI_ROUTING` is authoritative whenever it is
+**present**: a false value switches routing off outright, so a launcher can forbid the
+feature without depending on what an analyst's config says.
+
+**Self-configured** is the `[ai.routing]` table in the per-machine `config.toml`, edited
+from **Settings → AI copilot**, for an analyst with no managed deployment behind them.
+It is validated exactly as a managed profile is — explicit HTTPS with no credentials,
+query, or fragment; a classifier; a default model that is a member of its own allowlist;
+a credential — and it is refused until all of those are present. Its credential lives in
+a **separate** OS credential-store slot (`mooring-openai-trusted`), never the general
+OpenAI key and never `config.toml`.
+
+The difference that matters is what the product is allowed to *say*. A self-configured
+profile is labelled **Self-configured**, structurally: the label is a constant in
+`ai_config.SELF_CONFIGURED_LABEL`, not a value read from config, so a user cannot name
+their own endpoint after a firm. Only a managed profile may describe itself as approved,
+and the chat chrome words itself from the profile source the server reports — badge,
+tooltip, and every route notice. An absent or unrecognised source under-claims rather
+than guessing, because falsely asserting that a firm approved an endpoint is the only
+direction that does harm.
+
+An administrator who wants the feature gone entirely has two levers, both of which can
+only restrict: set `MOORING_AI_ROUTING=0` in the managed environment, or pin
+`"ai.routing.enabled" = false` in the synced `mooring.toml`'s `[policy.settings]`. As
+with every policy knob, the permissive direction is not expressible — a policy can take
+a self-configured profile away, and there is no `mooring.toml` that can hand one out.
+
+Whichever profile is live, the trusted route never falls back to the user's general
+OpenAI credential and never follows redirects. The browser receives only a safe profile
+label, its source, the approved model IDs, and their default: it never receives the
+endpoint, credential, API version, or classifier ID.
+
+Settings may store a user's **default selection within** the live profile: a
 customer-data model from the current allowlist and either **Automatic** or **Always use
 approved** routing. These are preferences, not trust designations. A hand-edited or
 stale model never reaches the provider; Mooring intersects it with the live allowlist
-and falls back to the administrator's approved default. An invalid hand-edited routing
+and falls back to that profile's own default. An invalid hand-edited routing
 value fails upward to the approved route rather than silently becoming automatic.
 
 The chat UI keeps the general and customer-data model choices separate. Each notebook
@@ -85,7 +118,7 @@ still runs local secret checks and honours a classifier `block` decision. There 
 control that can force content onto the general provider, and an upgraded conversation
 never moves back. Changing a model or routing preference starts a fresh chat; Settings
 changes affect newly opened chats. See
-[configuration](configuration.md#deployment-managed-trusted-ai-routing).
+[configuration](configuration.md#trusted-ai-routing).
 
 For the first release, general routed sessions expose only the proposal tool. Mutable
 read tools become available after the conversation is on the trusted route, where each

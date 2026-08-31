@@ -181,6 +181,15 @@ KNOBS: tuple[Knob, ...] = (
     Knob("ai.live_schema", ("ai", "live_schema"), False, "live kernel schema reads"),
     Knob("ai.semantic_model", ("ai", "semantic_model"), False, "Power BI semantic-model reads"),
     Knob("ai.batch.enabled", ("ai", "batch", "enabled"), False, "unattended batch builds"),
+    # Routing is the one path that deliberately PERMITS customer information to
+    # leave, so "no self-configured profile" is its restrictive end. Only the local
+    # profile is governed: a MANAGED profile comes from the launcher's environment,
+    # which already outranks the repo, and pinning it off here would let a synced
+    # file veto the deployment that installed mooring.
+    Knob(
+        "ai.routing.enabled", ("ai", "routing", "local_enabled"), False,
+        "self-configured customer-data routing",
+    ),
 )
 KNOB_BY_KEY: dict[str, Knob] = {k.key: k for k in KNOBS}
 

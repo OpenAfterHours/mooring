@@ -1836,11 +1836,15 @@ function populateTrustedRouting(routing) {
     (saved) => ChatCore.chooseNotebookRoutingOverride(ROUTING, saved),
   );
   const selectable = options.length > 1;
+  // "approved by your firm" is a claim about who vetted the endpoint, so it may only
+  // be made for a managed profile — the same rule the badge and route notices follow.
+  const vetted =
+    ChatCore.routingProfileKind(ROUTING) === "managed" ? " approved by your firm" : "";
   modelSelect.title = selectable
-    ? "Choose from the customer-data models approved by your firm"
+    ? `Choose from the customer-data models${vetted}`
     : options.length === 1
-      ? "This is the only customer-data model approved by your firm"
-      : "No approved customer-data model is configured";
+      ? `This is the only customer-data model${vetted || " configured"}`
+      : "No customer-data model is configured";
   modelSelect.disabled = !available || !selectable;
   preferenceSelect.disabled = !available;
   modelWrap.classList.remove("hidden");

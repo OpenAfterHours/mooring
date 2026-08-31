@@ -97,6 +97,29 @@ const ChatCore = (function () {
     return "";
   }
 
+  // Which profile is answering, from either the routing metadata or one route
+  // event — both carry the same `source` field. Three-way ON PURPOSE: claiming a
+  // firm approved an endpoint the user configured themselves is the one direction
+  // that does harm, so an absent/unrecognised source under-claims rather than
+  // guessing. "managed" is never inferred, only read.
+  function routingProfileKind(x) {
+    const raw = typeof x?.source === "string" ? x.source.trim().toLowerCase() : "";
+    if (raw === "local") return "local";
+    if (raw === "managed") return "managed";
+    return "unknown";
+  }
+
+  // The noun phrase for the customer-data model, matched to that kind.
+  function trustedModelPhrase(kind, { capitalise = false } = {}) {
+    const text =
+      kind === "managed"
+        ? "your firm's approved customer-data model"
+        : kind === "local"
+          ? "the customer-data model you configured"
+          : "the customer-data model";
+    return capitalise ? text.charAt(0).toUpperCase() + text.slice(1) : text;
+  }
+
   function trustedRoutingAvailable(routing) {
     return routing?.enabled === true && !routing.error && trustedModelOptions(routing).length > 0;
   }
@@ -112,10 +135,11 @@ const ChatCore = (function () {
     const model = typeof modelValue === "string" ? modelValue.trim() : "";
     const profile = typeof route.profile_label === "string" ? route.profile_label.trim() : "";
     const identity = [...new Set([profile, model].filter(Boolean))].join(" · ");
+    const kind = routingProfileKind(route);
     if (route.zone === "trusted") {
       let text = switched
-        ? "This conversation switched to your firm's approved customer-data model"
-        : "Your firm's approved customer-data model is handling this conversation";
+        ? `This conversation switched to ${trustedModelPhrase(kind)}`
+        : `${trustedModelPhrase(kind, { capitalise: true })} is handling this conversation`;
       if (identity) text += ` (${identity})`;
       text += ".";
       if (switched && route.conversation_carried === true) {
@@ -128,10 +152,11 @@ const ChatCore = (function () {
     }
     if (switched) return "";
     const general = model ? ` (${model})` : "";
+    const checker = kind === "local" ? "checker you configured" : "approved data checker";
     return (
-      "The approved data checker found this context suitable for the selected general coding model" +
+      `The ${checker} found this context suitable for the selected general coding model` +
       general +
-      ". Mooring will switch this conversation if later content needs the approved customer-data model."
+      `. Mooring will switch this conversation if later content needs ${trustedModelPhrase(kind)}.`
     );
   }
 
@@ -139,21 +164,43 @@ const ChatCore = (function () {
     if (routing?.enabled === true) {
       if (!trustedRoutingAvailable(routing)) {
         return {
-          badge: "approved routing unavailable",
+          badge: "customer-data routing unavailable",
           badgeClass: "danger",
-          title: "Approved customer-data routing is unavailable; messages cannot be sent",
-          lead: "mooring copilot · approved routing unavailable.",
+          title: "Customer-data routing is unavailable; messages cannot be sent",
+          lead: "mooring copilot · routing unavailable.",
           body: " Customer-data routing is not ready, so this chat cannot send messages.",
-          footer: "Reload or ask your administrator to check the approved model configuration.",
+          footer: "Reload, or check the customer-data profile in Settings.",
         };
       }
+      const kind = routingProfileKind(routing);
+      if (kind === "local") {
+        return {
+          badge: "self-configured routing",
+          badgeClass: "warn",
+          title:
+            "A checker YOU configured routes customer information to an endpoint YOU " +
+            "chose; nobody has approved it on your behalf",
+          lead: "mooring copilot · self-configured routing.",
+          body:
+            " You set this route up yourself: no administrator has approved the endpoint " +
+            "or the checker. Customer information you deliberately put in notebook code " +
+            "or this chat may be sent to the model you selected. Mooring does not " +
+            "automatically read raw dataset values or cell results, and recognized " +
+            "credential patterns are blocked locally.",
+          footer: "Type /help for commands.",
+        };
+      }
+      const whose = kind === "managed" ? "your firm's approved model" : "the selected model";
       return {
-        badge: "approved routing",
+        badge: kind === "managed" ? "approved routing" : "customer-data routing",
         badgeClass: "synced",
         title:
-          "An approved checker routes customer information to your firm's approved model; " +
+          `An approved checker routes customer information to ${whose}; ` +
           "raw dataset values and cell results are not automatically read",
-        lead: "mooring copilot · approved routing.",
+        lead:
+          kind === "managed"
+            ? "mooring copilot · approved routing."
+            : "mooring copilot · customer-data routing.",
         body:
           " An approved checker routes each turn. Customer information you deliberately put in " +
           "notebook code or this chat may be sent to the selected approved model. Mooring does " +
@@ -1446,6 +1493,8 @@ const ChatCore = (function () {
     trustedModelsFromEnumOptions,
     chooseTrustedModel,
     trustedRoutingAvailable,
+    routingProfileKind,
+    trustedModelPhrase,
     chooseRoutingPreference,
     routingNotice,
     privacyChrome,

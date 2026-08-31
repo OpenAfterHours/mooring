@@ -40,6 +40,7 @@ class RoutedChatSession(ChatBroadcaster):
         traceback_guard: bool = True,
         trusted_model: str = "",
         profile_label: str = "",
+        profile_source: str = "",
     ) -> None:
         super().__init__()
         if initial_zone not in (GENERAL_ZONE, TRUSTED_ZONE):
@@ -57,6 +58,9 @@ class RoutedChatSession(ChatBroadcaster):
         # validation. Browser request values are never copied into SSE events.
         self._trusted_model = str(trusted_model).strip()
         self._profile_label = str(profile_label).strip()
+        # "managed" | "local". Display-only, and supplied by the server rather than
+        # the browser: it decides whether the chat may say "approved by your firm".
+        self._profile_source = str(profile_source).strip()
         self._route_lock = threading.Lock()
         self._turn_idle = threading.Event()
         self._turn_idle.set()
@@ -81,6 +85,10 @@ class RoutedChatSession(ChatBroadcaster):
     @property
     def profile_label(self) -> str:
         return self._profile_label
+
+    @property
+    def profile_source(self) -> str:
+        return self._profile_source
 
     @property
     def start_status(self):
@@ -213,6 +221,8 @@ class RoutedChatSession(ChatBroadcaster):
         }
         if self._profile_label:
             route["profile_label"] = self._profile_label
+        if self._profile_source:
+            route["source"] = self._profile_source
         if self._trusted_model:
             route["model"] = self._trusted_model
         self._route_replay = route

@@ -6,6 +6,7 @@ const C = require("../../src/mooring/hub/static/chat_core.js");
 
 const routing = {
   enabled: true,
+  source: "managed",
   profile_label: "Firm Azure OpenAI",
   trusted_models: [
     { id: "approved-coder", name: "Approved coder" },
@@ -79,6 +80,7 @@ test("route notices include safe profile/model labels and handoff state", () => 
     C.routingNotice(
       {
         zone: "trusted",
+        source: "managed",
         profile_label: "Firm Azure OpenAI",
         model: "approved-coder",
         conversation_carried: true,
@@ -96,6 +98,7 @@ test("route notices include safe profile/model labels and handoff state", () => 
 test("privacy chrome is truthful about approved routing and never exposes deployment details", () => {
   const copy = C.privacyChrome({
     enabled: true,
+    source: "managed",
     trusted_models: [{ id: "approved-coder", name: "Approved coder" }],
     base_url: "https://must-not-appear.example",
     api_key: "must-not-appear",
@@ -132,7 +135,7 @@ test("privacy chrome retains schema-only guidance when routing is disabled", () 
 
 test("routing misconfiguration is shown as unavailable, never green approved routing", () => {
   const copy = C.privacyChrome({ enabled: true, trusted_models: [], error: "secret detail" });
-  assert.equal(copy.badge, "approved routing unavailable");
+  assert.equal(copy.badge, "customer-data routing unavailable");
   assert.equal(copy.badgeClass, "danger");
   assert.match(copy.body, /cannot send messages/);
   assert.doesNotMatch(Object.values(copy).join(" "), /secret detail/);
@@ -288,4 +291,60 @@ test("Settings hydrates approved controls independently and chat uses safe scope
   assert.doesNotMatch(chat, /localStorage\.getItem|localStorage\.setItem|localStorage\.removeItem/);
   assert.equal((chat.match(/window\.localStorage/g) || []).length, 1);
   assert.match(chat, /function browserStorage\(\) \{[\s\S]*?try \{[\s\S]*?window\.localStorage/);
+});
+
+// -- self-configured profiles --------------------------------------------------
+// The load-bearing claim of the whole two-profile design: a route the USER set up
+// must never be able to borrow the words that mean "an administrator approved this".
+
+const localRouting = {
+  enabled: true,
+  source: "local",
+  profile_label: "Self-configured",
+  trusted_models: [{ id: "self-coder", name: "self-coder" }],
+  default_trusted_model: "self-coder",
+  default_routing_preference: "auto",
+};
+
+test("profile kind is read, never inferred, and an unknown source under-claims", () => {
+  assert.equal(C.routingProfileKind({ source: "managed" }), "managed");
+  assert.equal(C.routingProfileKind({ source: " LOCAL " }), "local");
+  assert.equal(C.routingProfileKind({}), "unknown");
+  assert.equal(C.routingProfileKind({ source: "approved" }), "unknown");
+  assert.equal(C.routingProfileKind(null), "unknown");
+  // Under-claiming is the safe direction: no phrase may assert approval unless
+  // the source explicitly said "managed".
+  assert.doesNotMatch(C.trustedModelPhrase("unknown"), /approved|firm/i);
+  assert.doesNotMatch(C.trustedModelPhrase("local"), /approved|firm/i);
+  assert.match(C.trustedModelPhrase("managed"), /firm's approved/);
+});
+
+test("self-configured chrome never claims a firm approved the endpoint", () => {
+  const copy = C.privacyChrome(localRouting);
+  const all = Object.values(copy).join(" ");
+  assert.equal(copy.badge, "self-configured routing");
+  assert.equal(copy.badgeClass, "warn");
+  assert.doesNotMatch(all, /firm's approved|approved by/i);
+  assert.match(all, /no administrator has approved/i);
+  assert.match(copy.body, /does not automatically read raw dataset values or cell results/);
+  assert.match(copy.body, /recognized credential patterns are blocked locally/);
+});
+
+test("self-configured route notices say who configured the route", () => {
+  const upgraded = C.routingNotice(
+    { zone: "trusted", source: "local", profile_label: "Self-configured", model: "self-coder" },
+    true,
+  );
+  assert.match(upgraded, /switched to the customer-data model you configured/);
+  assert.doesNotMatch(upgraded, /firm/i);
+
+  const general = C.routingNotice({ zone: "general", source: "local", model: "gpt" }, false);
+  assert.match(general, /checker you configured/);
+  assert.doesNotMatch(general, /approved/i);
+});
+
+test("an unknown source claims neither approval nor self-configuration", () => {
+  const notice = C.routingNotice({ zone: "trusted", model: "some-coder" }, false);
+  assert.match(notice, /^The customer-data model is handling this conversation/);
+  assert.doesNotMatch(notice, /firm|you configured/i);
 });

@@ -43,6 +43,10 @@ _OPENAI_UNAVAILABLE = (
 )
 
 KEYRING_SERVICE = "mooring-openai"
+# A SEPARATE credential slot for the customer-data route. Distinct from
+# KEYRING_SERVICE on purpose: the two endpoints are different destinations, and the
+# whole point of the trusted route is that its credential is not the general one.
+KEYRING_SERVICE_TRUSTED = "mooring-openai-trusted"
 KEYRING_USER = "default"
 _NO_TRUSTED_KEY_DETAIL = (
     "The approved AI route has no dedicated credential. "
@@ -113,16 +117,60 @@ def resolve_api_key(env: Mapping[str, str] | None = None) -> str | None:
     return (key.strip() or None) if key else None
 
 
-def resolve_trusted_api_key(env: Mapping[str, str] | None = None) -> str | None:
-    """Resolve only the dedicated approved-route credential.
+def resolve_trusted_api_key(
+    env: Mapping[str, str] | None = None, *, allow_keyring: bool = False
+) -> str | None:
+    """Resolve only the dedicated customer-data credential.
 
-    There is deliberately no fallback to the user's general OpenAI key. A deployment
-    cannot accidentally send customer information with a credential meant for a
-    different tenant or endpoint.
+    There is deliberately no fallback to the user's general OpenAI key, in either
+    profile: a deployment cannot accidentally send customer information with a
+    credential meant for a different tenant or endpoint.
+
+    ``allow_keyring`` is the ONE difference between the two profiles, and the caller
+    passes it from the resolved routing source rather than deciding for itself:
+
+    * a **managed** profile stays env-only, exactly as ``docs/admins/`` documents —
+      the firm's credential is supplied by the launcher, and a key an analyst happens
+      to have stored locally must not be able to satisfy it;
+    * a **self-configured** profile has no launcher, so its key comes from the OS
+      credential store under :data:`KEYRING_SERVICE_TRUSTED`.
     """
     env = os.environ if env is None else env
     key = env.get("MOORING_AI_TRUSTED_API_KEY")
-    return (key.strip() or None) if key else None
+    if key:
+        return key.strip() or None
+    if not allow_keyring:
+        return None
+    kr = _keyring()
+    if kr is not None:
+        try:
+            stored = kr.get_password(KEYRING_SERVICE_TRUSTED, KEYRING_USER)
+            if stored:
+                return stored
+        except Exception:  # pragma: no cover - backend-dependent
+            pass
+    return None
+
+
+def save_trusted_api_key(key: str) -> None:
+    """Store the self-configured customer-data key in the OS credential store."""
+    kr = _keyring()
+    if kr is None:  # pragma: no cover - environment-dependent
+        raise AIError(
+            "No OS credential store is available to store the key. "
+            "Set MOORING_AI_TRUSTED_API_KEY in your environment instead."
+        )
+    kr.set_password(KEYRING_SERVICE_TRUSTED, KEYRING_USER, key.strip())
+
+
+def delete_trusted_api_key() -> None:
+    kr = _keyring()
+    if kr is None:  # pragma: no cover - environment-dependent
+        return
+    try:
+        kr.delete_password(KEYRING_SERVICE_TRUSTED, KEYRING_USER)
+    except Exception:  # pragma: no cover - backend-dependent (absent == deleted)
+        pass
 
 
 def save_api_key(key: str) -> None:

@@ -380,42 +380,116 @@ class AppConfig:
         return self.ai.openai_api_version
 
     @property
+    def ai_routing_source(self) -> str:
+        """Which trusted profile is live: ``"managed"``, ``"local"``, or ``"off"``.
+
+        THE resolution point. Everything about trusted routing is derived from here
+        rather than stored on :class:`~mooring.ai_config.RoutingConfig`, which means
+        the policy fold flipping ``local_enabled`` (see :data:`mooring.policy.KNOBS`)
+        re-resolves the profile and every field below it, with nothing left holding a
+        stale copy. Managed always wins, and a launcher that set ``MOORING_AI_ROUTING``
+        at all has spoken for the machine either way.
+        """
+        r = self.ai.routing
+        if r.enabled:
+            return "managed"
+        if r.managed_pinned or not r.local_enabled:
+            return "off"
+        return "local"
+
+    @property
     def ai_routing_enabled(self) -> bool:
-        return self.ai.routing.enabled
+        return self.ai_routing_source != "off"
+
+    def _trusted_field(self, managed_attr: str, local_attr: str) -> str:
+        """One field of the live profile, or ``""`` when routing is off.
+
+        Fail-closed by construction: a caller that forgets to check
+        ``ai_routing_enabled`` first reads an empty endpoint/classifier and is
+        rejected by ``Hub._trusted_profile`` rather than quietly reaching a
+        half-configured service.
+        """
+        source = self.ai_routing_source
+        if source == "off":
+            return ""
+        attr = managed_attr if source == "managed" else local_attr
+        return str(getattr(self.ai.routing, attr)).strip()
 
     @property
     def ai_trusted_base_url(self) -> str:
-        return self.ai.routing.trusted_base_url
+        return self._trusted_field("trusted_base_url", "local_base_url")
 
     @property
     def ai_trusted_api_version(self) -> str:
-        return self.ai.routing.trusted_api_version
+        return self._trusted_field("trusted_api_version", "local_api_version")
 
     @property
     def ai_trusted_classifier_model(self) -> str:
-        return self.ai.routing.classifier_model
+        return self._trusted_field("classifier_model", "local_classifier_model")
 
     @property
     def ai_trusted_coding_model(self) -> str:
-        return self.ai.routing.coding_model
+        return self._trusted_field("coding_model", "local_coding_model")
 
     @property
     def ai_trusted_coding_models(self) -> tuple[str, ...]:
-        """The effective admin allowlist.
+        """The effective allowlist of the live profile.
 
         The singular setting predates the picker. When the plural setting is
-        absent it remains the one approved model; when present the loader requires
-        the default to be a member of that exact approval set.
+        absent it remains the one approved model; when present the managed loader
+        requires the default to be a member of that exact approval set (the local
+        profile is checked the same way, on write and again at use).
         """
-        default = self.ai.routing.coding_model.strip()
-        configured = tuple(
-            dict.fromkeys(model.strip() for model in self.ai.routing.coding_models if model.strip())
-        )
-        return configured or ((default,) if default else ())
+        source = self.ai_routing_source
+        if source == "off":
+            return ()
+        r = self.ai.routing
+        if source == "managed":
+            default, configured = r.coding_model, r.coding_models
+        else:
+            default, configured = r.local_coding_model, r.local_coding_models
+        models = tuple(dict.fromkeys(model.strip() for model in configured if model.strip()))
+        return models or ((default.strip(),) if default.strip() else ())
 
     @property
     def ai_trusted_profile_label(self) -> str:
+        """The name shown for the live profile.
+
+        A local profile is ALWAYS the fixed self-configured label: it is the one
+        thing a user must not be able to write, or the chat chrome's "approved by
+        your firm" wording becomes something an analyst asserted about their own
+        endpoint. Only a managed profile may name itself.
+        """
+        if self.ai_routing_source == "local":
+            return ai_config.SELF_CONFIGURED_LABEL
         return self.ai.routing.profile_label.strip() or "Approved AI"
+
+    # The raw stored [ai.routing] values, for the Settings form only. These are what
+    # the user typed, NOT what the app runs with — the form has to render a profile
+    # that is saved but not yet enabled, or one a policy has since taken away.
+    @property
+    def ai_routing_local_enabled(self) -> bool:
+        return self.ai.routing.local_enabled
+
+    @property
+    def ai_routing_local_base_url(self) -> str:
+        return self.ai.routing.local_base_url
+
+    @property
+    def ai_routing_local_api_version(self) -> str:
+        return self.ai.routing.local_api_version
+
+    @property
+    def ai_routing_local_classifier_model(self) -> str:
+        return self.ai.routing.local_classifier_model
+
+    @property
+    def ai_routing_local_coding_model(self) -> str:
+        return self.ai.routing.local_coding_model
+
+    @property
+    def ai_routing_local_coding_models(self) -> tuple[str, ...]:
+        return self.ai.routing.local_coding_models
 
     @property
     def ai_trusted_model_preference(self) -> str:

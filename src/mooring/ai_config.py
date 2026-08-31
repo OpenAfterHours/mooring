@@ -115,16 +115,42 @@ class InvestigateConfig:
     pii_policy: str = "block_branch"  # "block_branch" | "block_investigation"
 
 
+# The user-facing name of a self-configured profile. It is a CONSTANT, deliberately
+# not read from config: a profile the analyst set up on their own machine must never
+# be able to describe itself as the firm's approved service. Only a managed (env)
+# profile may name itself, via MOORING_AI_TRUSTED_PROFILE_LABEL.
+SELF_CONFIGURED_LABEL = "Self-configured"
+
+
 @dataclass(frozen=True)
 class RoutingConfig:
-    """Deployment-managed trusted AI routing. Default OFF.
+    """Trusted AI routing — the one path by which customer information may reach a
+    model. Default OFF.
 
-    Values are accepted only from ``MOORING_AI_*`` environment variables, which a
-    managed deployment can pin outside the user-editable Settings and TOML surfaces.
-    Credentials are deliberately absent: the trusted provider uses a separate
-    deployment-only variable and never ``config.toml``.
+    Two profile sources, and the managed one always wins:
+
+    * **managed** — the ``MOORING_AI_*`` variables below, which a managed deployment
+      pins outside the user-editable Settings and TOML surfaces. Only a managed
+      profile may call itself the firm's approved service. ``MOORING_AI_ROUTING`` is
+      authoritative whenever it is *present*: a false value turns routing off
+      outright, local profile included, so a launcher can forbid the feature without
+      depending on what the analyst's ``config.toml`` says.
+    * **local** — the ``[ai.routing]`` table in the per-machine ``config.toml``,
+      editable from the Settings page, for an analyst with no managed deployment
+      behind them. It is labelled :data:`SELF_CONFIGURED_LABEL` everywhere it is
+      shown, and an admin policy may pin ``ai.routing.enabled`` off (see
+      :data:`mooring.policy.KNOBS`).
+
+    Only INPUTS are stored here. Which profile is live, and every effective field
+    that follows from it, is derived in :class:`mooring.config.AppConfig` — so the
+    policy fold flipping ``local_enabled`` re-resolves the whole profile with it,
+    rather than leaving a stale resolved copy behind for a caller to trip over.
+
+    Credentials are deliberately absent from both sources; see
+    :func:`mooring.ai.openai_provider.resolve_trusted_api_key`.
     """
 
+    # -- managed profile (env only) --
     enabled: bool = False
     trusted_base_url: str = ""
     trusted_api_version: str = ""
@@ -132,6 +158,17 @@ class RoutingConfig:
     coding_model: str = ""
     coding_models: tuple[str, ...] = ()
     profile_label: str = "Approved AI"
+    # -- local profile (config.toml). Appended to preserve the positional layout for
+    # any caller that built an older RoutingConfig positionally. --
+    # True when MOORING_AI_ROUTING is present at all, whatever its value: the
+    # launcher has spoken for this machine and a local profile is ignored either way.
+    managed_pinned: bool = False
+    local_enabled: bool = False
+    local_base_url: str = ""
+    local_api_version: str = ""
+    local_classifier_model: str = ""
+    local_coding_model: str = ""
+    local_coding_models: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -262,6 +299,31 @@ def _csv_list(raw: object) -> tuple[str, ...]:
     return tuple(values)
 
 
+def _toml_str_list(raw: object) -> tuple[str, ...]:
+    """A hand-editable TOML array of opaque model IDs, normalised like :func:`_csv_list`.
+
+    Tolerant on purpose, unlike :func:`_str_list`: ``[ai.routing]`` is a user-editable
+    table, so a wrong type here must drop to an empty list rather than raise out of
+    :func:`load_ai_config` and stop the hub from booting. An incomplete profile simply
+    never becomes usable, which is the fail-closed direction.
+    """
+    if raw is None:
+        return ()
+    items = [raw] if isinstance(raw, str) else raw
+    if not isinstance(items, (list, tuple)):
+        return ()
+    seen: set[str] = set()
+    values: list[str] = []
+    for item in items:
+        if not isinstance(item, str):
+            continue
+        value = item.strip()
+        if value and value not in seen:
+            seen.add(value)
+            values.append(value)
+    return tuple(values)
+
+
 def _routing_preference(raw: object) -> str:
     """Normalise the upward-only per-user routing preference, failing safe."""
     if raw is None:
@@ -349,6 +411,12 @@ def load_ai_config(ai: Mapping, env: Mapping[str, str]) -> AiConfig:
             "MOORING_AI_TRUSTED_CODING_MODELS must be non-empty and include "
             "MOORING_AI_TRUSTED_CODING_MODEL"
         )
+    # The LOCAL profile is ordinary user config: read it always, resolve it never.
+    # Whether it is the live profile is AppConfig's decision, so the policy fold can
+    # still take it away after this function has returned.
+    r = ai.get("routing", {})
+    if not isinstance(r, Mapping):
+        r = {}
     routing = RoutingConfig(
         enabled=_as_bool(env.get("MOORING_AI_ROUTING"), False),
         trusted_base_url=env.get("MOORING_AI_TRUSTED_BASE_URL", "").strip(),
@@ -359,6 +427,13 @@ def load_ai_config(ai: Mapping, env: Mapping[str, str]) -> AiConfig:
         profile_label=(
             env.get("MOORING_AI_TRUSTED_PROFILE_LABEL", "").strip() or "Approved AI"
         ),
+        managed_pinned="MOORING_AI_ROUTING" in env,
+        local_enabled=_as_bool(r.get("enabled"), False),
+        local_base_url=str(r.get("base_url", "")).strip(),
+        local_api_version=str(r.get("api_version", "")).strip(),
+        local_classifier_model=str(r.get("classifier_model", "")).strip(),
+        local_coding_model=str(r.get("coding_model", "")).strip(),
+        local_coding_models=_toml_str_list(r.get("coding_models")),
     )
     return AiConfig(
         enabled=_as_bool(env.get("MOORING_AI_ENABLED"), _as_bool(ai.get("enabled"), True)),

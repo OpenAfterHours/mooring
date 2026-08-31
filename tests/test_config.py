@@ -4,7 +4,13 @@ import platformdirs
 import pytest
 
 from mooring import paths
-from mooring.ai_config import AiConfig, BatchConfig, PiiConfig, RoutingConfig
+from mooring.ai_config import (
+    SELF_CONFIGURED_LABEL,
+    AiConfig,
+    BatchConfig,
+    PiiConfig,
+    RoutingConfig,
+)
 from mooring.config import load_app_config, load_config
 
 
@@ -74,19 +80,46 @@ def test_ai_routing_defaults_off_with_no_credentials_in_config(tmp_path):
     assert not hasattr(app.ai.routing, "api_key")
 
 
-def test_ai_routing_ignores_toml_and_accepts_only_managed_env(tmp_path):
-    user = tmp_path / "config.toml"
-    user.write_text(
+def _local_routing_toml() -> str:
+    return (
         "[ai.routing]\n"
         "enabled = true\n"
-        'trusted_base_url = "https://approved.example/v1"\n'
-        'trusted_api_version = "2026-01-01"\n'
+        'base_url = "https://self.example/v1"\n'
+        'api_version = "2026-01-01"\n'
         'classifier_model = "privacy-classifier"\n'
-        'coding_model = "approved-coder"\n',
-        "utf-8",
+        'coding_model = "self-coder"\n'
+        'coding_models = ["self-coder", "self-coder-fast"]\n'
     )
+
+
+def test_toml_configures_a_local_profile_that_can_never_call_itself_approved(tmp_path):
+    """A self-configured profile is usable, but it is not the managed one: it can
+    never set the label, which is the whole basis of the chat chrome's wording."""
+    user = tmp_path / "config.toml"
+    user.write_text(
+        _local_routing_toml() + 'profile_label = "Firm Azure OpenAI"\n', "utf-8"
+    )
+
     app = load_app_config(user_config_path=user, env={})
-    assert app.ai.routing == RoutingConfig()
+
+    assert app.ai_routing_source == "local"
+    assert app.ai_routing_enabled is True
+    assert app.ai_trusted_base_url == "https://self.example/v1"
+    assert app.ai_trusted_api_version == "2026-01-01"
+    assert app.ai_trusted_classifier_model == "privacy-classifier"
+    assert app.ai_trusted_coding_model == "self-coder"
+    assert app.ai_trusted_coding_models == ("self-coder", "self-coder-fast")
+    # The label the file asked for is DISCARDED — a constant takes its place.
+    assert app.ai_trusted_profile_label == SELF_CONFIGURED_LABEL
+    assert app.ai_trusted_profile_label != "Firm Azure OpenAI"
+    # And a local profile never becomes the managed one.
+    assert app.ai.routing.enabled is False
+    assert not hasattr(app.ai.routing, "api_key")
+
+
+def test_managed_env_profile_wins_over_a_local_one(tmp_path):
+    user = tmp_path / "config.toml"
+    user.write_text(_local_routing_toml(), "utf-8")
 
     overridden = load_app_config(
         user_config_path=user,
@@ -98,14 +131,44 @@ def test_ai_routing_ignores_toml_and_accepts_only_managed_env(tmp_path):
             "MOORING_AI_TRUSTED_CODING_MODEL": "admin-coder",
         },
     )
-    assert overridden.ai.routing == RoutingConfig(
-        enabled=True,
-        trusted_base_url="https://admin.example/openai",
-        trusted_api_version="2026-08-01",
-        classifier_model="admin-classifier",
-        coding_model="admin-coder",
-    )
+
+    assert overridden.ai_routing_source == "managed"
+    assert overridden.ai_trusted_base_url == "https://admin.example/openai"
+    assert overridden.ai_trusted_classifier_model == "admin-classifier"
     assert overridden.ai_trusted_coding_models == ("admin-coder",)
+    assert overridden.ai_trusted_profile_label == "Approved AI"
+    # The local values are still READ (the Settings form renders them) — they are
+    # simply not the live profile.
+    assert overridden.ai_routing_local_base_url == "https://self.example/v1"
+
+
+def test_a_launcher_that_switches_routing_off_also_switches_the_local_profile_off(
+    tmp_path,
+):
+    """MOORING_AI_ROUTING is authoritative whenever PRESENT, so a managed
+    deployment can forbid the feature without trusting the analyst's config."""
+    user = tmp_path / "config.toml"
+    user.write_text(_local_routing_toml(), "utf-8")
+
+    app = load_app_config(user_config_path=user, env={"MOORING_AI_ROUTING": "0"})
+
+    assert app.ai_routing_source == "off"
+    assert app.ai_routing_enabled is False
+    assert app.ai_trusted_base_url == ""
+    assert app.ai_trusted_coding_models == ()
+
+
+def test_a_malformed_local_routing_table_degrades_instead_of_raising(tmp_path):
+    """[ai.routing] is hand-editable, so a wrong type must not stop the hub booting."""
+    user = tmp_path / "config.toml"
+    user.write_text(
+        "[ai.routing]\nenabled = true\ncoding_models = 42\n", "utf-8"
+    )
+
+    app = load_app_config(user_config_path=user, env={})
+
+    assert app.ai_routing_local_coding_models == ()
+    assert app.ai_trusted_coding_models == ()
 
 
 def test_ai_trusted_model_allowlist_is_trimmed_deduped_and_exact(tmp_path):
@@ -139,6 +202,7 @@ def test_user_trusted_defaults_are_constrained_by_the_managed_allowlist(tmp_path
         "utf-8",
     )
     env = {
+        "MOORING_AI_ROUTING": "1",
         "MOORING_AI_TRUSTED_CODING_MODEL": "coder-default",
         "MOORING_AI_TRUSTED_CODING_MODELS": "coder-default,coder-fast",
     }
@@ -159,6 +223,7 @@ def test_stale_user_trusted_model_falls_back_and_bad_routing_fails_upward(tmp_pa
     app = load_app_config(
         user_config_path=user,
         env={
+            "MOORING_AI_ROUTING": "1",
             "MOORING_AI_TRUSTED_CODING_MODEL": "coder-default",
             "MOORING_AI_TRUSTED_CODING_MODELS": "coder-default,coder-fast",
         },
