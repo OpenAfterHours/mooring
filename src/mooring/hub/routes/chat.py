@@ -165,6 +165,10 @@ async def api_chat_open(request: Request) -> JSONResponse:
     telemetry.log_event("ai_chat_open")
     if pii_banner:  # count only — never a kind/value reaches the central sink
         telemetry.log_event("ai_pii", findings=len(pii_banner))
+    # Which profile answers: "managed" (a firm-approved endpoint) or "local" (one the
+    # user configured). Omitted when unknown, exactly as the SSE "routing" event omits
+    # it, so the browser reads ONE shape from both.
+    profile_source = str(getattr(session, "profile_source", "") or "")
     return JSONResponse(
         {
             "sid": sid,
@@ -181,6 +185,7 @@ async def api_chat_open(request: Request) -> JSONResponse:
                         {
                             "profile_label": session.profile_label,
                             "model": session.trusted_model,
+                            **({"source": profile_source} if profile_source else {}),
                         }
                         if session.zone == "trusted"
                         else {}
@@ -498,12 +503,13 @@ async def api_chat_models(request: Request) -> JSONResponse:
             # configuration error if a caller nevertheless attempts routed chat.
             payload["routing"] = {
                 "enabled": True,
-                "profile_label": "Approved AI",
+                "source": hub.app_cfg.ai_routing_source,
+                "profile_label": hub.app_cfg.ai_trusted_profile_label,
                 "trusted_models": [],
                 "managed_default_trusted_model": "",
                 "default_trusted_model": "",
                 "default_routing_preference": "trusted",
-                "error": "The approved AI profile is unavailable.",
+                "error": "The customer-data profile is unavailable.",
             }
     # When the list is empty because the provider REJECTED the request (e.g. a
     # 403 "not authorized to use this Copilot feature" — a signed-in but
@@ -581,6 +587,47 @@ async def api_ai_key_set(request: Request) -> JSONResponse:
     st = await run_in_threadpool(provider.status, True) if hasattr(provider, "status") else None
     telemetry.log_event("ai_key_set")
     return JSONResponse({"ok": True, "status": hub._ai_status_dict(st)})
+
+
+async def api_ai_trusted_key_set(request: Request) -> JSONResponse:
+    """Store (or clear) the API key for a SELF-CONFIGURED customer-data endpoint.
+
+    Deliberately separate from ``/api/ai/key``: that one holds the general OpenAI
+    credential, and the customer-data route must never be satisfied by it (see
+    ``openai_provider.resolve_trusted_api_key``). It also does not care which
+    provider answers general chat — a firm can route customer data through Azure
+    while ordinary chat stays on Copilot.
+
+    Refused outright when the deployment pins routing through the environment: there
+    the credential is the launcher's to supply, not the analyst's.
+    """
+    hub = request.app.state.hub
+    if not hub.app_cfg.ai_enabled:
+        return JSONResponse({"enabled": False}, status_code=404)
+    if hub.app_cfg.ai.routing.managed_pinned:
+        return JSONResponse(
+            {
+                "error": "Customer-data routing is managed by this deployment; its "
+                "credential comes from the environment."
+            },
+            status_code=400,
+        )
+    data = await request.json() if await request.body() else {}
+    from mooring.ai import openai_provider
+
+    if bool(data.get("clear")):
+        await run_in_threadpool(openai_provider.delete_trusted_api_key)
+        telemetry.log_event("ai_trusted_key_cleared")
+        return JSONResponse({"ok": True, "stored": False})
+    key = str(data.get("key", "")).strip()
+    if not key:
+        return JSONResponse({"error": "No API key provided."}, status_code=400)
+    try:
+        await run_in_threadpool(openai_provider.save_trusted_api_key, key)
+    except Exception as exc:  # noqa: BLE001  # no credential store / backend error
+        return JSONResponse({"error": str(exc)}, status_code=500)
+    telemetry.log_event("ai_trusted_key_set")
+    return JSONResponse({"ok": True, "stored": True})
 
 
 async def api_ai_login_start(request: Request) -> JSONResponse:

@@ -35,8 +35,18 @@ let modelsLoading = false;
 let lastPayload = null;
 let modelsError = ""; // why the list is empty (e.g. a 403 "not authorized") — shown on the row
 
+let ROUTING_SOURCE = "off"; // "off" | "managed" | "local" — which profile is live
+let ROUTING_LOCAL_ALLOWED = true; // false when the launcher or a team policy forbids it
+let ROUTING_KEY_STORED = false; // whether a self-configured credential exists (never it)
+
 function isRoutingSetting(spec) {
   return spec.key === "ai.trusted_model" || spec.key === "ai.routing_preference";
+}
+
+// The six rows that DEFINE a self-configured profile, as opposed to the two that
+// pick within whichever profile is live.
+function isLocalRoutingSetting(spec) {
+  return spec.key.startsWith("ai.routing.");
 }
 
 function trustedModelsForSpec(spec) {
@@ -52,6 +62,10 @@ function routingForSpec(spec) {
 }
 
 function routingSettingUnavailable(spec) {
+  // The server explains an on-but-unusable profile itself; trust that over the
+  // client's own read of the metadata, which cannot see an endpoint or credential.
+  if (spec.unavailable_note) return true;
+  if (isLocalRoutingSetting(spec)) return !ROUTING_LOCAL_ALLOWED;
   return isRoutingSetting(spec) && !ChatCore.trustedRoutingAvailable(routingForSpec(spec));
 }
 
@@ -183,11 +197,34 @@ function renderRow(spec) {
     note.textContent = "Couldn’t load models — " + modelsError;
     left.appendChild(note);
   }
+  if (isLocalRoutingSetting(spec)) {
+    const note = document.createElement("div");
+    note.className = "settings-help env-note";
+    // env_overridden already renders its own "managed centrally" note, so only
+    // explain the OTHER reason a local profile can be forbidden: a team policy.
+    if (!ROUTING_LOCAL_ALLOWED && !spec.env_overridden) {
+      note.textContent =
+        "Your team's policy switches self-configured customer-data routing off, so " +
+        "it can't be set up here.";
+    } else if (spec.key === "ai.routing.enabled" && ROUTING_SOURCE === "local") {
+      note.textContent =
+        "In use. Chats say “Self-configured”, never “approved”: nobody but you has " +
+        "vetted this endpoint.";
+    } else if (spec.key === "ai.routing.enabled") {
+      note.textContent =
+        "Not in use yet. Fill in every field, store an API key, then switch it on.";
+    }
+    // The status line belongs to the master switch; the five fields under it say
+    // nothing extra unless they are dead, in which case every one of them says why.
+    if (note.textContent) left.appendChild(note);
+  }
   if (isRoutingSetting(spec)) {
     const note = document.createElement("div");
     note.className = "settings-help env-note";
-    if (routingSettingUnavailable(spec)) {
-      note.textContent = "Approved routing is unavailable. Ask your administrator to check its managed profile.";
+    if (spec.unavailable_note) {
+      note.textContent = spec.unavailable_note;
+    } else if (routingSettingUnavailable(spec)) {
+      note.textContent = "Customer-data routing is unavailable. Check its profile, or ask your administrator.";
     } else if (spec.key === "ai.trusted_model") {
       const profile = typeof ROUTING?.profile_label === "string" ? ROUTING.profile_label.trim() : "";
       note.textContent = profile
@@ -227,6 +264,89 @@ function renderRow(spec) {
   return row;
 }
 
+// The credential for a SELF-CONFIGURED endpoint. Not a SettingSpec, because it is
+// not config: it goes to the OS credential store, never config.toml, and is never
+// read back — the page only ever learns whether one exists.
+function renderTrustedKeyRow() {
+  const row = document.createElement("div");
+  row.className = "settings-row";
+
+  const left = document.createElement("div");
+  left.className = "settings-label";
+  const name = document.createElement("label");
+  name.htmlFor = "ctrl:ai.routing.api_key";
+  name.textContent = "Customer-data API key";
+  left.appendChild(name);
+  const tag = document.createElement("span");
+  tag.className = `badge ${ROUTING_KEY_STORED ? "synced" : "warn"}`;
+  tag.textContent = ROUTING_KEY_STORED ? "Stored" : "Not set";
+  left.appendChild(tag);
+  const help = document.createElement("div");
+  help.className = "settings-help muted";
+  help.textContent =
+    "The key for the endpoint above, kept in this machine's credential store — never " +
+    "in config.toml and never synced. It is deliberately separate from your general " +
+    "OpenAI key: the customer-data route will not fall back to it.";
+  left.appendChild(help);
+
+  const right = document.createElement("div");
+  right.className = "settings-control";
+  const input = document.createElement("input");
+  input.type = "password";
+  input.id = "ctrl:ai.routing.api_key";
+  input.placeholder = ROUTING_KEY_STORED ? "Replace the stored key…" : "Paste a key…";
+  input.autocomplete = "off";
+  input.disabled = !ROUTING_LOCAL_ALLOWED;
+  const store = document.createElement("button");
+  store.className = "small";
+  store.textContent = "Store";
+  store.disabled = !ROUTING_LOCAL_ALLOWED;
+  store.addEventListener("click", () => saveTrustedKey(input));
+  const clear = document.createElement("button");
+  clear.className = "small ghost";
+  clear.textContent = "Clear";
+  clear.disabled = !ROUTING_LOCAL_ALLOWED || !ROUTING_KEY_STORED;
+  clear.addEventListener("click", () => clearTrustedKey());
+  right.append(input, store, clear);
+
+  row.append(left, right);
+  return row;
+}
+
+async function postTrustedKey(body, failure) {
+  showError("");
+  try {
+    const resp = await fetch("/api/ai/trusted-key", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      showError(data.error || failure);
+      return;
+    }
+  } catch {
+    showError(failure);
+    return;
+  }
+  await reload();
+}
+
+function saveTrustedKey(input) {
+  const key = input.value.trim();
+  if (!key) {
+    showError("Paste a key first.");
+    return;
+  }
+  input.value = "";
+  return postTrustedKey({ key }, "Could not store the key.");
+}
+
+function clearTrustedKey() {
+  return postTrustedKey({ clear: true }, "Could not clear the key.");
+}
+
 function render(payload) {
   // Preserve keyboard focus (and caret) across the full-form rebuild, so a toggle
   // or select the user just changed doesn't drop focus to <body>.
@@ -258,7 +378,11 @@ function render(payload) {
       else line.textContent = "Guard status: scan on.";
       card.appendChild(line);
     }
-    for (const spec of specs) card.appendChild(renderRow(spec));
+    for (const spec of specs) {
+      card.appendChild(renderRow(spec));
+      // The credential belongs with the endpoint it unlocks, not in a card of its own.
+      if (spec.key === "ai.routing.base_url") card.appendChild(renderTrustedKeyRow());
+    }
     root.appendChild(card);
   }
 
@@ -352,6 +476,9 @@ async function show(payload) {
   if (Object.prototype.hasOwnProperty.call(payload, "routing")) {
     ROUTING = payload.routing?.enabled === true ? payload.routing : null;
   }
+  ROUTING_SOURCE = typeof payload.routing_source === "string" ? payload.routing_source : "off";
+  ROUTING_LOCAL_ALLOWED = payload.routing_local_allowed !== false;
+  ROUTING_KEY_STORED = payload.routing_key_stored === true;
   render(payload);
   if (payload.ai_enabled && !modelsLoaded && !modelsLoading) {
     modelsLoading = true;

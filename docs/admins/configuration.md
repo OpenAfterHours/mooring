@@ -228,21 +228,49 @@ because they gate what the copilot may *read*:
 | `notebook_catalog` | `false` | **Opt-in.** Let the copilot search **every notebook in the repo** — each one's `# H1` title, its imports, and the inputs/checks/SQL tables its *source declares* — so it can point at work a teammate already did. Never another notebook's code, a markdown paragraph, a cell output, or a `.mooring/` run receipt; a notebook in `disabled_notebooks` is left out. Off by default because it widens the assistant's view from the one open notebook to the whole repo, and the title is authored prose. The hub's own search box uses the same index locally and is not gated by this. Env override: `MOORING_AI_NOTEBOOK_CATALOG`. Preview with `mooring catalog`. See [the notebook catalog](ai-privacy.md#notebook-catalog). |
 | `live_schema` | `true` | Read dataframe schemas (names + types only) live from the running kernel. See [live dataframe schemas](ai-privacy.md#live-dataframe-schemas-data-outside-the-workspace). |
 
-#### Deployment-managed trusted AI routing
+#### Trusted AI routing
 
-Trusted AI routing is off by default. It cannot be enabled or designated through
-the user-editable Settings page or `config.toml`: a managed launcher, MDM profile,
-or equivalent administrator-controlled deployment must supply the complete profile.
-The approved endpoint receives the exact context first for classification and handles
-coding turns that contain, or may contain, customer information.
+Trusted AI routing is off by default. The approved endpoint receives the exact context
+first for classification and handles coding turns that contain, or may contain, customer
+information. Its profile comes from one of two places, and **managed always wins**:
 
-Once that profile is available, **Settings → AI copilot** exposes safe user defaults:
-the general model, customer-data model, and **Automatic** / **Always use approved**
-routing preference. The latter two write only `ai.trusted_model` and
-`ai.routing_preference` to the per-machine `config.toml`. They select within the live
-managed profile; they cannot create one or change its endpoint, credential, classifier,
-API version, or allowlist. Defaults apply to newly opened chats, not sessions already
-in progress.
+- **Managed** — the `MOORING_AI_*` variables below, supplied by a managed launcher, MDM
+  profile, or equivalent administrator-controlled deployment. Only a managed profile may
+  present itself as your firm's approved service.
+- **Self-configured** — the `[ai.routing]` table in the per-machine `config.toml`, edited
+  from **Settings → AI copilot**, for an analyst with no managed deployment behind them.
+  It is validated identically but always labelled **Self-configured**, never "approved";
+  see [two profile sources](ai-privacy.md#two-profile-sources).
+
+To forbid the self-configured route, set `MOORING_AI_ROUTING=0` in the managed
+environment, or pin `"ai.routing.enabled" = false` in the synced `mooring.toml`'s
+`[policy.settings]`. Both can only restrict: no policy can hand a profile out.
+
+The self-configured keys, all under `[ai.routing]` and all writable from Settings:
+
+| Key | Meaning |
+|---|---|
+| `enabled` | Master switch. Refused unless the rest of the profile is complete and an API key is stored; turning it on is a privacy-weakening flip that needs an explicit confirm. |
+| `base_url` | Explicit HTTPS endpoint — no credentials, query string, or fragment. Validated when typed, not just when used. |
+| `api_version` | Azure api-version; empty for a standard OpenAI-compatible endpoint. |
+| `classifier_model` | The model that judges every outbound turn. |
+| `coding_model` | The default model answering a customer-data conversation; must be a member of `coding_models` when that is set. |
+| `coding_models` | Models you are willing to send customer information to. Two or more become a picker in chat. |
+
+Its API key is **not** config: store it from Settings (or `MOORING_AI_TRUSTED_API_KEY`).
+It lives in its own credential-store slot and the route never falls back to your general
+OpenAI key.
+
+Once a profile is live — from either source — **Settings → AI copilot** also exposes
+safe user defaults: the general model, customer-data model, and **Automatic** / **Always
+use approved** routing preference. The latter two write only `ai.trusted_model` and
+`ai.routing_preference`. They select *within* whichever profile is live; unlike the
+`[ai.routing]` keys above, they cannot create a profile or change its endpoint,
+credential, classifier, API version, or allowlist, and against a managed profile they
+are the only routing settings a user can touch at all. Defaults apply to newly opened
+chats, not sessions already in progress.
+
+##### The managed profile
 
 Install a build that includes the official OpenAI SDK (`pip install "mooring[openai]"`),
 including when the general coding provider remains GitHub Copilot. For a packaged or
@@ -264,10 +292,11 @@ Set all of these in the managed process environment:
 | `MOORING_AI_TRUSTED_API_KEY` | Dedicated credential for this approved endpoint; it never falls back to the user's general OpenAI key. |
 
 The profile must name an explicit HTTPS endpoint, redirects are disabled, and a
-per-chat model choice can select only an exact member of the deployment-managed
-trusted allowlist. The endpoint, credential, and classifier are never user-selectable.
-If the plural allowlist is set, startup validation fails closed unless the default
-model is included; model discovery from the endpoint is deliberately not used.
+per-chat model choice can select only an exact member of the live trusted allowlist.
+While a managed profile is in force its endpoint, credential, and classifier are not
+user-selectable — the `[ai.routing]` keys above are inert and shown disabled. If the
+plural allowlist is set, startup validation fails closed unless the default model is
+included; model discovery from the endpoint is deliberately not used.
 
 When routing is available, the chat status bar shows separate **General model** and
 **Customer-data model** controls. Each starts at **Use Settings default** and can be

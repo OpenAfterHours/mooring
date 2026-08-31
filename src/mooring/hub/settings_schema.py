@@ -167,6 +167,102 @@ EDITABLE: tuple[SettingSpec, ...] = (
         "applies to newly opened chats only.",
     ),
     SettingSpec(
+        key="ai.routing.enabled",
+        accessor="ai_routing_local_enabled",
+        label="Self-configured customer-data routing",
+        group="ai",
+        type="bool",
+        control="toggle",
+        default=False,
+        sensitivity="weakens",
+        # MOORING_AI_ROUTING is authoritative whenever it is PRESENT — truthy means a
+        # managed profile is live, falsy means the launcher switched routing off — so
+        # its presence is exactly the condition under which all six rows below are
+        # inert. See mooring.ai_config.RoutingConfig.
+        env_var="MOORING_AI_ROUTING",
+        weaken_value=True,
+        confirm=(
+            "This lets customer information leave this machine. Mooring normally holds "
+            "it back; routing sends it to the endpoint you configure here, judged by the "
+            "classifier you nominate. Nobody has approved that endpoint on your behalf, "
+            "so chats will say “Self-configured”, never “approved”. Turn it on only if "
+            "you are sure the endpoint is a legitimate destination for this data."
+        ),
+        help="Set up customer-data routing yourself when no administrator has done it "
+        "for you. A managed profile in the environment always wins, and your team's "
+        "policy can switch this off. Fill in every field below and store an API key; "
+        "an incomplete profile stays unused.",
+    ),
+    SettingSpec(
+        key="ai.routing.base_url",
+        accessor="ai_routing_local_base_url",
+        label="Customer-data endpoint",
+        group="ai",
+        type="str",
+        control="text",
+        default="",
+        sensitivity="needs_care",
+        env_var="MOORING_AI_ROUTING",
+        help="The HTTPS OpenAI-compatible or Azure endpoint that may receive customer "
+        "information. Must be an explicit https:// URL with no credentials, query "
+        "string, or fragment. This is a different endpoint from the general “OpenAI "
+        "base URL” above and uses its own API key.",
+    ),
+    SettingSpec(
+        key="ai.routing.api_version",
+        accessor="ai_routing_local_api_version",
+        label="Customer-data API version (Azure)",
+        group="ai",
+        type="str",
+        control="text",
+        default="",
+        sensitivity="needs_care",
+        env_var="MOORING_AI_ROUTING",
+        help="Only for Azure: the api-version of the endpoint above (e.g. 2024-10-21). "
+        "Leave empty for a standard OpenAI-compatible endpoint.",
+    ),
+    SettingSpec(
+        key="ai.routing.classifier_model",
+        accessor="ai_routing_local_classifier_model",
+        label="Customer-data classifier model",
+        group="ai",
+        type="str",
+        control="text",
+        default="",
+        sensitivity="needs_care",
+        env_var="MOORING_AI_ROUTING",
+        help="The model/deployment on that endpoint which judges every outbound turn "
+        "and decides whether it needs the customer-data route. A small, cheap model is "
+        "the usual choice. It sees the same text the coding model would.",
+    ),
+    SettingSpec(
+        key="ai.routing.coding_model",
+        accessor="ai_routing_local_coding_model",
+        label="Customer-data coding model",
+        group="ai",
+        type="str",
+        control="text",
+        default="",
+        sensitivity="needs_care",
+        env_var="MOORING_AI_ROUTING",
+        help="The default model/deployment that answers a customer-data conversation. "
+        "It must also appear in the list below.",
+    ),
+    SettingSpec(
+        key="ai.routing.coding_models",
+        accessor="ai_routing_local_coding_models",
+        label="Customer-data models offered",
+        group="ai",
+        type="list",
+        control="tags",
+        default=[],
+        sensitivity="needs_care",
+        env_var="MOORING_AI_ROUTING",
+        help="Every model/deployment you are willing to send customer information to. "
+        "Leave empty to offer only the coding model above; list two or more to get a "
+        "picker in chat. The coding model above must be one of them.",
+    ),
+    SettingSpec(
         key="ai.reasoning_effort",
         accessor="ai_reasoning_effort",
         label="Default reasoning effort",

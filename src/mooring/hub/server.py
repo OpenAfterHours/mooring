@@ -381,6 +381,7 @@ class Hub:
         routing_profile: tuple[object, ...] = ()
         if app_cfg.ai_routing_enabled:
             routing_profile = (
+                app_cfg.ai_routing_source,
                 app_cfg.ai_trusted_base_url.strip(),
                 app_cfg.ai_trusted_api_version.strip(),
                 app_cfg.ai_trusted_classifier_model.strip(),
@@ -809,10 +810,13 @@ class Hub:
         and every model option come from the fully validated managed profile; this
         function performs no notebook reads, classifier calls, or coding-model calls.
         """
+        if key.startswith("ai.routing."):
+            self._validate_local_routing_setting(key, value)
+            return
         if key not in {"ai.trusted_model", "ai.routing_preference"}:
             return
         if not self.app_cfg.ai_routing_enabled:
-            raise ValueError("Approved customer-data routing is not enabled.")
+            raise ValueError("Customer-data routing is not enabled.")
         metadata = self._trusted_routing_metadata()
         if key == "ai.trusted_model":
             selected = str(value or "").strip()
@@ -824,6 +828,79 @@ class Hub:
         if preference not in {"auto", "trusted"}:
             raise ValueError("The routing preference must be 'auto' or 'trusted'.")
 
+    def _validate_local_routing_setting(self, key: str, value: object) -> None:
+        """Validate one field of the SELF-CONFIGURED profile as it is written.
+
+        Fields are checked for shape individually so a typo is a 400 at the moment
+        it is made, not a mystery when a chat later refuses to open. Coherence —
+        every field present, the default model inside the offered set, a credential
+        stored — is checked only when the profile is switched ON, because a user
+        legitimately fills the fields in whatever order they like.
+        """
+        if self.app_cfg.ai.routing.managed_pinned:
+            raise ValueError(
+                "Customer-data routing is managed by this deployment's environment "
+                "and cannot be configured here."
+            )
+        if key == "ai.routing.base_url":
+            if str(value or "").strip():
+                self._check_trusted_endpoint(str(value))
+            return
+        if key != "ai.routing.enabled" or value is not True:
+            return
+
+        from mooring.ai.openai_provider import resolve_trusted_api_key
+
+        r = self.app_cfg.ai.routing
+        endpoint = r.local_base_url.strip()
+        classifier = r.local_classifier_model.strip()
+        coding = r.local_coding_model.strip()
+        offered = tuple(m.strip() for m in r.local_coding_models if m.strip())
+        missing = [
+            label
+            for label, present in (
+                ("an endpoint", endpoint),
+                ("a classifier model", classifier),
+                ("a coding model", coding),
+            )
+            if not present
+        ]
+        if missing:
+            raise ValueError(
+                "Fill in " + ", ".join(missing) + " before turning customer-data "
+                "routing on."
+            )
+        self._check_trusted_endpoint(endpoint)
+        if offered and coding not in offered:
+            raise ValueError(
+                "The customer-data coding model must be one of the models offered."
+            )
+        try:
+            credential = resolve_trusted_api_key(allow_keyring=True)
+        except Exception:  # noqa: BLE001 - never surface keyring/backend detail
+            credential = ""
+        if not credential:
+            raise ValueError(
+                "Store an API key for the customer-data endpoint before turning "
+                "routing on."
+            )
+
+    @staticmethod
+    def _trusted_key_stored() -> bool:
+        """Whether a SELF-CONFIGURED customer-data credential is stored. Never its value.
+
+        Reports the credential-store slot only — ``env={}`` deliberately hides
+        ``MOORING_AI_TRUSTED_API_KEY``, because the row this answers is about the
+        key the user manages here, and a managed deployment's env credential is not
+        one they could clear or replace.
+        """
+        from mooring.ai.openai_provider import resolve_trusted_api_key
+
+        try:
+            return bool(resolve_trusted_api_key(env={}, allow_keyring=True))
+        except Exception:  # noqa: BLE001 - keyring backend detail is never surfaced
+            return False
+
     def _settings_payload(self) -> dict:
         """Value-free snapshot of every editable setting for the page: the EFFECTIVE
         value (read off the live app_cfg, so it reflects MOORING_* overrides — what the
@@ -834,23 +911,28 @@ class Hub:
         cfg = self.app_cfg
         pol = self.team_policy()
         routing_settings = None
+        routing_error = ""
         if cfg.ai_routing_enabled:
             try:
                 routing_settings = self._trusted_routing_metadata()
-            except Exception:  # noqa: BLE001 - hide unavailable managed controls
-                routing_settings = None
+            except Exception as exc:  # noqa: BLE001 - a config message, never a value
+                routing_error = str(exc) or "Customer-data routing is unavailable."
         editable = []
         for spec in settings_schema.EDITABLE:
             if spec.key in {"ai.trusted_model", "ai.routing_preference"}:
-                # A preference with no complete approved service cannot be used.
-                # Hide both rows instead of presenting a control whose options are
-                # stale or whose endpoint/credential is unavailable.
-                if routing_settings is None:
+                # These two pick WITHIN a live profile. With no profile at all there
+                # is nothing to pick, so the rows stay absent; with a profile that is
+                # switched on but unusable they are shown disabled, carrying the
+                # reason — a mistyped endpoint has to be distinguishable from a
+                # feature nobody turned on.
+                if routing_settings is None and not routing_error:
                     continue
             value = getattr(cfg, spec.accessor)
             default = spec.default
             enum_options = self._enum_options(spec)
-            if spec.key == "ai.trusted_model":
+            if spec.key == "ai.trusted_model" and routing_settings is None:
+                value, enum_options = "", []
+            elif spec.key == "ai.trusted_model":
                 allowed_ids = {row["id"] for row in routing_settings["trusted_models"]}
                 preferred = cfg.ai_trusted_model_preference.strip()
                 # Empty means "inherit the approved admin default". A stale or
@@ -861,7 +943,7 @@ class Hub:
                     {"value": row["id"], "label": row["name"]}
                     for row in routing_settings["trusted_models"]
                 ]
-            elif spec.key == "ai.routing_preference":
+            elif spec.key == "ai.routing_preference" and routing_settings is not None:
                 value = routing_settings["default_routing_preference"]
             if isinstance(value, tuple):
                 value = list(value)
@@ -892,6 +974,15 @@ class Hub:
                     "locked_note": (
                         settings_schema.POLICY_LOCK_NOTE if locked is not None else ""
                     ),
+                    # Set only on the two picker rows, and only when routing is on
+                    # but its profile cannot be used. Value-free: these are endpoint
+                    # and credential configuration messages.
+                    "unavailable_note": (
+                        routing_error
+                        if routing_error
+                        and spec.key in {"ai.trusted_model", "ai.routing_preference"}
+                        else ""
+                    ),
                 }
             )
         return {
@@ -904,10 +995,20 @@ class Hub:
             # Settings must be able to hydrate its approved controls even if the
             # unrelated general provider cannot list models. This is the same
             # value-free, fully validated metadata exposed by /api/ai/models.
+            "routing_source": cfg.ai_routing_source,
+            # Whether a self-configured credential is stored. A BOOLEAN — the key
+            # itself never leaves the credential store.
+            "routing_key_stored": self._trusted_key_stored(),
+            # Whether the Settings page may offer the self-configured profile at all:
+            # false when the launcher pinned MOORING_AI_ROUTING, or a team policy
+            # switched local routing off.
+            "routing_local_allowed": not cfg.ai.routing.managed_pinned
+            and pol.locked_value("ai.routing.enabled") is None,
             "routing": routing_settings
             or (
                 {
                     "enabled": True,
+                    "source": cfg.ai_routing_source,
                     "profile_label": "Approved AI",
                     "trusted_models": [],
                     "managed_default_trusted_model": "",
@@ -1162,6 +1263,33 @@ class Hub:
                 self._provider_key = key
             return self._provider
 
+    @staticmethod
+    def _check_trusted_endpoint(endpoint: str) -> str:
+        """The endpoint rule, in ONE place so a value the Settings page accepted can
+        never be one the trusted route later refuses (or, worse, the reverse).
+
+        Explicit HTTPS, a real host, and no embedded credentials, query, or fragment:
+        the URL is joined with API paths and carries a bearer token, so anything that
+        can smuggle authority or state into it is rejected outright.
+        """
+        from urllib.parse import urlsplit
+
+        value = (endpoint or "").strip()
+        parsed = urlsplit(value)
+        if (
+            parsed.scheme.lower() != "https"
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ValueError(
+                "The customer-data endpoint must be an explicit HTTPS URL without "
+                "credentials, query parameters, or fragments."
+            )
+        return value
+
     def _trusted_model_profile(self) -> tuple[str, tuple[str, ...], str]:
         """Return the exact deployment-managed model allowlist and label."""
         from mooring.ai.base import AIError
@@ -1183,37 +1311,33 @@ class Hub:
         an unapproved browser selection before reading notebook context or creating
         either the classifier or coding client.
         """
-        from urllib.parse import urlsplit
-
         from mooring.ai.base import AIError
         from mooring.ai.openai_provider import resolve_trusted_api_key
 
+        source = self.app_cfg.ai_routing_source
+        managed = source == "managed"
+        whose = "managed" if managed else "self-configured"
         endpoint = self.app_cfg.ai_trusted_base_url.strip()
         classifier_model = self.app_cfg.ai_trusted_classifier_model.strip()
         default_model, allowed_models, profile_label = self._trusted_model_profile()
         if not endpoint or not classifier_model:
             raise AIError(
-                "Trusted AI routing is enabled but its managed endpoint/model profile is incomplete."
-            )
-        parsed = urlsplit(endpoint)
-        if (
-            parsed.scheme.lower() != "https"
-            or not parsed.hostname
-            or parsed.username is not None
-            or parsed.password is not None
-            or parsed.query
-            or parsed.fragment
-        ):
-            raise AIError(
-                "The managed trusted AI endpoint must be an explicit HTTPS URL without "
-                "credentials, query parameters, or fragments."
+                f"Customer-data routing is on but its {whose} endpoint/model profile "
+                "is incomplete."
             )
         try:
-            credential = resolve_trusted_api_key()
+            self._check_trusted_endpoint(endpoint)
+        except ValueError as exc:
+            raise AIError(str(exc)) from None
+        try:
+            # The keyring slot belongs to the SELF-CONFIGURED profile only. A managed
+            # profile stays env-only as documented, so a key an analyst happens to
+            # have stored can never stand in for the firm's credential.
+            credential = resolve_trusted_api_key(allow_keyring=not managed)
         except Exception:  # noqa: BLE001 - never surface keyring/backend detail
             credential = ""
         if not credential:
-            raise AIError("The managed trusted AI credential is unavailable.")
+            raise AIError(f"The {whose} customer-data credential is unavailable.")
         return default_model, allowed_models, profile_label
 
     def _trusted_chat_options(
@@ -1243,6 +1367,9 @@ class Hub:
             default_model = admin_default
         return {
             "enabled": True,
+            # "managed" | "local". The browser words its own chrome from this, so a
+            # self-configured profile can never be described as firm-approved.
+            "source": self.app_cfg.ai_routing_source,
             "profile_label": profile_label,
             "trusted_models": [{"id": model, "name": model} for model in allowed_models],
             "managed_default_trusted_model": admin_default,
@@ -1278,19 +1405,27 @@ class Hub:
             raise AIError(
                 "Trusted AI routing is enabled but its managed endpoint/model profile is incomplete."
             )
+        # The source is part of the identity: managed and self-configured profiles
+        # resolve their credential from different places, so a cached provider must
+        # not survive a switch between them.
+        source = self.app_cfg.ai_routing_source
         key = (
+            source,
             endpoint,
             self.app_cfg.ai_trusted_api_version.strip(),
             classifier_model,
             coding_model,
         )
+        allow_keyring = source != "managed"
         with self._provider_lock:
             if self._trusted_provider is None or self._trusted_provider_key != key:
                 self._trusted_provider = OpenAIProvider(
                     model=coding_model,
                     base_url=endpoint,
                     api_version=self.app_cfg.ai_trusted_api_version,
-                    api_key_resolver=resolve_trusted_api_key,
+                    api_key_resolver=lambda: resolve_trusted_api_key(
+                        allow_keyring=allow_keyring
+                    ),
                     require_api_key=True,
                     follow_redirects=False,
                     name="trusted-openai",
@@ -1541,6 +1676,7 @@ class Hub:
             traceback_guard=self.app_cfg.ai.traceback_guard,
             trusted_model=trusted_model,
             profile_label=profile_label,
+            profile_source=self.app_cfg.ai_routing_source,
         )
 
     def _make_investigator_session(
@@ -1850,6 +1986,9 @@ def create_app(hub: Hub) -> Starlette:
             Route("/api/ai/login/start", chat.api_ai_login_start, methods=["POST"]),
             Route("/api/ai/login/poll", chat.api_ai_login_poll),
             Route("/api/ai/key", chat.api_ai_key_set, methods=["POST"]),
+            Route(
+                "/api/ai/trusted-key", chat.api_ai_trusted_key_set, methods=["POST"]
+            ),
             Route("/api/ai/chat/open", chat.api_chat_open, methods=["POST"]),
             Route("/api/ai/chat/stream/{sid}", chat.api_chat_stream),
             Route("/api/ai/chat/send", chat.api_chat_send, methods=["POST"]),

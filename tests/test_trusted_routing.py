@@ -22,7 +22,7 @@ from mooring.hub.server import Hub, create_app
 
 @pytest.fixture(autouse=True)
 def _managed_trusted_credential(monkeypatch):
-    monkeypatch.setattr(openai_provider, "resolve_trusted_api_key", lambda: "managed-key")
+    monkeypatch.setattr(openai_provider, "resolve_trusted_api_key", lambda **_: "managed-key")
 
 
 class _Inspector:
@@ -217,6 +217,7 @@ def test_trusted_routing_metadata_contains_only_exact_safe_profile(tmp_path):
 
     assert metadata == {
         "enabled": True,
+        "source": "managed",
         "profile_label": "Firm approved AI",
         "trusted_models": [
             {"id": "approved-coder", "name": "approved-coder"},
@@ -268,7 +269,7 @@ def test_models_endpoint_offers_no_choices_for_unavailable_profile(tmp_path, mon
             return []
 
     monkeypatch.setattr(hub, "_provider_for", lambda: GeneralProvider())
-    monkeypatch.setattr(openai_provider, "resolve_trusted_api_key", lambda: "")
+    monkeypatch.setattr(openai_provider, "resolve_trusted_api_key", lambda **_: "")
 
     with TestClient(create_app(hub)) as client:
         routing = client.get("/api/ai/models").json()["routing"]
@@ -351,7 +352,7 @@ def test_unapproved_browser_model_is_rejected_before_context_or_inspector(
         coding_models=("approved-coder", "approved-coder-fast"),
     )
     touched = []
-    monkeypatch.setattr(openai_provider, "resolve_trusted_api_key", lambda: "")
+    monkeypatch.setattr(openai_provider, "resolve_trusted_api_key", lambda **_: "")
     monkeypatch.setattr(hub, "_build_chat_context", lambda *a, **k: touched.append("context"))
     monkeypatch.setattr(hub, "_trusted_inspector_for", lambda: touched.append("inspector"))
 
@@ -373,7 +374,7 @@ def test_unapproved_browser_model_is_rejected_before_context_or_inspector(
 def test_incomplete_managed_profile_is_rejected_before_context(tmp_path, monkeypatch):
     hub = _hub(tmp_path)
     touched = []
-    monkeypatch.setattr(openai_provider, "resolve_trusted_api_key", lambda: "")
+    monkeypatch.setattr(openai_provider, "resolve_trusted_api_key", lambda **_: "")
     monkeypatch.setattr(hub, "_build_chat_context", lambda *a, **k: touched.append("context"))
     monkeypatch.setattr(hub, "_trusted_inspector_for", lambda: touched.append("inspector"))
 
