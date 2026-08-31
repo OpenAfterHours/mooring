@@ -9,8 +9,10 @@ from threadpool workers. Starlette's loop and this loop never share state beyond
 the thread-safe queues.
 
 Privacy: the session is built from :func:`copilot.hardened_session_kwargs` (the
-audited value-blind config) plus ``available_tools=TOOL_NAMES`` (only mooring's
-value-free tools — the SDK's built-in file/shell tools are not in the allowlist)
+audited value-blind config) plus an ``available_tools`` allowlist derived from the
+tools actually built — so it stays in lock-step with them, including the write
+tool's two names (only mooring's
+value-free tools; the SDK's built-in file/shell tools are not in the allowlist)
 and ``working_directory`` set to an empty temp dir (so even a stray file tool has
 no data to read). The agent has no path to a data value.
 """
@@ -26,12 +28,17 @@ from typing import TYPE_CHECKING, Any
 
 from mooring.ai.base import AIError, AINotConnectedError
 from mooring.ai.chat import ChatBroadcaster, ChatEvent
+from mooring.ai.tools import EDIT_TOOL_NAME, write_tool_name
 
 if TYPE_CHECKING:
     from mooring.ai.ner import ModelRef
 
 _START_TIMEOUT = 60.0
 _SEND_TIMEOUT = 30.0
+# How long to wait on the SDK's own turn abort. Short on purpose: it is a best-effort
+# BONUS on top of the tool-boundary stop flag, which has already taken effect, so the
+# analyst's Cancel must never block the hub waiting for it.
+_ABORT_TIMEOUT = 5.0
 # Reasoning-effort picker sentinels meaning "send no reasoning_effort at all" — leave
 # it to the model's own default. Defined HERE (the lowest ai/ session module) and
 # imported by :mod:`mooring.ai.openai_session`, so both providers read one list: the
@@ -39,49 +46,93 @@ _SEND_TIMEOUT = 30.0
 # now appears in the picker, so either session can be handed it.
 _EFFORT_SENTINELS = frozenset({"", "default", "auto"})
 
-_TOOL_GUIDE = (
-    "\n\nYou have tools to inspect this workspace WITHOUT ever seeing data values:\n"
-    "- mooring_list_datasets — list available datasets\n"
-    "- mooring_get_schema(dataset) — a dataset's column names + dtypes\n"
-    "- mooring_read_notebook_source — the notebook's code as it is RIGHT NOW, with each "
-    "cell's current index\n"
-    "- mooring_propose_notebook_edit(edits, appends, deletes, cells, rationale) — the ONE "
-    "tool that changes the notebook, whatever the change is. `appends` adds brand-new "
-    "cells at the end; `edits` replaces existing ones; `deletes` removes them; `cells` "
-    "rewrites the notebook wholesale (rare — it discards every cell you do not carry "
-    "over). Mix edits, appends and deletes freely in one call; they arrive as one patch "
-    "the analyst reviews together.\n"
-    "  PREFER EDITING the cell that already does the thing over appending a near-"
-    "duplicate: two cells defining the same name stop BOTH of them and everything "
-    "downstream.\n"
-    "  Every `edits` and `deletes` entry carries `expect`: the first line of the cell you "
-    "believe is at that index, copied from the cell view. mooring compares it with the "
-    "real cell and refuses the whole change unless it matches that cell AND NO OTHER — "
-    "that is what stops a stale index writing over a cell you never read, so send what "
-    "you actually saw, never a guess. When the first line does not single a cell out — "
-    "every markdown cell begins `mo.md(\"\"\"`, so one line never does — send the next line "
-    "or two as well. Take indices from the cell view you were given, but that view is a "
-    "SNAPSHOT: "
-    "once anything has been applied this session, call mooring_read_notebook_source "
-    "first, because inserting or deleting a cell renumbers the ones after it. A `cells` "
-    "rewrite carries `expect_cells` instead — how many cells you believe the notebook has "
-    "right now.\n"
-    "To CHANGE the notebook, call mooring_propose_notebook_edit. Cell code is the BODY "
-    "ONLY: top-level statements "
-    "with NO '@app.cell', NO 'def _():', and NO trailing 'return (...)' (mooring adds that "
-    "wrapper for you). WHERE the notebook is shown to you as indexed cells (each under a "
-    "'# === cell N ===' line), those are already in exactly that body-only form — write "
-    "them back the same way; where it is instead shown raw, it says so. Every "
-    "proposal is reviewed and applied by the analyst; you never write the file yourself and "
+# What happens AFTER the write tool is called — the one thing that genuinely differs
+# between the tool's two modes, so it is the only part of the guides below that varies.
+# Mirrors ``tools._PROPOSE_MODE`` / ``tools._EDIT_MODE`` (the tool's own description) in
+# the guide's voice; the two must agree, because the model reads both every turn.
+_PROPOSE_OUTCOME = (
+    "Every proposal is reviewed and applied by the analyst; you never write the file "
+    "yourself and cannot read the data itself."
+)
+_EDIT_OUTCOME = (
+    "Your change is written into the analyst's open notebook and marimo runs it straight "
+    "away — there is no Apply click. The call comes back with a value-free OBSERVATION "
+    "of what actually happened (whether the cell ran, the error if it did not, and the "
+    "column names and dtypes of what it produced): READ it, fix anything wrong with "
+    "another call, and keep going until the analysis is right rather than handing back "
+    "a half-finished notebook. Only names, types and status ever come back — you still "
     "cannot read the data itself."
 )
 
-_PROPOSE_ONLY_GUIDE = (
-    "\n\nYou have one tool: mooring_propose_notebook_edit. It creates a local, "
-    "reviewable patch and never writes by itself. Workspace read tools are disabled "
-    "for this general-provider conversation; use only the notebook snapshot already "
-    "in your context."
-)
+
+def _outcome(write_tool: str) -> str:
+    return _EDIT_OUTCOME if write_tool == EDIT_TOOL_NAME else _PROPOSE_OUTCOME
+
+
+def _tool_guide(write_tool: str) -> str:
+    """The read + write tool guide, naming the write tool as THIS session registered it.
+
+    A function rather than a constant because the ONE write tool has two names, one per
+    mode (:data:`mooring.ai.tools.WRITE_TOOL_NAMES`), and this text rides the system
+    message on EVERY turn — a hard-coded name here is a standing instruction to call a
+    tool that does not exist in the other mode. Callers pass
+    :func:`mooring.ai.tools.write_tool_name`, the same helper ``build_tool_specs`` uses
+    to REGISTER it, so the prompt and the toolset cannot disagree.
+    """
+    return (
+        "\n\nYou have tools to inspect this workspace WITHOUT ever seeing data values:\n"
+        "- mooring_list_datasets — list available datasets\n"
+        "- mooring_get_schema(dataset) — a dataset's column names + dtypes\n"
+        "- mooring_read_notebook_source — the notebook's code as it is RIGHT NOW, with each "
+        "cell's current index\n"
+        f"- {write_tool}(edits, appends, deletes, cells, rationale) — the ONE "
+        "tool that changes the notebook, whatever the change is. `appends` adds brand-new "
+        "cells at the end; `edits` replaces existing ones; `deletes` removes them; `cells` "
+        "rewrites the notebook wholesale (rare — it discards every cell you do not carry "
+        "over). Mix edits, appends and deletes freely in one call; they arrive as one patch "
+        "the analyst reviews together.\n"
+        "  PREFER EDITING the cell that already does the thing over appending a near-"
+        "duplicate: two cells defining the same name stop BOTH of them and everything "
+        "downstream.\n"
+        "  Every `edits` and `deletes` entry carries `expect`: the first line of the cell you "
+        "believe is at that index, copied from the cell view. mooring compares it with the "
+        "real cell and refuses the whole change unless it matches that cell AND NO OTHER — "
+        "that is what stops a stale index writing over a cell you never read, so send what "
+        "you actually saw, never a guess. When the first line does not single a cell out — "
+        "every markdown cell begins `mo.md(\"\"\"`, so one line never does — send the next line "
+        "or two as well. Take indices from the cell view you were given, but that view is a "
+        "SNAPSHOT: "
+        "once anything has been applied this session, call mooring_read_notebook_source "
+        "first, because inserting or deleting a cell renumbers the ones after it. A `cells` "
+        "rewrite carries `expect_cells` instead — how many cells you believe the notebook has "
+        "right now.\n"
+        f"To CHANGE the notebook, call {write_tool}. Cell code is the BODY "
+        "ONLY: top-level statements "
+        "with NO '@app.cell', NO 'def _():', and NO trailing 'return (...)' (mooring adds that "
+        "wrapper for you). WHERE the notebook is shown to you as indexed cells (each under a "
+        "'# === cell N ===' line), those are already in exactly that body-only form — write "
+        "them back the same way; where it is instead shown raw, it says so. "
+        + _outcome(write_tool)
+    )
+
+
+# Propose mode's sentence here is byte-for-byte the one this guide has always carried:
+# it says what the call PRODUCES, which the main guide's shared outcome sentence does
+# not need to (that guide has just described the fields). Edit mode reuses the shared
+# one, since what it produces is the observation.
+_WRITE_ONLY_PROPOSE = "It creates a local, reviewable patch and never writes by itself."
+
+
+def _write_only_guide(write_tool: str) -> str:
+    """The guide for the general-provider conversation, which gets the write tool and
+    no workspace read tools. Mode-aware for the same reason :func:`_tool_guide` is: the
+    hub wires an applier into BOTH routed children, so this path reaches edit mode too."""
+    return (
+        f"\n\nYou have one tool: {write_tool}. "
+        + (_EDIT_OUTCOME if write_tool == EDIT_TOOL_NAME else _WRITE_ONLY_PROPOSE)
+        + " Workspace read tools are disabled for this general-provider conversation; "
+        "use only the notebook snapshot already in your context."
+    )
 
 _INVESTIGATOR_GUIDE = (
     "\n\nYou are INVESTIGATING on another assistant's behalf. Use the read tools to inspect "
@@ -163,6 +214,7 @@ class CopilotChatSession(ChatBroadcaster):
         catalog=None,
         read_only: bool = False,
         run_investigation=None,
+        applier=None,
         pii_enabled: bool = False,
         pii_block: bool = True,
         pii_names: bool = False,
@@ -207,10 +259,22 @@ class CopilotChatSession(ChatBroadcaster):
         # mooring_investigate (so it cannot write or recurse). Forced off under read_only
         # even if a run_investigation were mis-wired — belt-and-suspenders for depth-1.
         self._run_investigation = None if read_only else run_investigation
+        # The in-turn write capability, wired the SAME way as emit_proposal and gated by
+        # the same read_only rule (see _aopen). None -> the tool stays in propose mode.
+        self._applier = None if read_only else applier
+        # The name the write tool will actually be REGISTERED under below (_aopen passes
+        # the same `self._applier is not None` through to build_tools), resolved by the
+        # one helper both sides share so the prompt cannot name a tool the session does
+        # not have.
+        write_tool = write_tool_name(self._applier is not None)
         guide = (
             _INVESTIGATOR_GUIDE
             if read_only
-            else (_TOOL_GUIDE if self._allow_read_tools else _PROPOSE_ONLY_GUIDE)
+            else (
+                _tool_guide(write_tool)
+                if self._allow_read_tools
+                else _write_only_guide(write_tool)
+            )
         )
         if self._allow_read_tools and dictionary is not None and not dictionary.is_empty():
             guide += _DICT_TOOL_GUIDE
@@ -351,6 +415,13 @@ class CopilotChatSession(ChatBroadcaster):
             # gate): no propose/edit tool, only the value-free read tools.
             emit_proposal=None if self._read_only else self._emit_proposal,
             emit_proposal_patch=None if self._read_only else self._emit_proposal_patch,
+            # ...and the same gate again for the WRITE capability, which is strictly
+            # stronger than a proposal: no applier (or a read-only sub-agent) leaves the
+            # tool in propose mode, exactly as it shipped.
+            apply_edit=None if self._read_only or self._applier is None else self._apply_edit,
+            # The portable stop signal. The SDK owns this tool loop, so the analyst's
+            # Cancel is enforced at the boundary of every call it makes.
+            cancelled=self.cancel_requested,
             dictionary=self._dictionary,
             semantic_models=self._semantic_models,
             code_index=self._helpers,
@@ -464,6 +535,10 @@ class CopilotChatSession(ChatBroadcaster):
 
     def _forward(self, text: str) -> None:
         assert self._session is not None and self._loop is not None  # callers check first
+        # The start of a turn — the ONE place both send paths meet, so this is where the
+        # stop flag is re-armed. Clearing it anywhere later would let one Cancel go on
+        # refusing every tool call in every turn that followed it.
+        self.clear_cancel()
         future = asyncio.run_coroutine_threadsafe(self._session.send(text), self._loop)
         try:
             future.result(timeout=_SEND_TIMEOUT)
@@ -471,6 +546,42 @@ class CopilotChatSession(ChatBroadcaster):
             from mooring.ai.copilot import friendly_error
 
             self._broadcast(ChatEvent("fail", {"text": friendly_error(str(exc))}))
+
+    # -- cancellation -------------------------------------------------------
+
+    def request_cancel(self) -> None:
+        """Stop the turn in flight: raise the portable flag, then ALSO ask the SDK.
+
+        The flag (base class) is what actually guarantees a stop here — the Copilot SDK
+        runs its own tool loop and mooring cannot break out of it, so every tool call the
+        agent makes from now on comes back as a terminal "cancelled" error and the loop
+        converges. The SDK's own ``session.abort()`` is a genuine bonus on top: it ends
+        the turn the runtime is processing right now (mid-completion, before the next
+        tool call), and its docstring is explicit that the session stays valid for new
+        messages afterwards — which is the property the next turn depends on.
+        """
+        already = self.cancel_requested()
+        super().request_cancel()
+        if not already:
+            self._abort_sdk_turn()
+
+    def _abort_sdk_turn(self) -> None:
+        """Best-effort ``session.abort()`` on the session's own loop thread.
+
+        Duck-typed and fully swallowed: the SDK is an optional extra whose surface can
+        move, and this is an EXTRA stop, not the mechanism. If it is missing or fails,
+        the tool-boundary flag has already taken effect and the turn still ends.
+        """
+        session, loop = self._session, self._loop
+        if session is None or loop is None or not loop.is_running():
+            return
+        abort = getattr(session, "abort", None)
+        if not callable(abort):
+            return
+        try:
+            asyncio.run_coroutine_threadsafe(abort(), loop).result(timeout=_ABORT_TIMEOUT)
+        except Exception:  # noqa: BLE001 - never let a best-effort abort break Cancel
+            pass
 
     def close(self) -> None:
         super().close()  # broadcast "closed" to subscribers (idempotent)

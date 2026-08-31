@@ -37,6 +37,9 @@ _AI_ENV = [
     "MOORING_AI_TRACEBACK_GUARD",
     "MOORING_AI_APPLY_GUARD",
     "MOORING_AI_APPLY_RUNS",
+    "MOORING_AI_AUTO_APPLY",
+    "MOORING_AI_AUTO_RUN_REPORT",
+    "MOORING_AI_MAX_TOOL_ITERS",
     "MOORING_AI_CONTEXT",
     "MOORING_AI_CONTEXT_DIR",
     "MOORING_AI_CONTEXT_MAX_KB",
@@ -380,6 +383,56 @@ def test_traceback_guard_off_needs_confirm(client):
     # Turning it back ON is the safe direction — no confirm required.
     back = c.post("/api/settings", json={"key": "ai.traceback_guard", "value": True})
     assert back.status_code == 200 and hub.app_cfg.ai_traceback_guard is True
+
+
+def test_turning_auto_apply_back_on_needs_confirm(client):
+    c, hub = client
+    # ON by default. Turning it OFF is the safe direction (the analyst gets the Apply
+    # button back), so it goes straight through...
+    assert hub.app_cfg.ai_auto_apply is True
+    off = c.post("/api/settings", json={"key": "ai.auto_apply", "value": False})
+    assert off.status_code == 200 and hub.app_cfg.ai_auto_apply is False
+    # ...and turning it back on is the weakening direction, held for a confirm.
+    resp = c.post("/api/settings", json={"key": "ai.auto_apply", "value": True})
+    assert resp.status_code == 409
+    assert resp.json()["needs_confirm"] is True and resp.json()["message"]
+    assert hub.app_cfg.ai_auto_apply is False  # not applied
+    ok = c.post("/api/settings", json={"key": "ai.auto_apply", "value": True, "confirm": True})
+    assert ok.status_code == 200 and hub.app_cfg.ai_auto_apply is True
+
+
+def test_turning_the_automatic_re_run_back_on_needs_confirm(client):
+    c, hub = client
+    assert hub.app_cfg.ai_auto_run_report is True
+    off = c.post("/api/settings", json={"key": "ai.auto_run_report", "value": False})
+    assert off.status_code == 200 and hub.app_cfg.ai_auto_run_report is False
+    resp = c.post("/api/settings", json={"key": "ai.auto_run_report", "value": True})
+    assert resp.status_code == 409 and resp.json()["needs_confirm"] is True
+    assert hub.app_cfg.ai_auto_run_report is False
+    ok = c.post(
+        "/api/settings", json={"key": "ai.auto_run_report", "value": True, "confirm": True}
+    )
+    assert ok.status_code == 200 and hub.app_cfg.ai_auto_run_report is True
+
+
+def test_the_tool_call_ceiling_is_editable_and_range_checked(client):
+    c, hub = client
+    assert hub.app_cfg.ai_max_tool_iters == 200
+    ok = c.post("/api/settings", json={"key": "ai.max_tool_iters", "value": 500})
+    assert ok.status_code == 200 and hub.app_cfg.ai_max_tool_iters == 500
+    # A ceiling of 0 would end every turn before the model's first tool call, so it
+    # is refused at the door rather than written and silently ignored on load.
+    bad = c.post("/api/settings", json={"key": "ai.max_tool_iters", "value": 0})
+    assert bad.status_code == 400
+    assert hub.app_cfg.ai_max_tool_iters == 500
+    # The page's range is the loader's range. settings_schema is a pure leaf and
+    # cannot import ai_config, so the two numbers are written twice — pin them
+    # together, or the page would happily accept a value the loader silently caps.
+    from mooring.ai_config import MAX_TOOL_ITERS_CEILING, AiConfig
+
+    spec = settings_schema.by_key("ai.max_tool_iters")
+    assert spec.maximum == MAX_TOOL_ITERS_CEILING
+    assert spec.default == AiConfig().max_tool_iters
 
 
 def test_non_weakening_direction_needs_no_confirm(client):

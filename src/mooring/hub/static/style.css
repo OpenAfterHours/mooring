@@ -1190,6 +1190,74 @@ pre {
 /* decided (confirmed or declined) — the ask stays in the transcript, visibly spent. */
 .chat-body .row-gate.gate-done { opacity: 0.6; }
 
+/* -- auto-apply: the receipt ----------------------------------------------
+   What replaces the Apply card when the model writes for itself. The card asked
+   someone who does not read Python to judge code BEFORE it ran; this reports the same
+   change after the run, when there are results — and carries the one thing that makes
+   that trade safe, a way back. One turn can write several times, so its receipts share
+   a group and number themselves: a sequence to read down, not a stack of cards. */
+.chat-body .receipt-group {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  margin: 0.4rem 0;
+}
+.chat-body .receipt {
+  display: flex;
+  gap: 0.5rem;
+  padding: 0.35rem 0.6rem;
+  border: 1px solid var(--term-rule);
+  border-left: 3px solid var(--term-add);
+  border-radius: 6px;
+  background: var(--term-surface);
+  font-size: 12px;
+}
+.chat-body .receipt-step {
+  display: none;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.35em;
+  height: 1.35em;
+  margin-top: 0.1rem;
+  border: 1px solid var(--term-rule);
+  border-radius: 50%;
+  color: var(--term-dim);
+  font-size: 10px;
+  line-height: 1;
+}
+/* the numbers appear only once there IS a sequence — a lone "1" is noise. */
+.chat-body .receipt-group.receipt-seq .receipt-step { display: inline-flex; }
+.chat-body .receipt-main { flex: 1; min-width: 0; }
+/* "Changed cell 3 · Added cell 8" — the analyst's words, never an op dict. */
+.chat-body .receipt-head { color: var(--term-ink); font-weight: 700; }
+.chat-body .receipt-why { color: var(--term-dim); font-style: italic; margin-top: 0.1rem; }
+/* the line the design turns on: what came BACK, which is what is now being judged. */
+.chat-body .receipt-obs { color: var(--term-dim); margin-top: 0.15rem; }
+.chat-body .receipt-obs::before { content: "→ "; color: var(--term-add); } /* → */
+.chat-body .receipt-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.3rem;
+}
+.chat-body .receipt-note { color: var(--term-dim); font-size: 11px; }
+/* reverted — the rail drops its "landed" tint AND the row says the word. Never colour
+   alone: a green control on a row that did not apply is exactly how a HELD change once
+   read as an applied one. */
+.chat-body .receipt.reverted { border-left-color: var(--term-dim); opacity: 0.7; }
+.chat-body .receipt.reverted .receipt-obs::before { color: var(--term-dim); }
+/* an open tool line closed by a STOP: neither ✓ nor ✗ — the analyst ended it, so it
+   is not the assistant's failure. */
+.chat-body .row-tool.stopped .tool-glyph { color: var(--term-dim); }
+/* the transcript's own record that the analyst stopped a turn. */
+.chat-body .row-stopped {
+  border-left: 3px solid var(--warn);
+  padding: 0.2rem 0.6rem;
+  margin: 0.3rem 0;
+  color: var(--term-ink);
+}
+
 /* the prompt: a "> " gutter + an auto-growing, chrome-free input */
 .chat-body #prompt-area {
   flex: 0 0 auto;
@@ -1219,6 +1287,31 @@ pre {
 }
 .chat-body #chat-input::placeholder { color: var(--term-dim); }
 .chat-body #chat-input:disabled { opacity: 0.6; }
+
+/* the stop: while a turn is in flight it IS the affordance in this row, because the
+   composer is locked and ending the turn is the one thing left to do. Deliberately not
+   .primary — stopping is neither the happy path nor a success. */
+.chat-body .prompt-row .stop-btn {
+  flex: 0 0 auto;
+  align-self: flex-start;
+  margin-left: 0.6rem;
+  background: var(--term-surface);
+  border-color: var(--term-rule);
+  color: var(--term-ink);
+}
+.chat-body .prompt-row .stop-btn:hover:not(:disabled) {
+  border-color: var(--warn);
+  color: var(--warn);
+  background: var(--term-surface);
+}
+/* "Stopping…" — insensitive because the ask is already in flight. Muted, NEVER tinted
+   like a finished or successful state: the turn has not stopped yet, and the button
+   saying otherwise is the exact failure this control exists to avoid. */
+.chat-body .prompt-row .stop-btn:disabled {
+  color: var(--term-dim);
+  opacity: 0.75;
+  cursor: default;
+}
 
 /* slash-command / @-mention autocomplete, floated above the prompt */
 .chat-body #autocomplete {

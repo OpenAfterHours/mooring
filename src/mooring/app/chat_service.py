@@ -2,7 +2,9 @@
 finally landed (P3 of docs/developers/architecture-plan.md).
 
 Owns what used to live inside the web adapter: the chat-session registry (and
-its lock + lifecycle: close/reap/per-notebook teardown), the CONTEXT ASSEMBLY —
+its lock + lifecycle: close/reap/per-notebook teardown, and the session's
+optional in-turn applier beside it, so a turn boundary is one call rather than a
+second registry in the routes), the CONTEXT ASSEMBLY —
 :meth:`ChatService.build_context` is the application's SOLE caller of
 :func:`mooring.ai.egress.build_system_context`, so the value-blindness choke
 point now sits next to the privacy machinery it feeds instead of among route
@@ -43,6 +45,10 @@ class ChatService:
         # CopilotChatSession (Phase 1) — both ChatBroadcasters.
         self._chats: dict[str, object] = {}
         self._targets: dict[str, tuple[str, str]] = {}  # sid -> (workspace, notebook rel)
+        # sid -> the session's NotebookApplier (mooring.app.auto_apply), when the model
+        # writes for itself. Absent in manual mode, where no write-through is registered
+        # at all — see Hub._make_applier.
+        self._appliers: dict[str, object] = {}
         self._lock = threading.Lock()
 
     # -- registry / lifecycle --------------------------------------------------
@@ -54,16 +60,39 @@ class ChatService:
         with self._lock:
             return self._targets.get(sid)
 
-    def register(self, sid: str, session, workspace: Path, notebook_rel: str) -> None:
+    def register(self, sid: str, session, workspace: Path, notebook_rel: str, applier=None) -> None:
         with self._lock:
             self._chats[sid] = session
             self._targets[sid] = (str(workspace), notebook_rel)
+            if applier is not None:
+                self._appliers[sid] = applier
+
+    def begin_turn(self, sid: str) -> str:
+        """Tell this session's applier that a NEW turn is starting, so its writes get a
+        fresh undo checkpoint and a fresh receipt group.
+
+        A turn starts when the analyst sends — nothing else does — so this is called from
+        the send paths (``/api/ai/chat/send`` and the Run & report hand-off) rather than
+        being inferred inside the applier, which has no view of the conversation. Returns
+        the new turn id, or ``""`` when this session has no applier (manual mode), which
+        is not a condition anyone needs to handle.
+        """
+        with self._lock:
+            applier = self._appliers.get(sid)
+        begin = getattr(applier, "begin_turn", None)
+        if not callable(begin):
+            return ""
+        try:
+            return str(begin() or "")
+        except Exception:  # noqa: BLE001 — a turn boundary must never fail a send
+            return ""
 
     def close(self, sid: str) -> None:
         """Tear down one chat session (drop its target, close the provider)."""
         with self._lock:
             session = self._chats.pop(sid, None)
             self._targets.pop(sid, None)
+            self._appliers.pop(sid, None)
         if session is not None:
             with contextlib.suppress(Exception):
                 session.close()  # ty: ignore[unresolved-attribute]
@@ -73,6 +102,7 @@ class ChatService:
             sessions = list(self._chats.values())
             self._chats.clear()
             self._targets.clear()
+            self._appliers.clear()
         for session in sessions:
             with contextlib.suppress(Exception):
                 session.close()  # ty: ignore[unresolved-attribute]
@@ -109,6 +139,7 @@ class ChatService:
             sessions = [self._chats.pop(sid) for sid in dead]
             for sid in dead:
                 self._targets.pop(sid, None)
+                self._appliers.pop(sid, None)
         for session in sessions:
             with contextlib.suppress(Exception):
                 session.close()  # ty: ignore[unresolved-attribute]
@@ -350,7 +381,10 @@ class ChatService:
             checks_help=checks.copilot_guide(),
             # Likewise, let it author marimo SQL (mo.sql / DuckDB) cells — authored code
             # the model never sees the result of, so no new egress channel either.
-            sql_help=tools.sql_cell_guide(),
+            # Named for THIS session's mode: with auto-apply on the session registers
+            # `mooring_edit_notebook`, so a guide naming the propose tool would point the
+            # model at a tool it does not have.
+            sql_help=tools.sql_cell_guide(tools.write_tool_name(app_cfg.ai_auto_apply)),
             # And author value-free input/output fingerprints (mooring_inputs) on request
             # — a hash/shape/schema receipt, never a value, so no new egress channel. The
             # guide DESCRIBES the API; the receipts themselves (and the lineage graph

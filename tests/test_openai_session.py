@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import queue
+import threading
 import time
 import types
 
@@ -19,7 +20,7 @@ import polars as pl
 import pytest
 
 from mooring.ai.chat import ChatEvent  # noqa: F401  (documents the event shape)
-from mooring.ai.openai_session import OpenAIChatSession
+from mooring.ai.openai_session import DEFAULT_MAX_TOOL_ITERS, OpenAIChatSession
 
 SECRET = "SECRET_VALUE_DO_NOT_LEAK"
 VALID_CARD = "4012888888881881"  # Luhn-valid (shared with test_egress/test_pii)
@@ -692,3 +693,296 @@ def test_parallel_tool_calls_are_each_answered_before_the_next_request(ws):
     assert [tc["id"] for tc in assistant["tool_calls"]] == ["a", "b"]
     tool_ids = [m["tool_call_id"] for m in second if m.get("role") == "tool"]
     assert tool_ids == ["a", "b"]  # both answered, in order, before the 2nd request
+
+
+# -- cancellation (the analyst's stop button) -----------------------------------
+
+
+class _BlockingStream:
+    """One streamed completion that STALLS part-way until the test releases it.
+
+    The point is to press Cancel while the worker thread really is mid-stream, from
+    another thread, rather than to simulate that from inside the loop being tested.
+    Records ``closed`` so a test can prove the abandoned stream was closed and is not
+    still being billed.
+    """
+
+    def __init__(self, chunks, opened, release):
+        self._chunks = list(chunks)
+        self._opened = opened
+        self._release = release
+        self.closed = False
+
+    def __iter__(self):
+        for i, chunk in enumerate(self._chunks):
+            if i == 1:  # one chunk has been delivered; hand control to the test
+                self._opened.set()
+                self._release.wait(timeout=5)
+            yield chunk
+
+    def close(self):
+        self.closed = True
+
+
+class _StreamCompletions:
+    """Like ``_FakeCompletions`` but scripted with whole STREAM objects, so a test can
+    supply one that blocks (and one that records ``close()``)."""
+
+    def __init__(self, streams):
+        self._streams = list(streams)
+        self.calls: list[dict] = []
+
+    def create(self, **kwargs):
+        idx = len(self.calls)
+        self.calls.append(kwargs)
+        if idx < len(self._streams):
+            return self._streams[idx]
+        return _play([_chunk(finish="stop")])
+
+
+def _stream_session(ws, streams, **kw):
+    client = types.SimpleNamespace(chat=types.SimpleNamespace(completions=_StreamCompletions(streams)))
+    session = OpenAIChatSession(
+        model="gpt-4o",
+        system_context="SYSTEM CONTEXT: schema + source only.",
+        workspace=ws,
+        folders=("data",),
+        notebook_rel="nb.py",
+        client_factory=lambda: client,
+        **kw,
+    )
+    session.start(block=True)
+    return session, client.chat.completions
+
+
+def test_cancel_stops_an_in_flight_turn_and_the_session_takes_the_next_message(ws):
+    # The whole point of "no small iteration cap, a Cancel button instead": a stop must
+    # actually stop THIS turn (closing the open stream rather than paying it out), and
+    # must leave the session usable for the very next message.
+    opened, release = threading.Event(), threading.Event()
+    blocking = _BlockingStream(
+        [_chunk(content="working"), _chunk(content=" on it"), _chunk(finish="stop")],
+        opened,
+        release,
+    )
+    session, completions = _stream_session(
+        ws, [blocking, [_chunk(content="second answer"), _chunk(finish="stop")]]
+    )
+    q = session.subscribe()
+    try:
+        session.send("do something long")
+        assert opened.wait(timeout=5), "the worker never reached the stream"
+        session.request_cancel()
+        release.set()
+
+        events = _drain(q, until="idle")
+        kinds = [e.kind for e in events]
+        assert "cancelled" in kinds  # the UI is told the moment the analyst asks
+        assert kinds[-1] == "idle"  # ...and the turn ends the ordinary way
+        texts = [e.data.get("text", "") for e in events if e.kind == "message"]
+        assert "(Stopped at your request.)" in texts
+        assert "working" in texts  # the text already streamed is kept, not thrown away
+        assert blocking.closed is True  # the abandoned completion was closed
+        assert len(completions.calls) == 1  # no further round-trip was paid for
+
+        # The session is still alive: the NEXT message runs a full, uncancelled turn.
+        session.send("and now?")
+        follow = _drain(q, until="idle")
+        assert "second answer" in [
+            e.data.get("text", "") for e in follow if e.kind == "message"
+        ]
+        assert session.cancel_requested() is False  # re-armed at the start of that turn
+    finally:
+        session.close()
+
+
+def test_a_cancel_never_poisons_the_following_turn(ws):
+    # The flag is cleared at the START of a turn, not at the end of the cancelled one:
+    # a stop pressed with nothing running (or one that raced the end of a turn) must not
+    # silently kill every turn after it.
+    session, completions = _session(
+        ws, [[_chunk(content="fresh"), _chunk(finish="stop")]]
+    )
+    q = session.subscribe()
+    try:
+        session.request_cancel()
+        assert session.cancel_requested() is True
+        session.send("hello")
+        events = _drain(q, until="idle")
+        assert "fresh" in [e.data.get("text", "") for e in events if e.kind == "message"]
+        assert session.cancel_requested() is False
+        assert len(completions.calls) == 1  # the turn really ran
+    finally:
+        session.close()
+
+
+def test_cancel_between_tool_rounds_ends_the_turn_with_every_tool_call_answered(ws):
+    # A cancel that lands while tools are being dispatched still has to leave the
+    # conversation well-formed — every tool_call_id answered — or the NEXT turn is
+    # rejected by the API for a half-finished one.
+    scripted = [
+        [
+            _chunk(tool_calls=[_tc(0, tc_id="c1", name="mooring_list_datasets", args="{}")]),
+            _chunk(finish="tool_calls"),
+        ],
+        [_chunk(content="never reached"), _chunk(finish="stop")],
+    ]
+    session, completions = _session(ws, scripted)
+    q = session.subscribe()
+    try:
+        # The analyst presses stop while that tool is running: wrap the handler so the
+        # cancel lands at exactly that point every run, instead of racing the loop.
+        original = session._dispatch["mooring_list_datasets"]
+
+        def cancel_during(invocation):
+            out = original(invocation)
+            session.request_cancel()
+            return out
+
+        session._dispatch["mooring_list_datasets"] = cancel_during
+        session.send("list them")
+        events = _drain(q, until="idle")
+        assert "(Stopped at your request.)" in [
+            e.data.get("text", "") for e in events if e.kind == "message"
+        ]
+        assert len(completions.calls) == 1  # the second completion was never requested
+        # Every tool_call_id the assistant asked for has exactly one answer on record.
+        asked = [
+            tc["id"]
+            for m in session._messages
+            if m.get("role") == "assistant" and m.get("tool_calls")
+            for tc in m["tool_calls"]
+        ]
+        answered = [m["tool_call_id"] for m in session._messages if m.get("role") == "tool"]
+        assert asked == answered == ["c1"]
+    finally:
+        session.close()
+
+
+def test_closing_a_session_raises_the_stop_flag(ws):
+    # A closed session's turn is over by definition; the flag makes an in-flight tool
+    # loop converge at its next tool boundary instead of running on against a dead chat.
+    session, _ = _session(ws, [[_chunk(content="hi"), _chunk(finish="stop")]])
+    assert session.cancel_requested() is False
+    session.close()
+    assert session.cancel_requested() is True
+
+
+# -- the runaway ceiling (a safety limit, not a work budget) --------------------
+
+
+def test_the_tool_iteration_ceiling_comes_from_the_caller(ws):
+    # The ceiling is the policy-folded `[ai] max_tool_iters`, passed IN by the caller.
+    tool_round = [
+        _chunk(tool_calls=[_tc(0, tc_id="c", name="mooring_list_datasets", args="{}")]),
+        _chunk(finish="tool_calls"),
+    ]
+    session, completions = _session(ws, [tool_round, tool_round, tool_round], max_tool_iters=2)
+    q = session.subscribe()
+    try:
+        session.send("loop forever")
+        events = _drain(q, until="idle")
+        assert len(completions.calls) == 2  # stopped at the ceiling the caller set
+        [budget] = [
+            e for e in events if e.kind == "message" and e.data.get("notice")
+        ]
+        text = budget.data["text"]
+        assert "2 steps" in text
+        # Abnormal stop, not a finished answer — and continuing is one message away.
+        assert "runaway ceiling" in text and "not a finished answer" in text
+        assert "continue" in text
+    finally:
+        session.close()
+
+
+def test_the_default_ceiling_is_the_config_default(ws):
+    # Nothing passed in falls back to the SAME number `[ai] max_tool_iters` ships, so a
+    # default install and an un-wired caller can never disagree about the ceiling.
+    from mooring.ai_config import AiConfig
+
+    assert DEFAULT_MAX_TOOL_ITERS == AiConfig().max_tool_iters == 200
+    session, _ = _session(ws, [[_chunk(content="hi"), _chunk(finish="stop")]])
+    try:
+        assert session._max_tool_iters == DEFAULT_MAX_TOOL_ITERS
+    finally:
+        session.close()
+
+
+@pytest.mark.parametrize("bad", [0, -5, None])
+def test_a_degenerate_ceiling_falls_back_rather_than_ending_every_turn(ws, bad):
+    # A ceiling of 0 would end every turn before its first request. Fall back instead.
+    session, _ = _session(
+        ws, [[_chunk(content="hi"), _chunk(finish="stop")]], max_tool_iters=bad
+    )
+    try:
+        assert session._max_tool_iters == DEFAULT_MAX_TOOL_ITERS
+    finally:
+        session.close()
+
+
+# -- the write capability (edit mode) ------------------------------------------
+
+
+def _captured_tool_kwargs(ws, monkeypatch, **kw):
+    """Build a session, capturing what it hands :func:`build_openai_tools`.
+
+    Returns ``(captured, session)``; the caller closes the session (closing it raises
+    the stop flag, so the cancel predicate must be read before that)."""
+    captured: dict = {}
+
+    def fake_build(**kwargs):
+        captured.update(kwargs)
+        return [], {}
+
+    monkeypatch.setattr("mooring.ai.openai_session.build_openai_tools", fake_build)
+    session, _ = _session(ws, [[_chunk(content="hi"), _chunk(finish="stop")]], **kw)
+    return captured, session
+
+
+def test_no_applier_leaves_the_write_tool_in_propose_mode(ws, monkeypatch):
+    # `[ai] auto_apply = false` and the policy escape hatch both ride on this: with no
+    # applier the tool proposes and the analyst clicks Apply, exactly as it shipped.
+    captured, session = _captured_tool_kwargs(ws, monkeypatch)
+    try:
+        assert captured["apply_edit"] is None
+        assert captured["emit_proposal"] is not None
+        assert captured["emit_proposal_patch"] is not None
+    finally:
+        session.close()
+
+
+def test_an_applier_is_wired_into_the_write_tool(ws, monkeypatch):
+    captured, session = _captured_tool_kwargs(ws, monkeypatch, applier=lambda ops, why: None)
+    try:
+        assert captured["apply_edit"] == session._apply_edit
+        assert captured["emit_proposal"] is not None  # propose events still exist
+    finally:
+        session.close()
+
+
+def test_a_read_only_session_gets_no_write_capability_at_all(ws, monkeypatch):
+    # The load-bearing privacy gate, extended: a read-only investigate sub-agent gets no
+    # proposal callbacks AND no applier — even when one is mis-wired in, as here.
+    captured, session = _captured_tool_kwargs(
+        ws, monkeypatch, read_only=True, applier=lambda ops, why: "should never run"
+    )
+    try:
+        assert captured["apply_edit"] is None
+        assert captured["emit_proposal"] is None
+        assert captured["emit_proposal_patch"] is None
+        assert session._applier is None  # dropped at the ctor, not just at the builder
+    finally:
+        session.close()
+
+
+def test_the_tool_boundary_always_gets_the_cancel_predicate(ws, monkeypatch):
+    # Both providers stop the same way at the tool boundary; a session that did not hand
+    # its predicate over would have no stop at all on the Copilot path.
+    captured, session = _captured_tool_kwargs(ws, monkeypatch)
+    try:
+        assert captured["cancelled"] == session.cancel_requested
+        assert captured["cancelled"]() is False
+        session.request_cancel()
+        assert captured["cancelled"]() is True  # the tools see the stop immediately
+    finally:
+        session.close()

@@ -144,14 +144,18 @@ routing is enabled.
 - **Cell outputs / dataframe previews** — these are where real values appear.
 - **Variable *values*.** Mooring may read a live dataframe's **schema** (names +
   dtypes — see [Live dataframe schemas](#live-dataframe-schemas-data-outside-the-workspace)),
-  but never a stored value or other kernel state.
+  and — for names it asked about itself — whether a name is **bound** and its runtime
+  **class name** ([the probe's second question](#the-probes-second-question-is-this-name-bound)).
+  Never a stored value, never anything derived from one.
 - **Raw error tracebacks.** A traceback can embed values (`KeyError: 'ACME Ltd'`),
   and mooring never captures one. Two things can put an error message *near* the
   model, and both are rewritten value-safe first by the same sanitiser: an analyst
   can *paste* a traceback into the chat (rewritten and held for an explicit confirm;
-  the raw paste is never stored, so no code path can forward it), and an analyst can
-  click **Run & report** after an Apply (mooring runs the notebook and reads only
-  marimo's own error lines). What survives the rewrite is best-effort, not
+  the raw paste is never stored, so no code path can forward it), and the
+  **Run & report** path can run the notebook and read only marimo's own error lines —
+  started by your click, or, when
+  [`[ai] auto_run_report`](#apply-gate) is on, by mooring itself after a change the
+  model wrote did not complete. What survives the rewrite is best-effort, not
   structural — see [Pasted tracebacks](#pasted-tracebacks) and
   [Run & report](#run-and-report) for the exact contracts.
 - **The contents of any data file.**
@@ -168,10 +172,14 @@ routing is enabled.
    [structured-PII scan](#structured-pii-pre-flight-scan-opt-in-best-effort) runs at
    all of these, not only `build_system_context`.
 2. **Value-free tools only.** The agent is given mooring's own tools (`ai/tools.py`):
-   list datasets, get a schema, read the notebook source, and *propose* a change —
-   each value-free by construction. There is exactly **one** propose tool,
-   `mooring_propose_notebook_edit`, and it covers every change the copilot can make
-   (new cells, edits, deletions, a wholesale rewrite) as one reviewable patch. It
+   list datasets, get a schema, read the notebook source, and *change* the notebook —
+   each value-free by construction. There is exactly **one** write tool, and it covers
+   every change the copilot can make (new cells, edits, deletions, a wholesale rewrite)
+   as one patch. It is registered under one of **two** names, chosen per session by
+   [`[ai] auto_apply`](#apply-gate): `mooring_propose_notebook_edit` when the analyst
+   applies (it emits a card and writes nothing), and `mooring_edit_notebook` when the
+   change lands inside the call. Same handler, same JSON schema, same checks — the name
+   differs because it is an instruction to the model about what happens next. It
    answers with mooring's **static
    check** of the notebook that proposal would produce (`marimo_rt.validate_notebook_source`):
    the candidate is composed in memory, never written, and checked on the AST alone —
@@ -206,17 +214,29 @@ routing is enabled.
    agent runs with an **empty working directory** so there are no data files within
    its reach.
 3. **Applying a cell only writes source; mooring never opens a marimo websocket.**
-   When you Apply a proposed cell, mooring writes the cell's **source code** into
+   When a cell is applied — by your click, or, with
+   [`[ai] auto_apply`](#apply-gate) on, by the model inside its own tool call — mooring
+   writes the cell's **source code** into
    the notebook's `.py` file (via marimo's own codegen); the editor, launched with
    `--watch`, reloads and runs it (unless you have turned
    [*Run an applied cell straight away*](#apply-gate) off, in which case it reloads
    the cell marked stale and runs nothing). mooring never reads cell outputs, and never
    connects a marimo *websocket* — and outputs, dataframe previews, and variable
-   values are delivered *only* over that websocket. So a value cannot travel back
+   values are delivered *only* over that websocket. So a **value** cannot travel back
    through mooring to the model. (The cell runs in *your* kernel; only your browser
    sees the result.) Live-schema introspection ([below](#live-dataframe-schemas-data-outside-the-workspace))
    keeps this invariant: it pushes a fixed probe in over HTTP and reads back only a
    names-and-dtypes file that probe wrote — never a cell output, never the websocket.
+
+   What has changed with `auto_apply` is that the model now learns **that** a cell ran,
+   not what it produced. A write it makes itself comes back as an **observation** built
+   from that same probe: which of the names the change should have bound are now bound
+   and their runtime class names, plus the names + dtypes + row count of any dataframe,
+   and mooring's own words for the status. It is the live-schema channel, asked a second
+   question — no output, no repr, no value, no websocket. That is what lets it correct
+   its own mistake in the turn instead of handing you a broken cell; see
+   [the probe's second question](#the-probes-second-question-is-this-name-bound) for the
+   exact shape and its boundary.
 4. **marimo's own AI is turned off.** marimo ships a built-in AI assistant that
    *does* send sample values to whatever model it's configured with. Mooring
    disables it in every editor it launches by writing a `.marimo.toml`
@@ -228,9 +248,9 @@ discovery, skills, file hooks, and host-git access are all switched off.
 
 ## Applying a cell: the check, and whether it runs { #apply-gate }
 
-Apply is the one moment the copilot's code touches your machine, so two settings
-govern it. Both live on the hub's **Settings** page under *AI copilot*, and both
-can be pinned by a [team policy](policy.md).
+Apply is the one moment the copilot's code touches your machine, so four settings
+govern it. All four live on the hub's **Settings** page under *AI copilot*, and all
+four can be pinned by a [team policy](policy.md).
 
 **`[ai] apply_guard` (default `true`) — read the cell before it lands.** mooring
 scans every proposed cell and holds the ones Undo cannot take back. Undo restores
@@ -274,9 +294,44 @@ writes marimo's `"lazy"` instead: the cell arrives in your notebook marked **sta
 and nothing executes until you press run. Slower, and worth it for a team that wants
 a human between the model's code and the kernel every time.
 
-A policy may pin `apply_guard = true` and `apply_runs = false` — the strict end of
-each. It cannot pin either the other way: there is no policy that disarms the check,
-and none that makes a teammate's applied cells run.
+**`[ai] auto_apply` (default `true`) — who presses the button.** By default a change
+the copilot writes lands as soon as it is written, and mooring hands the model back a
+value-free observation of what happened, so it can see its own mistake and fix it in
+the same turn instead of waiting a round trip for a human to click. This does **not**
+widen what may land: `apply_guard` above still reads every proposed cell first and
+still holds anything Undo cannot take back for your explicit confirm — the
+irreversible cells still stop and ask. What it removes is your look at the *ordinary*
+ones before they land, and Undo remains the remedy for those by construction. Set it
+`false` and the copilot goes back to proposing: nothing touches the notebook until you
+press **Apply**. That is the setting for a team that wants a human decision on every
+write, and a policy may pin it.
+
+**`[ai] auto_run_report` (default `true`) — may mooring re-run your notebook?** When
+the observation says an applied cell did not complete, mooring may run the same
+value-free smoke path described under
+["Run & report"](#run-and-report) itself, so the failure reaches the model without you
+relaying it. Nothing about *what* is read changes — the same closed error taxonomy, the
+same unconditional sanitiser, the same value-free receipt — but it re-executes the
+notebook without you asking, which is why it is a switch of its own rather than a
+detail of `auto_apply`. Set it `false` and the model is still told the cell did not
+complete; mooring just will not re-run anything on your behalf, and **Run & report**
+stays the button it always was.
+
+A policy may pin `apply_guard = true`, and `apply_runs`, `auto_apply` and
+`auto_run_report` to `false` — the strict end of each. It cannot pin any of them the
+other way: there is no policy that disarms the check, none that makes a teammate's
+applied cells run, none that takes a teammate's Apply button away, and none that makes
+mooring re-run their notebook.
+
+One nearby setting is **not** part of this gate and is not policy-governed:
+`[ai] max_tool_iters` (default `200`) is a ceiling on how many tool calls the model may
+make within one turn — a backstop against a runaway loop, not a work budget. It is set
+high on purpose, because the control for "that is enough" is the chat's **Cancel**
+button, not a small cap that stops a long analysis mid-thought. Raising or lowering it
+changes nothing about what the model sees or what may land; a value below 1 is ignored
+(it would end every turn before the first tool call). See
+[the policy reference](policy.md) for why an integer is deliberately outside the
+policy model.
 
 ## Parallel "investigate": read-only sub-agents (on by default) { #investigate }
 
@@ -307,9 +362,9 @@ It preserves every guarantee above, and its safety rests on one load-bearing inv
   exactly a branch's job). Note the compounding: a fan-out runs up to 8 sub-agents at
   once, so anything they can read is read in parallel. That is a large part of why the
   catalog carries no free prose and is opt-in. The
-  read-only tool subset is enforced in one place (`ai/tools.py`: the one propose tool is
-  gated on the proposal callbacks, neither of which a sub-agent is ever given) and pinned
-  by a test.
+  read-only tool subset is enforced in one place (`ai/tools.py`: the one write tool is
+  gated on the two proposal callbacks *and* the apply callback, none of which a sub-agent
+  is ever given — so it registers under neither of its names) and pinned by a test.
   The merge still applies the checksum-PII floor as defence-in-depth, but that floor is
   *beneath* the structural guarantee, not the guarantee itself.
 - **Investigations cannot recurse.** `mooring_investigate` is never in a sub-agent's own
@@ -629,6 +684,38 @@ full of secret values (including an `Enum` whose categories are secret) and prov
 none reach the readback. If introspection can't run (no live session, frames not yet
 loaded), mooring silently falls back to the file-based schema.
 
+### The probe's second question: "is this name bound?" { #the-probes-second-question-is-this-name-bound }
+
+The same frozen probe answers a **second** question, used only by the observation a
+model-written change gets back (see
+[guarantee 3](#the-four-structural-guarantees) and [`[ai] auto_apply`](#apply-gate)):
+*are these particular names bound in the kernel, and what are they?* Its readback adds
+one section, `names`, holding one entry per name mooring asked about:
+
+- **`present`** — a bool. Bound in the kernel globals, or not.
+- **`type`** — `type(obj).__name__`, and **nothing else**. That is the runtime **class
+  name**: the identifier from a `class` statement, or the name handed to `namedtuple`.
+  It is **never** `repr(obj)`, `str(obj)`, a length, a row/element count, a dict key, an
+  attribute walk, or any other summary derived from the object's *contents*. The probe
+  reads the class name and stops (`_mooring_collect_names`). `tests/test_introspect.py::test_the_reported_type_is_the_class_name_verbatim`
+  pins exactly that: it probes a `namedtuple("RowShape", ...)` instance and asserts the
+  readback is the class name verbatim and nothing more.
+
+The names mooring asks about are **its own**: they come from static analysis of the
+cell it just wrote (`marimo_rt.cell_defs`), so the asker already knew them before the
+probe ran, and a name it did not ask for is dropped on the way back. Cell-local
+(`_`-prefixed) names and anything that is not a plain identifier are filtered out
+*before* the probe is built. The reader (`_parse_names`) is fail-closed in the same way
+`_parse_frames` is, with one extra lock: a `type` that is not a plain identifier of
+sane length is dropped to `""`, so the one free-form string in the payload cannot carry
+a sentence, a path, or a serialised value — while `present` survives, because a suspect
+type name must not also lose the fact that the name is bound.
+
+State the boundary honestly rather than overselling it: a class **deliberately named
+after a data value** would be reported — and the `class` statement that named it is
+authored code the model can already read in the notebook source. What the guarantee
+buys is that nothing *derived from the data inside the object* is ever read.
+
 ## Team context (opt-in): not a structural guarantee
 
 The four guarantees above are *structural* — they hold no matter what. **Team
@@ -872,9 +959,13 @@ mooring reads an error message rather than being handed one:
   run lock, the same value-bearing render written under `.mooring/` and deleted on
   every path, the same process-tree kill, and the same value-free receipt. Your row
   badges from it exactly as a hand-run Verify does.
-- **It never fires by itself.** The run re-executes *every* cell, which is precisely
-  what the [apply gate](#apply-gate) exists to keep deliberate, so it is reachable only
-  from that click — never from Apply, a timer, or opening a page.
+- **It fires from your click, or from the one setting that says otherwise.** The run
+  re-executes *every* cell, which is precisely what the [apply gate](#apply-gate) exists
+  to keep deliberate. It is never reachable from a timer or from opening a page. The one
+  path that does not begin with the button is
+  [`[ai] auto_run_report`](#apply-gate) (default `true`), which lets mooring start this
+  same run itself when an applied cell did not complete — set it `false`, or have your
+  team pin it `false`, and the button is once again the only way in.
 - **Only two things are read from the run.** marimo's stderr is not a log: the exporter
   echoes each cell's own `print` output onto it, so a printed dataframe lands there in
   full. Mooring therefore reads *only* the lines matching marimo's own closed error

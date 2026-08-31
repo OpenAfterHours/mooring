@@ -25,6 +25,8 @@ import types
 from dataclasses import dataclass
 from typing import Iterable
 
+from mooring.ai.tools import PROPOSE_TOOL_NAME
+
 # -- the script DSL -----------------------------------------------------------
 
 
@@ -47,7 +49,13 @@ class Call:
 # general patch could already express were retired, so a scripted "wrong tool" is no
 # longer a thing a model can do — the equivalent mistake is now the wrong FIELD, or a
 # bad ``expect``. Both are scriptable through the helpers below.
-PROPOSE = "mooring_propose_notebook_edit"
+#
+# Taken from the constant rather than spelled out: a scripted call has to name the tool
+# the session actually REGISTERED or the dispatch fails as an unknown tool, and the
+# sessions these scripts drive are opened in propose mode (no applier — see
+# ``evals/providers.py``). ``EDIT_TOOL_NAME`` is the name to use here if an edit-mode
+# opener is ever added.
+PROPOSE = PROPOSE_TOOL_NAME
 
 
 def propose_cell(code: str, rationale: str = "") -> Call:

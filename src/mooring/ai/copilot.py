@@ -302,6 +302,8 @@ class CopilotProvider:
         catalog=None,
         read_only: bool = False,
         run_investigation=None,
+        applier=None,
+        max_tool_iters: int | None = None,
         pii: PiiConfig | None = None,
         traceback_guard: bool = True,
         background: bool = False,
@@ -358,6 +360,13 @@ class CopilotProvider:
             catalog=catalog,
             read_only=read_only,
             run_investigation=run_investigation,
+            # Edit mode. None keeps the write tool in propose mode, which is what
+            # `[ai] auto_apply = false` and a read-only sub-agent both rely on (the
+            # session forces it to None under read_only as well).
+            applier=applier,
+            # `max_tool_iters` is deliberately NOT forwarded: the Copilot SDK drives its
+            # own tool loop, so there is no loop here to bound. The analyst's Cancel is
+            # what stops a long turn on this backend, enforced at the tool boundary.
             pii_enabled=pii.enabled,
             pii_block=pii.block_prompt,
             # NER name detection only acts when the whole guard is on.

@@ -125,6 +125,31 @@ class RoutedChatSession(ChatBroadcaster):
     def run_failure_report(self, failures):
         return self._active.run_failure_report(failures)
 
+    def request_cancel(self) -> None:
+        """Stop the turn on whichever child is live.
+
+        The wrapper keeps its OWN flag in step (so ``cancel_requested`` answers for the
+        routed session too) but deliberately does not broadcast: the child raises the
+        flag its own tools read and emits the one ``cancelled`` event, which the bridge
+        relays here. Broadcasting on both would show the analyst two stops for one press.
+
+        There is nothing to forward for ``applier``: children arrive fully constructed
+        from the hub's factories, which is where every write/proposal callback is wired —
+        the wrapper only routes turns and relays events.
+        """
+        self.touch()
+        self._cancel.set()
+        cancel = getattr(self._active, "request_cancel", None)
+        if callable(cancel):
+            cancel()
+
+    def clear_cancel(self) -> None:
+        """Re-arm both the wrapper and the live child at the start of a turn."""
+        super().clear_cancel()
+        clear = getattr(self._active, "clear_cancel", None)
+        if callable(clear):
+            clear()
+
     def send(self, text: str, live_schema_text: str = "") -> None:
         self.touch()
         # Raw tracebacks are rewritten and held before either classifier or coder.
@@ -164,6 +189,9 @@ class RoutedChatSession(ChatBroadcaster):
                 self._upgrade(reasons)
 
             self._turn_idle.clear()
+            # Start of a turn: drop any cancel left over from the last one (the child
+            # re-arms itself too, but the wrapper answers cancel_requested as well).
+            self.clear_cancel()
             active = self._active
             try:
                 active.send(text, live_schema_text)

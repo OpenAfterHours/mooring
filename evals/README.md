@@ -76,7 +76,7 @@ Read it bucket by bucket, not by the overall number:
 * **`format` high, everything else low** — the model can write a cell but not
   reason about the notebook. Usable for "add a cell that…", not for edits.
 * **`tool choice` low** — either it appends near-duplicates instead of editing, or
-  it cannot hold an index: `mooring_propose_notebook_edit` makes every edit and
+  it cannot hold an index: the write tool makes every edit and
   delete carry an `expect` (what the model believes is at that index), and a wrong
   or missing one is refused outright. A low score here with a **high refusal count**
   means the model is guessing indices rather than reading the notebook — nothing

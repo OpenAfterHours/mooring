@@ -1,7 +1,8 @@
 """THE per-notebook apply/undo write guard — one owner for the one lock.
 
 Three write paths share the per-notebook undo stack and must serialize on the
-SAME lock: the AI Apply (the chat AND the batch Apply both route through
+SAME lock: the AI Apply (the chat Apply, the batch Apply, and the model's own
+in-turn write in :mod:`mooring.app.auto_apply` all route through
 :meth:`ApplyGuard.apply_with_undo`), Undo/restore (the chat rollback and
 ``/api/undo`` route through :meth:`ApplyGuard.restore_undo`), and the sync
 rollback (``/api/rollback`` holds :attr:`ApplyGuard.lock` around its
@@ -118,12 +119,33 @@ def _guard_armed(workspace: Path) -> bool:
         return True
 
 
+def _undo_key(workspace: Path, notebook_rel: str) -> tuple[str, str]:
+    """The identity of ONE notebook's undo stack, spelled exactly as
+    :mod:`mooring.notebook_undo` spells it.
+
+    The turn-checkpoint map below is keyed by this and compared against a token read
+    off that stack, so the two must agree about which notebook is which. Anything
+    coarser (a case-folded path, say) could make two distinct notebooks share a map
+    entry, and their snapshot tokens are plain counters — ``000000000001`` on one
+    stack matches ``000000000001`` on the other — so the "is my checkpoint still on
+    top?" check would pass against the WRONG stack and skip a snapshot that was
+    needed. Mirrors ``notebook_undo._norm``.
+    """
+    return (str(workspace), str(notebook_rel).replace("\\", "/").strip("/"))
+
+
 class ApplyGuard:
     def __init__(self) -> None:
         # Serializes the snapshot+write of an Apply and the restore of an Undo so
         # two near-simultaneous clicks can't race the undo stack (single-user,
         # rare clicks — one global lock is plenty and keeps snapshot/restore atomic).
         self.lock = threading.Lock()
+        # The TURN checkpoint: notebook -> (turn_id, the snapshot token taken for it).
+        # Read and written only under `lock`, so it moves in step with the stack it
+        # describes. Deliberately in memory: a hub restart just means the next write
+        # opens a fresh checkpoint, which is the safe direction (one extra undo step,
+        # never a missing one).
+        self._turn_checkpoints: dict[tuple[str, str], tuple[str, str]] = {}
 
     def apply_with_undo(
         self,
@@ -133,6 +155,7 @@ class ApplyGuard:
         op_dicts,
         *,
         gate_token: str | None = None,
+        turn_id: str | None = None,
     ) -> int:
         """Snapshot the notebook, apply the patch, and return the new undo depth.
 
@@ -147,6 +170,20 @@ class ApplyGuard:
 
         With ``[ai] apply_guard`` off there is no scan and no token: every cell applies
         the way it did before the gate existed.
+
+        ``turn_id`` makes the checkpoint TURN-scoped. When it names the turn that took
+        the snapshot currently on top of this notebook's stack, no second snapshot is
+        taken — the existing one is EXTENDED, so the whole turn reverts as one step.
+        That is the unit an analyst thinks in ("undo what the assistant just did"), and
+        it matters now that one turn can write several times: a per-write stack would
+        turn one piece of work into a run of near-identical steps and, bounded at 25,
+        could push a real checkpoint off the end. ``None`` (a manual Apply) always
+        snapshots, exactly as before.
+
+        The extend decision is made HERE, under the lock, against what is actually on
+        top of the stack — never from the map alone. A manual Apply or an Undo landing
+        mid-turn moves the top, and a checkpoint that no longer describes the pre-turn
+        bytes must not be extended: reverting it would restore the wrong layer.
         """
         from mooring import notebook_undo, policy
         from mooring.ai import cellwrite, codeguard
@@ -185,13 +222,43 @@ class ApplyGuard:
                     # it can assert.
                     if gate_token != expected:
                         raise ApplyGateHeld(verdict, expected)
-            token = notebook_undo.snapshot(workspace, notebook_rel, current)
+            # AFTER the disable re-check and AFTER the gate, unchanged: a held Apply
+            # still leaves no snapshot, no bytes and no undo step.
+            key = _undo_key(workspace, notebook_rel)
+            token = None
+            if not self._extends_turn(workspace, notebook_rel, turn_id, key):
+                token = notebook_undo.snapshot(workspace, notebook_rel, current)
             try:
                 cellwrite.apply_wire_patch(nb_path, op_dicts)
             except BaseException:
-                notebook_undo.discard(workspace, notebook_rel, token)
+                if token is not None:
+                    notebook_undo.discard(workspace, notebook_rel, token)
                 raise
+            if turn_id and token is not None:
+                # Only ever recorded for a snapshot that is now genuinely on top, so
+                # the map can never point at a layer the stack does not have.
+                self._turn_checkpoints[key] = (turn_id, token)
             return notebook_undo.depth(workspace, notebook_rel)
+
+    def _extends_turn(self, workspace: Path, notebook_rel: str, turn_id, key) -> bool:
+        """Whether this write joins the checkpoint an earlier write in the SAME turn
+        already took. Call under :attr:`lock` only.
+
+        Two things must both hold: the turn matches, and the snapshot that turn took is
+        still the newest on the stack. The second is what keeps the map honest — a
+        manual Apply, an Undo, or a sync rollback landing between two model writes moves
+        the top, and extending then would leave the turn's Revert pointing at a state
+        the analyst never had.
+        """
+        from mooring import notebook_undo
+
+        if not turn_id:
+            return False
+        recorded = self._turn_checkpoints.get(key)
+        if recorded is None or recorded[0] != turn_id:
+            return False
+        peeked = notebook_undo.peek_latest(workspace, notebook_rel)
+        return peeked is not None and peeked[0] == recorded[1]
 
     def restore_undo(
         self, nb_path: Path, workspace: Path, notebook_rel: str, *, expect_token: str | None = None

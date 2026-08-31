@@ -210,6 +210,17 @@ def test_readonly_build_registers_no_write_tool(ws):
     assert names == ["mooring_list_datasets", "mooring_get_schema", "mooring_read_notebook_source"]
     assert not any("propose" in n for n in names)
     assert "mooring_investigate" not in names
+    # ...and the write tool now has TWO names (it is renamed when it applies its own
+    # change), so the invariant is that NEITHER is registered — a check that knew only
+    # the old name would pass while the tool that actually writes sat in the list.
+    from mooring.ai.tools import WRITE_TOOL_NAMES
+
+    assert not any(n in names for n in WRITE_TOOL_NAMES)
+    # An applier alone must not sneak the write tool back in either: a read-only session
+    # is one built with no proposal callback AND no applier.
+    assert not any(
+        n in _spec_names(ws, cancelled=lambda: False) for n in WRITE_TOOL_NAMES
+    )
 
 
 def test_investigate_tool_only_registered_with_run_investigation(ws):
@@ -931,13 +942,15 @@ def test_repeated_failures_stop_the_model_retrying(ws):
     # A refusal only helps while the model can act on it. The copilot SDK drives its
     # own tool loop with no mooring-side bound, and the OpenAI loop's 12 round-trips
     # cover the WHOLE turn — so a stuck model must not be able to spend the lot
-    # re-proposing one cell.
+    # re-proposing one cell. SIX, not three: a tool that applies its own change hands
+    # the model the notebook's real answer, so several passes is work rather than
+    # thrash — but a model that has read none of six refusals is stuck either way.
     proposals = []
     specs = _specs(_real(ws), proposals)
     bad = _invocation(code="seed = 2")
-    for _ in range(3):
+    for _ in range(6):
         out = specs["mooring_propose_notebook_edit"].handler(bad)
-        assert out.is_error and "MB002" in out.text  # the diagnostics, three times
+        assert out.is_error and "MB002" in out.text  # the diagnostics, six times
     out = specs["mooring_propose_notebook_edit"].handler(bad)
     assert out.is_error and "MB002" not in out.text
     assert "Stop calling the propose tools" in out.text
@@ -1347,7 +1360,7 @@ def test_a_mistargeted_edit_spends_the_same_retry_budget(ws):
     patches = []
     specs = _specs(_real(ws), patches=patches)
     bad = _invocation(edits=[{"index": 1, "expect": "seed = 1", "code": "seed = 9"}])
-    for _ in range(3):
+    for _ in range(6):
         assert "NOT proposed" in specs["mooring_propose_notebook_edit"].handler(bad).text
     out = specs["mooring_propose_notebook_edit"].handler(bad)
     assert "Stop calling the propose tools" in out.text

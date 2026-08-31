@@ -413,6 +413,7 @@ class Hub:
         trusted_model: str = "",
         routing_preference: str = "auto",
         profile_label: str = "",
+        applier=None,
     ) -> str:
         """Atomically re-check chat policy and register, or return a refusal code.
 
@@ -441,7 +442,7 @@ class Hub:
                     return "configuration_changed"
             # Lock order is Hub -> ChatService. Config reload never holds the
             # ChatService lock while acquiring Hub._lock, so this cannot invert.
-            self.chat.register(sid, session, workspace, notebook_rel)
+            self.chat.register(sid, session, workspace, notebook_rel, applier=applier)
         return ""
 
     def _disabled_block(self, sid: str) -> JSONResponse | None:
@@ -1468,6 +1469,36 @@ class Hub:
 
         return guard
 
+    def _make_applier(self, workspace: Path, notebook_rel: str):
+        """The model's in-turn writer for one chat, or ``None`` for manual mode.
+
+        Built HERE because this is the one place the three things it needs are all in
+        reach: the workspace + notebook the chat is bound to, the single
+        :class:`~mooring.app.apply.ApplyGuard` every write path serialises on, and the
+        live marimo ``EditorServer`` the observation probes (looked up per call the way
+        ``_live_schema_for_sid`` does, since an editor can start or stop mid-chat).
+
+        ``None`` when ``[ai] auto_apply`` is off at open: manual mode then registers no
+        write-through at all, so the write tool stays in propose mode by CONSTRUCTION
+        rather than by a flag the tool has to remember to read. The knob is re-read
+        again inside the applier at every write, so turning it off mid-session still
+        bites immediately — this is only the open-time decision.
+        """
+        if not self.app_cfg.ai_auto_apply:
+            return None
+        from mooring.app import auto_apply
+
+        key = str(workspace)
+        return auto_apply.make_applier(
+            workspace=workspace,
+            notebook_rel=notebook_rel,
+            guard=self.apply,
+            # Both read through `self` on every call: the hub reloads its config in
+            # place, and a captured cfg would pin the old workspace to a live chat.
+            cfg_fn=lambda: self.cfg,
+            editor_fn=lambda: self.editors.get(key),
+        )
+
     def _make_chat_session(
         self,
         system_context: str,
@@ -1482,6 +1513,7 @@ class Hub:
         routing_zone: str | None = None,
         trusted_model: str = "",
         background: bool = True,
+        applier=None,
     ):
         """Open a streaming Copilot chat session bound to this notebook.
 
@@ -1489,7 +1521,10 @@ class Hub:
         ``dictionary`` (a parsed index) enables the value-free dictionary tools;
         ``semantic_models`` (pre-parsed, already-gated Power BI models from
         build_context) enables the semantic-model tools; ``catalog`` (the parsed
-        repo-wide notebook index) enables the notebook-catalog tools.
+        repo-wide notebook index) enables the notebook-catalog tools. ``applier``
+        (:meth:`_make_applier`) switches the ONE write tool from propose mode to edit
+        mode — this hop is what turns the feature on, and passing ``None`` is exactly
+        what manual mode is.
         Raises AIError (-> 502) if Copilot isn't available/installed; a sign-in or
         handshake failure surfaces over the SSE stream instead (the session starts
         in the background — ``background=True`` — so the open response is immediate).
@@ -1556,6 +1591,13 @@ class Hub:
             helpers=helpers if (not routed or trusted) else None,
             catalog=catalog if (not routed or trusted) else None,
             run_investigation=run_investigation,
+            # Edit mode. None (manual mode) leaves the write tool proposing, which is
+            # what the analyst's Apply button depends on.
+            applier=applier,
+            # The runaway ceiling for a backend that drives its own tool loop. Read off
+            # the policy-folded app config here rather than in the provider, which stays
+            # config-blind; the Copilot backend ignores it (its SDK owns the loop).
+            max_tool_iters=self.app_cfg.ai_max_tool_iters,
             # The whole guard config travels as ONE object, so a field can't be
             # silently dropped on the way to the session (the session downloads any
             # NER model in the background and the prompt path skips it until ready).
@@ -1589,8 +1631,15 @@ class Hub:
         reasoning_effort: str | None = None,
         trusted_model: str = "",
         routing_preference: str = "auto",
+        applier=None,
     ):
-        """Inspect one captured context before constructing any coding provider."""
+        """Inspect one captured context before constructing any coding provider.
+
+        ``applier`` reaches BOTH children (the general session opened now and the
+        trusted one built later by ``trusted_factory``): it is bound to the notebook,
+        not to a model or a zone, and a write that a routing hand-off silently turned
+        back into a proposal would be a mode change the analyst never asked for.
+        """
         from mooring.ai import secrets as ai_secrets
         from mooring.ai.base import AIError
         from mooring.ai.routed_session import GENERAL_ZONE, TRUSTED_ZONE, RoutedChatSession
@@ -1633,6 +1682,7 @@ class Hub:
                 routing_zone=zone,
                 trusted_model=trusted_model,
                 background=background,
+                applier=applier,
             )
 
         initial_ctx = trusted_ctx if initial_zone == TRUSTED_ZONE else bundle.general
@@ -1992,6 +2042,10 @@ def create_app(hub: Hub) -> Starlette:
             Route("/api/ai/chat/open", chat.api_chat_open, methods=["POST"]),
             Route("/api/ai/chat/stream/{sid}", chat.api_chat_stream),
             Route("/api/ai/chat/send", chat.api_chat_send, methods=["POST"]),
+            # The analyst's stop. With the model writing and re-checking its own work
+            # there is no small iteration cap to end a long turn, so this is the control
+            # that does — it must exist beside send, not behind a setting.
+            Route("/api/ai/chat/cancel", chat.api_chat_cancel, methods=["POST"]),
             Route("/api/ai/chat/apply", chat.api_chat_apply, methods=["POST"]),
             Route("/api/ai/chat/rollback", chat.api_chat_rollback, methods=["POST"]),
             Route("/api/ai/chat/run-report", chat.api_chat_run_report, methods=["POST"]),

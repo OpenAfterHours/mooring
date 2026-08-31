@@ -81,6 +81,8 @@ class AIProvider(Protocol):
         catalog=None,
         read_only: bool = False,
         run_investigation=None,
+        applier=None,
+        max_tool_iters: int | None = None,
         pii: "PiiConfig | None" = None,
         allow_read_tools: bool = True,
         trusted_customer_data: bool = False,
@@ -103,6 +105,18 @@ class AIProvider(Protocol):
         sub-agent); ``run_investigation`` (a value-free coordinator closure) adds the
         ``mooring_investigate`` fan-out tool — never both at once (a read-only session
         is forced to drop ``run_investigation`` so an investigation cannot recurse).
+
+        ``applier`` is the ONE switch between the write tool's two modes. ``None`` (the
+        shipped default, and what ``[ai] auto_apply = false`` passes) leaves it in
+        PROPOSE mode: the model emits a card and the analyst clicks Apply. An injected
+        ``apply_edit(op_dicts, rationale)`` — :func:`mooring.app.auto_apply.make_applier`
+        — puts the write inside the tool call and hands its value-free observation back
+        as the tool result. Passed here rather than read from config INSIDE the session
+        so ``ai/`` never has to reach up to ``app/`` for it. ``max_tool_iters`` is the
+        per-turn tool-call ceiling (``[ai] max_tool_iters``, policy-folded), and applies
+        only to a backend that drives its own tool loop; the Copilot SDK owns that loop
+        and takes no ceiling from us.
+
         Raises :class:`AIError` if unavailable/not signed in.
         """
         ...

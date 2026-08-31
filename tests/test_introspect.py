@@ -20,11 +20,11 @@ from mooring.schema import DatasetSchema
 SECRET = "SECRET_VALUE_DO_NOT_LEAK"
 
 
-def _run_probe(namespace: dict, tmp_path) -> dict:
+def _run_probe(namespace: dict, tmp_path, names=()) -> dict:
     """Exec the real kernel snippet against ``namespace`` (its globals) and read
     back what it wrote — faithfully simulating /api/kernel/run."""
     out = tmp_path / "schema.json"
-    src = introspect.probe_source(out)
+    src = introspect.probe_source(out, names)
     exec(src, namespace)  # noqa: S102  # the frozen probe, our own source
     assert out.exists(), "probe did not write the sidecar file"
     return json.loads(out.read_text("utf-8"))
@@ -154,6 +154,119 @@ def test_extract_server_token_reads_marimo_element():
     # JS-blob fallback still works for other builds.
     assert introspect._extract_server_token('{"serverToken": "xyz123"}') == "xyz123"
     assert introspect._extract_server_token("<html>no token here</html>") == ""
+
+
+# --- the name probe: "is this name bound, and what is it?" -----------------
+#
+# The second question the probe answers, so the copilot can learn whether the cell
+# it just wrote actually ran. The answer per name is a bool plus the runtime CLASS
+# name — the value itself must never be reachable through it.
+
+
+def test_a_bound_secret_yields_its_type_name_and_nothing_else(tmp_path):
+    ns = {"token": SECRET, "count": 7, "df": pl.DataFrame({"a": [1]})}
+    data = _run_probe(ns, tmp_path, ["token", "count", "df", "never_defined"])
+
+    assert SECRET not in json.dumps(data)
+    assert data["names"] == [
+        {"name": "token", "present": True, "type": "str"},
+        {"name": "count", "present": True, "type": "int"},
+        {"name": "df", "present": True, "type": "DataFrame"},
+        {"name": "never_defined", "present": False, "type": None},
+    ]
+    present, missing, types = introspect._parse_names(data, ["token", "count", "df", "never_defined"])
+    assert present == ("count", "df", "token")
+    assert missing == ("never_defined",)
+    assert dict(types)["token"] == "str"
+    assert SECRET not in repr((present, missing, types))
+
+
+def test_the_probe_never_calls_repr_or_str_on_the_object(tmp_path):
+    # The single most likely way a value could leak out of a "what type is it?"
+    # answer: an object whose repr/str IS the value. The probe must not touch them.
+    class Leaky:
+        def __repr__(self):
+            return SECRET
+
+        def __str__(self):
+            return SECRET
+
+        def __len__(self):
+            return 42
+
+    data = _run_probe({"obj": Leaky()}, tmp_path, ["obj"])
+
+    assert SECRET not in json.dumps(data)
+    assert data["names"] == [{"name": "obj", "present": True, "type": "Leaky"}]
+
+
+def test_the_reported_type_is_the_class_name_verbatim(tmp_path):
+    # The BOUNDARY of the guarantee, stated so it is a decision rather than an
+    # accident: what comes back is `type(obj).__name__`, which is authored text — a
+    # class statement, or the name handed to namedtuple — of exactly the kind the
+    # model already reads in the notebook source. It is not read out of the data.
+    # A class deliberately named after a data value would therefore be reported, and
+    # the source that named it would already be visible; nothing else about the
+    # object (its repr, length, contents or attributes) is ever touched.
+    from collections import namedtuple
+
+    data = _run_probe({"row": namedtuple("RowShape", ["a"])(1)}, tmp_path, ["row"])
+    assert data["names"] == [{"name": "row", "present": True, "type": "RowShape"}]
+
+
+def test_the_probe_is_only_ever_asked_about_bindable_names(tmp_path):
+    # `_`-prefixed names are marimo CELL-LOCALS: absent from the kernel globals
+    # however well the cell ran, so asking would manufacture a false "missing".
+    src = introspect.probe_source(tmp_path / "x.json", ["good", "_local", "not a name", 7, "good"])
+    assert "('good',)" in src
+    assert "_local" not in src.split("_mooring_probe(")[-1]
+
+    data = _run_probe({"good": 1, "_local": 2}, tmp_path, ["good", "_local"])
+    assert [e["name"] for e in data["names"]] == ["good"]
+
+
+def test_the_names_section_does_not_disturb_the_frames_section(tmp_path):
+    # live_dataset_schemas' path must behave exactly as it did before.
+    ns = {"df": pl.DataFrame({"region": ["EU"], "note": [SECRET]})}
+    data = _run_probe(ns, tmp_path, ["df"])
+
+    (f,) = introspect._parse_frames(data)
+    assert f.name == "df" and [c[0] for c in f.columns] == ["region", "note"]
+    assert f.n_rows == 1
+    assert SECRET not in json.dumps(data)
+
+
+def test_parse_names_is_fail_closed():
+    asked = ["a", "b", "c", "d", "e"]
+    data = {
+        "names": [
+            {"name": "a", "present": True, "type": "DataFrame", "preview": [[SECRET]]},
+            {"name": "b", "present": 1, "type": "int"},  # present must be a real bool
+            {"name": "c", "present": True, "type": f"str: {SECRET}"},  # not a class name
+            {"name": "d", "present": False, "type": None},
+            {"name": "not an identifier", "present": True, "type": "int"},
+            {"name": "smuggled", "present": True, "type": "int"},  # never asked about
+            "not-a-dict",
+            {"present": True, "type": "int"},  # no name
+        ]
+    }
+    present, missing, types = introspect._parse_names(data, asked)
+
+    assert present == ("a", "c")  # b dropped entirely: its `present` was not a bool
+    assert missing == ("d",)
+    # the suspect type is dropped, but the FACT that `c` is bound survives
+    assert types == (("a", "DataFrame"),)
+    assert SECRET not in repr((present, missing, types))
+
+
+def test_parse_names_rejects_a_malformed_payload():
+    for junk in (None, [1, 2, 3], {"names": "nope"}, {"names": {"a": True}}, {}):
+        assert introspect._parse_names(junk) == ((), (), ())
+
+
+def test_parse_names_without_an_ask_still_only_accepts_the_exact_shape():
+    data = {"names": [{"name": "a", "present": True, "type": "int"}]}
+    assert introspect._parse_names(data) == (("a",), (), (("a", "int"),))
 
 
 def test_live_dataset_schemas_no_editor_is_empty():

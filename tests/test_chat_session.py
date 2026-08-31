@@ -8,6 +8,7 @@ create_session config, without the Copilot CLI or a GitHub login.
 
 from __future__ import annotations
 
+import queue
 import types
 from collections.abc import Callable
 
@@ -39,6 +40,7 @@ class FakeSession:
         self.create_kwargs = create_kwargs
         self._handler: Callable[..., object] | None = None
         self.disconnected = False
+        self.aborted = 0  # times the SDK's own turn abort was asked for
         self.sent = []  # prompts actually forwarded to the SDK
 
     def on(self, handler):
@@ -52,6 +54,11 @@ class FakeSession:
         for etype, data in type(self).SCRIPT:
             self._handler(_event(etype, **data))
         return "turn-1"
+
+    async def abort(self):
+        # The real SDK's CopilotSession.abort(): "Abort the currently processing message
+        # in this session. The session remains valid and can continue to be used."
+        self.aborted += 1
 
     async def disconnect(self):
         self.disconnected = True
@@ -402,6 +409,184 @@ def test_traceback_prompt_raw_never_reaches_the_sdk(fake_sdk, tmp_path):
         assert 'File "nb.py", line 1, in _' in forwarded
         assert "import marimo" in forwarded  # the disk re-read, not the doctored paste
         assert "KeyError: <redacted:" in forwarded
+    finally:
+        sess.close()
+
+
+# -- cancellation (the analyst's stop button) -----------------------------------
+
+
+def test_cancel_raises_the_tool_boundary_flag_and_asks_the_sdk_to_abort(fake_sdk, tmp_path):
+    # The SDK drives its own tool loop, so the FLAG is the mechanism that always works:
+    # every later tool call comes back as a terminal refusal. session.abort() is a real
+    # bonus on top (it ends the completion in flight), so use it when the SDK has it.
+    sess = _make(tmp_path).start()
+    try:
+        q = sess.subscribe()
+        session = FakeClient.last.session
+        assert sess.cancel_requested() is False
+        sess.request_cancel()
+        assert sess.cancel_requested() is True
+        assert session.aborted == 1
+        ev = q.get(timeout=2)
+        assert ev.kind == "cancelled" and ev.data["text"] == "(Stopped at your request.)"
+
+        # Idempotent: a second press neither re-announces nor re-aborts.
+        sess.request_cancel()
+        assert session.aborted == 1
+    finally:
+        sess.close()
+
+
+def test_a_missing_sdk_abort_is_not_an_error(fake_sdk, tmp_path, monkeypatch):
+    # The SDK is an optional extra whose surface can move; abort is duck-typed and the
+    # flag alone still stops the turn.
+    monkeypatch.delattr(FakeSession, "abort")
+    sess = _make(tmp_path).start()
+    try:
+        sess.request_cancel()  # must not raise
+        assert sess.cancel_requested() is True
+    finally:
+        sess.close()
+
+
+def test_a_cancelled_turn_leaves_the_session_usable_and_the_flag_cleared(fake_sdk, tmp_path):
+    # The single most important behaviour: one cancel must not poison every later turn
+    # (each tool call would refuse to run, on a chat the analyst believes is live).
+    sess = _make(tmp_path).start()
+    try:
+        q = sess.subscribe()
+        sess.request_cancel()
+        assert sess.cancel_requested() is True
+
+        sess.send("carry on then")
+        assert sess.cancel_requested() is False  # re-armed at the start of the turn
+        kinds = [k for k, _ in _drain(q)]
+        assert kinds[-1] == "idle" and "message" in kinds  # a full, normal turn ran
+        assert FakeClient.last.session.sent == ["carry on then"]
+    finally:
+        sess.close()
+
+
+def test_closing_the_session_raises_the_stop_flag(fake_sdk, tmp_path):
+    sess = _make(tmp_path).start()
+    assert sess.cancel_requested() is False
+    sess.close()
+    assert sess.cancel_requested() is True
+
+
+# -- the write capability (edit mode) ------------------------------------------
+
+
+def _captured_tool_kwargs(tmp_path, monkeypatch, **kw):
+    """Build a session, capturing what it hands :func:`mooring.ai.tools.build_tools`.
+
+    Returns ``(captured, session)``; the caller closes it (closing raises the stop
+    flag, so the cancel predicate has to be read first)."""
+    captured: dict = {}
+
+    def fake_build(**kwargs):
+        captured.update(kwargs)
+        return []
+
+    monkeypatch.setattr("mooring.ai.tools.build_tools", fake_build)
+    return captured, _make(tmp_path, **kw).start()
+
+
+def test_no_applier_leaves_the_write_tool_in_propose_mode(fake_sdk, tmp_path, monkeypatch):
+    # `[ai] auto_apply = false` and the policy escape hatch both ride on this path.
+    captured, sess = _captured_tool_kwargs(tmp_path, monkeypatch)
+    try:
+        assert captured["apply_edit"] is None
+        assert captured["emit_proposal"] is not None
+        assert captured["emit_proposal_patch"] is not None
+        assert captured["cancelled"] == sess.cancel_requested
+    finally:
+        sess.close()
+
+
+def test_an_applier_is_wired_into_the_write_tool(fake_sdk, tmp_path, monkeypatch):
+    captured, sess = _captured_tool_kwargs(
+        tmp_path, monkeypatch, applier=lambda ops, why: None
+    )
+    try:
+        assert captured["apply_edit"] == sess._apply_edit
+    finally:
+        sess.close()
+
+
+def test_a_read_only_session_gets_no_write_capability_at_all(fake_sdk, tmp_path, monkeypatch):
+    # The load-bearing privacy gate, extended to the applier: a read-only investigate
+    # sub-agent gets no proposal callbacks AND no way to write, even mis-wired as here.
+    captured, sess = _captured_tool_kwargs(
+        tmp_path, monkeypatch, read_only=True, applier=lambda ops, why: "never"
+    )
+    try:
+        assert captured["apply_edit"] is None
+        assert captured["emit_proposal"] is None
+        assert captured["emit_proposal_patch"] is None
+        assert sess._applier is None  # dropped at the ctor, not only at the builder
+    finally:
+        sess.close()
+
+
+def _outcome(status, **extra):
+    return types.SimpleNamespace(status=status, text=f"{status} text", is_error=False, **extra)
+
+
+def test_an_applied_edit_broadcasts_a_receipt_and_returns_the_outcome(fake_sdk, tmp_path):
+    receipt = {"summary": "changed cell 3", "undo": "u1"}
+    outcome = _outcome("applied", payload=receipt)
+    sess = _make(tmp_path, applier=lambda ops, why: outcome).start()
+    try:
+        q = sess.subscribe()
+        got = sess._apply_edit([{"op": "edit", "index": 3}], "why")
+        assert got is outcome  # the model reads the applier's own observation, unchanged
+        ev = q.get(timeout=2)
+        assert ev.kind == "applied" and ev.data == receipt
+        assert ev.data is not receipt  # copied, so a later mutation can't rewrite it
+    finally:
+        sess.close()
+
+
+def test_a_held_edit_reuses_the_existing_proposal_card(fake_sdk, tmp_path):
+    # A held change must show TODAY's hold card — there is deliberately no second UI.
+    patch = {"kind": "patch", "ops": [{"op": "edit"}], "diffs": [], "gate": {"band": "ask"}}
+    sess = _make(tmp_path, applier=lambda ops, why: _outcome("held", payload=patch)).start()
+    try:
+        q = sess.subscribe()
+        sess._apply_edit([{"op": "edit"}], "why")
+        ev = q.get(timeout=2)
+        assert ev.kind == "proposal" and ev.data == patch
+    finally:
+        sess.close()
+
+
+@pytest.mark.parametrize("status", ["conflict", "disabled", "cancelled", "error"])
+def test_an_unapplied_edit_tells_the_model_and_leaves_the_ui_alone(fake_sdk, tmp_path, status):
+    sess = _make(tmp_path, applier=lambda ops, why: _outcome(status, payload={"x": 1})).start()
+    try:
+        q = sess.subscribe()
+        got = sess._apply_edit([{"op": "edit"}], "why")
+        assert got.status == status
+        with pytest.raises(queue.Empty):  # no card for a change that did not happen
+            q.get(timeout=0.2)
+    finally:
+        sess.close()
+
+
+def test_a_broken_applier_becomes_a_value_free_error_not_a_crashed_turn(fake_sdk, tmp_path):
+    secret = "SECRET_VALUE_DO_NOT_LEAK"
+
+    def boom(ops, why):
+        raise RuntimeError(f"exploded on {secret}")
+
+    sess = _make(tmp_path, applier=boom).start()
+    try:
+        out = sess._apply_edit([{"op": "edit"}], "why")
+        assert out.status == "error" and out.is_error is True
+        assert secret not in out.text  # the failure is never repeated back to the model
+        assert "Nothing was written" in out.text
     finally:
         sess.close()
 

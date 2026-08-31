@@ -3,9 +3,13 @@
 // The interactive AI copilot, rendered as a terminal-style REPL. Opens beside
 // the marimo notebook tab. The model streams over SSE; proposals (append a cell,
 // edit a cell, or rewrite the notebook) are reviewed and Applied into the open
-// notebook via the hub, and the last Apply can be Undone. mooring talks to marimo
-// over HTTP only, never a websocket — outputs/values never reach this page or the
-// model. Pure, DOM-free helpers live in chat_core.js (ChatCore).
+// notebook via the hub, and the last Apply can be Undone. With `[ai] auto_apply` on the
+// model writes reversible changes inside its own tool call instead, and what appears
+// here is a RECEIPT of what changed — with Revert — rather than an Apply button; the
+// analyst's control is the Stop beside the composer. Irreversible cells still stop and
+// ask: the apply gate's hold card is unchanged. mooring talks to marimo over HTTP only,
+// never a websocket — outputs/values never reach this page or the model. Pure, DOM-free
+// helpers live in chat_core.js (ChatCore).
 
 const $ = (id) => document.getElementById(id);
 const NOTEBOOK = new URLSearchParams(location.search).get("notebook") || "";
@@ -61,11 +65,19 @@ function rememberNotebookOverride(key, value, select) {
 // cross-tab change. Alias applyTheme for the /api/state follow below.
 const applyTheme = window.MooringTheme.applyTheme;
 
+// Human-readable progress labels, keyed by the tool name the server sends. The ONE
+// write tool is registered under TWO names — `mooring_propose_notebook_edit` in manual
+// mode and `mooring_edit_notebook` when it applies its own change (ai/tools.py:
+// WRITE_TOOL_NAMES) — and this page is never told which mode the session is in, so BOTH
+// carry a label. A missing entry is not fatal (the fallback below de-prefixes the raw
+// name) but it reads as machinery leaking into the transcript. Pinned against the Python
+// constants by tests/test_ai_edit_tool.py, which scans this file.
 const TOOL_LABELS = {
   mooring_list_datasets: "listing datasets",
   mooring_get_schema: "looking up the schema",
   mooring_read_notebook_source: "reading the notebook",
   mooring_propose_notebook_edit: "drafting changes",
+  mooring_edit_notebook: "editing the notebook",
   mooring_list_tables: "listing dictionary tables",
   mooring_describe_table: "describing a table",
   mooring_search_dictionary: "searching the dictionary",
@@ -99,7 +111,12 @@ let pendingRow = null; // transient "· thinking▋" indicator until real conten
 let toolStack = []; // open tool-call rows in this turn
 
 let latestProposal = null; // { card, kind, ops, copyText, applyBtn, note, applied, skipped }
-let lastUndoBtn = null; // the single visible "Undo" button (the last applied change)
+// The ONE visible way back — the proposal card's "Undo" or a receipt's "Revert". Both
+// pop the same per-notebook undo stack, so exactly one may be on screen at a time:
+// several buttons would all do the same thing while looking like they didn't.
+// { btn, done, displaced } — `done` marks its owner when the undo lands, `displaced`
+// marks it when a newer change takes the control away.
+let undoControl = null;
 let lastUserText = ""; // for /retry
 let lastUserLabel = ""; // its compact visible label (so /retry re-shows it too)
 let explainFired = false; // &explain=1 auto-runs at most ONCE per window — openChat()
@@ -108,6 +125,20 @@ let explainFired = false; // &explain=1 auto-runs at most ONCE per window — op
 let reviewFired = false; // &review=1 auto-runs /review at most ONCE per window (same reason)
 let explainTurnActive = false; // the turn answering /explain (offers "Add as notes cell")
 let currentGuard = null; // outbound-PII guard status for this session (topbar badge)
+
+// -- stop / receipt state (auto-apply) ---------------------------------------
+// `turnSeq` counts turns so a cancel reply that lands after the next turn started can
+// be recognised as stale. `cancelPending` is true from the click until the turn really
+// ends — the button reads "Stopping…" for exactly that long. `sawCancelled` records the
+// server's acknowledgement, so `idle` can tell "you stopped it" from "it finished
+// first". `receiptGroup` batches one turn's receipts into a readable sequence, and
+// `manualApplyInFlight` keeps a manual Apply's own write from ALSO drawing a receipt.
+let turnSeq = 0;
+let cancelPending = false;
+let sawCancelled = false;
+let receiptGroup = null; // { el, turnId, count }
+let manualApplyInFlight = 0;
+let idlePlaceholder = ""; // the composer's resting placeholder, captured at init
 const history = new ChatCore.HistoryRing(); // in-memory ONLY (never persisted)
 const openGate = ChatCore.latestRequestGate();
 let openController = null;
@@ -483,7 +514,17 @@ async function applyProposal(p, gateToken) {
   p.note.textContent = " applying…";
   const body = { sid, ops: p.ops };
   if (gateToken) body.gate_token = gateToken;
-  const { status, data } = await api("/api/ai/chat/apply", body);
+  // Counted so an "applied" SSE frame that belongs to THIS click can be told apart from
+  // one the model made for itself. The card below already reports this write; a receipt
+  // for it too would double-report it and change what manual mode looks like.
+  manualApplyInFlight += 1;
+  let response;
+  try {
+    response = await api("/api/ai/chat/apply", body);
+  } finally {
+    manualApplyInFlight -= 1;
+  }
+  const { status, data } = response;
   if (data.reason === "notebook_disabled") {
     // AI was turned off for this notebook (here, the hub, or a teammate's sync)
     // before the apply landed — lock the window instead of "asking the AI to fix".
@@ -689,20 +730,40 @@ function askAiToFix(error, tried) {
   });
 }
 
-// Show a single "Undo" button on the just-applied card (the change /undo reverts).
-// A new apply moves it; using it (or /undo) removes it. Deeper history stays
-// reachable via /undo.
-function offerUndo(p) {
-  if (lastUndoBtn) {
-    lastUndoBtn.remove();
-    lastUndoBtn = null;
+// -- the one way back -------------------------------------------------------
+// The proposal card's "Undo" and a receipt's "Revert" are the same action on the same
+// per-notebook undo stack: restore the newest snapshot. So only the NEWEST change may
+// carry a live control — a Revert sitting on an older receipt would look like it undid
+// that change and would in fact undo a later one.
+
+// Hand the control to a new owner, telling the previous one it lost it.
+function claimUndoControl(control) {
+  if (undoControl) {
+    undoControl.btn.remove();
+    if (undoControl.displaced) undoControl.displaced();
   }
+  undoControl = control;
+}
+
+// The control was used (here or via /undo): remove it and let its owner say so.
+function spendUndoControl() {
+  const held = undoControl;
+  undoControl = null;
+  if (!held) return;
+  held.btn.remove();
+  if (held.done) held.done();
+}
+
+// Show a single "Undo" button on the just-applied card (the change /undo reverts).
+// A new apply (or a model-driven write's receipt) moves it; using it removes it.
+// Deeper history stays reachable via /undo.
+function offerUndo(p) {
   const btn = document.createElement("button");
   btn.className = "small";
   btn.textContent = "Undo";
   btn.addEventListener("click", () => undoLast(btn));
+  claimUndoControl({ btn, done: null, displaced: null });
   p.applyBtn.parentNode.insertBefore(btn, p.note);
-  lastUndoBtn = btn;
 }
 
 // -- "did it actually run?" -------------------------------------------------
@@ -751,10 +812,13 @@ async function runAndReport(p, btn) {
   }
   btn.disabled = true;
   p.note.textContent = APPLIED + " · running…";
-  // The composer is deliberately left usable: the run is server-side and can take
-  // minutes, and there is no cancel, so locking the input for it would be worse than
-  // the mess it prevents. That means the analyst CAN start a turn meanwhile — hence
-  // the isBusy() guards below, which keep this handler from stamping on one.
+  // The composer is deliberately left usable: this run is server-side and can take
+  // minutes. A chat TURN now has a way out — the Stop beside the composer — but this
+  // run does not: the notebook is already executing locally, and a button claiming to
+  // call it back would be a lie. So the old reasoning still holds exactly here, and
+  // only here: locking the input for something with no cancel would strand the analyst
+  // with nothing to do. That means they CAN start a turn meanwhile — hence the isBusy()
+  // guards below, which keep this handler from stamping on one.
   setStatus("running the notebook…");
   const { status, data } = await api("/api/ai/chat/run-report", { sid });
   const settle = () => {
@@ -830,10 +894,7 @@ async function undoLast(srcBtn) {
     return;
   }
   if (data.ok) {
-    if (lastUndoBtn) {
-      lastUndoBtn.remove();
-      lastUndoBtn = null;
-    }
+    spendUndoControl(); // takes the button away and marks its card/receipt "reverted"
     const more = data.undo_depth || 0;
     let earlier = "";
     if (more) {
@@ -1024,7 +1085,15 @@ function startTurn() {
   startTurnState();
 }
 
+// Every route into a turn comes through here — the ordinary send, /retry, the canned
+// commands, the apply-repair loop, and the PII/traceback holds' "send" buttons — so the
+// per-turn stop and receipt state is reset in ONE place. A cancel belongs to the turn it
+// stopped; a flag left standing would make the next turn open with a dead "Stopping…".
 function startTurnState() {
+  turnSeq += 1;
+  cancelPending = false;
+  sawCancelled = false;
+  receiptGroup = null; // a new turn starts a new receipt sequence
   setTurnState("thinking");
   showPending();
 }
@@ -1053,11 +1122,205 @@ function setTurnState(state) {
   const trustedOptions = ChatCore.trustedModelOptions(ROUTING);
   $("chat-trusted-model").disabled = busy || trustedOptions.length <= 1;
   $("chat-routing-preference").disabled = busy || trustedOptions.length === 0;
+  // Any state that is not a LIVE turn ends the stop with it — a held, failed, connecting
+  // or unavailable session has nothing left to cancel, and a "Stopping…" left standing
+  // would make the NEXT turn open looking like it was already being called off.
+  if (state !== "thinking" && state !== "streaming") {
+    cancelPending = false;
+    sawCancelled = false;
+  }
   setStatus(STATE_LABEL[state] || state);
+  renderStopControl(); // the composer's stop follows the turn state from one place
   if (state === "idle" || state === "error") {
     clearPending();
     if (state === "idle") $("chat-input").focus();
   }
+}
+
+// -- stop ------------------------------------------------------------------
+// A turn can now work an analysis all the way through — many tool calls, several
+// writes, no small iteration cap. What keeps that from being a runaway is that the
+// analyst can end it. There was no cancel before; now there is, and the whole job of
+// this control is to never overstate what it has achieved.
+
+function renderStopControl() {
+  const btn = $("stop-btn");
+  if (!btn) return; // the workbench embeds this page; a missing control must not throw
+  const s = ChatCore.stopButtonState(turnState, cancelPending);
+  btn.textContent = s.label;
+  btn.disabled = s.disabled;
+  btn.title = s.title;
+  btn.setAttribute("aria-label", s.label === "Stop" ? "Stop this turn" : "Stopping this turn");
+  btn.classList.toggle("hidden", !s.visible);
+  // The composer is disabled while a turn runs, so its placeholder is the one place
+  // that can say what to do about it.
+  const input = $("chat-input");
+  if (s.visible) input.placeholder = "Working — press Esc or click Stop to end this turn";
+  else if (idlePlaceholder) input.placeholder = idlePlaceholder;
+}
+
+// Ask the server to stop the turn. Optimistic only as far as the truth allows: the
+// button goes to "Stopping…" straight away, and NOTHING claims the turn is over until
+// the session says so.
+async function stopTurn() {
+  if (!ChatCore.canStopTurn(turnState, cancelPending, !!sid)) return;
+  const seq = turnSeq;
+  cancelPending = true;
+  renderStopControl();
+  setStatus("stopping…");
+  const { data } = await api("/api/ai/chat/cancel", { sid });
+  // A reply that lands after the next turn began says nothing about that turn.
+  if (seq !== turnSeq) return;
+  if (data.ok) return; // the `cancelled` event settles it; `idle` ends it
+  cancelPending = false;
+  if (data.error) showError(data.error);
+  if (isBusy()) {
+    setTurnState(turnState); // repaint the status line and the button from one place
+    addSysRow(ChatCore.stopOutcomeNotice("failed"));
+  } else {
+    // It finished between the click and the answer — a real outcome, not an error.
+    renderStopControl();
+    addSysRow(ChatCore.stopOutcomeNotice("finished"));
+  }
+}
+
+// The session acknowledged the stop. The turn is winding DOWN, not over: the model
+// still finishes the step it had already started and the real end arrives as `idle`.
+// So this says the stop registered and leaves the busy state alone — a composer that
+// unlocked here would invite a second message into a turn that is still replying.
+function onCancelled(reason) {
+  if (sawCancelled) return; // one acknowledgement per turn; a replay must not re-report
+  sawCancelled = true;
+  clearPending();
+  stopOpenToolRows();
+  // Frames can arrive out of order (and the stream replays on reconnect): if the turn
+  // has ALREADY ended, there is nothing winding down, so say the shorter true thing and
+  // settle rather than leaving a "stopping…" on an idle session.
+  const live = isBusy();
+  addRow("row-sys row-stopped", ChatCore.cancelledNotice(reason, live)); // textContent — safe
+  cancelPending = live;
+  setStatus(live ? "stopping…" : "stopped");
+  renderStopControl();
+}
+
+// A stop lands mid-tool. Those lines are neither ✓ nor ✗ — marking them failed would
+// blame the assistant for the analyst's decision — so they close as "stopped".
+function stopOpenToolRows() {
+  while (toolStack.length) {
+    const row = toolStack.pop();
+    row.classList.add("stopped");
+    const glyph = row.querySelector(".tool-glyph");
+    if (glyph) glyph.textContent = "⏹"; // ⏹
+  }
+}
+
+// -- the receipt ------------------------------------------------------------
+// What replaces the Apply button when the model writes for itself. The button asked
+// someone who does not read Python to approve code before it ran — the one moment they
+// could not judge it. The receipt reports the same change after the run, when there are
+// results to judge, and carries the one thing that makes that safe: a way back.
+
+// The group this receipt belongs to. Receipts from ONE turn share a group so a turn that
+// wrote three times reads as a numbered sequence instead of three unrelated cards.
+function receiptGroupFor(turnId) {
+  // The decision (reuse or start fresh, and what number this receipt is) is pure and
+  // unit-tested; all that is left here is the DOM. `isConnected` is what answers "is the
+  // group still on the page?" — /clear empties #messages, and appending into the
+  // detached node it leaves behind would silently swallow every later receipt.
+  const seq = ChatCore.receiptSequence(receiptGroup, turnId, !!receiptGroup?.el?.isConnected);
+  if (seq.reuse) {
+    receiptGroup.count = seq.count;
+  } else {
+    const el = document.createElement("div");
+    el.className = "receipt-group";
+    $("messages").appendChild(el);
+    receiptGroup = { el, turnId: seq.turnId, count: seq.count };
+  }
+  receiptGroup.el.classList.toggle("receipt-seq", seq.numbered);
+  return receiptGroup;
+}
+
+// `d` is the "applied" SSE payload: {summary:{edited,appended,deleted}, rationale,
+// observation, undo_depth, turn_id}. Everything server-supplied reaches the DOM through
+// textContent — an observation is data, never markup.
+function addReceipt(d) {
+  clearPending();
+  // Close the row the assistant is streaming into, so the receipt lands BELOW the prose
+  // that led to it and the next sentence starts a new row. Each provider emits its
+  // `message` per assistant message (not per turn), so finalising here cannot orphan or
+  // duplicate the reply that follows.
+  if (asstRow) finalizeAssistant();
+
+  const group = receiptGroupFor(d?.turn_id);
+  const row = document.createElement("div");
+  row.className = "receipt";
+
+  const step = document.createElement("span");
+  step.className = "receipt-step";
+  step.textContent = String(group.count);
+
+  const main = document.createElement("div");
+  main.className = "receipt-main";
+  const head = document.createElement("div");
+  head.className = "receipt-head";
+  head.textContent = ChatCore.receiptHeadline(d?.summary); // "Changed cell 3 · Added cell 8"
+  main.appendChild(head);
+
+  const why = typeof d?.rationale === "string" ? d.rationale.trim() : "";
+  if (why) {
+    const w = document.createElement("div");
+    w.className = "receipt-why";
+    w.textContent = why;
+    main.appendChild(w);
+  }
+  // The line the whole design turns on: what came BACK. This is what the analyst judges
+  // instead of the code — and it is value-free by construction (names and counts only).
+  const observation = ChatCore.receiptObservation(d?.observation);
+  if (observation) {
+    const o = document.createElement("div");
+    o.className = "receipt-obs";
+    o.textContent = observation;
+    main.appendChild(o);
+  }
+
+  const bar = document.createElement("div");
+  bar.className = "receipt-actions";
+  const note = document.createElement("span");
+  note.className = "receipt-note";
+  const rec = { row, note };
+  // `undo_depth` is how far back the stack goes after this write. Zero means there is
+  // nothing to restore, and offering Revert then would be a button that cannot work.
+  const depth = Number(d?.undo_depth);
+  if (!Number.isFinite(depth) || depth > 0) {
+    const btn = document.createElement("button");
+    btn.className = "small receipt-revert";
+    btn.textContent = "Revert";
+    btn.title = "Put the notebook back the way it was before this change";
+    btn.addEventListener("click", () => undoLast(btn));
+    claimUndoControl({
+      btn,
+      done: () => markReceiptReverted(rec),
+      displaced: () => {
+        note.textContent = "superseded · /undo steps further back";
+      },
+    });
+    bar.appendChild(btn);
+  } else {
+    note.textContent = "no earlier version to go back to";
+  }
+  bar.appendChild(note);
+  main.appendChild(bar);
+
+  row.append(step, main);
+  group.el.appendChild(row);
+  maybeScroll();
+}
+
+// Reverted state SAYS it, in words — the receipt never relies on a colour or a greyed
+// button to carry which of "applied" and "put back" the analyst is looking at.
+function markReceiptReverted(rec) {
+  rec.row.classList.add("reverted");
+  rec.note.textContent = "reverted";
 }
 
 // -- session ----------------------------------------------------------------
@@ -1167,12 +1430,49 @@ async function openChat() {
   });
   source.addEventListener("message", (e) => finalizeAssistant(JSON.parse(e.data).text));
   source.addEventListener("proposal", (e) => addProposal(JSON.parse(e.data)));
+  // The model wrote the change itself (auto-apply) and marimo ran it — draw the receipt.
+  // In MANUAL mode this event never arrives: the write tool stays in propose mode with
+  // no applier behind it, so the Apply card is still the only path. The in-flight guard
+  // covers the one overlap that is possible either way — a manual Apply's own write.
+  source.addEventListener("applied", (e) => {
+    if (manualApplyInFlight > 0) return; // the card is already reporting this write
+    // Wrapped: a frame this client cannot read still describes a write that HAPPENED,
+    // so it must still draw a receipt — silently dropping it would leave a change in
+    // the notebook that the transcript never mentions. addReceipt copes with an empty
+    // payload (it says "Changed the notebook" and still offers the way back).
+    let d = {};
+    try {
+      d = JSON.parse(e.data) || {};
+    } catch (_err) {
+      d = {};
+    }
+    addReceipt(d);
+  });
+  // The session took the stop. Wrapped because a frame this client cannot read must not
+  // leave the turn stuck looking un-stoppable.
+  source.addEventListener("cancelled", (e) => {
+    let reason = "";
+    try {
+      reason = (JSON.parse(e.data) || {}).reason || "";
+    } catch (_err) {
+      reason = "";
+    }
+    onCancelled(reason);
+  });
   source.addEventListener("tool", (e) => onTool(JSON.parse(e.data)));
   source.addEventListener("tool_done", (e) => onToolDone(JSON.parse(e.data).success !== false));
   source.addEventListener("intent", (e) => onIntent(JSON.parse(e.data).text));
   source.addEventListener("routing", (e) => showRoutingNotice(JSON.parse(e.data), true));
   source.addEventListener("idle", () => {
+    // The turn's real end, however it ended. Three ways out and each names itself —
+    // stopped, finished-before-the-stop-landed, or the ordinary end — decided by a pure
+    // helper so a "stopping…" line can never quietly become an ordinary finish.
+    const outcome = ChatCore.turnEndOutcome(cancelPending, sawCancelled);
+    cancelPending = false;
+    sawCancelled = false;
     setTurnState("idle");
+    if (outcome.status) setStatus(outcome.status);
+    if (outcome.notice) addSysRow(outcome.notice);
     if (explainTurnActive) {
       explainTurnActive = false;
       offerNotesCell(); // the walkthrough landed — offer to keep it with the notebook
@@ -1293,7 +1593,10 @@ function lockForDisabled() {
   closeStream();
   sid = null;
   turnState = "idle";
+  cancelPending = false;
+  sawCancelled = false;
   clearPending();
+  renderStopControl(); // the stream is gone — there is nothing left to stop
   const input = $("chat-input");
   input.disabled = true;
   input.blur();
@@ -1322,7 +1625,10 @@ function showCopilotSignin(detail) {
   closeStream();
   sid = null;
   turnState = "idle";
+  cancelPending = false;
+  sawCancelled = false;
   clearPending();
+  renderStopControl(); // the stream is gone — there is nothing left to stop
   const input = $("chat-input");
   input.disabled = true;
   input.blur();
@@ -1574,7 +1880,11 @@ function runCommand(cmd) {
     case "clear":
       $("messages").innerHTML = "";
       latestProposal = null;
-      lastUndoBtn = null; // the transcript (and its Undo button) is gone
+      undoControl = null; // the transcript (and its Undo/Revert button) is gone
+      // …and so is the receipt group this turn was appending into. Dropping the
+      // reference matters: a detached group would still accept receipts, and every
+      // later one would land in a node that is no longer on the page.
+      receiptGroup = null;
       printBanner();
       break;
     case "model":
@@ -1685,7 +1995,8 @@ function printHelp() {
     const k = document.createElement("div");
     k.textContent =
       "Keys: Enter send · Shift+Enter newline · ↑/↓ recall input · @ reference a dataset · " +
-      "a/s apply or skip a proposal (when the prompt is empty/unfocused) · Esc clear / close menu";
+      "a/s apply or skip a proposal (when the prompt is empty/unfocused) · " +
+      "Esc clear the draft / close a menu — or stop the turn in flight";
     el.appendChild(k);
   });
 }
@@ -1978,6 +2289,11 @@ async function loadDatasets() {
 
 async function init() {
   $("chat-target").textContent = NOTEBOOK || "(no notebook)";
+  // Captured before anything can overwrite it: the stop control swaps the placeholder
+  // for "what to do about this turn" and has to be able to put the resting one back.
+  idlePlaceholder = $("chat-input").placeholder;
+  $("stop-btn").addEventListener("click", stopTurn);
+  renderStopControl();
   if (!NOTEBOOK) {
     showError("Open the copilot from a notebook's “AI” button.");
     return;
@@ -2083,8 +2399,10 @@ function onInputKeydown(e) {
     return;
   }
   if (e.key === "Escape") {
-    // Esc clears the draft — it does NOT interrupt the turn (there is no backend
-    // cancel; pretending otherwise would silently leave a billed turn running).
+    // Esc clears the draft. Stopping a turn is Esc too, but it can never collide with
+    // this one: a turn DISABLES the composer, so while one is in flight this handler
+    // does not run at all and the keystroke lands on the document handler
+    // (onGlobalKeydown) instead. A draft in a live composer always wins.
     e.preventDefault();
     if (input.value) resetInput(input);
     return;
@@ -2125,6 +2443,22 @@ function onGlobalKeydown(e) {
   // so they can't hijack normal keyboard use of those controls.
   const ae = document.activeElement;
   const tag = ae?.tagName;
+  // Esc stops the turn in flight. It is handled BEFORE the guard below because the
+  // Stop button is where the keyboard naturally lands during a turn, and Esc on it
+  // must still work — but never while something is being typed: that Esc belongs to
+  // the draft (onInputKeydown), which is why a text field is excluded here.
+  if (
+    e.key === "Escape" &&
+    tag !== "INPUT" &&
+    tag !== "TEXTAREA" &&
+    !ae?.isContentEditable &&
+    !e.metaKey && !e.ctrlKey && !e.altKey &&
+    ChatCore.canStopTurn(turnState, cancelPending, !!sid)
+  ) {
+    e.preventDefault();
+    stopTurn();
+    return;
+  }
   if (
     tag === "SELECT" || tag === "INPUT" || tag === "TEXTAREA" || tag === "BUTTON" ||
     ae?.isContentEditable

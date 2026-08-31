@@ -163,14 +163,23 @@ KNOBS: tuple[Knob, ...] = (
         "the PII-dense notebook warning",
     ),
     Knob("ai.traceback_guard", ("ai", "traceback_guard"), True, "traceback sanitising"),
-    # The two Apply knobs point in OPPOSITE directions, and both are the stricter
-    # end of their own knob: `safe` is "the guard is armed" and "an applied cell is
-    # NOT run". So an admin may force the guard ON and may force autorun OFF; the
-    # data model has no way to express forcing the guard off or autorun on.
+    # The Apply knobs point in OPPOSITE directions, and each is the stricter end of
+    # its own knob: `safe` is "the guard is armed", "an applied cell is NOT run",
+    # "a human presses Apply", and "mooring does not re-run the notebook itself". So
+    # an admin may force the guard ON and may force the other three OFF; the data
+    # model has no way to express the reverse of any of them.
     Knob("ai.apply_guard", ("ai", "apply_guard"), True, "the Apply code guard"),
     Knob(
         "ai.apply_runs", ("ai", "apply_runs"), False,
         "running an applied cell immediately",
+    ),
+    Knob(
+        "ai.auto_apply", ("ai", "auto_apply"), False,
+        "applying a reversible change without the Apply button",
+    ),
+    Knob(
+        "ai.auto_run_report", ("ai", "auto_run_report"), False,
+        "re-running the notebook to report a failure back to the model",
     ),
     Knob("ai.context", ("ai", "context"), False, "team context files"),
     Knob("ai.code_index", ("ai", "code_index"), False, "the team code library"),
@@ -192,6 +201,22 @@ KNOBS: tuple[Knob, ...] = (
     ),
 )
 KNOB_BY_KEY: dict[str, Knob] = {k.key: k for k in KNOBS}
+
+# NOT governed, deliberately: ``[ai] max_tool_iters``.
+#
+# Every knob above is a BOOL with ONE safe value, and that is precisely what makes
+# "policy can only ever be more restrictive" a property of the data rather than a
+# promise this module keeps (:func:`_parse_settings` has no branch that stores
+# anything else). An integer has no single safe value — it needs a comparison
+# direction, i.e. "a policy may only LOWER this" — and adding one would introduce
+# the first governed setting whose tighten-only-ness lives in code that could be
+# got wrong, for a knob that is a runaway-loop backstop and not a safety boundary:
+# nothing a policy protects becomes reachable because a turn was allowed more tool
+# calls, and the Apply gate above is what actually stands between the model and an
+# irreversible write. A team that wants to bound the loop sets it in the deployed
+# config_default.toml or MOORING_AI_MAX_TOOL_ITERS — the deployment's own channels,
+# which do not travel in an attacker-writable synced file. Generalising KNOBS to ints
+# needs its own design and its own tests; do not do it incidentally.
 
 
 # -- globs ---------------------------------------------------------------------

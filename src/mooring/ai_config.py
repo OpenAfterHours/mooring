@@ -243,6 +243,38 @@ class AiConfig:
     # endpoint, classifier, credential, and approval set remain env-only above.
     trusted_model: str = ""
     routing_preference: str = "auto"
+    # Whether a reversible change the copilot writes lands WITHOUT an Apply click.
+    # Default True: the model's write goes straight into the notebook and it gets a
+    # value-free observation back, so it can see its own mistake and fix it in the
+    # same turn instead of waiting a round-trip for a human to press a button. This
+    # does NOT widen what may land: ``apply_guard`` still reads every cell first and
+    # still holds anything Undo cannot take back (see :mod:`mooring.ai.codeguard`) —
+    # only the unconditional click goes. False restores exactly the older behaviour:
+    # the copilot proposes, the analyst Applies. "The analyst presses the button" is
+    # the restrictive direction, so a policy may pin this OFF and never on (see
+    # :data:`mooring.policy.KNOBS`).
+    auto_apply: bool = True
+    # Whether mooring may AUTOMATICALLY re-run the existing value-free smoke path
+    # when the observation says an applied cell did not complete, so the failure
+    # reaches the model without a human relaying it. Default True. It re-executes the
+    # notebook, which is why it is a knob of its own rather than a detail of
+    # ``auto_apply``: "do not re-run my notebook unasked" is the restrictive
+    # direction, so a policy may pin this OFF and never on.
+    auto_run_report: bool = True
+    # SAFETY CEILING on the tool-call loop inside one turn — not a work budget. The
+    # product intent is that the model works a hard analysis all the way through and
+    # the analyst cancels if they want it to stop, so this sits high enough never to
+    # truncate real work and only ever catches a runaway loop. Clamped on load (see
+    # :func:`_as_positive_int`): a 0 or a negative in a hand-edited config would
+    # silently kill EVERY turn, which looks like a broken copilot, not a setting.
+    # Deliberately NOT policy-governed — see :data:`mooring.policy.KNOBS`.
+    max_tool_iters: int = 200
+
+
+# Upper bound for [ai] max_tool_iters. A ceiling is not a target: anything past this
+# is indistinguishable from "no ceiling at all", and the cancel button is the control
+# the product actually offers for a long run.
+MAX_TOOL_ITERS_CEILING = 10_000
 
 
 def _as_bool(value: object, default: bool) -> bool:
@@ -267,6 +299,23 @@ def _as_int(value: object, default: int) -> int:
         return int(str(value).strip())
     except (TypeError, ValueError):
         return default
+
+
+def _as_positive_int(value: object, default: int, *, maximum: int) -> int:
+    """:func:`_as_int` for a knob where zero and below are not a choice a user can
+    have meant, so they fall back to ``default`` rather than being honoured.
+
+    ``config.toml`` is hand-editable and ``MOORING_*`` is typed at a shell, so the
+    two ways to get this wrong are a typo and a plausible-looking ``0``. For an
+    iteration CEILING both are worse than useless: ``max_tool_iters = 0`` would end
+    every turn before the model's first tool call and read as a broken copilot, not
+    as a setting. Anything above ``maximum`` is capped — past a point a ceiling says
+    nothing that "no ceiling" does not.
+    """
+    num = _as_int(value, default)
+    if num < 1:
+        return default
+    return min(num, maximum)
 
 
 def _str_list(raw: object, default: tuple[str, ...]) -> tuple[str, ...]:
@@ -466,6 +515,17 @@ def load_ai_config(ai: Mapping, env: Mapping[str, str]) -> AiConfig:
         ),
         apply_runs=_as_bool(
             env.get("MOORING_AI_APPLY_RUNS"), _as_bool(ai.get("apply_runs"), True)
+        ),
+        auto_apply=_as_bool(
+            env.get("MOORING_AI_AUTO_APPLY"), _as_bool(ai.get("auto_apply"), True)
+        ),
+        auto_run_report=_as_bool(
+            env.get("MOORING_AI_AUTO_RUN_REPORT"), _as_bool(ai.get("auto_run_report"), True)
+        ),
+        max_tool_iters=_as_positive_int(
+            env.get("MOORING_AI_MAX_TOOL_ITERS"),
+            _as_positive_int(ai.get("max_tool_iters"), 200, maximum=MAX_TOOL_ITERS_CEILING),
+            maximum=MAX_TOOL_ITERS_CEILING,
         ),
         openai_base_url=env.get(
             "MOORING_AI_OPENAI_BASE_URL", str(ai.get("openai_base_url", ""))

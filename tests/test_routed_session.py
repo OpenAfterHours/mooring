@@ -217,6 +217,40 @@ def test_second_send_is_rejected_until_child_reports_idle(tmp_path):
     assert [text for text, _ in busy.sent] == ["first", "second"]
 
 
+def test_cancel_reaches_the_live_child_and_is_announced_exactly_once(tmp_path):
+    # The wrapper routes turns; the CHILD is what owns the tool loop, so the stop flag
+    # has to reach it — and only the child announces, or one press would show two stops.
+    session, general, _trusted, _inspector, _ = _session(tmp_path)
+    q = session.subscribe()
+    session.request_cancel()
+
+    assert session.cancel_requested() is True
+    assert general.cancel_requested() is True
+    _wait_for(lambda: not q.empty())
+    events = []
+    while not q.empty():
+        events.append(q.get_nowait())
+    assert [e.kind for e in events].count("cancelled") == 1
+
+
+def test_cancel_after_an_upgrade_reaches_the_trusted_child(tmp_path):
+    session, general, trusted, _inspector, _ = _session(tmp_path)
+    session.send("CUSTOMER: change that")
+    _wait_for(lambda: len(trusted.sent) == 1)
+    session.request_cancel()
+    assert trusted.cancel_requested() is True  # the stop follows the LIVE child
+    assert general.closed is True  # the retired one was closed by the upgrade
+
+
+def test_a_cancel_does_not_carry_into_the_next_routed_turn(tmp_path):
+    session, general, _trusted, _inspector, _ = _session(tmp_path)
+    session.request_cancel()
+    session.send("show the schema")
+    _wait_for(lambda: len(general.sent) == 1)
+    assert session.cancel_requested() is False
+    assert general.cancel_requested() is False
+
+
 def test_general_transcript_is_carried_only_upward(tmp_path):
     session, general, trusted, _inspector, handoffs = _session(tmp_path)
     general.auto_idle = False

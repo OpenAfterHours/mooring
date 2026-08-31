@@ -739,47 +739,63 @@ def validate_notebook_source(source: str) -> list[Diagnostic]:
     :data:`VALIDATE_TIMEOUT_SECONDS` is abandoned and reported as unavailable rather
     than waited on, and a notebook over the ceilings is declined outright.
     """
+    ok, result, detail = _run_guarded(
+        _validate_notebook_source, source, timeout=VALIDATE_TIMEOUT_SECONDS, name="mooring-validate"
+    )
+    if not ok:
+        return [_validator_unavailable(detail)]
+    return result if isinstance(result, list) else []
+
+
+def _run_guarded(fn, *args, timeout: float, name: str) -> tuple[bool, object, object]:
+    """Run ``fn(*args)`` on the serialized validator worker thread; never raise.
+
+    THE one way into marimo's graph builder from this module. Everything the lock
+    and the orphan-thread bookkeeping above protect (a process-global stdout
+    redirect that is neither thread-safe nor reentrant) applies to any caller that
+    compiles cells, not just the validator — so both :func:`validate_notebook_source`
+    and :func:`cell_defs` go through here rather than each inventing a mechanism.
+
+    Returns ``(ok, result, detail)``: ``ok`` False means the pass did not produce an
+    answer, and ``detail`` says why (an exception, or a value-free string).
+    """
     global _VALIDATE_ORPHAN
     with _VALIDATE_LOCK:
         # A previous pass that overran is still inside marimo's output redirect. The
         # lock is free (its caller had to return), so this costs no wait — but starting
         # a second pass now is exactly the interleaving the lock exists to prevent.
         if _VALIDATE_ORPHAN is not None and _VALIDATE_ORPHAN.is_alive():
-            return [_validator_unavailable("an earlier validation is still running")]
+            return False, None, "an earlier validation is still running"
         _VALIDATE_ORPHAN = None
         outcome: dict = {}
         # A DAEMON thread: an abandoned pass must never hold up interpreter exit.
         worker = threading.Thread(
-            target=_validate_into, args=(source, outcome), name="mooring-validate", daemon=True
+            target=_call_into, args=(fn, args, outcome), name=name, daemon=True
         )
         worker.start()
         try:
-            worker.join(VALIDATE_TIMEOUT_SECONDS)
+            worker.join(timeout)
         finally:
             # In a `finally` because a KeyboardInterrupt out of `join` releases the lock
             # just the same, and would otherwise leave the worker running unguarded.
             if worker.is_alive():
                 _VALIDATE_ORPHAN = worker
         if worker.is_alive():  # a running thread cannot be cancelled; let it go
-            return [
-                _validator_unavailable(
-                    f"it did not finish within {VALIDATE_TIMEOUT_SECONDS:.0f}s"
-                )
-            ]
+            return False, None, f"it did not finish within {timeout:.0f}s"
     error = outcome.get("error")
     if error is not None:
-        return [_validator_unavailable(error)]
-    return outcome.get("result", [])
+        return False, None, error
+    return True, outcome.get("result"), ""
 
 
-def _validate_into(source: str, outcome: dict) -> None:
-    """Run the validation on this worker thread, reporting through ``outcome``.
+def _call_into(fn, args, outcome: dict) -> None:
+    """Run the pass on this worker thread, reporting through ``outcome``.
 
     Nothing escapes: a checker that breaks its caller is worse than one that says
     nothing, and an exception here would be raised on a thread with nobody to catch it.
     """
     try:
-        outcome["result"] = _validate_notebook_source(source)
+        outcome["result"] = fn(*args)
     except BaseException as exc:  # noqa: BLE001  # incl. anything marimo's internals raise
         outcome["error"] = exc
 
@@ -1255,6 +1271,69 @@ def _unresolved_diagnostics(ir, source: str) -> list[Diagnostic]:
     return out
 
 
+# --- what each cell DEFINES (compile-only) ---------------------------------
+
+
+def cell_defs(source: str) -> list[tuple[int, tuple[str, ...]]]:
+    """Per-cell ``(index, names the cell DEFINES)``, in document order. Never raises.
+
+    The indices are :func:`read_cells`' indices (both enumerate the same IR cell
+    list), so a caller that has just written cell *n* can ask what cell *n* was
+    supposed to bind — and then ask a live kernel whether those names are actually
+    there (``ai/introspect.observe``). A markdown cell, or any cell that binds
+    nothing, comes back with an empty tuple; the entry is still present, because
+    "this cell defines nothing" is an answer.
+
+    **It never executes the notebook.** The names come from marimo's own dataflow
+    graph (``LintContext(ir, source).get_graph()``), which ``compile()``s each cell
+    to read its ``defs``/``refs`` — the same graph :func:`_unresolved_diagnostics`
+    reads. Compiling is not running: no kernel, no subprocess, no import of the
+    notebook's own dependencies, no top-level statement evaluated. That matters
+    twice over here, because the caller reaches this function with model-authored
+    source in hand.
+
+    Fail-soft by design: a too-old or missing marimo, an unparseable source, a
+    private marimo API that moved, a notebook over the validator's ceilings, or a
+    cell marimo could not compile (which would make the graph and the IR disagree
+    about how many cells there are) all return ``[]`` — "could not tell", which the
+    caller degrades into "could not observe". It runs under the same lock and
+    worker thread as :func:`validate_notebook_source`, because marimo's graph
+    builder wraps every cell compile in a process-global stdout redirect.
+    """
+    ok, result, _ = _run_guarded(
+        _cell_defs, source, timeout=VALIDATE_TIMEOUT_SECONDS, name="mooring-cell-defs"
+    )
+    if not ok or not isinstance(result, list):
+        return []
+    return result
+
+
+def _cell_defs(source: str) -> list[tuple[int, tuple[str, ...]]]:
+    """The body of :func:`cell_defs`, free to raise. Runs on the validator's worker
+    thread (so marimo's redirect stays off the caller's)."""
+    from marimo._lint.context import LintContext
+    from marimo._schemas.serialization import UnparsableCell
+
+    # The same ceilings the validator is budgeted for: this walks marimo's graph
+    # builder, so an unbounded notebook is an unbounded pass.
+    if len(source) > VALIDATE_MAX_BYTES:
+        return []
+    _require_marimo_floor()
+    _, MarimoConvert = _codegen_api()
+    ir = _parse_ir(MarimoConvert, source)
+    if not ir.cells or len(ir.cells) > VALIDATE_MAX_CELLS:
+        return []
+    if any(isinstance(cell, UnparsableCell) for cell in ir.cells):
+        return []
+    graph = LintContext(ir, source).get_graph()
+    cells = list(graph.cells.values())
+    # marimo silently drops a cell it cannot compile from the graph, which would
+    # shift every later index. An exact match is the only safe way to zip them.
+    if len(cells) != len(ir.cells):
+        return []
+    return [(index, tuple(sorted(cell.defs))) for index, cell in enumerate(cells)]
+
+
 # --- HTTP control API: read live-kernel schemas ----------------------------
 
 # marimo serves the skew-protection token in a dedicated element:
@@ -1304,11 +1383,13 @@ class KernelControl:
             urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar())
         )
 
-    def _get(self, path: str, params: dict | None = None) -> str:
+    def _get(self, path: str, params: dict | None = None, headers: dict | None = None) -> str:
         url = self.base + path
         if params:
             url += "?" + urllib.parse.urlencode(params)
         req = urllib.request.Request(url)  # noqa: S310  # localhost only
+        for key, value in (headers or {}).items():
+            req.add_header(key, value)
         try:
             with self._opener.open(req, timeout=self.timeout) as resp:  # noqa: S310
                 return resp.read().decode("utf-8", "replace")
@@ -1355,6 +1436,27 @@ class KernelControl:
                 sid = f.get("sessionId")
                 return str(sid) if sid else None
         return None
+
+    def kernel_state(self, session_id: str) -> str:
+        """``"running"`` | ``"idle"`` | ``"stopped"`` from ``GET /api/kernel/status``.
+
+        marimo's own words: *running* means at least one cell is queued or running,
+        *idle* means the kernel is alive but not executing, *stopped* means the kernel
+        process is not running. A response this client does not recognise reads as
+        ``""`` — "unknown", which every caller must treat as "not idle".
+
+        Value-free by construction: the endpoint answers with that one enum and
+        nothing else. Note it is a whole-SESSION signal, so mooring's own probe runs
+        make it ``running`` too — a caller cannot read it as "the notebook's own
+        cells are running".
+        """
+        headers = {**self._auth_headers(), "Marimo-Session-Id": session_id}
+        body = self._get("/api/kernel/status", headers=headers)
+        try:
+            state = json.loads(body).get("state")
+        except (ValueError, AttributeError):
+            return ""
+        return state if state in ("running", "idle", "stopped") else ""
 
     def run(self, session_id: str, code: str, *, cell_id: str = PROBE_CELL_ID) -> None:
         headers = {**self._auth_headers(), "Marimo-Session-Id": session_id}

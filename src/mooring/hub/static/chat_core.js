@@ -470,14 +470,21 @@ const ChatCore = (function () {
   }
 
   // The canned follow-up behind "Add as notes cell": ONE new appended markdown
-  // documentation cell. There is now ONE propose tool, so the forbidden thing is no
+  // documentation cell. There is now ONE write tool, so the forbidden thing is no
   // longer a set of tool names but the other FIELDS of that tool — `appends` only,
   // never `edits`, `deletes` or `cells` — so the walkthrough can never clobber an
-  // existing cell. The proposal still rides the normal card → Apply → undo path.
+  // existing cell.
+  //
+  // It says "the notebook-editing tool" rather than naming one: that tool is registered
+  // under TWO names, one per mode (ai/tools.py: WRITE_TOOL_NAMES), and this page is
+  // never told which mode the session is in — naming the wrong one would be an
+  // instruction to call a tool the model has not been given. The session's own system
+  // prompt names it exactly once, and does know. What THIS prompt has to pin is the
+  // FIELD, which is the same in both modes.
   function notesCellPrompt() {
     return (
-      "Now add that walkthrough to the notebook as a notes cell. Propose ONE new " +
-      "markdown documentation cell using mooring_propose_notebook_edit with `appends` " +
+      "Now add that walkthrough to the notebook as a notes cell. Add ONE new " +
+      "markdown documentation cell using the notebook-editing tool with `appends` " +
       "only — never its `edits`, `deletes` or `cells` fields, and do not touch any " +
       "existing cell.\n" +
       "\n" +
@@ -496,8 +503,10 @@ const ChatCore = (function () {
   // -- /checks: propose value-free tie-out checks ----------------------------
   // A fixed prompt (no user text, no values) asking the copilot to author a
   // mooring_checks cell from the schema + source it already sees. Value-free by
-  // construction, over the EXISTING chat channel: the copilot proposes; the analyst
-  // reviews and applies. Pinned by tests/js/chat_core.test.js.
+  // construction, over the EXISTING chat channel. It does not say who applies the
+  // result: with `[ai] auto_apply` on the model's write lands and runs inside its own
+  // tool call, and this page is not told which mode it is in. Pinned by
+  // tests/js/chat_core.test.js.
   function checksPrompt() {
     return (
       "Add tie-out / data-quality checks for this notebook using the value-free " +
@@ -505,7 +514,7 @@ const ChatCore = (function () {
       "\n" +
       "First call mooring_read_notebook_source to see the current cells, and " +
       "mooring_get_schema for the datasets involved, so you pick real column and key " +
-      "names. Then propose ONE new cell (mooring_propose_notebook_edit, using `appends`) that:\n" +
+      "names. Then add ONE new cell (the notebook-editing tool, using `appends`) that:\n" +
       "- begins with `import mooring_checks as mc` and `mc.reset()`;\n" +
       "- asserts the checks that fit THIS notebook — e.g. mc.unique_key(df, \"id\") on any " +
       "key you expect to be unique, mc.no_fanout(left, right, on=\"key\") before a join, " +
@@ -514,7 +523,7 @@ const ChatCore = (function () {
       "should match a control.\n" +
       "\n" +
       "Choose the columns and keys from the schema and the source only — never ask for " +
-      "data values. Briefly say why each check matters. The analyst reviews and applies it."
+      "data values. Briefly say why each check matters."
     );
   }
 
@@ -527,15 +536,16 @@ const ChatCore = (function () {
   // A fixed prompt (no user text, no values) asking the copilot to author a marimo
   // `mo.sql` cell from the schema + source it already sees. Value-free by construction:
   // SQL is authored code run locally by marimo; the model never sees the result. Over
-  // the EXISTING chat channel — the copilot proposes, the analyst reviews and applies.
-  // Pinned by tests/js/chat_core.test.js.
+  // the EXISTING chat channel. Like /checks it does not say who applies the result —
+  // the page is not told whether this session auto-applies. Pinned by
+  // tests/js/chat_core.test.js.
   function sqlPrompt() {
     return (
       "Propose a marimo SQL cell for this notebook, running on DuckDB.\n" +
       "\n" +
       "First call mooring_read_notebook_source to see the current cells, and " +
       "mooring_get_schema for the datasets involved, so you use real dataframe and " +
-      "column names. Then propose ONE new cell (mooring_propose_notebook_edit, using `appends`) that:\n" +
+      "column names. Then add ONE new cell (the notebook-editing tool, using `appends`) that:\n" +
       '- runs the query with `result = mo.sql("""...""")` (assign it to a well-named ' +
       "dataframe variable so later cells can use it);\n" +
       "- queries the dataframes already in scope BY THEIR VARIABLE NAME;\n" +
@@ -547,8 +557,7 @@ const ChatCore = (function () {
       "column headers (e.g. DuckDB PIVOT); the resulting column names would be data values.\n" +
       "\n" +
       "Choose the tables and columns from the schema and the source only — never inline a " +
-      "data value or ask for one. Briefly say what the query returns. The analyst reviews " +
-      "and applies it."
+      "data value or ask for one. Briefly say what the query returns."
     );
   }
 
@@ -986,6 +995,189 @@ const ChatCore = (function () {
   // The per-row tag. Fixed strings that name the BAND, never the code.
   function codeFindingTag(row) {
     return row && row.floor ? GATE_MARK : "side effect";
+  }
+
+  // -- auto-apply: the receipt --------------------------------------------
+  // With `[ai] auto_apply` on, the model's write lands inside its own tool call and
+  // marimo runs it; the analyst gets a RECEIPT after the fact instead of an Apply
+  // button before it. That is the whole design bet: the Apply button asked someone who
+  // does not read Python to judge code at the one moment they could not — before it
+  // ran. The judgement moves to after the run, where there are results.
+  //
+  // Which is exactly why every string on the receipt is decided HERE, pinned by tests,
+  // the same way the gate's wording is. The reader of these words does not read Python.
+  // "Changed cell 3 · Added cell 8" is their language; `{"op": "edit", "index": 3}`,
+  // "append_cell" and "status: applied" are not, and must never surface.
+
+  // The wire summary is {edited: [...], appended: [...], deleted: [...]} — cell numbers
+  // in whatever order the applier wrote them. Verb order is fixed so a multi-op write
+  // always reads the same way round.
+  const RECEIPT_PARTS = [
+    ["edited", "Changed"],
+    ["appended", "Added"],
+    ["deleted", "Removed"],
+  ];
+  // Past this many cells the list stops being readable, so say how many instead.
+  const RECEIPT_MAX_LISTED = 4;
+
+  // Cell numbers, cleaned: integers only, deduped, ascending. Anything else is dropped
+  // rather than rendered — a receipt that says "cell undefined" is worse than one that
+  // says less.
+  function receiptCells(value) {
+    const list = Array.isArray(value) ? value : [];
+    const seen = new Set();
+    const out = [];
+    for (const raw of list) {
+      // Number(null) is 0 and Number(true) is 1 — coercing blindly would invent a
+      // "cell 0" out of a hole in the payload, which is precisely the kind of confident
+      // wrong number a receipt must never print.
+      const n =
+        typeof raw === "number"
+          ? raw
+          : typeof raw === "string" && raw.trim() !== ""
+            ? Number(raw)
+            : NaN;
+      if (!Number.isInteger(n) || n < 0) continue;
+      if (seen.has(n)) continue;
+      seen.add(n);
+      out.push(n);
+    }
+    out.sort((a, b) => a - b);
+    return out;
+  }
+
+  function receiptCellPhrase(nums) {
+    if (nums.length === 1) return "cell " + nums[0];
+    if (nums.length > RECEIPT_MAX_LISTED) return nums.length + " cells";
+    return "cells " + nums.slice(0, -1).join(", ") + " and " + nums[nums.length - 1];
+  }
+
+  // "Changed cell 3 · Added cell 8". Never empty: a write with no readable summary still
+  // happened, and saying nothing would hide it.
+  function receiptHeadline(summary) {
+    const s = summary && typeof summary === "object" && !Array.isArray(summary) ? summary : {};
+    const parts = [];
+    for (const [key, verb] of RECEIPT_PARTS) {
+      const nums = receiptCells(s[key]);
+      if (nums.length) parts.push(verb + " " + receiptCellPhrase(nums));
+    }
+    return parts.length ? parts.join(" · ") : "Changed the notebook";
+  }
+
+  // The observation is the value-free line the applier read back off the run ("cell 8
+  // ran · sales_q3: 12 columns, 40331 rows"). It is DATA, not markup — chat.js renders
+  // it with textContent — so all this does is make it readable.
+  const OBSERVATION_MAX = 240;
+
+  // Thousands separators for standalone integers of five or more digits, so a row count
+  // reads as a magnitude ("40,331 rows") instead of a digit soup. Deliberately narrow:
+  // four digits are left alone (a year is not a count), and a run glued to a letter,
+  // dot, dash or underscore is left exactly as written, so an id, a version or a column
+  // name is never rewritten.
+  function groupDigits(text) {
+    return String(text).replace(
+      /(^|[^0-9A-Za-z._-])(\d{5,})(?![0-9A-Za-z_-])/g,
+      (_m, before, digits) => before + digits.replace(/\B(?=(\d{3})+$)/g, ","),
+    );
+  }
+
+  function receiptObservation(text) {
+    const s = typeof text === "string" ? text.replace(/\s+/g, " ").trim() : "";
+    if (!s) return "";
+    const grouped = groupDigits(s);
+    return grouped.length > OBSERVATION_MAX
+      ? grouped.slice(0, OBSERVATION_MAX - 1).trimEnd() + "…"
+      : grouped;
+  }
+
+  // Where the next receipt goes. One turn can write several times, and those receipts
+  // must read as a numbered sequence rather than a stack of unrelated cards — but ONLY
+  // while the group they would join is still the same turn's and still on the page.
+  // `attached` is the caller's answer to "is that group still in the document?": /clear
+  // empties the transcript, and appending into the detached node it left behind would
+  // silently swallow every later receipt. (A tray rebuild eating a live card is a
+  // mistake this codebase has already made once; this is the pure part of not repeating
+  // it.) `prev` is the last group as {turnId, count}, or null when there is none.
+  function receiptSequence(prev, turnId, attached) {
+    const id = typeof turnId === "string" ? turnId : "";
+    const reuse = !!prev && attached === true && prev.turnId === id;
+    const count = reuse ? (Number(prev.count) || 0) + 1 : 1;
+    // Numbers appear only once there IS a sequence — a lone "1" beside one receipt is
+    // noise, so the first receipt is numbered retroactively when the second arrives.
+    return { reuse, turnId: id, count, numbered: count >= 2 };
+  }
+
+  // -- auto-apply: the stop control ---------------------------------------
+  // A turn with no small iteration cap needs a way out, and the way out is the analyst's
+  // to press. These decide what the control SAYS, which is the whole safety property: a
+  // stop that reads as done while the assistant is still replying is worse than no stop.
+
+  // The turn is winding down, not over: `request_cancel` broadcasts `cancelled` the
+  // moment it is asked, and the model still finishes the step it had already started
+  // (the turn's real end arrives later, as the usual `idle`). So the wording says the
+  // stop registered WITHOUT claiming the assistant has gone quiet.
+  // `windingDown` is the caller's answer to "is the turn still live?". It is normally
+  // true — but a frame that arrives after the turn already ended must not promise a
+  // wind-up that has already happened.
+  function cancelledNotice(reason, windingDown) {
+    const r = typeof reason === "string" ? reason.trim().toLowerCase() : "";
+    const tail =
+      windingDown === false
+        ? ""
+        : " The assistant is wrapping up the step it had already started.";
+    // "analyst" is the only reason the stop button produces. Anything else is the
+    // session ending a turn for its own reasons, and saying "you stopped this" then
+    // would be a lie about who is in control.
+    if (!r || r === "analyst" || r === "user") return "You stopped this turn." + tail;
+    if (r === "timeout") return "This turn was stopped — it ran out of time." + tail;
+    return "This turn was stopped." + tail;
+  }
+
+  const STOP_LABEL = "Stop";
+  const STOPPING_LABEL = "Stopping…";
+
+  // What the composer's stop control shows. `cancelPending` stays true from the click
+  // until the turn actually ends, so the button reads "Stopping…" for exactly as long
+  // as that is true — and is insensitive, because the ask is already in flight.
+  function stopButtonState(turnState, cancelPending) {
+    const busy = turnState === "thinking" || turnState === "streaming";
+    if (!busy) return { visible: false, disabled: true, label: STOP_LABEL, title: "" };
+    if (cancelPending) {
+      return {
+        visible: true,
+        disabled: true,
+        label: STOPPING_LABEL,
+        title: "Stopping — the assistant is finishing the step it had already started.",
+      };
+    }
+    return { visible: true, disabled: false, label: STOP_LABEL, title: "Stop this turn (Esc)" };
+  }
+
+  // The two ways a stop does NOT end in a stopped turn. Both must be said out loud: a
+  // "stopping…" line that quietly becomes an ordinary finish teaches the analyst that
+  // the button is decorative.
+  function stopOutcomeNotice(outcome) {
+    if (outcome === "finished") return "That turn finished on its own before the stop reached it.";
+    return "The stop didn't reach the assistant — the turn is still running.";
+  }
+
+  // Whether a stop may be STARTED right now — shared by the button and the Esc key so
+  // the two routes to the same action cannot drift apart. There must be a session, a
+  // live turn, and no ask already in flight.
+  function canStopTurn(turnState, cancelPending, hasSession) {
+    if (!hasSession || cancelPending) return false;
+    return stopButtonState(turnState, false).visible;
+  }
+
+  // What the END of a turn should say, given whether a stop was asked for and whether
+  // the session acknowledged it. Three ways out and each names itself: a turn that
+  // reached its own end while a "stopping…" was on screen must SAY it finished first —
+  // letting that line quietly become an ordinary finish is how a stop control stops
+  // being believed. `status` is the status-line word, "" to leave the state's own.
+  function turnEndOutcome(asked, acknowledged) {
+    if (acknowledged) return { status: "stopped", notice: "" };
+    if (asked) return { status: "", notice: stopOutcomeNotice("finished") };
+    return { status: "", notice: "" };
   }
 
   // -- reasoning effort -----------------------------------------------------
@@ -1546,6 +1738,14 @@ const ChatCore = (function () {
     codeFindingRows,
     codeFindingLead,
     codeFindingTag,
+    receiptHeadline,
+    receiptObservation,
+    receiptSequence,
+    cancelledNotice,
+    stopButtonState,
+    stopOutcomeNotice,
+    canStopTurn,
+    turnEndOutcome,
     effortKey,
     adoptLegacyEffort,
     chooseEffort,

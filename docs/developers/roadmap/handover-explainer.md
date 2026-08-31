@@ -118,9 +118,17 @@ sequenceDiagram
     Srv->>AI: session.send → _pii_gate → model
     AI-->>Chat: streamed, cell-anchored walkthrough
     Chat->>Srv: "Add as notes cell" follow-up turn (optional)
-    AI-->>Chat: mooring_propose_notebook_edit (appends) proposal
+    AI-->>Chat: the write tool (appends) → proposal
     Chat->>Srv: Apply → /api/ai/chat/apply (+ undo snapshot)
 ```
+
+!!! note "Since this shipped"
+    The one write tool is now registered under **two** names, chosen per session by
+    `[ai] auto_apply` (`ai/tools.py`: `PROPOSE_TOOL_NAME` / `EDIT_TOOL_NAME`), and with
+    auto-apply on the write lands inside the tool call instead of returning a card for
+    the analyst to Apply. The last two steps of the diagram above therefore describe
+    manual mode. Nothing about `notesCellPrompt()` changed: it pins the `appends`
+    **field**, not a tool name — the browser is not told which mode the session is in.
 
 ## Architecture fit
 
