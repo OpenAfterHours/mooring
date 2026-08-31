@@ -66,6 +66,11 @@ def test_ai_routing_defaults_off_with_no_credentials_in_config(tmp_path):
     assert app.ai.routing == RoutingConfig()
     assert app.ai_routing_enabled is False
     assert app.ai_trusted_base_url == ""
+    assert app.ai_trusted_coding_models == ()
+    assert app.ai_trusted_profile_label == "Approved AI"
+    assert app.ai_trusted_model_preference == ""
+    assert app.ai_default_trusted_model == ""
+    assert app.ai_routing_preference == "auto"
     assert not hasattr(app.ai.routing, "api_key")
 
 
@@ -100,6 +105,80 @@ def test_ai_routing_ignores_toml_and_accepts_only_managed_env(tmp_path):
         classifier_model="admin-classifier",
         coding_model="admin-coder",
     )
+    assert overridden.ai_trusted_coding_models == ("admin-coder",)
+
+
+def test_ai_trusted_model_allowlist_is_trimmed_deduped_and_exact(tmp_path):
+    app = load_app_config(
+        user_config_path=tmp_path / "missing.toml",
+        env={
+            "MOORING_AI_ROUTING": "1",
+            "MOORING_AI_TRUSTED_BASE_URL": "https://admin.example/openai",
+            "MOORING_AI_TRUSTED_CLASSIFIER_MODEL": "classifier",
+            "MOORING_AI_TRUSTED_CODING_MODEL": "coder-default",
+            "MOORING_AI_TRUSTED_CODING_MODELS": (
+                " coder-default, coder-fast, coder-default ,Coder-Fast "
+            ),
+            "MOORING_AI_TRUSTED_PROFILE_LABEL": " Firm Azure OpenAI ",
+        },
+    )
+
+    assert app.ai.routing.coding_models == (
+        "coder-default",
+        "coder-fast",
+        "Coder-Fast",
+    )
+    assert app.ai_trusted_coding_models == app.ai.routing.coding_models
+    assert app.ai_trusted_profile_label == "Firm Azure OpenAI"
+
+
+def test_user_trusted_defaults_are_constrained_by_the_managed_allowlist(tmp_path):
+    user = tmp_path / "config.toml"
+    user.write_text(
+        '[ai]\ntrusted_model = "coder-fast"\nrouting_preference = "trusted"\n',
+        "utf-8",
+    )
+    env = {
+        "MOORING_AI_TRUSTED_CODING_MODEL": "coder-default",
+        "MOORING_AI_TRUSTED_CODING_MODELS": "coder-default,coder-fast",
+    }
+
+    app = load_app_config(user_config_path=user, env=env)
+
+    assert app.ai_trusted_model_preference == "coder-fast"
+    assert app.ai_default_trusted_model == "coder-fast"
+    assert app.ai_routing_preference == "trusted"
+
+
+def test_stale_user_trusted_model_falls_back_and_bad_routing_fails_upward(tmp_path):
+    user = tmp_path / "config.toml"
+    user.write_text(
+        '[ai]\ntrusted_model = "removed-model"\nrouting_preference = "general"\n',
+        "utf-8",
+    )
+    app = load_app_config(
+        user_config_path=user,
+        env={
+            "MOORING_AI_TRUSTED_CODING_MODEL": "coder-default",
+            "MOORING_AI_TRUSTED_CODING_MODELS": "coder-default,coder-fast",
+        },
+    )
+
+    assert app.ai_trusted_model_preference == "removed-model"
+    assert app.ai_default_trusted_model == "coder-default"
+    assert app.ai_routing_preference == "trusted"
+
+
+@pytest.mark.parametrize("models", ["", "other-coder, another-coder"])
+def test_ai_trusted_model_allowlist_must_include_default(tmp_path, models):
+    with pytest.raises(ValueError, match="must be non-empty and include"):
+        load_app_config(
+            user_config_path=tmp_path / "missing.toml",
+            env={
+                "MOORING_AI_TRUSTED_CODING_MODEL": "coder-default",
+                "MOORING_AI_TRUSTED_CODING_MODELS": models,
+            },
+        )
 
 
 def test_ai_batch_config_defaults_off_with_caps(tmp_path):

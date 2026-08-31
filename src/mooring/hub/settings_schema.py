@@ -140,6 +140,33 @@ EDITABLE: tuple[SettingSpec, ...] = (
         "pick a model per chat.",
     ),
     SettingSpec(
+        key="ai.trusted_model",
+        accessor="ai_trusted_model_preference",
+        label="Default customer-data model",
+        group="ai",
+        type="str",
+        control="select",  # exact options injected from the managed allowlist
+        default="",
+        help="Your default for customer-data conversations. Only models explicitly "
+        "approved by your administrator are offered or accepted; this preference "
+        "cannot make another model trusted. It applies to newly opened chats only.",
+    ),
+    SettingSpec(
+        key="ai.routing_preference",
+        accessor="ai_routing_preference",
+        label="Default AI routing",
+        group="ai",
+        type="enum",
+        control="select",
+        enum_values=("auto", "trusted"),
+        enum_labels=("Automatic", "Always use approved"),
+        default="auto",
+        help="Automatic lets the approved checker choose the route. Always use approved "
+        "can only move conversations upward to the customer-data service; it cannot "
+        "force customer information to a general model or bypass a block. This default "
+        "applies to newly opened chats only.",
+    ),
+    SettingSpec(
         key="ai.reasoning_effort",
         accessor="ai_reasoning_effort",
         label="Default reasoning effort",

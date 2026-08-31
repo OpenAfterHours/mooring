@@ -10,7 +10,9 @@ import pytest
 from starlette.testclient import TestClient
 
 from mooring import config, paths, telemetry
+from mooring.ai import openai_provider
 from mooring.hub import settings_schema
+from mooring.hub.routes import settings as settings_routes
 from mooring.hub.server import Hub, create_app
 
 # Env vars that would shadow a config.toml write and break the round-trip tests.
@@ -27,6 +29,8 @@ _AI_ENV = [
     "MOORING_AI_TRUSTED_API_VERSION",
     "MOORING_AI_TRUSTED_CLASSIFIER_MODEL",
     "MOORING_AI_TRUSTED_CODING_MODEL",
+    "MOORING_AI_TRUSTED_CODING_MODELS",
+    "MOORING_AI_TRUSTED_PROFILE_LABEL",
     "MOORING_AI_CHAT_IDLE_SEC",
     "MOORING_AI_LIVE_SCHEMA",
     "MOORING_AI_SEMANTIC_MODEL",
@@ -65,6 +69,21 @@ def client(tmp_path, monkeypatch):
 
 def _config_data():
     return tomllib.loads(paths.user_config_file().read_text("utf-8"))
+
+
+def _enable_trusted_routing(hub, monkeypatch):
+    managed = {
+        "MOORING_AI_ROUTING": "1",
+        "MOORING_AI_TRUSTED_BASE_URL": "https://approved.example/v1",
+        "MOORING_AI_TRUSTED_CLASSIFIER_MODEL": "approved-inspector",
+        "MOORING_AI_TRUSTED_CODING_MODEL": "approved-coder",
+        "MOORING_AI_TRUSTED_CODING_MODELS": "approved-coder,approved-coder-fast",
+        "MOORING_AI_TRUSTED_PROFILE_LABEL": "Firm approved AI",
+    }
+    for key, value in managed.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setattr(openai_provider, "resolve_trusted_api_key", lambda: "managed-key")
+    hub.app_cfg = config.load_app_config()
 
 
 # -- registry (pure) ---------------------------------------------------------
@@ -155,14 +174,137 @@ def test_get_settings_shape(client):
     c, _ = client
     data = c.get("/api/settings").json()
     assert {"groups", "editable", "admin", "pii"} <= data.keys()
+    assert data["routing"] == {"enabled": False}
     keys = {row["key"] for row in data["editable"]}
     assert "ui.theme" in keys
     assert "ai.pii.enabled" in keys
     assert not any(key.startswith("ai.routing.") for key in keys)
+    assert "ai.trusted_model" not in keys
+    assert "ai.routing_preference" not in keys
     # Admin block is read-only display, never the literal client id / endpoint.
     labels = {row["label"] for row in data["admin"]}
     assert "Central logging" in labels
     assert "GitHub OAuth client id" in labels
+
+
+def test_trusted_defaults_appear_only_with_a_complete_managed_profile(client, monkeypatch):
+    c, hub = client
+    _enable_trusted_routing(hub, monkeypatch)
+
+    payload = c.get("/api/settings").json()
+    rows = {row["key"]: row for row in payload["editable"]}
+
+    model = rows["ai.trusted_model"]
+    assert model["value"] == ""
+    assert model["default"] == ""
+    assert model["enum_options"] == [
+        {"value": "approved-coder", "label": "approved-coder"},
+        {"value": "approved-coder-fast", "label": "approved-coder-fast"},
+    ]
+    routing = rows["ai.routing_preference"]
+    assert routing["value"] == "auto"
+    assert routing["enum_options"] == [
+        {"value": "auto", "label": "Automatic"},
+        {"value": "trusted", "label": "Always use approved"},
+    ]
+    assert payload["routing"] == hub._trusted_routing_metadata()
+
+
+def test_trusted_defaults_are_hidden_when_managed_profile_is_unavailable(client, monkeypatch):
+    c, hub = client
+    _enable_trusted_routing(hub, monkeypatch)
+    monkeypatch.setattr(openai_provider, "resolve_trusted_api_key", lambda: "")
+
+    payload = c.get("/api/settings").json()
+    keys = {row["key"] for row in payload["editable"]}
+
+    assert "ai.trusted_model" not in keys
+    assert "ai.routing_preference" not in keys
+    assert payload["routing"] == {
+        "enabled": True,
+        "profile_label": "Approved AI",
+        "trusted_models": [],
+        "managed_default_trusted_model": "",
+        "default_trusted_model": "",
+        "default_routing_preference": "trusted",
+        "error": "The approved AI profile is unavailable.",
+    }
+    rendered = repr(payload["routing"])
+    assert "approved.example" not in rendered
+    assert "approved-inspector" not in rendered
+    assert "managed-key" not in rendered
+
+
+def test_trusted_default_writes_are_allowlisted_and_go_live(client, monkeypatch):
+    c, hub = client
+    _enable_trusted_routing(hub, monkeypatch)
+
+    model = c.post(
+        "/api/settings",
+        json={"key": "ai.trusted_model", "value": "approved-coder-fast"},
+    )
+    routing = c.post(
+        "/api/settings",
+        json={"key": "ai.routing_preference", "value": "trusted"},
+    )
+
+    assert model.status_code == 200
+    assert routing.status_code == 200
+    assert hub.app_cfg.ai_default_trusted_model == "approved-coder-fast"
+    assert hub.app_cfg.ai_routing_preference == "trusted"
+    stored = _config_data()["ai"]
+    assert stored["trusted_model"] == "approved-coder-fast"
+    assert stored["routing_preference"] == "trusted"
+
+
+def test_settings_metadata_distinguishes_managed_and_effective_trusted_default(
+    client, monkeypatch
+):
+    c, hub = client
+    _enable_trusted_routing(hub, monkeypatch)
+
+    selected = c.post(
+        "/api/settings",
+        json={"key": "ai.trusted_model", "value": "approved-coder-fast"},
+    ).json()
+
+    assert selected["routing"]["managed_default_trusted_model"] == "approved-coder"
+    assert selected["routing"]["default_trusted_model"] == "approved-coder-fast"
+    row = next(r for r in selected["editable"] if r["key"] == "ai.trusted_model")
+    assert row["value"] == "approved-coder-fast"
+
+    reset = c.post("/api/settings/reset", json={"key": "ai.trusted_model"}).json()
+
+    assert reset["routing"]["managed_default_trusted_model"] == "approved-coder"
+    assert reset["routing"]["default_trusted_model"] == "approved-coder"
+    row = next(r for r in reset["editable"] if r["key"] == "ai.trusted_model")
+    assert row["value"] == ""
+
+
+def test_unapproved_trusted_default_is_rejected_before_any_ai_or_context_call(
+    client, monkeypatch
+):
+    c, hub = client
+    _enable_trusted_routing(hub, monkeypatch)
+    touched = []
+    monkeypatch.setattr(hub, "_build_chat_context", lambda *a, **k: touched.append("context"))
+    monkeypatch.setattr(hub, "_trusted_inspector_for", lambda: touched.append("inspector"))
+    monkeypatch.setattr(hub, "_trusted_provider_for", lambda: touched.append("provider"))
+    monkeypatch.setattr(
+        settings_routes.config_store,
+        "set_value",
+        lambda *a, **k: touched.append("config_write"),
+    )
+
+    response = c.post(
+        "/api/settings",
+        json={"key": "ai.trusted_model", "value": "browser-invented"},
+    )
+
+    assert response.status_code == 400
+    assert "not approved" in response.json()["error"]
+    assert touched == []
+    assert not paths.user_config_file().exists()
 
 
 def test_set_persists_and_goes_live(client):

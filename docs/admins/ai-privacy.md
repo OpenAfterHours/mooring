@@ -45,7 +45,8 @@ to a deployment-approved OpenAI-compatible classifier. It returns one value-free
 decision:
 
 - `general_ok` — construct the user's selected general coding model;
-- `trusted_required` — use the pinned approved coding model; uncertainty takes this path;
+- `trusted_required` — use the user's deployment-approved coding-model choice;
+  uncertainty takes this path;
 - `block` — send the content to no coding model.
 
 Every later prompt and changed notebook source is checked again. A conversation can
@@ -62,9 +63,28 @@ reviewer, keep that enforcement boundary in place around Mooring; trusted routin
 not replace or invoke an external reviewer that is not configured in this codebase.
 
 The trust profile is not a Settings or `config.toml` preference. A managed deployment
-must pin an explicit HTTPS endpoint, classifier model, coding model, and dedicated
-`MOORING_AI_TRUSTED_API_KEY`. The trusted route never falls back to the user's general
-OpenAI credential, never follows redirects, and ignores the chat model picker. See
+must pin an explicit HTTPS endpoint, classifier model, trusted coding-model allowlist,
+default model, and dedicated `MOORING_AI_TRUSTED_API_KEY`. The trusted route never falls
+back to the user's general OpenAI credential and never follows redirects. The browser
+receives only a safe profile label, the approved model IDs, and their default: it never
+receives the endpoint, credential, API version, or classifier ID.
+
+Settings may store a user's **default selection within** that managed profile: a
+customer-data model from the current allowlist and either **Automatic** or **Always use
+approved** routing. These are preferences, not trust designations. A hand-edited or
+stale model never reaches the provider; Mooring intersects it with the live allowlist
+and falls back to the administrator's approved default. An invalid hand-edited routing
+value fails upward to the approved route rather than silently becoming automatic.
+
+The chat UI keeps the general and customer-data model choices separate. Each notebook
+inherits Settings unless the user chooses **Override this notebook**. These personal
+overrides live only in browser storage, namespaced by an opaque repository identity and
+the normalized notebook path; they are not synced team policy. **Automatic** lets the
+classifier choose the route; **Always use approved** starts on the trusted route but
+still runs local secret checks and honours a classifier `block` decision. There is no
+control that can force content onto the general provider, and an upgraded conversation
+never moves back. Changing a model or routing preference starts a fresh chat; Settings
+changes affect newly opened chats. See
 [configuration](configuration.md#deployment-managed-trusted-ai-routing).
 
 For the first release, general routed sessions expose only the proposal tool. Mutable

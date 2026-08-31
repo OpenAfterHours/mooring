@@ -38,6 +38,8 @@ class RoutedChatSession(ChatBroadcaster):
         notebook_rel: str,
         initial_source_digest: bytes,
         traceback_guard: bool = True,
+        trusted_model: str = "",
+        profile_label: str = "",
     ) -> None:
         super().__init__()
         if initial_zone not in (GENERAL_ZONE, TRUSTED_ZONE):
@@ -51,6 +53,10 @@ class RoutedChatSession(ChatBroadcaster):
         self._workspace = Path(workspace)
         self._notebook_rel = notebook_rel
         self._source_digest = initial_source_digest
+        # Display-only route metadata, supplied by the server after allowlist
+        # validation. Browser request values are never copied into SSE events.
+        self._trusted_model = str(trusted_model).strip()
+        self._profile_label = str(profile_label).strip()
         self._route_lock = threading.Lock()
         self._turn_idle = threading.Event()
         self._turn_idle.set()
@@ -67,6 +73,14 @@ class RoutedChatSession(ChatBroadcaster):
     @property
     def zone(self) -> str:
         return self._zone
+
+    @property
+    def trusted_model(self) -> str:
+        return self._trusted_model
+
+    @property
+    def profile_label(self) -> str:
+        return self._profile_label
 
     @property
     def start_status(self):
@@ -197,6 +211,10 @@ class RoutedChatSession(ChatBroadcaster):
             "reason_codes": list(reason_codes),
             "conversation_carried": carried,
         }
+        if self._profile_label:
+            route["profile_label"] = self._profile_label
+        if self._trusted_model:
+            route["model"] = self._trusted_model
         self._route_replay = route
         self._broadcast(ChatEvent("routing", route))
 

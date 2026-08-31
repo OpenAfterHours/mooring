@@ -71,7 +71,16 @@ def _digest(text: str) -> bytes:
     return hashlib.sha256(text.encode("utf-8")).digest()
 
 
-def _session(tmp_path, *, zone=GENERAL_ZONE, child=None, trusted=None, inspector=None):
+def _session(
+    tmp_path,
+    *,
+    zone=GENERAL_ZONE,
+    child=None,
+    trusted=None,
+    inspector=None,
+    trusted_model="",
+    profile_label="",
+):
     source = "x = 1\n"
     (tmp_path / "nb.py").write_text(source, "utf-8")
     child = child or _Child("general")
@@ -92,6 +101,8 @@ def _session(tmp_path, *, zone=GENERAL_ZONE, child=None, trusted=None, inspector
         notebook_rel="nb.py",
         initial_source_digest=_digest(source),
         traceback_guard=False,
+        trusted_model=trusted_model,
+        profile_label=profile_label,
     )
     return session, child, trusted, inspector, handoffs
 
@@ -134,6 +145,29 @@ def test_sensitive_turn_upgrades_ready_child_exactly_once_and_is_sticky(tmp_path
     _wait_for(lambda: len(trusted.sent) == 2)
     assert session.zone == TRUSTED_ZONE
     assert trusted.sent[-1][0] == "now change the title"
+
+
+def test_upgrade_event_uses_server_bound_trusted_profile_metadata(tmp_path):
+    session, _general, trusted, _inspector, _handoffs = _session(
+        tmp_path,
+        trusted_model="approved-coder-fast",
+        profile_label="Firm approved AI",
+    )
+    events = session.subscribe()
+
+    session.send("CUSTOMER account needs a chart")
+    _wait_for(lambda: len(trusted.sent) == 1)
+    routing = events.get(timeout=1)
+
+    assert routing.kind == "routing"
+    assert routing.data == {
+        "zone": TRUSTED_ZONE,
+        "reason_codes": ["customer_context"],
+        "conversation_carried": False,
+        "profile_label": "Firm approved AI",
+        "model": "approved-coder-fast",
+    }
+    assert session.route_replay == routing.data
 
 
 def test_trusted_zone_still_blocks_prohibited_later_turn(tmp_path):

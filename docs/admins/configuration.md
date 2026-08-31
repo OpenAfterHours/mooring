@@ -236,6 +236,14 @@ or equivalent administrator-controlled deployment must supply the complete profi
 The approved endpoint receives the exact context first for classification and handles
 coding turns that contain, or may contain, customer information.
 
+Once that profile is available, **Settings → AI copilot** exposes safe user defaults:
+the general model, customer-data model, and **Automatic** / **Always use approved**
+routing preference. The latter two write only `ai.trusted_model` and
+`ai.routing_preference` to the per-machine `config.toml`. They select within the live
+managed profile; they cannot create one or change its endpoint, credential, classifier,
+API version, or allowlist. Defaults apply to newly opened chats, not sessions already
+in progress.
+
 Install a build that includes the official OpenAI SDK (`pip install "mooring[openai]"`),
 including when the general coding provider remains GitHub Copilot. For a packaged or
 frozen deployment, include that extra when building the artifact. The launcher must
@@ -250,13 +258,31 @@ Set all of these in the managed process environment:
 | `MOORING_AI_TRUSTED_BASE_URL` | Explicit HTTPS OpenAI-compatible or Azure endpoint approved for customer data. |
 | `MOORING_AI_TRUSTED_API_VERSION` | Azure API version; leave empty for a standard OpenAI-compatible endpoint. |
 | `MOORING_AI_TRUSTED_CLASSIFIER_MODEL` | Pinned model/deployment that classifies every outbound context and turn. |
-| `MOORING_AI_TRUSTED_CODING_MODEL` | Pinned coding model/deployment used after a sensitive or uncertain decision. |
+| `MOORING_AI_TRUSTED_CODING_MODEL` | Default trusted coding model/deployment. When no allowlist is supplied, this is also the only trusted choice. |
+| `MOORING_AI_TRUSTED_CODING_MODELS` | Optional comma-separated allowlist of trusted coding models/deployments shown in the chat UI. The default above must be a member. |
+| `MOORING_AI_TRUSTED_PROFILE_LABEL` | Optional user-facing name for the approved service, such as `Firm Azure OpenAI`. Endpoint details are never exposed to the browser. |
 | `MOORING_AI_TRUSTED_API_KEY` | Dedicated credential for this approved endpoint; it never falls back to the user's general OpenAI key. |
 
 The profile must name an explicit HTTPS endpoint, redirects are disabled, and a
-per-chat model choice never overrides the pinned trusted coding model. This first
-release applies to interactive notebook chat; batch building is disabled while
-trusted routing is active, as is parallel investigate.
+per-chat model choice can select only an exact member of the deployment-managed
+trusted allowlist. The endpoint, credential, and classifier are never user-selectable.
+If the plural allowlist is set, startup validation fails closed unless the default
+model is included; model discovery from the endpoint is deliberately not used.
+
+When routing is available, the chat status bar shows separate **General model** and
+**Customer-data model** controls. Each starts at **Use Settings default** and can be
+overridden for that notebook; the same inheritance applies to reasoning effort and
+routing preference. Notebook overrides are personal browser preferences, scoped by an
+opaque repository identity plus notebook path — they are not written to the repository
+or shared with teammates. A revoked/stale model is discarded and inherits the current
+safe default.
+
+A single approved customer-data model is shown as a fixed choice; a larger allowlist
+becomes a selector. **Always use approved** can only move a conversation upward to the
+approved service: local secret blocking and the approved classifier's `block` decision
+still apply, and there is no “always general” bypass. Changing a selection starts a
+fresh chat. This release applies to interactive notebook chat; batch building is
+disabled while trusted routing is active, as is parallel investigate.
 
 ### `[guard]` — in the synced `mooring.toml`, not here
 
