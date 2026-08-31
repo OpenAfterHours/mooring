@@ -33,9 +33,11 @@ import polars as pl
 import pytest
 
 from mooring.ai.tools import (
+    DEFAULT_MAX_TOOL_ITERS,
     EDIT_TOOL_NAME,
     PROPOSE_TOOL_NAME,
     WRITE_TOOL_NAMES,
+    TurnCallBudget,
     build_openai_tools,
     build_tool_specs,
     build_tools,
@@ -498,13 +500,247 @@ def test_repeated_conflicts_cannot_become_an_unbounded_retry_loop(ws):
 
 def test_a_held_change_does_not_spend_the_thrash_brake(ws):
     # A hold is not the model being wrong: the code passed the gate and the analyst is
-    # simply being asked. Counting it would end the turn for a model doing fine work.
+    # simply being asked. Counting it on the VALIDATION brake would end the turn for a
+    # model doing fine work — so a run of DIFFERENT held changes costs it nothing, and
+    # the brake is still full afterwards.
     applier = _Applier(_Outcome("held", "it writes to a database"))
     specs = _specs(ws, apply_edit=applier)
     tool = _write_tool(specs)
-    for _ in range(8):
-        out = tool.handler(_invocation(code="y = x * 2"))
+    for i in range(8):
+        out = tool.handler(_invocation(code=f"y_{i} = x * {i}"))
         assert not out.is_error and "HELD" in out.text
+    # ...and the next real mistake still gets its diagnostics, not the give-up message.
+    assert "MB002" in tool.handler(_invocation(code="seed = 2")).text
+
+
+# --- the repeat brake: held/disabled, which are nobody's fault and never end ---
+
+
+def test_re_sending_one_held_change_forever_is_stopped_by_its_own_brake(ws):
+    # The hold already says "Do NOT send this change again". A model that does not read
+    # it can otherwise re-send the identical change for as long as the turn lasts, being
+    # told "held" every time — on the Copilot backend that is a loop with nothing else
+    # to end it. Nine is deliberately generous; the tenth is told to stop and explain.
+    applier = _Applier(_Outcome("held", "it writes to a database"))
+    specs = _specs(ws, apply_edit=applier)
+    tool = _write_tool(specs)
+    same = _invocation(code="y = x * 2")
+
+    for _ in range(9):
+        assert "HELD" in tool.handler(same).text
+    out = tool.handler(same)
+    assert out.is_error
+    assert f"Stop calling {EDIT_TOOL_NAME}" in out.text
+    assert "waiting on a person" in out.text
+    assert "HELD" not in out.text
+
+
+def test_a_repeated_disabled_write_is_stopped_the_same_way(ws):
+    # Same shape, same reason: a switch the model cannot see will answer identically
+    # forever, and "retrying will not change that" is not self-enforcing.
+    applier = _Applier(_Outcome("disabled", "auto-apply is off for this notebook", True))
+    specs = _specs(ws, apply_edit=applier)
+    tool = _write_tool(specs)
+    same = _invocation(code="y = x * 2")
+
+    for _ in range(9):
+        assert "may not write to the notebook" in tool.handler(same).text
+    out = tool.handler(same)
+    assert f"Stop calling {EDIT_TOOL_NAME}" in out.text
+    # ...and it says which of the two this is: nobody is coming to confirm a switch.
+    assert "switched off for this notebook" in out.text
+    assert "waiting on a person" not in out.text
+
+
+def test_changing_the_change_starts_the_repeat_brake_over(ws):
+    # It measures "you sent me this again", not "you have been held before" — a model
+    # working through a notebook a hold at a time is not thrashing.
+    applier = _Applier(_Outcome("held", "it writes to a database"))
+    specs = _specs(ws, apply_edit=applier)
+    tool = _write_tool(specs)
+    for i in range(20):
+        out = tool.handler(_invocation(code=f"y_{i} = x * {i}"))
+        assert not out.is_error and "HELD" in out.text, i
+
+
+def test_a_write_that_lands_clears_the_repeat_brake(ws):
+    held = _Outcome("held", "it writes to a database")
+    applier = _Applier(*([held] * 9 + [_Outcome("applied", _OBSERVATION), held]))
+    specs = _specs(ws, apply_edit=applier)
+    tool = _write_tool(specs)
+    same = _invocation(code="y = x * 2")
+
+    for _ in range(9):
+        assert "HELD" in tool.handler(same).text
+    assert "APPLIED" in tool.handler(same).text  # the 10th call lands
+    for _ in range(9):  # ...and the identical change gets a full budget again
+        assert "HELD" in tool.handler(same).text
+
+
+def test_the_two_brakes_are_counted_separately(ws):
+    # A held change must not push a REFUSED one closer to the give-up message, or the
+    # reverse: they say different things about who is at fault.
+    applier = _Applier(_Outcome("held", "it writes to a database"))
+    specs = _specs(ws, apply_edit=applier)
+    tool = _write_tool(specs)
+    bad = _invocation(code="seed = 2")
+    held = _invocation(code="y = x * 2")
+
+    for _ in range(6):
+        assert "MB002" in tool.handler(bad).text
+        assert "HELD" in tool.handler(held).text
+    # Six refusals have been spent; the seventh gives up, and the holds did not count.
+    assert f"Stop calling {EDIT_TOOL_NAME}" in tool.handler(bad).text
+    assert "HELD" in tool.handler(held).text  # ...and the hold path is still open
+
+
+# --- where the change landed --------------------------------------------------
+
+
+def _applied_with(summary):
+    outcome = _Outcome("applied", _OBSERVATION)
+    outcome.payload = {"summary": summary, "rationale": "why", "undo_depth": 1}
+    return outcome
+
+
+def test_the_applied_result_tells_the_model_where_its_cells_landed(ws):
+    # Without this every follow-up edit costs a mooring_read_notebook_source round trip
+    # — or is guessed at, refused by `expect`, and charged to the thrash brake for a
+    # mistake mooring caused.
+    applier = _Applier(_applied_with({"edited": [2], "appended": [4], "deleted": []}))
+    specs = _specs(ws, apply_edit=applier)
+    out = _write_tool(specs).handler(_invocation(code="y = x * 2"))
+    assert not out.is_error
+    assert "WHERE IT LANDED: edited cell 2; added cell 4." in out.text
+    assert _OBSERVATION in out.text  # the observation is still there, unchanged
+
+
+def test_a_delete_says_the_numbers_below_it_have_moved(ws):
+    applier = _Applier(_applied_with({"edited": [], "appended": [], "deleted": [1]}))
+    specs = _specs(ws, apply_edit=applier)
+    out = _write_tool(specs).handler(_invocation(code="y = x * 2"))
+    assert "deleted cell 1" in out.text
+    assert "renumbers every cell after it" in out.text
+    assert "mooring_read_notebook_source" in out.text
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [None, {}, {"summary": None}, {"summary": {"edited": [], "appended": [], "deleted": []}}],
+)
+def test_a_payload_with_nothing_to_say_adds_nothing(ws, payload):
+    outcome = _Outcome("applied", _OBSERVATION)
+    if payload is not None:
+        outcome.payload = payload
+    specs = _specs(ws, apply_edit=_Applier(outcome))
+    out = _write_tool(specs).handler(_invocation(code="y = x * 2"))
+    assert not out.is_error and "WHERE IT LANDED" not in out.text
+
+
+def test_only_cell_NUMBERS_reach_the_model_from_the_receipt(ws):
+    # The receipt is the applier's, and it is built for the browser. Whatever else ends
+    # up in it, only integers are rendered into a tool result.
+    applier = _Applier(
+        _applied_with({"edited": [1, SECRET, None, True, 3.5], "appended": SECRET, "deleted": []})
+    )
+    specs = _specs(ws, apply_edit=applier)
+    out = _write_tool(specs).handler(_invocation(code="y = x * 2"))
+    assert "WHERE IT LANDED: edited cell 1." in out.text
+    assert SECRET not in out.text
+
+
+# --- the runaway ceiling on ONE turn's tool calls ------------------------------
+#
+# The Copilot SDK drives its own tool loop, so mooring cannot count it from outside —
+# only from the boundary every call crosses, which is here. (The OpenAI session owns
+# its loop and spends the SAME budget there instead; see test_openai_session.py.)
+
+
+def test_the_ceiling_answers_a_call_past_it_without_running_it(ws):
+    budget = TurnCallBudget(3)
+    applier = _Applier()
+    specs = _specs(ws, apply_edit=applier, budget=budget)
+    tool = _write_tool(specs)
+
+    for i in range(3):
+        assert not tool.handler(_invocation(code=f"a_{i} = {i}")).is_error, i
+    out = tool.handler(_invocation(code="a_4 = 4"))
+
+    assert out.is_error and "runaway ceiling" in out.text
+    # An abnormal SELF-stop with the work intact, not a finished turn — the same thing
+    # the OpenAI loop's own notice says to the analyst.
+    assert "not a finished answer" in out.text and "continue" in out.text
+    assert len(applier.calls) == 3  # the call past the ceiling never reached the applier
+
+
+def test_the_ceiling_counts_reads_as_well_as_writes(ws):
+    # A model told "no" only by the write tool would spend the rest of the turn reading.
+    budget = TurnCallBudget(1)
+    specs = _specs(ws, apply_edit=_Applier(), budget=budget, cancelled=lambda: False)
+    assert not specs["mooring_list_datasets"].handler(_invocation()).is_error
+    for name, spec in specs.items():
+        out = spec.handler(_invocation(dataset="data/sales.parquet", code="y = x * 2"))
+        assert out.is_error and "runaway ceiling" in out.text, name
+
+
+def test_the_ceiling_is_per_turn(ws):
+    budget = TurnCallBudget(2)
+    specs = _specs(ws, apply_edit=_Applier(), budget=budget)
+    tool = _write_tool(specs)
+    for _ in range(2):
+        assert not tool.handler(_invocation(code="y = x * 2")).is_error
+    assert "runaway ceiling" in tool.handler(_invocation(code="y = x * 2")).text
+
+    budget.start_turn()  # the analyst said "carry on"
+    assert not tool.handler(_invocation(code="y = x * 2")).is_error
+
+
+@pytest.mark.parametrize("bad", [0, -5, None, "twelve"])
+def test_a_degenerate_ceiling_falls_back_rather_than_ending_every_turn(bad):
+    # A ceiling below 1 would end every turn before its first call — a worse answer to a
+    # bad value than the shipped default is.
+    assert TurnCallBudget(bad).ceiling == DEFAULT_MAX_TOOL_ITERS
+
+
+def test_no_budget_means_no_ceiling_wrapper_at_all(ws):
+    # The shipped propose path passes none; nothing to call, nothing to fail.
+    specs = _specs(ws, apply_edit=_Applier())
+    tool = _write_tool(specs)
+    for _ in range(12):
+        assert not tool.handler(_invocation(code="y = x * 2")).is_error
+
+
+def test_a_cancel_is_reported_ahead_of_the_ceiling(ws):
+    # Both refusals are terminal, but only one of them is the analyst's own doing — and
+    # a stopped turn must not even spend the ceiling.
+    budget = TurnCallBudget(1)
+    specs = _specs(ws, apply_edit=_Applier(), budget=budget, cancelled=lambda: True)
+    out = _write_tool(specs).handler(_invocation(code="y = x * 2"))
+    assert "CANCELLED by the analyst" in out.text and "runaway" not in out.text
+    assert budget.used == 0
+
+
+def test_the_ceiling_refusal_is_not_withheld_by_the_output_guard(ws):
+    # Like the cancel refusal, it is mooring's own fixed sentence about mooring's own
+    # limit — a data-policy check on text the model was never going to see must not be
+    # able to swallow the one result that ends the loop.
+    budget = TurnCallBudget(1)
+    specs = {
+        s.name: s
+        for s in build_tool_specs(
+            workspace=ws,
+            folders=("data",),
+            notebook_rel="nb.py",
+            apply_edit=_Applier(),
+            budget=budget,
+            output_guard=lambda text: False,
+        )
+    }
+    tool = _write_tool(specs)
+    assert tool.handler(_invocation(code="y = x * 2")).text == (
+        "tool output withheld by the approved data policy"
+    )
+    assert "runaway ceiling" in tool.handler(_invocation(code="y = x * 2")).text
 
 
 # --- cancellation at the tool boundary --------------------------------------

@@ -24,10 +24,25 @@ What that buys is only safe because of what it does NOT change:
   this module's own words (:func:`mooring.ai.introspect.format_observation`); the
   receipt payload is cell numbers and the same one-line summary. The optional run
   report goes through ``egress.sanitize_traceback`` — the one gateway — inside
-  :mod:`mooring.app.run_report`, never a second route to the sanitiser.
-* **The analyst keeps the stop and the way back.** A cancelled turn writes nothing, and
-  every write in one turn shares ONE undo checkpoint, so Revert puts the notebook back
-  the way it was before the assistant started — not one write at a time.
+  :mod:`mooring.app.run_report`, and then through the session's own outbound PII valve,
+  which FAILS CLOSED here: with no analyst at a tool result to confirm a held summary,
+  nothing is sent.
+* **The other three knobs still mean what they say.** ``apply_runs = false`` stages the
+  cell, so there is nothing to observe and nothing to re-run; ``live_schema = false``
+  forbids reading the running kernel, and the observation IS a kernel read; both are
+  re-read from disk, policy-folded, at every write (:class:`Arming`).
+* **Both ledgers are filled from here** (:func:`_record_apply`), so the model's own
+  Apply is as visible in telemetry and the local activity journal as the analyst's
+  click — same event names, same value-free split.
+* **The analyst keeps the stop and the way back.** Stated precisely, because the loose
+  version ("a cancelled turn writes nothing") is not what the code does: a cancel is
+  read before each write, so once it is raised **no NEW write is STARTED** — every later
+  tool call comes back ``cancelled`` having touched nothing. A cancel that lands while a
+  write is already in flight does not unwind it; that write finishes, because rolling
+  bytes back mid-patch is how a notebook ends up half-written. The remedy for it is the
+  other half of this bullet: every write in one turn shares ONE undo checkpoint, so
+  Revert puts the notebook back the way it was before the assistant started — not one
+  write at a time. (``ai/chat.py::_apply_edit`` words its own guarantee the same way.)
 
 Layering note: this is L3.5 (``app/``) and the tool that calls it is L3 (``ai/``), so
 the callback is injected downwards and the outcome is read back by DUCK TYPING
@@ -37,14 +52,16 @@ the callback is injected downwards and the outcome is read back by DUCK TYPING
 
 from __future__ import annotations
 
+import contextlib
 import secrets
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import NamedTuple
 
-from mooring import config, marimo_rt, policy
+from mooring import activity, config, marimo_rt, policy, telemetry
 from mooring.app import notebooks
-from mooring.app.apply import ApplyGateHeld, ApplyGuard
+from mooring.app.apply import ApplyGateHeld, ApplyGuard, scan_report
 
 # How long the observation waits for the kernel to settle before reporting "could not
 # see". Deliberately the introspect module's own budget: the settle rule, the poll
@@ -60,6 +77,21 @@ _MANUAL_TEXT = (
 _CANCELLED_TEXT = "The analyst stopped this turn, so nothing was written."
 _DISABLED_TEXT = "The copilot is switched off for this notebook, so nothing was written."
 _NO_NOTEBOOK_TEXT = "The notebook could not be opened, so nothing was written."
+# Why an observation did not happen. Both are ordinary, configured states of the app,
+# not failures — and both are reported as "could not see", never as "it did not run",
+# because the model must not repair a cell on the strength of either.
+_STAGED_DETAIL = (
+    "mooring is set to stage an applied cell rather than run it (`[ai] apply_runs` is "
+    "off), so the change is waiting in the notebook for the analyst to run"
+)
+_LIVE_SCHEMA_OFF_DETAIL = (
+    "reading the running kernel is turned off for this machine (`[ai] live_schema`)"
+)
+_REPORT_HELD_TEXT = (
+    "mooring ran the notebook to find out what failed, but its outbound PII guard held "
+    "the failure summary, so it was NOT sent. Ask the analyst what the error says "
+    "rather than guessing at it."
+)
 
 
 @dataclass(frozen=True)
@@ -92,6 +124,7 @@ def make_applier(
     cfg_fn,
     editor_fn,
     observe_timeout: float = OBSERVE_TIMEOUT,
+    settle_floor: float | None = None,
 ) -> "NotebookApplier":
     """Build the ``apply_edit(op_dicts, rationale) -> ApplyOutcome`` callback.
 
@@ -115,6 +148,7 @@ def make_applier(
         cfg_fn=cfg_fn,
         editor_fn=editor_fn,
         observe_timeout=observe_timeout,
+        settle_floor=settle_floor,
     )
 
 
@@ -130,6 +164,7 @@ class NotebookApplier:
         cfg_fn,
         editor_fn,
         observe_timeout: float = OBSERVE_TIMEOUT,
+        settle_floor: float | None = None,
     ) -> None:
         self._workspace = Path(workspace)
         self._notebook_rel = notebook_rel
@@ -137,6 +172,10 @@ class NotebookApplier:
         self._cfg_fn = cfg_fn
         self._editor_fn = editor_fn
         self._observe_timeout = observe_timeout
+        # None -> introspect's own default (or the MOORING_OBSERVE_FLOOR override). The
+        # floor is a guess about how long THIS machine's marimo takes to notice a file
+        # change, so it is threaded rather than baked in.
+        self._settle_floor = settle_floor
         self._session = None
         # The turn this applier is writing under. Minted here so a write is always
         # turn-scoped even if nobody ever calls begin_turn (a session that writes
@@ -175,9 +214,9 @@ class NotebookApplier:
         ops = list(op_dicts or [])
         rationale = str(rationale or "")
         turn_id = self.turn_id
-        auto_apply, auto_run_report = _arming(self._workspace)
+        arming = _arming(self._workspace)
 
-        if not auto_apply:
+        if not arming.auto_apply:
             # Manual mode, decided at the moment of THIS write. Reuses the hold path on
             # purpose: the analyst gets the ordinary proposal card and the model is told
             # the same thing a codeguard hold tells it — a human has to act.
@@ -205,6 +244,13 @@ class NotebookApplier:
             # verbatim so today's hold card renders exactly as it always did.
             from mooring.ai import codeguard
 
+            # The same central-sink event the manual Apply route emits when the gate
+            # holds — count + band only, never the kinds (see _record_apply).
+            _log_event(
+                "ai_chat_apply_held",
+                band=held.verdict.band,
+                findings=len(held.verdict.findings),
+            )
             reasons = "\n".join(f"- {line}" for line in codeguard.describe(held.verdict))
             return _held(
                 ops,
@@ -219,19 +265,32 @@ class NotebookApplier:
         except CellWriteError as exc:
             return ApplyOutcome("error", _clean(str(exc)), is_error=True)
 
-        return self._observe_and_report(
-            nb_path, ops, rationale, turn_id, undo_depth, auto_run_report
-        )
+        # The write LANDED. Both ledgers, exactly as the manual Apply route fills them.
+        _record_apply(self._workspace, self._notebook_rel, ops)
+        return self._observe_and_report(nb_path, ops, rationale, turn_id, undo_depth, arming)
 
     # -- what came back -------------------------------------------------------
 
     def _observe_and_report(
-        self, nb_path: Path, ops, rationale: str, turn_id: str, undo_depth: int, auto_run_report
+        self, nb_path: Path, ops, rationale: str, turn_id: str, undo_depth: int, arming: Arming
     ) -> ApplyOutcome:
         """The half of the feature that is the point: watch the change run.
 
-        Everything here is best-effort by construction. The bytes are already on disk
-        and marimo is already running them, so a failure to OBSERVE must never be
+        Two configured states mean there is nothing to watch, and both are answered
+        WITHOUT probing rather than by probing and misreading the result:
+
+        * ``apply_runs`` off — marimo is set to ``lazy``, so the applied cell arrives
+          stale and never runs. Probing then would settle on names bound before the
+          write (an edit) or report them missing (an append), and "missing" would be
+          stated as *"the code that defines them did not run to completion"* — flatly
+          false about a cell nobody has run yet. So: no verdict either way, and no
+          automatic re-run, which would defeat the very knob that staged the cell.
+        * ``live_schema`` off — the observation is a live-kernel read over the same
+          frozen probe, so the machine that turned kernel reads off does not get them
+          back through this door. ``[ai] live_schema = false`` means what it says.
+
+        Everything else here is best-effort by construction. The bytes are already on
+        disk and marimo is already running them, so a failure to OBSERVE must never be
         reported as a failure to apply — it is reported as "could not see", which
         :func:`mooring.ai.introspect.format_observation` states in terms the model is
         told not to act on.
@@ -239,25 +298,34 @@ class NotebookApplier:
         from mooring.ai import introspect
 
         new_source = _read_text(nb_path)
+        # Static analysis of the file just written (compile-only, no kernel), so it runs
+        # whatever the knobs say: the receipt's cell numbers are derived from it.
         try:
             defs = marimo_rt.cell_defs(new_source)
-            touched = _touched_indices(ops, len(defs))
-            obs = introspect.observe(
-                self._editor(),
-                self._notebook_rel,
-                _expected_names(defs, touched),
-                timeout=self._observe_timeout,
-            )
-            text = introspect.format_observation(obs)
+        except Exception:  # noqa: BLE001
+            defs = []
+        try:
+            if not arming.apply_runs:
+                obs = introspect.Observation(detail=_STAGED_DETAIL)
+            elif not arming.live_schema:
+                obs = introspect.Observation(detail=_LIVE_SCHEMA_OFF_DETAIL)
+            else:
+                obs = introspect.observe(
+                    self._editor(),
+                    self._notebook_rel,
+                    _expected_names(defs, _touched_indices(ops, len(defs))),
+                    timeout=self._observe_timeout,
+                    settle_floor=self._settle_floor,
+                )
         except Exception:  # noqa: BLE001
             # The bytes ARE on disk and marimo is running them. Reporting an error here
             # would tell the model its change did not land, which is false and is the one
             # answer that makes it undo working code. Degrade to "could not see" instead.
-            defs, obs = [], introspect.Observation(detail="the observation failed")
-            text = introspect.format_observation(obs)
+            obs = introspect.Observation(detail="the observation failed")
+        text = introspect.format_observation(obs)
 
         report = ""
-        if auto_run_report and obs.observed and obs.missing:
+        if arming.auto_run_report and arming.apply_runs and obs.observed and obs.missing:
             report = self._auto_run_report(new_source)
         if report:
             text = f"{text}\n\n{report}"
@@ -266,9 +334,22 @@ class NotebookApplier:
             "applied",
             text,
             payload={
+                # Opaque, unique per write, stable for the session: the SSE layer
+                # replays receipts after a dropped stream and dedupes on this, and
+                # replays ONLY payloads that carry one — so an empty id is a receipt
+                # the analyst silently loses on a reconnect.
+                "id": _new_receipt_id(),
                 "summary": _summary(ops, len(defs)),
-                "rationale": rationale,
-                "undo_depth": undo_depth,
+                # Never empty — see _rationale. The receipt is the analyst's only
+                # account of what happened to their notebook, and no client can
+                # invent the missing half of it.
+                "rationale": _rationale(rationale),
+                "undo_depth": int(undo_depth),
+                # How many writes this receipt's Revert would take back, counting this
+                # one. A turn shares ONE checkpoint, so a receipt that implies "undoes
+                # this change" when the number is 5 is telling the analyst something
+                # untrue about the button they are about to press.
+                "checkpoint_writes": int(getattr(undo_depth, "writes", 1) or 1),
                 "turn_id": turn_id,
                 "observation": _observation_line(obs),
             },
@@ -309,9 +390,15 @@ class NotebookApplier:
             return ""
         finally:
             cancel.stop()
-        if report.cancelled or not report.sent:
+        if report.cancelled:
             return ""
-        return report.sent
+        if getattr(report, "held", False):
+            # The outbound PII guard would have HELD this summary in block mode. There
+            # is no analyst at a tool result to press "Send anyway", so it fails closed:
+            # nothing is sent, and the model is told to ask rather than left thinking the
+            # run found nothing.
+            return _REPORT_HELD_TEXT
+        return report.sent or ""
 
     # -- small helpers --------------------------------------------------------
 
@@ -324,7 +411,12 @@ class NotebookApplier:
     def _cancelled(self) -> bool:
         """Whether the analyst has stopped this turn. Duck-typed and fail-OPEN: an
         applier with no session (or a session without the method) is not cancelled, so
-        a missing signal never silently blocks every write."""
+        a missing signal never silently blocks every write.
+
+        Read BEFORE a write, which is what "the stop works" means here and all it means:
+        no new write is started once the flag is up. A cancel raised between this check
+        and ``apply_with_undo``'s lock still lands that one write — see the module
+        docstring for why that window is left open and what the remedy for it is."""
         session = self._session
         checker = getattr(session, "cancel_requested", None)
         if not callable(checker):
@@ -378,8 +470,85 @@ def _new_turn_id() -> str:
     return secrets.token_urlsafe(6)
 
 
-def _arming(workspace: Path) -> tuple[bool, bool]:
-    """``(auto_apply, auto_run_report)``, read FRESH from disk and policy-folded.
+def _new_receipt_id() -> str:
+    """One write's identity, for the receipt event. Opaque and unique — the SSE replay
+    dedupes on it, so two writes must never share one."""
+    return secrets.token_urlsafe(9)
+
+
+# What the receipt says when the model supplied no reason. Mooring's own words, and
+# honest about which half is missing: the summary beside it already says WHAT changed,
+# so the gap this fills is WHY, and inventing one would be worse than naming the gap.
+_NO_RATIONALE = "The assistant did not say why it made this change."
+
+
+def _rationale(rationale: str) -> str:
+    """The receipt's description of the change — never empty.
+
+    A receipt with no rationale reads as "changed the 4th cell" and nothing else, which
+    is not an account of what happened to someone's notebook. Nothing downstream can
+    fill it in (the browser has neither the ops nor the conversation), so it is filled
+    here or not at all.
+    """
+    text = " ".join(str(rationale or "").split())
+    return text or _NO_RATIONALE
+
+
+def _log_event(name: str, **fields) -> None:
+    """One telemetry line, best-effort: a write must never fail because a sink did."""
+    with contextlib.suppress(Exception):
+        telemetry.log_event(name, **fields)
+
+
+def _record_apply(workspace: Path, notebook_rel: str, ops) -> None:
+    """The two ledgers an Apply fills, for the write the MODEL made.
+
+    They used to be filled only by ``/api/ai/chat/apply`` — the analyst's click — which
+    meant that once auto-apply became the default, the commonest Apply in the product
+    emitted neither, and ``docs/admins/ai-privacy.md``'s "each Apply emits a telemetry
+    line ... for held, confirmed and clean applies alike" stopped being true. Emitting
+    from here covers BOTH adapters at once, because both write through this applier.
+
+    The split between the two sinks is the one the route drew and is kept exactly:
+
+    * the central sink (opt-in ``[logging] endpoint``) gets the verdict's BAND and the
+      NUMBER of findings — never the kinds, never a line number, never anything from
+      the cell;
+    * the LOCAL activity ledger gets the value-free KINDS themselves (fixed slugs from
+      codeguard's own table), because "what did I approve?" is a local question.
+
+    ``scan_report`` re-derives the verdict from the ops — a pure function, outside the
+    lock, reported and never enforced, exactly as the route calls it.
+    """
+    try:
+        band, kinds = scan_report(ops)
+    except Exception:  # noqa: BLE001 — a report must never break a write that landed
+        return
+    _log_event("ai_chat_apply", band=band, findings=len(kinds))
+    with contextlib.suppress(Exception):
+        activity.record(workspace, "ai_apply", path=notebook_rel, kinds=list(kinds))
+
+
+class Arming(NamedTuple):
+    """The four policy-folded knobs one write is decided by.
+
+    ``auto_apply`` — may the model's change land at all. ``apply_runs`` — does an
+    applied cell RUN (marimo's ``watcher_on_save``); with it off the cell arrives
+    stale and nothing executes, so there is nothing to observe and nothing to re-run.
+    ``live_schema`` — may mooring read the running kernel at all; the observation IS a
+    live-kernel read, over the same probe, so a machine that has turned that off does
+    not get one through this door. ``auto_run_report`` — may mooring re-run the
+    notebook itself.
+    """
+
+    auto_apply: bool
+    auto_run_report: bool
+    apply_runs: bool
+    live_schema: bool
+
+
+def _arming(workspace: Path) -> Arming:
+    """The four knobs, read FRESH from disk and policy-folded.
 
     The same read, in the same place, for the same TOCTOU reason as
     :func:`mooring.app.apply._guard_armed`: the local config file and the synced
@@ -388,19 +557,26 @@ def _arming(workspace: Path) -> tuple[bool, bool]:
     when the chat opened would be about a config that no longer exists. A policy pinning
     ``ai.auto_apply = false`` has to bite on the very NEXT write, not the next restart.
 
-    ``policy.tighten_app_config`` rather than the local value alone, because that is the
-    point of both knobs being policy-governed: a team can take the model's write away
-    for everyone, and local config (env vars included) cannot answer back.
+    ``policy.tighten_app_config`` rather than the local values alone, because that is
+    the point of these knobs being policy-governed: a team can take the model's write,
+    its kernel reads and its re-runs away for everyone, and local config (env vars
+    included) cannot answer back.
 
-    Fails CLOSED — an unreadable config means manual mode and no automatic run. The
-    worst case of failing closed is one Apply click; the worst case of failing open is
-    "corrupt the config" becoming a way past both knobs.
+    Fails CLOSED on every knob — an unreadable config means manual mode, no kernel
+    read, no automatic run. The worst case of failing closed is one Apply click and a
+    turn of ignorance; the worst case of failing open is "corrupt the config" becoming
+    a way past all four.
     """
     try:
         app_cfg = policy.tighten_app_config(config.load_app_config(), workspace)
-        return bool(app_cfg.ai_auto_apply), bool(app_cfg.ai_auto_run_report)
+        return Arming(
+            auto_apply=bool(app_cfg.ai_auto_apply),
+            auto_run_report=bool(app_cfg.ai_auto_run_report),
+            apply_runs=bool(app_cfg.ai_apply_runs),
+            live_schema=bool(app_cfg.ai_live_schema),
+        )
     except Exception:  # noqa: BLE001
-        return False, False
+        return Arming(False, False, False, False)
 
 
 def _read_text(path: Path) -> str:

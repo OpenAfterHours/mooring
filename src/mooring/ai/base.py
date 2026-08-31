@@ -113,9 +113,10 @@ class AIProvider(Protocol):
         — puts the write inside the tool call and hands its value-free observation back
         as the tool result. Passed here rather than read from config INSIDE the session
         so ``ai/`` never has to reach up to ``app/`` for it. ``max_tool_iters`` is the
-        per-turn tool-call ceiling (``[ai] max_tool_iters``, policy-folded), and applies
-        only to a backend that drives its own tool loop; the Copilot SDK owns that loop
-        and takes no ceiling from us.
+        per-turn tool-call RUNAWAY ceiling (``[ai] max_tool_iters``, policy-folded), and
+        every backend honours it: one that drives its own tool loop spends it there,
+        and one whose SDK owns the loop (Copilot) spends it at the tool boundary, which
+        is the only part of that loop mooring owns.
 
         Raises :class:`AIError` if unavailable/not signed in.
         """

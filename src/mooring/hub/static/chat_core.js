@@ -17,17 +17,24 @@ const ChatCore = (function () {
     { name: "help", help: "show commands and key bindings" },
     { name: "explain", help: "walk through what this notebook does" },
     { name: "review", help: "review the notebook's logic for correctness risks" },
-    { name: "checks", help: "propose tie-out / data-quality checks" },
-    { name: "sql", help: "propose a marimo SQL (DuckDB) cell for this notebook" },
+    // Worded so each line is true in BOTH modes. With `[ai] auto_apply` on the copilot
+    // writes the cell itself; with it off it proposes one and waits for Apply. "ask for"
+    // covers both; "propose" only described the second, and silently stopped being true
+    // for every user the day auto-apply became the default.
+    { name: "checks", help: "ask for tie-out / data-quality checks" },
+    { name: "sql", help: "ask for a marimo SQL (DuckDB) cell for this notebook" },
     {
       name: "investigate",
       help: "research independent sub-questions in parallel — /investigate <topic>",
     },
     { name: "clear", help: "clear the transcript (keeps the session)" },
     { name: "model", help: "switch model — /model [name]" },
-    { name: "apply", help: "apply the latest proposal" },
-    { name: "diff", help: "jump to the latest proposal" },
-    { name: "undo", help: "undo the last applied change" },
+    // These three act on a change that is WAITING — a held one, or (in propose mode)
+    // every one. When the copilot applies its own changes there is usually nothing
+    // waiting, and "the latest proposal" described a card that was no longer there.
+    { name: "apply", help: "apply a change that is waiting for you" },
+    { name: "diff", help: "jump to the change waiting for you" },
+    { name: "undo", help: "put the notebook back one step (same as Revert)" },
     { name: "retry", help: "resend your last message" },
   ];
 
@@ -1012,13 +1019,22 @@ const ChatCore = (function () {
   // The wire summary is {edited: [...], appended: [...], deleted: [...]} — cell numbers
   // in whatever order the applier wrote them. Verb order is fixed so a multi-op write
   // always reads the same way round.
-  const RECEIPT_PARTS = [
-    ["edited", "Changed"],
-    ["appended", "Added"],
-    ["deleted", "Removed"],
-  ];
+  //
+  // Those numbers are ZERO-BASED indices into the file, which is a number the analyst
+  // has no way to see: marimo does not print it, and "cell 0" is not a thing that
+  // exists on their screen. So they are rendered as a POSITION counted from the top —
+  // "the 4th cell" — which is a number they can arrive at by scrolling. Appends have no
+  // useful position at all (they are always the new last cells), so they say where they
+  // went instead of pretending to a number.
   // Past this many cells the list stops being readable, so say how many instead.
   const RECEIPT_MAX_LISTED = 4;
+
+  // "1st" / "2nd" / "3rd" / "4th"… for a ONE-based position.
+  function ordinal(n) {
+    const teens = n % 100;
+    if (teens >= 11 && teens <= 13) return n + "th";
+    return n + ({ 1: "st", 2: "nd", 3: "rd" }[n % 10] || "th");
+  }
 
   // Cell numbers, cleaned: integers only, deduped, ascending. Anything else is dropped
   // rather than rendered — a receipt that says "cell undefined" is worse than one that
@@ -1046,21 +1062,32 @@ const ChatCore = (function () {
     return out;
   }
 
+  // "the 4th cell" / "the 2nd and 4th cells" / "5 cells" — from ZERO-based indices.
   function receiptCellPhrase(nums) {
-    if (nums.length === 1) return "cell " + nums[0];
     if (nums.length > RECEIPT_MAX_LISTED) return nums.length + " cells";
-    return "cells " + nums.slice(0, -1).join(", ") + " and " + nums[nums.length - 1];
+    const pos = nums.map((n) => ordinal(n + 1));
+    if (pos.length === 1) return "the " + pos[0] + " cell";
+    return "the " + pos.slice(0, -1).join(", ") + " and " + pos[pos.length - 1] + " cells";
   }
 
-  // "Changed cell 3 · Added cell 8". Never empty: a write with no readable summary still
-  // happened, and saying nothing would hide it.
+  // Appends land at the END of the notebook, always. Their index is therefore a fact
+  // about the file's length rather than about the change, and naming it would invite
+  // the analyst to go looking for a number nothing on their screen agrees with.
+  function receiptAppendPhrase(n) {
+    return n === 1 ? "Added a new cell at the end" : "Added " + n + " new cells at the end";
+  }
+
+  // "Changed the 4th cell · Added a new cell at the end". Never empty: a write with no
+  // readable summary still happened, and saying nothing would hide it.
   function receiptHeadline(summary) {
     const s = summary && typeof summary === "object" && !Array.isArray(summary) ? summary : {};
     const parts = [];
-    for (const [key, verb] of RECEIPT_PARTS) {
-      const nums = receiptCells(s[key]);
-      if (nums.length) parts.push(verb + " " + receiptCellPhrase(nums));
-    }
+    const edited = receiptCells(s.edited);
+    if (edited.length) parts.push("Changed " + receiptCellPhrase(edited));
+    const appended = receiptCells(s.appended);
+    if (appended.length) parts.push(receiptAppendPhrase(appended.length));
+    const deleted = receiptCells(s.deleted);
+    if (deleted.length) parts.push("Removed " + receiptCellPhrase(deleted));
     return parts.length ? parts.join(" · ") : "Changed the notebook";
   }
 
@@ -1081,13 +1108,28 @@ const ChatCore = (function () {
     );
   }
 
-  function receiptObservation(text) {
+  // The whole tidied line, however long. The applier appends the clause that names what
+  // is NOT bound — the half of the observation that says the change did not work — LAST,
+  // so a hard truncation removes exactly the failure and leaves the good news. Nothing
+  // may be dropped on the floor: the short form is what is shown, this is what "show
+  // more" reveals, and the caller must offer that whenever the two differ.
+  function receiptObservationFull(text) {
     const s = typeof text === "string" ? text.replace(/\s+/g, " ").trim() : "";
-    if (!s) return "";
-    const grouped = groupDigits(s);
+    return s ? groupDigits(s) : "";
+  }
+
+  function receiptObservation(text) {
+    const grouped = receiptObservationFull(text);
+    if (!grouped) return "";
     return grouped.length > OBSERVATION_MAX
       ? grouped.slice(0, OBSERVATION_MAX - 1).trimEnd() + "…"
       : grouped;
+  }
+
+  // Whether the short form left something out — i.e. whether a "show more" is owed.
+  function receiptObservationTruncated(text) {
+    const full = receiptObservationFull(text);
+    return !!full && full !== receiptObservation(text);
   }
 
   // Where the next receipt goes. One turn can write several times, and those receipts
@@ -1106,6 +1148,102 @@ const ChatCore = (function () {
     // noise, so the first receipt is numbered retroactively when the second arrives.
     return { reuse, turnId: id, count, numbered: count >= 2 };
   }
+
+  // -- auto-apply: what Revert actually reverts -----------------------------
+  // The one control that makes auto-apply safe, and the one that was lying. mooring
+  // takes ONE undo checkpoint per TURN, not per write: five writes in a turn share a
+  // single snapshot, so the Revert beside the fifth receipt puts back all five. The
+  // button said "Put the notebook back the way it was before this change" and the
+  // confirmation said "Reverted the last applied change" — for someone who does not
+  // read Python and cannot see the notebook diff, that is the difference between
+  // knowing what happened and not.
+  //
+  // The granularity is not even fixed: the guard refuses to EXTEND a checkpoint after a
+  // manual Apply or an Undo lands mid-turn (app/apply.py:_extends_turn), so inside one
+  // visually identical group some Reverts undo four writes and some undo one. Only the
+  // server can tell them apart, and only if it says so.
+  //
+  // `writes` is that answer: the server's `checkpoint_writes` — how many model writes
+  // the checkpoint this Revert would restore currently covers, counting this one. When
+  // it is absent (an older hub, or a payload this client could not read) NOTHING is
+  // guessed: `undo_depth` cannot distinguish the two cases (the undo stack is capped at
+  // 25, so "the depth did not move" also means "the oldest snapshot was pruned"), and a
+  // confident wrong number is the defect being fixed, not a smaller version of it. The
+  // wording then says what is actually known — that a turn's changes go back together
+  // and the earlier ones MAY go with this one.
+  //
+  // `position` is which write of the current TURN this is (1-based), counted by the
+  // caller across the whole turn rather than off the visible group — /clear empties the
+  // transcript without un-writing anything, and the first receipt after it is still not
+  // the first write of the turn.
+  const REVERT_LABEL = "Revert";
+  const REVERT_ONE_TITLE = "Put the notebook back to how it was just before this change.";
+  const REVERT_MAYBE_TITLE =
+    "Put the notebook back one step. mooring undoes a turn's changes together, so the " +
+    "earlier changes from this turn may go back with it.";
+  const REVERT_MAYBE_NOTE = "may also undo the earlier changes in this turn";
+
+  function revertScope(writes, position) {
+    const n = Number.isInteger(writes) && writes >= 1 ? writes : null;
+    const pos = Number.isInteger(position) && position >= 1 ? position : 1;
+    if (n === null) {
+      // The first write of a turn always opens a fresh checkpoint (the recorded turn id
+      // cannot match one that has only just been minted), so this one case is knowable
+      // without the server's help.
+      if (pos <= 1) return { covers: 1, label: REVERT_LABEL, title: REVERT_ONE_TITLE, note: "" };
+      return { covers: null, label: REVERT_LABEL, title: REVERT_MAYBE_TITLE, note: REVERT_MAYBE_NOTE };
+    }
+    if (n === 1) return { covers: 1, label: REVERT_LABEL, title: REVERT_ONE_TITLE, note: "" };
+    return {
+      covers: n,
+      label: REVERT_LABEL + " " + n + " changes",
+      title:
+        "Put the notebook back to how it was before the assistant's last " +
+        n +
+        " changes — not just this one.",
+      note: "undoes " + n + " changes together",
+    };
+  }
+
+  // What the transcript says AFTER a revert lands. `covers` is the scope the button
+  // showed (a number, or null for "not known"); `remaining` is the undo depth left.
+  function revertedNotice(covers, remaining) {
+    const left = Number(remaining);
+    const more = Number.isFinite(left) && left > 0 ? Math.floor(left) : 0;
+    const earlier = more
+      ? " (" + more + " earlier change" + (more > 1 ? "s" : "") + " still undoable with /undo)"
+      : "";
+    if (covers === null || covers === undefined) {
+      return (
+        "Put the notebook back one step — any earlier changes from the same turn may " +
+        "have gone back with it. Check the notebook." +
+        earlier
+      );
+    }
+    const n = Number.isInteger(covers) && covers >= 1 ? covers : 1;
+    if (n === 1) return "Reverted the last applied change." + earlier;
+    return "Put the notebook back to before the assistant's last " + n + " changes." + earlier;
+  }
+
+  // A receipt whose Revert has been taken away by a NEWER change. Only one control may
+  // be live at a time (they all pop the same stack), so the older receipt has to say
+  // what happened to its own way back.
+  //
+  // `sameTurn` is the load-bearing distinction. A later write in the SAME turn usually
+  // joined this one's checkpoint, so this change has no undo step of its own and telling
+  // the analyst that "/undo steps further back" to it is false. A later TURN's write
+  // really does sit on its own step above this one.
+  function receiptDisplacedNote(sameTurn) {
+    return sameTurn === true
+      ? "the Revert moved to the newest change in this turn"
+      : "superseded · /undo steps back one change at a time";
+  }
+
+  // How a receipt reads once a revert has swept over it. The receipt that carried the
+  // button knows it went back; the earlier ones it covered only know so when the server
+  // said how far the checkpoint reached.
+  const RECEIPT_REVERTED_NOTE = "reverted";
+  const RECEIPT_MAYBE_REVERTED_NOTE = "may have been reverted with it";
 
   // -- auto-apply: the stop control ---------------------------------------
   // A turn with no small iteration cap needs a way out, and the way out is the analyst's
@@ -1178,6 +1316,185 @@ const ChatCore = (function () {
     if (acknowledged) return { status: "stopped", notice: "" };
     if (asked) return { status: "", notice: stopOutcomeNotice("finished") };
     return { status: "", notice: "" };
+  }
+
+  // Whether a `cancelled` frame should be reported at all.
+  //
+  // `request_cancel` broadcasts unconditionally — it cannot know whether the turn had
+  // already finished — so a stop that arrives a beat late produces TWO endings for one
+  // turn: `idle` first says "that turn finished on its own before the stop reached it",
+  // then this frame says "You stopped this turn" and parks the status on "stopped" for a
+  // session that is idle and ready. Both cannot be true, and the second one is the one
+  // that is wrong, so a frame for a turn whose end has already been reported is dropped.
+  // `turnClosed` starts TRUE (no turn has run yet), which also drops the frame a stream
+  // replays on reconnect.
+  function cancelEventAction(turnClosed, sawCancelled) {
+    if (sawCancelled === true) return "drop"; // one acknowledgement per turn
+    return turnClosed === true ? "drop" : "report";
+  }
+
+  // A `message` frame carrying `notice: true` is mooring's OWN aside (the stop's
+  // "(Stopped at your request.)", the tool-ceiling line) — not something the assistant
+  // said. Rendering it as assistant prose put words in the model's mouth; rendering the
+  // stop notice at all repeated a stop the transcript has already reported in the
+  // analyst's own terms.
+  function noticeMessageAction(notice, stopped) {
+    if (notice !== true) return "prose";
+    return stopped === true ? "drop" : "sys";
+  }
+
+  // How a finished tool line is marked. Under a stop every remaining call in the batch
+  // comes back as the terminal refusal, so the ✗ that follows would blame the assistant
+  // for the analyst's own decision. Those close as stopped — neither ✓ nor ✗ — which is
+  // what style.css has always said the intent was.
+  function toolDoneMark(success, stopping) {
+    if (success === true) return { cls: "ok", glyph: "⏺" }; // ⏺
+    if (stopping === true) return { cls: "stopped", glyph: "⏹" }; // ⏹
+    return { cls: "fail", glyph: "✗" }; // ✗
+  }
+
+  // -- auto-apply: saying which mode this chat is in ------------------------
+  // `[ai] auto_apply` defaults ON, so an existing user's copilot stops asking without
+  // ever announcing it, and the first evidence is a receipt for a change that has
+  // already landed and run. The mode is a fact about what the next turn will DO to their
+  // notebook, so it is stated up front, in the transcript, before the first turn.
+  function autoApplyBanner(on) {
+    if (on === true) {
+      return (
+        "This copilot changes your notebook itself. When it writes a cell the change " +
+        "lands and marimo runs it straight away — you get a receipt here, with a " +
+        "Revert. A change a Revert could not take back (deleting files, running a " +
+        "program, overwriting a report) still stops and asks you first. Press Stop, or " +
+        "Esc, to end a turn. To approve every change yourself instead, turn off “Let " +
+        "the copilot apply reversible changes itself” in Settings ▸ AI copilot."
+      );
+    }
+    return (
+      "This copilot proposes changes and waits: nothing touches your notebook until " +
+      "you press Apply ▸."
+    );
+  }
+
+  // /help, in the mode the chat is actually in. The rows used to advertise /apply as
+  // "apply the latest proposal" and offer an "a/s apply or skip" key hint — three
+  // controls that do nothing at all unless a change is being HELD for the analyst.
+  function helpRows(autoApply) {
+    const waiting = autoApply === true ? "a change the copilot is holding for you" : "the latest proposal";
+    return [
+      ["/help", "show this help"],
+      ["/explain", "walk through what this notebook does"],
+      ["/review", "review the notebook's logic for correctness risks"],
+      ["/checks", "ask for tie-out / data-quality checks"],
+      ["/sql", "ask for a marimo SQL (DuckDB) cell"],
+      ["/investigate <topic>", "research independent sub-questions in parallel"],
+      ["/clear", "clear the transcript (keeps the session)"],
+      ["/model [name]", "list or switch the model"],
+      ["/apply", "apply " + waiting],
+      ["/diff", "jump to " + waiting],
+      ["/undo", "put the notebook back one step (same as Revert)"],
+      ["/retry", "resend your last message"],
+    ];
+  }
+
+  function helpKeys(autoApply) {
+    const applySkip =
+      autoApply === true
+        ? "a/s apply or skip a change the copilot is holding for you"
+        : "a/s apply or skip a proposal";
+    return (
+      "Keys: Enter send · Shift+Enter newline · ↑/↓ recall input · @ reference a " +
+      "dataset · " +
+      applySkip +
+      " (when the prompt is empty/unfocused) · Esc clear the draft / close a menu — or " +
+      "stop the turn in flight"
+    );
+  }
+
+  // -- transcript entries for events this page did not write --------------
+  // The stream is the analyst's only account of what happened to their notebook, so an
+  // event that cannot be read must still leave a row: silence reads as "nothing
+  // happened", and by this point something already has. These take an arbitrary payload
+  // and get a sentence out of it, degrading rather than dropping.
+
+  // The first readable sentence in a payload, whatever the sender chose to call it.
+  function eventNoteText(data) {
+    if (!data || typeof data !== "object" || Array.isArray(data)) return "";
+    for (const key of ["text", "detail", "message", "summary", "error"]) {
+      const value = data[key];
+      if (typeof value === "string" && value.trim()) return value.trim();
+    }
+    return "";
+  }
+
+  // The AUTOMATIC run report — mooring re-running the whole notebook by itself when a
+  // change the model wrote did not complete. Today that happens inside a tool call with
+  // nothing on screen for minutes. Whatever shape the event settles on, this renders it:
+  // `{state}`, `{ran_clean}`, `{sent, redactions}` and a bare `{text}` are all understood.
+  function runReportNote(data) {
+    const d = data && typeof data === "object" && !Array.isArray(data) ? data : {};
+    const state = typeof d.state === "string" ? d.state.trim().toLowerCase() : "";
+    const redactions = Array.isArray(d.redactions) ? d.redactions : [];
+    if (state === "running" || state === "start" || state === "started") {
+      return {
+        text:
+          "Running your whole notebook to find out why that change did not complete. " +
+          "This can take a few minutes; the assistant gets the result, never a value.",
+        sent: "",
+        redactions: [],
+      };
+    }
+    if (d.ran_clean === true) {
+      return { text: "Ran the notebook: every cell ran clean. Nothing to report.", sent: "", redactions: [] };
+    }
+    const sent = typeof d.sent === "string" ? d.sent.trim() : "";
+    if (sent) {
+      return {
+        text: "Ran the notebook: it failed. This is exactly what was sent to the assistant:",
+        sent,
+        redactions,
+      };
+    }
+    const fallback = eventNoteText(d);
+    return {
+      text: fallback || "mooring ran the notebook and told the assistant what came back.",
+      sent: "",
+      redactions,
+    };
+  }
+
+  // A model write that did NOT land. Today the model is told and the analyst is not, so
+  // "the write failed" and "the write worked and something else broke" look identical
+  // from the transcript — with a notebook that may or may not have changed.
+  const APPLY_FAILED_LEAD = {
+    conflict:
+      "The assistant tried to change a cell that had moved underneath it, so nothing " +
+      "was written. Your notebook is unchanged.",
+    disabled:
+      "The assistant tried to change this notebook, but the copilot is switched off " +
+      "for it. Nothing was written.",
+    cancelled: "You stopped the turn before that change was written. Nothing was written.",
+  };
+
+  function applyFailedNote(data) {
+    const d = data && typeof data === "object" && !Array.isArray(data) ? data : {};
+    const status = typeof d.status === "string" ? d.status.trim().toLowerCase() : "";
+    const lead =
+      APPLY_FAILED_LEAD[status] ||
+      "The assistant tried to change the notebook and it did not land. Nothing was written.";
+    const detail = eventNoteText(d);
+    return detail && detail !== lead ? lead + " " + detail : lead;
+  }
+
+  // The stream dropped mid-turn and came back. A reconnect replays readiness, not
+  // receipts — so a change the model made while the connection was down is on disk with
+  // no row here and no way back on screen. Say that, rather than let the gap read as
+  // "the assistant did nothing".
+  function streamResumedNotice() {
+    return (
+      "The connection to the assistant dropped and came back. Anything it changed " +
+      "while it was down is in your notebook but not in this transcript — check the " +
+      "notebook, and use /undo if you need to step back."
+    );
   }
 
   // -- reasoning effort -----------------------------------------------------
@@ -1740,8 +2057,25 @@ const ChatCore = (function () {
     codeFindingTag,
     receiptHeadline,
     receiptObservation,
+    receiptObservationFull,
+    receiptObservationTruncated,
     receiptSequence,
+    revertScope,
+    revertedNotice,
+    receiptDisplacedNote,
+    RECEIPT_REVERTED_NOTE,
+    RECEIPT_MAYBE_REVERTED_NOTE,
     cancelledNotice,
+    cancelEventAction,
+    noticeMessageAction,
+    toolDoneMark,
+    autoApplyBanner,
+    helpRows,
+    helpKeys,
+    eventNoteText,
+    runReportNote,
+    applyFailedNote,
+    streamResumedNotice,
     stopButtonState,
     stopOutcomeNotice,
     canStopTurn,

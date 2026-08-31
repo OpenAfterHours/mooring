@@ -125,23 +125,61 @@ class RoutedChatSession(ChatBroadcaster):
     def run_failure_report(self, failures):
         return self._active.run_failure_report(failures)
 
-    def request_cancel(self) -> None:
+    def request_cancel(self) -> bool:
         """Stop the turn on whichever child is live.
 
-        The wrapper keeps its OWN flag in step (so ``cancel_requested`` answers for the
-        routed session too) but deliberately does not broadcast: the child raises the
-        flag its own tools read and emits the one ``cancelled`` event, which the bridge
-        relays here. Broadcasting on both would show the analyst two stops for one press.
+        The wrapper raises its own flag too (it is what ``close`` sets, and the fallback
+        for a child that exposes no predicate) but deliberately does not broadcast: the
+        child raises the flag its own tools read and emits the one ``cancelled`` event,
+        which the bridge relays here. Broadcasting on both would show the analyst two
+        stops for one press.
 
         There is nothing to forward for ``applier``: children arrive fully constructed
         from the hub's factories, which is where every write/proposal callback is wired —
         the wrapper only routes turns and relays events.
         """
         self.touch()
-        self._cancel.set()
+        with self._cancel_lock:  # the base class's lock: one press, one answer
+            first = not self._cancel.is_set()
+            self._cancel.set()
         cancel = getattr(self._active, "request_cancel", None)
         if callable(cancel):
             cancel()
+        return first
+
+    def turn_in_flight(self) -> bool:
+        """Whether a turn is running for this session right now.
+
+        Read duck-typed (and fail-open) by ``ChatService.begin_turn`` so that a second
+        message arriving mid-turn does not rotate the turn id underneath the turn already
+        running. That rotation would split the running turn's undo checkpoint in two, and
+        "revert what the assistant just did" would then undo only part of what it did.
+
+        This wrapper is the one object that knows: it is what already refuses a concurrent
+        send ("Wait for the current assistant turn to finish"), off the same flag.
+        """
+        return not self._turn_idle.is_set()
+
+    def cancel_requested(self) -> bool:
+        """Whether a stop is pending — read off the LIVE CHILD, not off this wrapper.
+
+        There is only one authoritative flag, and it is the child's: the child's tools
+        take their ``cancelled`` predicate from it, and the child re-arms it itself at
+        the start of every turn. This wrapper cleared its own copy independently, so a
+        Stop landing between the two clears left them DISAGREEING — and they are read by
+        different things. The hub binds the applier to the WRAPPER (``applier.bind``,
+        ``hub/routes/chat.py``) while the tools read the child, so the disagreement
+        showed up as the worst possible shape: writes refused as "cancelled" while reads
+        ran normally, in a turn nobody had stopped. Deriving the answer removes the
+        second copy rather than trying to keep two in step.
+
+        ``self._cancel`` still counts for a closed wrapper and for a child that has no
+        predicate at all (the hub's fakes and the stub session).
+        """
+        if self._closed:
+            return True
+        ask = getattr(self._active, "cancel_requested", None)
+        return bool(ask()) if callable(ask) else self._cancel.is_set()
 
     def clear_cancel(self) -> None:
         """Re-arm both the wrapper and the live child at the start of a turn."""
@@ -308,6 +346,23 @@ class RoutedChatSession(ChatBroadcaster):
                                 "assistant",
                                 "PROPOSED NOTEBOOK CHANGE:\n"
                                 + json.dumps(event.data or {}, ensure_ascii=False),
+                            )
+                        elif event.kind == "applied":
+                            # The same record, for the mode where the general model
+                            # WRITES instead of proposing. Without it an upgrade handed
+                            # the trusted model a transcript in which the general one had
+                            # apparently done nothing to the notebook — every edit-mode
+                            # change invisible, where on the propose path each one was
+                            # remembered. The receipt is value-free by construction (cell
+                            # numbers, the model's own rationale, the observation line);
+                            # it is not the CODE, which the trusted session reads for
+                            # itself from the notebook its fresh context is built on.
+                            self._remember(
+                                "assistant",
+                                "APPLIED NOTEBOOK CHANGE (already written and run):\n"
+                                + json.dumps(
+                                    event.data or {}, ensure_ascii=False, default=str
+                                ),
                             )
                     self._broadcast(event)
             finally:

@@ -15,6 +15,12 @@ tool's two names (only mooring's
 value-free tools; the SDK's built-in file/shell tools are not in the allowlist)
 and ``working_directory`` set to an empty temp dir (so even a stray file tool has
 no data to read). The agent has no path to a data value.
+
+Two things this session cannot do from outside the SDK's tool loop — stop it, and
+count it — are therefore done at the one boundary it does own: what every tool call
+ANSWERS. The analyst's Cancel rides there as ``cancelled``, and the per-turn runaway
+ceiling (``[ai] max_tool_iters``) as a :class:`mooring.ai.tools.TurnCallBudget`; both
+are re-armed together at the start of every turn (:meth:`CopilotChatSession._forward`).
 """
 
 from __future__ import annotations
@@ -28,7 +34,7 @@ from typing import TYPE_CHECKING, Any
 
 from mooring.ai.base import AIError, AINotConnectedError
 from mooring.ai.chat import ChatBroadcaster, ChatEvent
-from mooring.ai.tools import EDIT_TOOL_NAME, write_tool_name
+from mooring.ai.tools import EDIT_TOOL_NAME, TurnCallBudget, write_tool_name
 
 if TYPE_CHECKING:
     from mooring.ai.ner import ModelRef
@@ -215,6 +221,7 @@ class CopilotChatSession(ChatBroadcaster):
         read_only: bool = False,
         run_investigation=None,
         applier=None,
+        max_tool_iters: int | None = None,
         pii_enabled: bool = False,
         pii_block: bool = True,
         pii_names: bool = False,
@@ -262,6 +269,14 @@ class CopilotChatSession(ChatBroadcaster):
         # The in-turn write capability, wired the SAME way as emit_proposal and gated by
         # the same read_only rule (see _aopen). None -> the tool stays in propose mode.
         self._applier = None if read_only else applier
+        # The runaway ceiling for ONE turn, from the policy-folded `[ai] max_tool_iters`.
+        # The SDK owns this backend's tool loop, so there is no loop here to bound — but
+        # every call that loop makes still comes back through mooring's tool wrapper, and
+        # that is where the budget is spent (see _aopen). Without it this backend has NO
+        # bound at all: the thrash brake counts only CONSECUTIVE refusals, so one accepted
+        # write per six refusals runs forever, and both `_apply_edit` and the run-report
+        # keepalive touch the activity clock, so the idle reaper cannot end it either.
+        self._budget = TurnCallBudget(max_tool_iters)
         # The name the write tool will actually be REGISTERED under below (_aopen passes
         # the same `self._applier is not None` through to build_tools), resolved by the
         # one helper both sides share so the prompt cannot name a tool the session does
@@ -422,6 +437,9 @@ class CopilotChatSession(ChatBroadcaster):
             # The portable stop signal. The SDK owns this tool loop, so the analyst's
             # Cancel is enforced at the boundary of every call it makes.
             cancelled=self.cancel_requested,
+            # ...and, at that same boundary and for the same reason, the runaway ceiling:
+            # a loop mooring cannot count from outside is counted by what it ANSWERS.
+            budget=self._budget,
             dictionary=self._dictionary,
             semantic_models=self._semantic_models,
             code_index=self._helpers,
@@ -539,6 +557,10 @@ class CopilotChatSession(ChatBroadcaster):
         # stop flag is re-armed. Clearing it anywhere later would let one Cancel go on
         # refusing every tool call in every turn that followed it.
         self.clear_cancel()
+        # ...and the same place the per-turn tool-call ceiling is re-armed, for the
+        # mirror-image reason: a turn that hit it must not leave the next one with
+        # nothing, since "tell me to continue" is how the analyst lifts it.
+        self._budget.start_turn()
         future = asyncio.run_coroutine_threadsafe(self._session.send(text), self._loop)
         try:
             future.result(timeout=_SEND_TIMEOUT)
@@ -549,7 +571,7 @@ class CopilotChatSession(ChatBroadcaster):
 
     # -- cancellation -------------------------------------------------------
 
-    def request_cancel(self) -> None:
+    def request_cancel(self) -> bool:
         """Stop the turn in flight: raise the portable flag, then ALSO ask the SDK.
 
         The flag (base class) is what actually guarantees a stop here — the Copilot SDK
@@ -559,11 +581,16 @@ class CopilotChatSession(ChatBroadcaster):
         the turn the runtime is processing right now (mid-completion, before the next
         tool call), and its docstring is explicit that the session stays valid for new
         messages afterwards — which is the property the next turn depends on.
+
+        The base class decides — under its lock — whether THIS press is the one that
+        raised the flag, and only that press aborts. Reading the flag here first and
+        acting on the answer would be the same check-then-act race the base class exists
+        to close, with two presses aborting the SDK twice.
         """
-        already = self.cancel_requested()
-        super().request_cancel()
-        if not already:
+        first = super().request_cancel()
+        if first:
             self._abort_sdk_turn()
+        return first
 
     def _abort_sdk_turn(self) -> None:
         """Best-effort ``session.abort()`` on the session's own loop thread.

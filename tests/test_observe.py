@@ -149,16 +149,17 @@ class FakeKernel:
         return self.state
 
 
-def reading(*names, frames=(), **types):
-    """A probe readback: ``reading('a', b='DataFrame')`` -> a absent, b present."""
-    entries = [{"name": n, "present": False, "type": None} for n in names]
-    entries += [{"name": n, "present": True, "type": t} for n, t in types.items()]
+def reading(*names, frames=(), **kinds):
+    """A probe readback: ``reading('a', b='dataframe')`` -> a absent, b present."""
+    entries = [{"name": n, "present": False, "kind": None} for n in names]
+    entries += [{"name": n, "present": True, "kind": k} for n, k in kinds.items()]
     return {"frames": list(frames), "names": entries}
 
 
 @pytest.fixture
 def fast(monkeypatch):
     """Shrink the real-time constants so the loop is testable in milliseconds."""
+    monkeypatch.delenv(introspect.SETTLE_FLOOR_ENV, raising=False)
     monkeypatch.setattr(introspect, "SETTLE_FLOOR_SECONDS", 0.0)
     monkeypatch.setattr(introspect, "_OBSERVE_POLL_INTERVAL", 0.01)
     monkeypatch.setattr(introspect, "_OBSERVE_READ_SLICE", 0.2)
@@ -172,21 +173,95 @@ def install(monkeypatch, kernel):
 # --- observe: the settle rule ----------------------------------------------
 
 
-def test_observe_settles_as_soon_as_every_expected_name_is_bound(monkeypatch, fast):
+def test_observe_settles_once_the_kernel_is_still_and_idle_and_every_name_is_bound(
+    monkeypatch, fast
+):
     frame = {"name": "sales", "columns": [["region", "String"]], "n_rows": 12}
-    kernel = install(monkeypatch, FakeKernel([reading(frames=[frame], sales="DataFrame")]))
+    bound = reading(frames=[frame], sales="dataframe")
+    kernel = install(monkeypatch, FakeKernel([bound, bound, bound]))
 
     obs = introspect.observe(FakeEditor(), "nb.py", ["sales"], timeout=5.0)
 
     assert obs.observed is True
     assert obs.present == ("sales",) and obs.missing == ()
-    assert obs.types == (("sales", "DataFrame"),)
+    assert obs.kinds == (("sales", "dataframe"),)
     assert [f.name for f in obs.frames] == ["sales"]
-    assert kernel.runs == 1, "a bound name is final — no need for a second look"
+    assert kernel.runs >= 2, "one readback can never settle ANY verdict"
+
+
+def test_a_bound_name_from_BEFORE_the_write_is_not_a_verdict(monkeypatch, fast):
+    """The defect this rule exists for. The system prompt steers the model towards
+    EDITING an existing cell, and an edit's expected names are already bound from the
+    previous run — so the first readback describes the PRE-EDIT namespace. Settling on
+    it (measured: 0.014 s, inside the 0.5–1.5 s watcher-latency window) tells the model
+    a broken edit is fine. A verdict now needs positive evidence the reload happened."""
+    monkeypatch.setattr(introspect, "SETTLE_FLOOR_SECONDS", 30.0)
+    pre_edit = reading(sales="dataframe")
+    kernel = install(monkeypatch, FakeKernel([pre_edit, pre_edit, pre_edit], state="idle"))
+
+    obs = introspect.observe(FakeEditor(), "nb.py", ["sales"], timeout=0.4)
+
+    assert obs.observed is False, "settled on the namespace as it was before the write"
+    assert obs.present == () and obs.missing == ()
+    assert kernel.runs >= 2
+
+
+def test_a_namespace_that_moved_is_evidence_enough_without_the_floor(monkeypatch, fast):
+    # The reload ran: the name went away while the cell re-ran and came back. That is
+    # positive evidence, so the verdict does not wait out the floor.
+    monkeypatch.setattr(introspect, "SETTLE_FLOOR_SECONDS", 30.0)
+    after = reading(sales="dataframe", total="int")
+    install(
+        monkeypatch,
+        FakeKernel([reading("total", sales="dataframe"), after, after, after], state="idle"),
+    )
+
+    obs = introspect.observe(FakeEditor(), "nb.py", ["sales", "total"], timeout=3.0)
+
+    assert obs.observed is True
+    assert obs.present == ("sales", "total") and obs.missing == ()
+
+
+def test_a_kernel_seen_running_is_evidence_enough_without_the_floor(monkeypatch, fast):
+    # The other positive signal: the session was busy after our own probe had already
+    # answered, which is the watcher's reload cascade.
+    monkeypatch.setattr(introspect, "SETTLE_FLOOR_SECONDS", 30.0)
+    still = reading(sales="dataframe")
+
+    class BusyThenIdle(FakeKernel):
+        def __init__(self, readings):
+            super().__init__(readings)
+            self.states = ["running", "idle", "idle", "idle", "idle"]
+
+        def kernel_state(self, session_id):
+            return self.states.pop(0) if self.states else "idle"
+
+    install(monkeypatch, BusyThenIdle([still, still, still, still]))
+
+    obs = introspect.observe(FakeEditor(), "nb.py", ["sales"], timeout=3.0)
+
+    assert obs.observed is True and obs.present == ("sales",)
+
+
+def test_the_observation_reports_only_the_frames_it_asked_about(monkeypatch, fast):
+    """A frame's variable name and its column names are strings the executing cell can
+    set from data, and the model now writes the code that executes — so this path
+    reports what it asked about and nothing else. (The session's other frames still
+    reach the model through the live-schema channel, which `[ai] live_schema` gates.)"""
+    asked = {"name": "sales", "columns": [["region", "String"]], "n_rows": 12}
+    other = {"name": SECRET, "columns": [[SECRET, "String"]], "n_rows": 1}
+    both = reading(frames=[asked, other], sales="dataframe")
+    install(monkeypatch, FakeKernel([both, both, both]))
+
+    obs = introspect.observe(FakeEditor(), "nb.py", ["sales"], timeout=3.0)
+
+    assert obs.observed is True
+    assert [f.name for f in obs.frames] == ["sales"]
+    assert SECRET not in introspect.format_observation(obs)
 
 
 def test_observe_reports_a_missing_name_once_the_kernel_is_still_and_idle(monkeypatch, fast):
-    still = reading("totals", sales="DataFrame")
+    still = reading("totals", sales="dataframe")
     kernel = install(monkeypatch, FakeKernel([still, still, still], state="idle"))
 
     obs = introspect.observe(FakeEditor(), "nb.py", ["sales", "totals"], timeout=5.0)
@@ -230,15 +305,29 @@ def test_the_settle_floor_holds_a_missing_verdict_back(monkeypatch, fast):
     assert obs.observed is False and obs.missing == ()
 
 
-def test_a_name_that_is_bound_still_settles_inside_the_floor(monkeypatch, fast):
-    # The floor only ever delays a MISSING verdict. A bound name is final the moment
-    # it is seen, so the common case stays fast even with a long floor.
-    monkeypatch.setattr(introspect, "SETTLE_FLOOR_SECONDS", 30.0)
-    install(monkeypatch, FakeKernel([reading(sales="DataFrame")]))
+def test_the_floor_is_configurable_per_call_and_by_the_environment(monkeypatch, fast):
+    # It is 2x the slowest watcher latency measured on ONE machine — a guess about
+    # someone else's hardware, so it has to be raisable without a code change.
+    assert introspect.settle_floor_seconds() == introspect.SETTLE_FLOOR_SECONDS
+    assert introspect.settle_floor_seconds(7.5) == 7.5
+    monkeypatch.setenv(introspect.SETTLE_FLOOR_ENV, "12")
+    assert introspect.settle_floor_seconds() == 12.0
+    assert introspect.settle_floor_seconds(1.0) == 1.0, "an explicit value wins"
+    monkeypatch.setenv(introspect.SETTLE_FLOOR_ENV, "not a number")
+    assert introspect.settle_floor_seconds() == introspect.SETTLE_FLOOR_SECONDS
+    monkeypatch.setenv(introspect.SETTLE_FLOOR_ENV, "-4")
+    assert introspect.settle_floor_seconds() == 0.0
 
-    obs = introspect.observe(FakeEditor(), "nb.py", ["sales"], timeout=0.5)
-
-    assert obs.observed is True and obs.present == ("sales",)
+    # ...and the per-call value is what the loop actually waits on.
+    monkeypatch.delenv(introspect.SETTLE_FLOOR_ENV)
+    still = reading(sales="dataframe")
+    install(monkeypatch, FakeKernel([still, still, still, still], state="idle"))
+    assert (
+        introspect.observe(
+            FakeEditor(), "nb.py", ["sales"], timeout=0.4, settle_floor=30.0
+        ).observed
+        is False
+    )
 
 
 def test_a_busy_kernel_never_settles_a_missing_verdict(monkeypatch, fast):
@@ -276,7 +365,7 @@ def test_a_probe_that_never_writes_back_times_out_rather_than_lying(monkeypatch,
 
 
 def test_observe_asks_only_about_askable_names(monkeypatch, fast):
-    kernel = install(monkeypatch, FakeKernel([reading(frames=[], good="int")]))
+    kernel = install(monkeypatch, FakeKernel([reading(frames=[], good="int")] * 3))
 
     introspect.observe(
         FakeEditor(), "nb.py", ["good", "_cell_local", "not an identifier", 7, "good"], timeout=2.0
@@ -286,21 +375,26 @@ def test_observe_asks_only_about_askable_names(monkeypatch, fast):
 
 
 def test_a_single_name_passed_bare_is_not_read_letter_by_letter(monkeypatch, fast):
-    kernel = install(monkeypatch, FakeKernel([reading(frames=[], sales="DataFrame")]))
+    kernel = install(monkeypatch, FakeKernel([reading(frames=[], sales="dataframe")] * 3))
 
     introspect.observe(FakeEditor(), "nb.py", "sales", timeout=2.0)
 
     assert kernel.asked[0] == ("sales",)
 
 
-def test_observe_with_nothing_to_expect_settles_on_the_first_readback(monkeypatch, fast):
+def test_observe_with_nothing_to_expect_says_so_rather_than_probing(monkeypatch, fast):
+    """A markdown cell (or a source marimo could not read) leaves nothing to ask about.
+    "The kernel looks fine" is not a verdict about a change nothing was checked
+    against, and reporting the session's frames here would be the dump this path
+    deliberately does not make."""
     frame = {"name": "df", "columns": [["a", "Int64"]], "n_rows": 1}
-    install(monkeypatch, FakeKernel([{"frames": [frame], "names": []}]))
+    kernel = install(monkeypatch, FakeKernel([{"frames": [frame], "names": []}]))
 
     obs = introspect.observe(FakeEditor(), "nb.py", [], timeout=2.0)
 
-    assert obs.observed is True and obs.missing == ()
-    assert [f.name for f in obs.frames] == ["df"]
+    assert obs.observed is False and obs.missing == () and obs.frames == ()
+    assert "binds no name" in obs.detail
+    assert kernel.runs == 0, "nothing to ask means nothing to push into the kernel"
 
 
 def test_observe_degrades_when_there_is_nothing_to_look_at(monkeypatch, fast):
@@ -351,22 +445,23 @@ def test_observe_leaves_no_sidecar_files_behind(monkeypatch, fast, tmp_path):
 def test_format_observation_renders_schema_and_states_the_missing_name():
     obs = introspect.Observation(
         frames=(
-            DatasetSchema(name="sales", columns=(("region", "String"), ("amount", "Int64")), n_rows=1500),
-            DatasetSchema(name="lookup", columns=(("k", "String"),), n_rows=None),
+            DatasetSchema(
+                name="sales", columns=(("region", "String"), ("amount", "Int64")), n_rows=1500
+            ),
         ),
-        present=("sales", "n_total"),
+        present=("sales", "n_total", "thing"),
         missing=("totals",),
-        types=(("sales", "DataFrame"), ("n_total", "int")),
+        kinds=(("sales", "dataframe"), ("n_total", "int"), ("thing", "other")),
         observed=True,
     )
     text = introspect.format_observation(obs)
 
-    assert "`sales` is bound (DataFrame, 1,500 rows):" in text
+    assert "`sales` is bound (dataframe, 1,500 rows):" in text
     assert "- region: String" in text
     assert "`n_total` is bound (int)." in text
+    assert "`thing` is bound." in text, "the catch-all is not worth a label"
     assert "NOT bound in the kernel: `totals`." in text
     assert "did not run to completion" in text
-    assert "Also loaded in this session: `lookup` (1 column)." in text
     # fact, not diagnosis: no cause is invented for the missing name
     assert "error" not in text.lower() and "failed" not in text.lower()
 
@@ -381,14 +476,16 @@ def test_format_observation_says_plainly_that_it_could_not_see():
 
 
 def test_format_observation_carries_no_values():
-    # The one field that could carry one is the type name; it is a class name.
+    # Every string rendered here is either a name mooring asked about, a column name
+    # or dtype from the schema, or one of mooring's own words — `kinds` included, which
+    # is why it is a closed vocabulary rather than type(obj).__name__.
     obs = introspect.Observation(
         frames=(DatasetSchema(name="df", columns=((SECRET, "String"),), n_rows=3),),
         present=("df",),
-        types=(("df", "DataFrame"),),
+        kinds=(("df", "dataframe"),),
         observed=True,
     )
     text = introspect.format_observation(obs)
-    assert "DataFrame" in text
+    assert "dataframe" in text
     # a column NAME is allowed out (that is the schema); nothing else about the frame is
     assert text.count(SECRET) == 1

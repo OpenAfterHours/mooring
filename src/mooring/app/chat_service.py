@@ -29,6 +29,14 @@ from mooring import checks, datasets, inputs, policy, workbook, workspace_config
 from mooring.app import notebooks
 
 
+# How the system context refers to the ONE notebook-write tool. A PHRASE, not a name:
+# the context is built before the session exists and is shared by sessions that
+# register the tool under either of its two names — and by read-only ones that have no
+# write tool at all. The per-session tool guide (``ai/session.py``) names it for real,
+# derived from the same helper that registers it, so nothing here has to guess.
+WRITE_TOOL_PHRASE = "the notebook write tool"
+
+
 @dataclass(frozen=True)
 class RoutingContextBundle:
     """Two destination-specific renders of one captured context snapshot."""
@@ -76,16 +84,67 @@ class ChatService:
         being inferred inside the applier, which has no view of the conversation. Returns
         the new turn id, or ``""`` when this session has no applier (manual mode), which
         is not a condition anyone needs to handle.
+
+        Two ways the id can end up describing the wrong span, and they are one problem
+        with one answer — the checkpoint has to cover exactly the turn the Revert button
+        offers to take back:
+
+        * **A failure is not swallowed.** This used to catch everything and return
+          ``""``, which reads like robustness and is not: a missed boundary leaves the
+          applier on the PREVIOUS turn id, so
+          :meth:`mooring.app.apply.ApplyGuard.apply_with_undo` extends that turn's
+          checkpoint instead of opening a new one, and Revert silently rolls back more
+          than it says. Nothing has been written when this runs (it is called before the
+          send), so failing loudly costs a retry; failing quietly costs the analyst work
+          they never agreed to lose. The error is logged on its way past.
+        * **A turn already in flight does not rotate the id.** An analyst who types a
+          second message while the assistant is still working reaches this before the
+          session refuses the concurrent send — and rotating there SPLITS the running
+          turn: its next write takes a second snapshot, so "undo what the assistant just
+          did" undoes only the tail of it. The distinguishing fact lives in the session
+          (only it knows a turn is live), so it is asked, duck-typed, and the current id
+          is returned unchanged.
+
+        The in-flight check FAILS OPEN — a session that does not answer, or answers by
+        raising, rotates exactly as before — because a backend without the concept must
+        behave as it always did, and a stuck "busy" answer would freeze the turn id for
+        the life of the chat, which is the worse failure of the two.
         """
         with self._lock:
             applier = self._appliers.get(sid)
         begin = getattr(applier, "begin_turn", None)
         if not callable(begin):
             return ""
+        if self._turn_in_flight(sid):
+            return str(getattr(applier, "turn_id", "") or "")
         try:
             return str(begin() or "")
-        except Exception:  # noqa: BLE001 — a turn boundary must never fail a send
-            return ""
+        except Exception as exc:
+            from mooring import telemetry
+
+            with contextlib.suppress(Exception):
+                telemetry.log_error(exc=exc, op="ai_chat_begin_turn")
+            raise
+
+    def _turn_in_flight(self, sid: str) -> bool:
+        """Whether this session says a turn of its own is still running.
+
+        Duck-typed on ``turn_in_flight()``: only a session that tracks the thing can
+        answer, and today only the routed session does (its ``_turn_idle`` event, which
+        is what makes a concurrent send a refusal rather than an interleave). Anything
+        that does not offer the method — or that raises — reads as "not in flight", so
+        this can only ever SUPPRESS a rotation that would have split a live turn, never
+        withhold one that a session actually needed.
+        """
+        with self._lock:
+            session = self._chats.get(sid)
+        in_flight = getattr(session, "turn_in_flight", None)
+        if not callable(in_flight):
+            return False
+        try:
+            return bool(in_flight())
+        except Exception:  # noqa: BLE001 — an unanswerable question is not a "yes"
+            return False
 
     def close(self, sid: str) -> None:
         """Tear down one chat session (drop its target, close the provider)."""
@@ -381,10 +440,20 @@ class ChatService:
             checks_help=checks.copilot_guide(),
             # Likewise, let it author marimo SQL (mo.sql / DuckDB) cells — authored code
             # the model never sees the result of, so no new egress channel either.
-            # Named for THIS session's mode: with auto-apply on the session registers
-            # `mooring_edit_notebook`, so a guide naming the propose tool would point the
-            # model at a tool it does not have.
-            sql_help=tools.sql_cell_guide(tools.write_tool_name(app_cfg.ai_auto_apply)),
+            #
+            # The write tool is NOT named here, and that is the fix for a real bug: this
+            # is the SOLE context builder for three different kinds of session — the
+            # interactive chat (write tool in propose OR edit mode, depending on whether
+            # the hub wired an applier), the BATCH planner (propose mode, always: it is
+            # given no applier), and the read-only INVESTIGATE sub-agents (no write tool
+            # at all). `[ai] auto_apply` answers for the first of those and for neither
+            # of the others, so keying the guide off the config told a batch session to
+            # call `mooring_edit_notebook`, which it does not have. The only place that
+            # knows a session's actual write capability is the session
+            # (`ai/session.py`'s per-session tool guide names it from the same
+            # `write_tool_name(applier is not None)` that REGISTERS it, on every turn),
+            # so this note stays mode-neutral rather than guessing a name.
+            sql_help=tools.sql_cell_guide(WRITE_TOOL_PHRASE),
             # And author value-free input/output fingerprints (mooring_inputs) on request
             # — a hash/shape/schema receipt, never a value, so no new egress channel. The
             # guide DESCRIBES the API; the receipts themselves (and the lineage graph

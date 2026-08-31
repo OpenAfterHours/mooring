@@ -511,9 +511,9 @@ EDITABLE: tuple[SettingSpec, ...] = (
         default=200,
         env_var="MOORING_AI_MAX_TOOL_ITERS",
         help="A backstop against a runaway loop, not a work budget — set high on "
-        "purpose so a long analysis runs to the end. Use Cancel in the chat to stop a "
-        "turn you have seen enough of; lowering this only makes the copilot give up "
-        "mid-thought.",
+        "purpose so a long analysis runs to the end. Press Stop in the chat (or Esc) to "
+        "end a turn you have seen enough of; lowering this only makes the copilot give "
+        "up mid-thought.",
     ),
     SettingSpec(
         key="ai.context",

@@ -52,7 +52,10 @@ agent has no path to data.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
@@ -127,6 +130,92 @@ TOOL_NAMES = [
     "mooring_read_notebook_source",
     PROPOSE_TOOL_NAME,
 ]
+
+# --- the runaway ceiling on ONE turn's tool calls -----------------------------
+#
+# `[ai] max_tool_iters` is a RUNAWAY ceiling, never a work budget: a hard analysis is
+# meant to be worked all the way through — write a cell, see it fail, fix it, look at
+# the schema again — and the analyst's control over a turn that is going nowhere is the
+# Stop button, not a number that cuts them off at twelve. What the ceiling is for is
+# the turn that will never converge on its own, and there the cost is real: every call
+# is a completion the analyst pays for.
+#
+# ONE number, ONE unit (a tool call), spent exactly ONCE per call — but at a different
+# place per backend, because only one of the two tool loops is mooring's:
+#
+# * :class:`mooring.ai.openai_session.OpenAIChatSession` drives its own loop, so it
+#   spends the budget there. It has to: that loop is also the only place that sees a
+#   call for a tool which does not exist, and such a call never reaches a handler.
+# * The Copilot SDK drives its loop from INSIDE the session and cannot be broken out
+#   of from mooring's side. But every call it makes still comes back through the tool
+#   wrapper built here, so that is where the ceiling bites on that backend — the same
+#   place, and for the same reason, as the cancel check.
+#
+# The two therefore never both charge one call. A session hands the budget to exactly
+# one of them (see ``budget`` on :func:`build_tool_specs`).
+DEFAULT_MAX_TOOL_ITERS = 200
+
+# What a call past the ceiling is told. Worded as an abnormal SELF-stop with the work
+# intact and one message back to it — not as a finished turn — so the model reports
+# where it got to instead of inventing a conclusion. Mirrors the OpenAI loop's own
+# notice (``openai_session._TOOL_BUDGET_MSG``), which says the same thing to the
+# ANALYST; both must read as "unfinished", because at a ceiling of 200 it is.
+_RUNAWAY_TEXT = (
+    "STOP — you have made more than {n} tool calls in this ONE turn, which is mooring's "
+    "runaway ceiling. This is not a finished answer and nothing you have already done "
+    "has been lost. Make NO further tool calls: reply to the analyst now, saying what "
+    "you did, what you found, and what is left. They can tell you to continue and you "
+    "will pick up from here."
+)
+
+
+class TurnCallBudget:
+    """How many tool calls ONE turn may still make. Thread-safe, reset per turn.
+
+    Thread-safe because a call is not always answered on the thread that dispatched
+    it: the copilot adapter hands a ``blocking`` handler (the write tool, the
+    investigate fan-out) to a worker thread, so two calls can be in flight at once.
+    """
+
+    def __init__(self, ceiling: int | None = None) -> None:
+        try:
+            n = int(ceiling)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            n = 0
+        # Anything that is not a usable ceiling — missing, zero, negative,
+        # unparseable — falls back to the shipped default rather than being clamped:
+        # a ceiling below 1 would end every turn before its first step, which is a
+        # worse answer to a bad value than the default is.
+        self.ceiling = n if n >= 1 else DEFAULT_MAX_TOOL_ITERS
+        self._used = 0
+        self._lock = threading.Lock()
+
+    def start_turn(self) -> None:
+        """Re-arm for a new turn. The ceiling is PER TURN: a turn that hit it must not
+        leave the next one with nothing, because "tell me to continue" is the documented
+        way out of one."""
+        with self._lock:
+            self._used = 0
+
+    def spend(self) -> bool:
+        """Charge one tool call. ``False`` once this turn is past its ceiling."""
+        with self._lock:
+            self._used += 1
+            return self._used <= self.ceiling
+
+    @property
+    def used(self) -> int:
+        with self._lock:
+            return self._used
+
+    def exhausted(self) -> bool:
+        with self._lock:
+            return self._used >= self.ceiling
+
+    def runaway_text(self) -> str:
+        """The fixed, value-free result a call past the ceiling gets."""
+        return _RUNAWAY_TEXT.format(n=self.ceiling)
+
 
 # Cell-source format reminder for every propose tool: a cell's source is the BODY ONLY
 # — mooring regenerates marimo's wrapper (`@app.cell` / `def _()` / a trailing
@@ -382,8 +471,6 @@ def _as_list(value) -> list:
 
 def _args(invocation) -> dict:
     """The tool's arguments as a dict (the SDK passes a dict; tolerate a JSON string)."""
-    import json
-
     raw = getattr(invocation, "arguments", None)
     if isinstance(raw, str):
         try:
@@ -446,6 +533,7 @@ def build_tool_specs(
     output_guard: Callable[[str], bool] | None = None,
     apply_edit: Callable[[list[dict], str], object] | None = None,
     cancelled: Callable[[], bool] | None = None,
+    budget: "TurnCallBudget | None" = None,
 ) -> list["ToolSpec"]:
     """Build the safe tools as provider-neutral :class:`ToolSpec`s, bound to one
     workspace + target notebook.
@@ -484,6 +572,13 @@ def build_tool_specs(
 
     ``cancelled()`` is checked before EVERY handler runs (reads included), and a
     cancelled turn gets one terminal error telling the model to stop calling tools.
+
+    ``budget`` (a :class:`TurnCallBudget`) is the per-turn RUNAWAY ceiling for a
+    backend whose tool loop mooring does NOT own — the Copilot SDK. Each call charges
+    one step, and a call past the ceiling is answered with the same kind of terminal
+    result a cancel gets, telling the model to stop and reply. A session that drives
+    its own loop (OpenAI) passes ``None`` here and spends the SAME budget object in
+    that loop instead, so a call is never charged twice.
 
     :func:`build_tools` adapts these to the copilot SDK; a second backend reuses the
     same handlers and only re-expresses the spec and result shapes.
@@ -590,13 +685,11 @@ def build_tool_specs(
 
     # A refusal only helps while the model can still act on it. After this many failed
     # validations IN A ROW the gate stops handing back diagnostics it has already
-    # proved it cannot act on, and tells it to take the problem to the analyst: the
-    # copilot SDK drives its own tool loop with no mooring-side iteration bound at all,
-    # and the OpenAI loop's bound (`[ai] max_tool_iters`, defaulting to
-    # `openai_session.DEFAULT_MAX_TOOL_ITERS` = 200) is a RUNAWAY ceiling on the WHOLE
-    # turn, not a work budget — so a stuck model must not be able to spend the lot
-    # re-proposing one cell. Any accepted proposal resets it: the budget measures
-    # "stuck", not "has been wrong before".
+    # proved it cannot act on, and tells it to take the problem to the analyst. The
+    # per-turn ceiling (`[ai] max_tool_iters`, default :data:`DEFAULT_MAX_TOOL_ITERS`
+    # = 200) is a RUNAWAY ceiling on the WHOLE turn, not a work budget — so a stuck
+    # model must not be able to spend the lot re-proposing one cell. Any accepted
+    # proposal resets it: the budget measures "stuck", not "has been wrong before".
     #
     # Six, not three, since the write tool applies its own change. A model that only ever
     # heard "no" had nothing to converge ON, so three strikes was the right ceiling on
@@ -608,6 +701,23 @@ def build_tool_specs(
     # many changes a turn may successfully make.
     _VALIDATION_BUDGET = 6
     _consecutive_failures = [0]  # a one-slot list: a closure may mutate, not rebind
+
+    # A SECOND, separate brake, for the outcomes that are not the model being wrong.
+    #
+    # A `held` change passed every check; a human is simply being asked. A `disabled`
+    # one is a switch the model cannot see, let alone fix. Neither is a validation
+    # failure and neither may spend the budget above — a legitimate single hold must
+    # cost a working model nothing.
+    #
+    # What they CAN become is a loop: the hold text says "Do NOT send this change
+    # again", and a model that does not read it can re-send the identical change for
+    # as long as its turn lasts, being told "held" every time. So repeats of the SAME
+    # change get their own, deliberately generous, count — it is measured on the ops,
+    # so re-sending byte-identical work is what spends it and a model that CHANGES its
+    # change (or moves on and comes back) starts over. Nine, because a hold is not
+    # evidence of anything being wrong; six refusals in a row is.
+    _REPEAT_BUDGET = 9
+    _repeat = {"key": "", "count": 0}
 
     # Diagnostics that do NOT refuse a proposal, and why.
     #
@@ -961,6 +1071,91 @@ def build_tool_specs(
         out, _ = egress.scrub_text(text)
         return out.strip() or fallback
 
+    def _landed(outcome) -> str:
+        """Where the change actually went — the cell numbers, and nothing else.
+
+        The applier's receipt already carries them (``payload["summary"]``), but until
+        now that went only to the browser, so a model that had just edited cell 3 had to
+        spend a whole ``mooring_read_notebook_source`` round-trip to find out where its
+        next edit should aim — or guess, and get refused by ``expect``, which spends the
+        thrash brake for a mistake mooring caused.
+
+        Read defensively and rendered from INTEGERS only (anything else is dropped), so
+        this can carry nothing but cell numbers whatever an applier puts in its payload.
+        """
+        payload = getattr(outcome, "payload", None)
+        summary = payload.get("summary") if isinstance(payload, dict) else None
+        if not isinstance(summary, dict):
+            return ""
+
+        def _nums(key: str) -> list[int]:
+            value = summary.get(key)
+            if not isinstance(value, (list, tuple)):
+                return []
+            return [n for n in value if isinstance(n, int) and not isinstance(n, bool)]
+
+        edited, appended, deleted = _nums("edited"), _nums("appended"), _nums("deleted")
+        parts = [
+            f"{label} {', '.join(str(n) for n in nums)}"
+            for label, nums in (
+                ("edited cell", edited),
+                ("added cell", appended),
+                ("deleted cell", deleted),
+            )
+            if nums
+        ]
+        if not parts:
+            return ""
+        line = "\nWHERE IT LANDED: " + "; ".join(parts) + "."
+        if deleted:
+            # Edits and deletes are reported by the index they TARGETED, so once a cell
+            # has gone the numbers below it have moved. Say so rather than let the model
+            # aim at a stale one and be refused for it.
+            line += (
+                " Deleting a cell renumbers every cell after it, so call "
+                "mooring_read_notebook_source before targeting one by index again."
+            )
+        return line
+
+    def _repeat_key(ops: list[dict], status: str) -> str:
+        """A stable fingerprint of THIS change, for the repeat brake. Hashed, so a
+        notebook's source is never held in a closure any longer than the call."""
+        try:
+            body = json.dumps(ops, sort_keys=True, default=str)
+        except (TypeError, ValueError):  # pragma: no cover - json takes anything with default=str
+            body = repr(ops)
+        return f"{status}:{hashlib.sha256(body.encode('utf-8', 'replace')).hexdigest()}"
+
+    def _spent_the_repeat_budget(ops: list[dict], status: str) -> "ToolOutput | None":
+        """Count one identical re-send of a held/disabled change; give up past the budget.
+
+        Separate from :func:`_spent_the_budget` on purpose: that one counts the model
+        being WRONG, and neither of these outcomes is that. This one counts only "you
+        have sent me this exact change again after being told a human has to act".
+        """
+        key = _repeat_key(ops, status)
+        if key != _repeat["key"]:
+            _repeat["key"], _repeat["count"] = key, 1
+            return None
+        _repeat["count"] += 1
+        if _repeat["count"] <= _REPEAT_BUDGET:
+            return None
+        n = _repeat["count"]
+        # Say WHICH of the two it is: a hold is waiting on a person, and being switched
+        # off is not. Telling a model it is waiting for a confirm that is not coming is
+        # the kind of near-miss that makes it wait rather than explain.
+        why = (
+            "it is waiting on a person"
+            if status == "held"
+            else "writing is switched off for this notebook"
+        )
+        return _err(
+            f"NOT applied. You have now sent this same change {n} times and it has not "
+            f"been written once — {why}, and repeating it cannot change that. Stop "
+            f"calling {EDIT_TOOL_NAME} with it: tell the analyst in your reply what the "
+            "change does and what you need from them, and stop."
+        )
+
     def _apply_now(ops: list[dict], rationale: str, note: str) -> "ToolOutput":
         try:
             outcome = apply_edit(ops, rationale)
@@ -982,10 +1177,11 @@ def build_tool_specs(
             # candidate that passes the static check has not landed yet, and resetting on
             # the gate would make a run of conflicts unbounded.
             _consecutive_failures[0] = 0
+            _repeat["key"], _repeat["count"] = "", 0  # a write that LANDED ends any repeat
             body = _outcome_text(raw, "(no observation was returned)")
             return _ok(
                 "APPLIED. The change is in the analyst's notebook and marimo has run it. "
-                f"What happened:\n{body}\n"
+                f"What happened:\n{body}{_landed(outcome)}\n"
                 "Check this against what you intended. If it is wrong, fix it with another "
                 f"{EDIT_TOOL_NAME} call; if it is right, carry on." + note
             )
@@ -994,6 +1190,9 @@ def build_tool_specs(
             # NOT an error, and NOT retryable. The change is sitting in front of the
             # analyst waiting for a confirm, so calling again writes nothing and burns the
             # turn — the model's job now is to explain, not to write.
+            spent = _spent_the_repeat_budget(ops, status)
+            if spent is not None:
+                return spent
             body = _outcome_text(raw, "(no reason was given)")
             return _ok(
                 "HELD — the change is NOT running yet. mooring is waiting for the analyst "
@@ -1004,12 +1203,18 @@ def build_tool_specs(
             )
 
         if status == "conflict":
+            _repeat["key"], _repeat["count"] = "", 0  # a different problem entirely
             return _conflicted(_outcome_text(raw, "- the cell you targeted has moved"))
 
         if status == "cancelled":
             return _cancelled_result()
 
         if status == "disabled":
+            # Same brake as `held`, and for the same reason: nothing here says the model
+            # was wrong, but a switch it cannot see will answer the same way forever.
+            spent = _spent_the_repeat_budget(ops, status)
+            if spent is not None:
+                return spent
             body = _outcome_text(raw, "(no reason was given)")
             return _err(
                 f"NOT applied — this session may not write to the notebook:\n{body}\n"
@@ -1951,6 +2156,26 @@ def build_tool_specs(
 
         specs = [guarded(spec) for spec in specs]
 
+    if budget is not None:
+        # --- the runaway ceiling, at that same boundary -----------------------------
+        #
+        # Only ever wired by a session whose tool loop mooring does NOT own (see
+        # `budget` above, and :class:`TurnCallBudget`). It sits OUTSIDE the output
+        # guard for the same reason the cancel check does — the refusal is mooring's
+        # own fixed sentence and must not be withheld by a policy check — and INSIDE
+        # the cancel wrapper, so an analyst who pressed Stop is told that, not this.
+        def bounded(spec: ToolSpec) -> ToolSpec:
+            raw_handler = spec.handler
+
+            def handler(invocation):
+                if not budget.spend():
+                    return _err(budget.runaway_text())
+                return raw_handler(invocation)
+
+            return replace(spec, handler=handler)
+
+        specs = [bounded(spec) for spec in specs]
+
     if cancelled is not None:
         # --- the stop signal, at the ONE boundary every tool crosses ---------------
         #
@@ -2009,6 +2234,7 @@ def build_tools(
     output_guard: Callable[[str], bool] | None = None,
     apply_edit: Callable[[list[dict], str], object] | None = None,
     cancelled: Callable[[], bool] | None = None,
+    budget: "TurnCallBudget | None" = None,
 ) -> list:
     """The GitHub Copilot adapter over :func:`build_tool_specs`.
 
@@ -2023,10 +2249,11 @@ def build_tools(
     ``parameters`` / ``skip_permission`` and handlers that return a ``ToolResult``.
     The SDK import stays function-local (``copilot`` is the optional extra).
 
-    ``apply_edit`` / ``cancelled`` are passed straight through: the mode switch and the
-    stop signal live in :func:`build_tool_specs`, so both adapters get them from one
-    implementation rather than two. Note the SDK loop cannot be interrupted from outside,
-    which is exactly why ``cancelled`` is answered per tool call.
+    ``apply_edit`` / ``cancelled`` / ``budget`` are passed straight through: the mode
+    switch, the stop signal and the runaway ceiling live in :func:`build_tool_specs`, so
+    both adapters get them from one implementation rather than two. Note the SDK loop
+    cannot be interrupted OR counted from outside, which is exactly why both
+    ``cancelled`` and ``budget`` are answered per tool call on this backend.
     """
     from copilot.tools import Tool
 
@@ -2050,6 +2277,7 @@ def build_tools(
         output_guard=output_guard,
         apply_edit=apply_edit,
         cancelled=cancelled,
+        budget=budget,
     )
 
     def _to_tool(spec: ToolSpec):
@@ -2123,6 +2351,11 @@ def build_openai_tools(
     ``apply_edit`` / ``cancelled`` pass straight through to :func:`build_tool_specs`, so
     ``dispatch`` is keyed by whichever write-tool name that mode registers — the session
     dispatches by the key it is given and never by a hard-coded name.
+
+    There is deliberately NO ``budget`` here. This adapter's caller owns its tool loop
+    and spends the same :class:`TurnCallBudget` there, where it also sees the calls that
+    never reach a handler at all (an unknown tool name); charging one call in both
+    places would silently halve the analyst's configured ceiling.
     """
     specs = build_tool_specs(
         workspace=workspace,

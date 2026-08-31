@@ -22,6 +22,13 @@ and it is deliberately narrow:
   takes minutes; a teammate's sync or a hub toggle can land inside that window, and the
   hand-off is the egress, so the gate is where the egress is (the same reasoning as
   ``/api/ai/chat/send``). Both entry points below share that one check.
+* **The outbound PII valve applies to both entry points, and to the automatic one it
+  applies FAIL-CLOSED.** The attended path gets it from ``session.send``; the automatic
+  path never touches ``send``, so :func:`run_and_collect` runs the session's own scan
+  itself and, where block mode would hold the turn, sends NOTHING (there is no analyst
+  at a tool result to confirm a hold). The same call also puts the exact text that was
+  sent into the analyst's transcript, which is otherwise the one thing the automatic
+  path loses by not being a turn.
 
 **When it is automatic, and when it is not.** It used to be never — an analyst clicked a
 button that said what it would do, because this path re-executes every cell, which is
@@ -44,13 +51,38 @@ Neither entry point ever runs a notebook the per-notebook AI opt-out covers.
 
 from __future__ import annotations
 
+import contextlib
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from mooring import policy
 from mooring.app import notebook_run, verify_run
 from mooring.config import Config
+
+# What the ANALYST is shown when mooring runs the notebook on the model's behalf. The
+# summary itself travels verbatim in the event's `sent` field, so "you are shown exactly
+# what was sent" is literally true; these two say, without quoting anything, why there
+# is no summary to show.
+_HELD_NOTICE = (
+    "mooring ran this notebook after the assistant's change, and the outbound PII "
+    "guard held the failure summary — so nothing was sent to the assistant. Open the "
+    "notebook to see the error yourself."
+)
+_UNREADABLE_NOTICE = (
+    "mooring ran this notebook after the assistant's change. It did not run clean, but "
+    "no line matching marimo's own error taxonomy came back, so there was nothing "
+    "value-safe to send the assistant."
+)
+_STOPPED_NOTICE = "You stopped the turn, so mooring stopped the run it had started."
+_FAILED_NOTICE = "mooring could not run this notebook to diagnose the change:"
+
+
+def _one_line(exc: BaseException) -> str:
+    """A raised reason, bounded to one line. These messages are mooring's own (a busy
+    workspace, an unrunnable notebook, a broken environment) and they go to the
+    ANALYST's transcript, never to the model."""
+    return " ".join(str(exc).split())[:200]
 
 
 class ReportError(Exception):
@@ -66,6 +98,7 @@ class RunReport:
     sent: str  # the EXACT text forwarded to the model ("" when nothing was)
     redactions: tuple[tuple[int, str], ...] = ()  # value-free (line, kind) rewrite findings
     cancelled: bool = False  # the analyst stopped the turn; the process tree was killed
+    held: bool = False  # the outbound PII valve held the summary; NOTHING was sent
 
 
 def run_and_report(
@@ -100,16 +133,121 @@ def run_and_collect(
     lock, same receipt, same ``egress.sanitize_traceback`` rewrite, same opt-out re-check
     immediately before the text is handed over — and differs only in WHERE the text goes:
     back to the model as the result of the write it just made, rather than into the
-    transcript as a fresh turn. Nothing is broadcast, so the analyst reads the outcome on
-    the receipt the write already drew.
+    transcript as a fresh turn.
 
     ``cancel`` is the analyst's stop, honoured mid-run: it becomes the runner's own
     process-tree kill. A cancelled run reports ``cancelled=True`` and sends nothing —
     there is nothing to tell the model about a run that was stopped on purpose.
 
+    Two things the attended path gets from ``session.send`` have to be done explicitly
+    here, because this text does NOT go through it:
+
+    * **the outbound PII valve.** The same scan the analyst's own turns get
+      (``ChatBroadcaster._scan_prompt`` -> ``egress.guard_prompt``), and where block
+      mode would HOLD the turn this **fails closed**: ``held=True``, ``sent=""``,
+      nothing forwarded. A hold is a request for a human decision, and there is no
+      human at a tool result — auto-confirming one would make "block mode" mean
+      "warn mode" on the one path nobody watches. A session that cannot be scanned at
+      all is held for the same reason.
+    * **the transcript entry.** The attended report appears in the transcript because
+      it IS a turn; this one is a tool result the analyst never sees. So the run
+      announces itself before it starts and reports itself afterwards over value-free
+      ``run_report`` events (see :func:`_run_event` for why that NAME is a contract) —
+      the docs promise "you are shown exactly what was sent", and a summary that reaches
+      only the model would make that false.
+
     Raises the same :class:`ReportError` / ``PermissionError`` as :func:`run_and_report`.
     """
-    return _run_and_compose(session, cfg, notebook_rel, cancel=cancel)
+    # The analyst's own notebook is about to be re-executed, which takes minutes: say so
+    # before it starts, not once it is over.
+    _run_event(session, {"state": "running"})
+    try:
+        report = _run_and_compose(session, cfg, notebook_rel, cancel=cancel)
+    except Exception as exc:
+        # Every exit path ends the cue. A run that announced itself and then said
+        # nothing would leave "running your notebook…" on screen for ever.
+        _run_event(session, {"text": f"{_FAILED_NOTICE} {_one_line(exc)}".strip()})
+        raise
+    if report.cancelled:
+        _run_event(session, {"text": _STOPPED_NOTICE})
+        return report
+    if not report.sent:
+        _run_event(session, {"ran_clean": True} if report.ran_clean else {"text": _UNREADABLE_NOTICE})
+        return report
+    hold, findings, scan_error = _scan_outbound(session, report.sent)
+    _emit_pii_event(session, findings, scan_error, held=hold)
+    if hold:
+        _run_event(session, {"held": True, "text": _HELD_NOTICE})
+        return replace(report, sent="", held=True)
+    # The summary VERBATIM, in the field the chat page renders with its existing
+    # "this is exactly what was sent" block — the same promise the attended path keeps
+    # by being a turn.
+    _run_event(
+        session,
+        {"sent": report.sent, "redactions": [{"line": ln, "kind": k} for ln, k in report.redactions]},
+    )
+    return report
+
+
+def _scan_outbound(session, text: str) -> tuple[bool, list, str]:
+    """The session's OWN outbound scan, run without sending. Fails closed.
+
+    Deliberately the session's method rather than a second call to
+    ``egress.guard_prompt`` from here: the scan's configuration (enabled, block mode,
+    whether the optional name pass is armed AND its model actually ready) lives on the
+    session, and a copy of that decision in the app layer is a copy that can drift from
+    the one the analyst's own turns get. Duck-typed across the layer boundary for the
+    same reason ``run_failure_report`` is.
+
+    A session that does not offer the scan, or one whose scan raises, is treated as a
+    HOLD: this is the unattended path, so "the guard could not run" must stop the text,
+    not wave it through.
+    """
+    scan = getattr(session, "_scan_prompt", None)
+    if not callable(scan):
+        return True, [], "unavailable"
+    try:
+        hold, findings, scan_error = scan(text)
+    except Exception:  # noqa: BLE001 — a guard that breaks must not become a bypass
+        return True, [], "unavailable"
+    return bool(hold), list(findings or []), str(scan_error or "")
+
+
+def _emit_pii_event(session, findings, scan_error: str, *, held: bool) -> None:
+    """The same value-free ``pii`` event the attended valve broadcasts — kinds and line
+    numbers only, never the matched text. No confirm token: an automatic report is never
+    resumable, so there is nothing for the analyst to release."""
+    if not (findings or scan_error):
+        return
+    data: dict = {"findings": [{"line": f.line, "kind": f.kind} for f in findings]}
+    if scan_error:
+        data["scan_error"] = scan_error
+    if held:
+        data["held"] = True
+    _broadcast(session, "pii", data)
+
+
+def _run_event(session, data: dict) -> None:
+    """One value-free ``run_report`` event for the analyst's transcript (best-effort).
+
+    The NAME matters and is a contract with the chat page: ``EventSource`` has no
+    wildcard listener, so an event sent under any other name is dropped by the browser
+    with no error anywhere. The page understands ``{state}``, ``{ran_clean}`` and
+    ``{sent, redactions}``, and falls back to the first string among
+    ``text``/``detail``/``message``/``summary``/``error`` for anything else — so extra
+    keys are safe, a new NAME is not (``note`` is the only other one it listens for).
+    """
+    _broadcast(session, "run_report", data)
+
+
+def _broadcast(session, kind: str, data: dict) -> None:
+    from mooring.ai.chat import ChatEvent
+
+    fan_out = getattr(session, "_broadcast", None)
+    if not callable(fan_out):
+        return
+    with contextlib.suppress(Exception):
+        fan_out(ChatEvent(kind, data))
 
 
 def _run_and_compose(

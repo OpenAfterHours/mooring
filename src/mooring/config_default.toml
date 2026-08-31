@@ -169,8 +169,8 @@ auto_run_report = true      # when the observation says an applied cell did not 
 max_tool_iters = 200        # SAFETY CEILING on the model's tool calls within one turn — a
                             # backstop against a runaway loop, not a work budget. It is set
                             # high on purpose: a hard analysis should run to the end, and the
-                            # control for "that is enough" is the chat's Cancel button, not a
-                            # small cap that stops the model mid-thought. A value below 1 is
+                            # control for "that is enough" is the chat's Stop button (or Esc),
+                            # not a small cap that stops the model mid-thought. A value below 1 is
                             # ignored (it would end every turn before the first tool call).
                             # Not policy-governed — see docs/admins/policy.md.
 traceback_guard = true      # when a chat message contains a pasted Python traceback,

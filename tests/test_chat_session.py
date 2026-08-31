@@ -17,7 +17,7 @@ import pytest
 from copilot import SessionEventType as ET
 
 from mooring.ai.session import CopilotChatSession
-from mooring.ai.tools import TOOL_NAMES
+from mooring.ai.tools import DEFAULT_MAX_TOOL_ITERS, TOOL_NAMES
 
 
 def _event(etype, **data):
@@ -438,6 +438,29 @@ def test_cancel_raises_the_tool_boundary_flag_and_asks_the_sdk_to_abort(fake_sdk
         sess.close()
 
 
+def test_only_the_press_that_raised_the_flag_announces_or_aborts(tmp_path, fake_sdk):
+    # Whether to announce is decided WITH the set, under one lock: two near-simultaneous
+    # presses (two tabs, a double click) both saw the flag unset before, and both
+    # announced — and on this backend both also asked the SDK to abort.
+    from mooring.ai.chat import ChatBroadcaster
+
+    plain = ChatBroadcaster()
+    q = plain.subscribe()
+    assert plain.request_cancel() is True
+    assert plain.request_cancel() is False
+    assert q.get(timeout=1).kind == "cancelled"
+    with pytest.raises(queue.Empty):
+        q.get(timeout=0.2)
+
+    sess = _make(tmp_path).start()
+    try:
+        assert sess.request_cancel() is True
+        assert sess.request_cancel() is False
+        assert FakeClient.last.session.aborted == 1
+    finally:
+        sess.close()
+
+
 def test_a_missing_sdk_abort_is_not_an_error(fake_sdk, tmp_path, monkeypatch):
     # The SDK is an optional extra whose surface can move; abort is duck-typed and the
     # flag alone still stops the turn.
@@ -563,13 +586,24 @@ def test_a_held_edit_reuses_the_existing_proposal_card(fake_sdk, tmp_path):
 
 
 @pytest.mark.parametrize("status", ["conflict", "disabled", "cancelled", "error"])
-def test_an_unapplied_edit_tells_the_model_and_leaves_the_ui_alone(fake_sdk, tmp_path, status):
+def test_an_unapplied_edit_tells_the_model_and_says_so_in_the_transcript(fake_sdk, tmp_path, status):
+    """A write that did not land is announced, but never as a CARD.
+
+    A card offers an action and there is nothing here to act on — the notebook was not
+    touched. Saying nothing at all was worse: the analyst saw a tool row end in a cross,
+    which does not distinguish "the write failed" from "the write worked and something
+    else broke", and those are the two readings they most need told apart now that they
+    are no longer clicking Apply for each change.
+    """
     sess = _make(tmp_path, applier=lambda ops, why: _outcome(status, payload={"x": 1})).start()
     try:
         q = sess.subscribe()
         got = sess._apply_edit([{"op": "edit"}], "why")
         assert got.status == status
-        with pytest.raises(queue.Empty):  # no card for a change that did not happen
+        ev = q.get(timeout=2)
+        assert ev.kind == "apply_failed"  # not "proposal": no card, no Apply, no Revert
+        assert ev.data["status"] == status
+        with pytest.raises(queue.Empty):  # and nothing else
             q.get(timeout=0.2)
     finally:
         sess.close()
@@ -587,6 +621,115 @@ def test_a_broken_applier_becomes_a_value_free_error_not_a_crashed_turn(fake_sdk
         assert out.status == "error" and out.is_error is True
         assert secret not in out.text  # the failure is never repeated back to the model
         assert "Nothing was written" in out.text
+    finally:
+        sess.close()
+
+
+# -- the runaway ceiling on ONE turn's tool calls -------------------------------
+#
+# The Copilot SDK drives its own tool loop from inside the session, so mooring cannot
+# count iterations here the way `OpenAIChatSession` counts its own. What mooring DOES
+# own on this backend is what every tool call answers — so that is where the ceiling
+# lives, and these tests drive a "model" that only ever stops when a tool result tells
+# it to. Without the ceiling this turn does not end at all.
+
+
+def _tool_invocation(**arguments):
+    return types.SimpleNamespace(
+        session_id="s", tool_call_id="t", tool_name="x", arguments=arguments
+    )
+
+
+class _NeverConverges(FakeSession):
+    """A model that calls one tool until a tool RESULT tells it to stop.
+
+    ``HARD_STOP`` stands in for "forever": a run that reaches it is the unbounded
+    turn the ceiling exists to end, and the test fails on it rather than hanging.
+    A cheap READ tool is used because any tool call is a call — the ceiling counts
+    calls, not writes — and 200 of them then cost milliseconds, not minutes.
+    """
+
+    HARD_STOP = 400
+    TOOL = "mooring_list_datasets"
+
+    def __init__(self, create_kwargs):
+        super().__init__(create_kwargs)
+        self.results: list[str] = []
+
+    async def send(self, prompt, **kw):
+        import inspect
+
+        self.sent.append(prompt)
+        tools = {t.name: t for t in self.create_kwargs["tools"]}
+        tool = tools[type(self).TOOL]
+        for _ in range(type(self).HARD_STOP):
+            out = tool.handler(_tool_invocation())
+            if inspect.isawaitable(out):
+                out = await out
+            text = (getattr(out, "text_result_for_llm", "") or "") + (
+                getattr(out, "error", "") or ""
+            )
+            self.results.append(text)
+            if "runaway ceiling" in text:
+                break  # the model was told to stop, and did
+        assert self._handler is not None
+        self._handler(_event(ET.SESSION_IDLE, aborted=False))
+        return "turn-1"
+
+
+async def _looping_create_session(self, **kwargs):
+    self.session = _NeverConverges(kwargs)
+    return self.session
+
+
+def _run_away(sess, tmp_path):
+    """Run one turn against the never-converging model; return its tool results."""
+    q = sess.subscribe()
+    sess.send("do the whole analysis")
+    _drain(q, until="idle", timeout=30)
+    return FakeClient.last.session.results
+
+
+def test_a_never_converging_model_is_stopped_by_the_runaway_ceiling(
+    fake_sdk, tmp_path, monkeypatch
+):
+    monkeypatch.setattr(FakeClient, "create_session", _looping_create_session)
+    sess = _make(tmp_path).start()
+    try:
+        results = _run_away(sess, tmp_path)
+        assert len(results) < _NeverConverges.HARD_STOP, "the turn never ended on its own"
+        # The default ceiling's worth of calls are answered normally; the one after it
+        # is the stop, and it is the ONLY result that says so.
+        assert len(results) == DEFAULT_MAX_TOOL_ITERS + 1
+        assert "runaway ceiling" in results[-1]
+        assert not any("runaway ceiling" in r for r in results[:-1])
+        # Worded as an abnormal SELF-stop the analyst can lift, not as a finished turn.
+        assert "not a finished answer" in results[-1] and "continue" in results[-1]
+    finally:
+        sess.close()
+
+
+def test_the_copilot_ceiling_is_the_caller_s_max_tool_iters(fake_sdk, tmp_path, monkeypatch):
+    # ONE number for both backends: the policy-folded `[ai] max_tool_iters`, passed in.
+    monkeypatch.setattr(FakeClient, "create_session", _looping_create_session)
+    sess = _make(tmp_path, max_tool_iters=4).start()
+    try:
+        results = _run_away(sess, tmp_path)
+        assert len(results) == 5
+        assert "runaway ceiling" in results[-1]
+    finally:
+        sess.close()
+
+
+def test_the_ceiling_is_per_turn_not_per_session(fake_sdk, tmp_path, monkeypatch):
+    # A turn that hit the ceiling must not leave the next one with no budget at all —
+    # the analyst's "carry on" is the documented way to continue.
+    monkeypatch.setattr(FakeClient, "create_session", _looping_create_session)
+    sess = _make(tmp_path, max_tool_iters=3).start()
+    try:
+        assert len(_run_away(sess, tmp_path)) == 4
+        FakeClient.last.session.results.clear()
+        assert len(_run_away(sess, tmp_path)) == 4
     finally:
         sess.close()
 

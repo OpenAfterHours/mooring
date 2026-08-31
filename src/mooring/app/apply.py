@@ -29,6 +29,33 @@ from pathlib import Path
 UNDO_SUPERSEDED = object()
 
 
+class ApplyDepth(int):
+    """The new undo depth, carrying ONE extra fact: how many writes the checkpoint a
+    Revert would now restore covers, counting the write that just happened.
+
+    An ``int`` SUBCLASS rather than a tuple or a second return value because every
+    existing caller — both adapters and the tests — reads this as a depth and compares
+    it with ``> 0``; changing the type would touch each of them to serve one consumer.
+    Only the model's own writer (:mod:`mooring.app.auto_apply`) reads ``.writes``, and
+    it needs it for a specific reason: a turn's writes share ONE checkpoint, so Revert
+    on the fifth receipt takes back all five — and the UI cannot say so unless it is
+    told the number. It cannot be inferred from the depth either, because the undo stack
+    is capped: "the depth did not move" is ambiguous between "this write extended the
+    checkpoint" and "a new one was pushed and the oldest was pruned".
+
+    ``writes`` is always >= 1, and is 1 exactly when this write opened a fresh
+    checkpoint. It is computed under the guard's lock, so it describes the stack as it
+    was at the instant of this write and cannot be raced by a later one.
+    """
+
+    writes: int
+
+    def __new__(cls, depth: int, writes: int = 1) -> "ApplyDepth":
+        self = super().__new__(cls, depth)
+        self.writes = max(1, int(writes))
+        return self
+
+
 class ApplyGateHeld(Exception):
     """The arriving cell does something Undo cannot take back, and no matching
     confirmation came with it — so NOTHING was written: no snapshot, no bytes, no
@@ -125,11 +152,10 @@ def _undo_key(workspace: Path, notebook_rel: str) -> tuple[str, str]:
 
     The turn-checkpoint map below is keyed by this and compared against a token read
     off that stack, so the two must agree about which notebook is which. Anything
-    coarser (a case-folded path, say) could make two distinct notebooks share a map
-    entry, and their snapshot tokens are plain counters — ``000000000001`` on one
-    stack matches ``000000000001`` on the other — so the "is my checkpoint still on
-    top?" check would pass against the WRONG stack and skip a snapshot that was
-    needed. Mirrors ``notebook_undo._norm``.
+    coarser (a case-folded path, say) would let two distinct notebooks share ONE map
+    entry, so each notebook's write would evict the other's checkpoint and a turn that
+    touches both would take an extra undo step per alternation. Mirrors
+    ``notebook_undo._norm``.
     """
     return (str(workspace), str(notebook_rel).replace("\\", "/").strip("/"))
 
@@ -146,6 +172,10 @@ class ApplyGuard:
         # opens a fresh checkpoint, which is the safe direction (one extra undo step,
         # never a missing one).
         self._turn_checkpoints: dict[tuple[str, str], tuple[str, str]] = {}
+        # notebook -> how many writes the checkpoint above currently covers. Same lock,
+        # same lifetime; reported on the way out as ApplyDepth.writes so a receipt can
+        # say "Revert takes back N changes" instead of implying it takes back one.
+        self._turn_writes: dict[tuple[str, str], int] = {}
 
     def apply_with_undo(
         self,
@@ -156,8 +186,12 @@ class ApplyGuard:
         *,
         gate_token: str | None = None,
         turn_id: str | None = None,
-    ) -> int:
+    ) -> ApplyDepth:
         """Snapshot the notebook, apply the patch, and return the new undo depth.
+
+        The return value is an :class:`ApplyDepth` — an ``int`` that is the depth, plus
+        ``.writes``: how many writes the checkpoint a Revert would restore now covers.
+        Every caller that wants a depth can go on treating it as one.
 
         Runs in a thread (file IO), serialized with Undo by :attr:`lock`. If the
         patch fails the just-taken snapshot is discarded, so a failed Apply never
@@ -226,7 +260,8 @@ class ApplyGuard:
             # still leaves no snapshot, no bytes and no undo step.
             key = _undo_key(workspace, notebook_rel)
             token = None
-            if not self._extends_turn(workspace, notebook_rel, turn_id, key):
+            extends = self._extends_turn(workspace, notebook_rel, turn_id, key)
+            if not extends:
                 token = notebook_undo.snapshot(workspace, notebook_rel, current)
             try:
                 cellwrite.apply_wire_patch(nb_path, op_dicts)
@@ -238,7 +273,15 @@ class ApplyGuard:
                 # Only ever recorded for a snapshot that is now genuinely on top, so
                 # the map can never point at a layer the stack does not have.
                 self._turn_checkpoints[key] = (turn_id, token)
-            return notebook_undo.depth(workspace, notebook_rel)
+            # A fresh checkpoint covers exactly this write; an extended one covers one
+            # more than it did. Written on BOTH paths so a manual Apply landing between
+            # two model writes (which takes its own snapshot, and therefore breaks the
+            # chain above) also resets the count rather than leaving a stale one to be
+            # picked up by whatever writes next.
+            self._turn_writes[key] = self._turn_writes.get(key, 1) + 1 if extends else 1
+            return ApplyDepth(
+                notebook_undo.depth(workspace, notebook_rel), self._turn_writes[key]
+            )
 
     def _extends_turn(self, workspace: Path, notebook_rel: str, turn_id, key) -> bool:
         """Whether this write joins the checkpoint an earlier write in the SAME turn
@@ -249,6 +292,13 @@ class ApplyGuard:
         manual Apply, an Undo, or a sync rollback landing between two model writes moves
         the top, and extending then would leave the turn's Revert pointing at a state
         the analyst never had.
+
+        "Still the newest" is answered by TOKEN identity, which is only an answer at all
+        because ``notebook_undo`` tokens are unique for the life of a notebook. It is
+        deliberately not answered by comparing the snapshot's BYTES: an Undo restores
+        exactly the bytes its snapshot held, so a manual Apply taken straight after one
+        snapshots identical content — the two layers a byte check most needs to tell
+        apart are the two it cannot see any difference between.
         """
         from mooring import notebook_undo
 
@@ -267,6 +317,9 @@ class ApplyGuard:
         the remaining undo depth, ``None`` when there is nothing to undo, or
         :data:`UNDO_SUPERSEDED` when ``expect_token`` is given but no longer the newest
         snapshot (a later write is on top — restoring it would revert the wrong layer).
+        That check leans on the same property :meth:`_extends_turn` does: a token names
+        ONE snapshot for the life of the notebook, so a stale token can never be
+        satisfied by a later layer that happened to reuse its number.
 
         Write-then-discard: the snapshot is only consumed AFTER it is safely written
         back, so a failed restore leaves the undo step intact to retry (symmetric with

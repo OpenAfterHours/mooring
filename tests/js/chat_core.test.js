@@ -16,17 +16,27 @@ const C = require("../../src/mooring/hub/static/chat_core.js");
 // chat.js's printHelp keeps its OWN hand-written rows, so a command added to COMMANDS
 // (which drives the "/" autocomplete) can silently go undocumented — /review, /checks and
 // /sql all did. Pin the two lists together.
-test("every slash command in COMMANDS is documented in chat.js's /help", () => {
+test("every slash command in COMMANDS is documented in /help, in both modes", () => {
+  // The rows moved into ChatCore.helpRows so they can differ by MODE: /apply, /diff and
+  // the a/s keys act on a change that is WAITING, which once the copilot applies its own
+  // changes means only the ones it is holding for a confirm. Both listings must still
+  // cover every command.
+  for (const autoApply of [true, false]) {
+    const documented = new Set(
+      C.helpRows(autoApply).map(([name]) => name.replace(/^\//, "").split(" ")[0]),
+    );
+    const missing = C.COMMANDS.map((c) => c.name).filter((n) => !documented.has(n));
+    assert.deepEqual(missing, [], `commands missing from /help (auto_apply=${autoApply}): ${missing.join(", ")}`);
+  }
+});
+
+test("chat.js renders /help through ChatCore, so the two cannot drift", () => {
   const chatJs = fs.readFileSync(
     path.join(__dirname, "..", "..", "src", "mooring", "hub", "static", "chat.js"),
     "utf8",
   );
-  // printHelp rows look like  ["/name", "…"]  or  ["/name <topic>", "…"].
-  const documented = new Set(
-    [...chatJs.matchAll(/\["\/([a-z]+)[^"]*",/g)].map((m) => m[1]),
-  );
-  const missing = C.COMMANDS.map((c) => c.name).filter((n) => !documented.has(n));
-  assert.deepEqual(missing, [], `commands missing from /help: ${missing.join(", ")}`);
+  assert.match(chatJs, /ChatCore\.helpRows\(/);
+  assert.match(chatJs, /ChatCore\.helpKeys\(/);
 });
 
 // A copy of chat.js's escapeHtml so we can prove highlightCode is safe on

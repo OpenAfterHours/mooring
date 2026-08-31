@@ -213,6 +213,18 @@ async def api_chat_open(request: Request) -> JSONResponse:
             # waits for the "ready"/"fail" event on the stream. The stub/already-
             # ready sessions report True and the UI enables the input immediately.
             "ready": session.is_ready(),
+            # Which MODE this chat is in: True = the copilot writes its own reversible
+            # changes and reports them as receipts, False = it proposes and waits for
+            # Apply. `[ai] auto_apply` defaults ON, so without this the page has no way
+            # to say so and an existing user's copilot simply stops asking — the first
+            # evidence being a receipt for a change that has already landed and run.
+            #
+            # Read off the applier rather than the config: `_make_applier` returning
+            # None IS manual mode (the write tool is never wired), so this cannot
+            # disagree with what the session will actually do. The knob is re-read at
+            # every write, so a mid-session change still bites — this is the open-time
+            # answer, which is what the opening line of the transcript is about.
+            "auto_apply": applier is not None,
         }
     )
 
@@ -252,12 +264,21 @@ async def api_chat_send(request: Request) -> JSONResponse:
     # A turn is starting. Everything the model writes from here shares ONE undo
     # checkpoint and ONE receipt group, because "undo the assistant's last turn" is the
     # unit an analyst thinks in — not "undo its fourth write". Nothing happens in manual
-    # mode (no applier), and the id is deliberately minted BEFORE the send rather than
-    # inferred later: only a send starts a turn.
-    hub.chat.begin_turn(sid)
+    # mode (no applier).
+    #
+    # Minted on the two paths that actually FORWARD text, immediately before each send,
+    # rather than once up here. Up here it rotated the turn id for sends that never
+    # happened — an empty message, and (the one that costs something) a second message
+    # typed while the assistant is still working, which a routed session refuses outright.
+    # The running turn's next write then no longer matched the checkpoint map, so it took
+    # a second snapshot and "revert what the assistant just did" only undid part of it.
+    # It must still be minted BEFORE the send: on a backend that drives its tool loop in
+    # this thread, the writes happen inside the call.
+    #
     # "Send anyway" path: forward a prompt the PII guard held, verbatim, once.
     confirm = str(data.get("confirm_token", "")).strip()
     if confirm:
+        hub.chat.begin_turn(sid)
         try:
             await asyncio.to_thread(session.send_confirmed, confirm, live_text)  # ty: ignore[unresolved-attribute]
         except Exception as exc:  # noqa: BLE001  # AIError surfaces to the UI
@@ -267,6 +288,7 @@ async def api_chat_send(request: Request) -> JSONResponse:
     text = str(data.get("text", "")).strip()
     if not text:
         return JSONResponse({"error": "Type a message."}, status_code=400)
+    hub.chat.begin_turn(sid)
     try:
         await asyncio.to_thread(session.send, text, live_text)  # ty: ignore[unresolved-attribute]
     except Exception as exc:  # noqa: BLE001  # AIError surfaces to the UI in Phase 1

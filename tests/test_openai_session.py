@@ -796,6 +796,47 @@ def test_cancel_stops_an_in_flight_turn_and_the_session_takes_the_next_message(w
         session.close()
 
 
+def test_a_stop_pressed_while_a_turn_waits_in_the_queue_still_stops_it(ws):
+    # The race the analyst actually saw: `send` returns, they press Stop, the UI says
+    # "cancelled" — and the turn ran to completion anyway, because the flag was cleared
+    # on the WORKER thread when it finally picked the turn up. The flag is re-armed when
+    # a turn is ENQUEUED now (as the Copilot backend has always done), so a stop in that
+    # window ends the queued turn before a single completion is paid for.
+    opened, release = threading.Event(), threading.Event()
+    blocking = _BlockingStream(
+        [_chunk(content="one"), _chunk(content=" more"), _chunk(finish="stop")],
+        opened,
+        release,
+    )
+    session, completions = _stream_session(
+        ws, [blocking, [_chunk(content="second answer"), _chunk(finish="stop")]]
+    )
+    q = session.subscribe()
+    try:
+        session.send("first")
+        assert opened.wait(timeout=5), "the worker never reached the stream"
+        session.send("second")  # queued behind the turn in flight
+        session.request_cancel()  # ...and stopped before the worker reaches it
+        release.set()
+
+        events, idles = [], 0
+        deadline = time.monotonic() + 5
+        while idles < 2 and time.monotonic() < deadline:
+            try:
+                ev = q.get(timeout=0.2)
+            except queue.Empty:
+                continue
+            events.append(ev)
+            idles += ev.kind == "idle"
+        assert idles == 2, "the queued turn never ended"
+        assert len(completions.calls) == 1  # the queued turn paid for no completion
+        texts = [e.data.get("text", "") for e in events if e.kind == "message"]
+        assert texts.count("(Stopped at your request.)") == 2
+        assert "second answer" not in texts
+    finally:
+        session.close()
+
+
 def test_a_cancel_never_poisons_the_following_turn(ws):
     # The flag is cleared at the START of a turn, not at the end of the cancelled one:
     # a stop pressed with nothing running (or one that raced the end of a turn) must not
@@ -916,6 +957,56 @@ def test_a_degenerate_ceiling_falls_back_rather_than_ending_every_turn(ws, bad):
     )
     try:
         assert session._max_tool_iters == DEFAULT_MAX_TOOL_ITERS
+    finally:
+        session.close()
+
+
+def _two_calls(a="a", b="b"):
+    return [
+        _chunk(
+            tool_calls=[
+                _tc(0, tc_id=a, name="mooring_list_datasets", args="{}"),
+                _tc(1, tc_id=b, name="mooring_list_datasets", args="{}"),
+            ]
+        ),
+        _chunk(finish="tool_calls"),
+    ]
+
+
+def test_the_ceiling_counts_a_tool_call_once_not_once_per_layer(ws):
+    # The ceiling is enforced on BOTH backends now, from one number. This loop spends it
+    # here and the tool wrapper does not spend it again (`build_openai_tools` takes no
+    # budget) — charging in both places would silently halve the analyst's setting. Two
+    # calls per completion, a ceiling of 4: four calls, all of them really run.
+    session, completions = _session(
+        ws, [_two_calls("a1", "a2"), _two_calls("b1", "b2"), _two_calls()], max_tool_iters=4
+    )
+    q = session.subscribe()
+    try:
+        session.send("loop")
+        _drain(q, until="idle")
+        assert len(completions.calls) == 2
+        replies = [m for m in session._messages if m.get("role") == "tool"]
+        assert len(replies) == 4
+        assert not any("runaway" in m["content"] for m in replies)
+    finally:
+        session.close()
+
+
+def test_a_call_past_the_ceiling_is_answered_but_never_run(ws):
+    # Every tool_call_id still needs exactly one reply or the API rejects the next turn —
+    # but a batch of parallel calls must not RUN on a budget that has one step left.
+    session, completions = _session(ws, [_two_calls("c1", "c2")], max_tool_iters=1)
+    ran = []
+    original = session._dispatch["mooring_list_datasets"]
+    session._dispatch["mooring_list_datasets"] = lambda inv: (ran.append(1), original(inv))[1]
+    q = session.subscribe()
+    try:
+        session.send("loop")
+        _drain(q, until="idle")
+        replies = [m["content"] for m in session._messages if m.get("role") == "tool"]
+        assert len(replies) == 2 and len(ran) == 1
+        assert "runaway ceiling" in replies[1] and "runaway" not in replies[0]
     finally:
         session.close()
 
