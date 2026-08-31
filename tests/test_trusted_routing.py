@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import types
+from dataclasses import replace
 
 import pytest
 from starlette.testclient import TestClient
@@ -54,6 +55,8 @@ def _hub(
     endpoint="https://approved.example/v1",
     coding_models=(),
     profile_label="Firm approved AI",
+    trusted_model="",
+    routing_preference="auto",
 ):
     routing = RoutingConfig(
         enabled=True,
@@ -68,7 +71,12 @@ def _hub(
         config.AppConfig(
             repos=(repo,),
             active_alias="ws",
-            ai=AiConfig(provider="copilot", routing=routing),
+            ai=AiConfig(
+                provider="copilot",
+                routing=routing,
+                trusted_model=trusted_model,
+                routing_preference=routing_preference,
+            ),
         )
     )
 
@@ -214,7 +222,9 @@ def test_trusted_routing_metadata_contains_only_exact_safe_profile(tmp_path):
             {"id": "approved-coder", "name": "approved-coder"},
             {"id": "approved-coder-fast", "name": "approved-coder-fast"},
         ],
+        "managed_default_trusted_model": "approved-coder",
         "default_trusted_model": "approved-coder",
+        "default_routing_preference": "auto",
     }
     rendered = repr(metadata)
     assert "approved.example" not in rendered
@@ -237,9 +247,12 @@ def test_models_endpoint_exposes_only_validated_safe_routing_metadata(tmp_path, 
     monkeypatch.setattr(hub, "_provider_for", lambda: GeneralProvider())
 
     with TestClient(create_app(hub)) as client:
-        routing = client.get("/api/ai/models").json()["routing"]
+        payload = client.get("/api/ai/models").json()
+        routing = payload["routing"]
 
     assert routing == hub._trusted_routing_metadata()
+    assert payload["preference_scope"] == hub._ai_preference_scope()
+    assert str(tmp_path) not in payload["preference_scope"]
     assert "approved.example" not in repr(routing)
     assert "approved-inspector" not in repr(routing)
 
@@ -263,7 +276,64 @@ def test_models_endpoint_offers_no_choices_for_unavailable_profile(tmp_path, mon
     assert routing["enabled"] is True
     assert routing["trusted_models"] == []
     assert routing["default_trusted_model"] == ""
+    assert routing["default_routing_preference"] == "trusted"
     assert "approved-coder" not in repr(routing)
+
+
+def test_routing_metadata_uses_only_safe_effective_user_defaults(tmp_path):
+    selected = _hub(
+        tmp_path,
+        coding_models=("approved-coder", "approved-coder-fast"),
+        trusted_model="approved-coder-fast",
+        routing_preference="trusted",
+    )._trusted_routing_metadata()
+    stale = _hub(
+        tmp_path,
+        coding_models=("approved-coder", "approved-coder-fast"),
+        trusted_model="browser-invented",
+        routing_preference="general",
+    )._trusted_routing_metadata()
+
+    assert selected["default_trusted_model"] == "approved-coder-fast"
+    assert selected["default_routing_preference"] == "trusted"
+    assert stale["default_trusted_model"] == "approved-coder"
+    assert stale["default_routing_preference"] == "trusted"
+
+
+def test_preference_scope_is_opaque_and_unique_to_workspace_and_repo(tmp_path):
+    first = _hub(tmp_path / "first")
+    second = _hub(tmp_path / "second")
+
+    def configured(workspace, owner, repo):
+        spec = config.RepoSpec(
+            alias="same-alias",
+            owner=owner,
+            repo=repo,
+            workspace_path=str(workspace),
+        )
+        return Hub(
+            config.AppConfig(
+                repos=(spec,),
+                active_alias="same-alias",
+                ai=AiConfig(),
+            )
+        )
+
+    rebound_one = configured(tmp_path / "bound", "Customer-One", "analytics")
+    rebound_two = configured(tmp_path / "bound", "Customer-Two", "analytics")
+    scopes = {
+        first._ai_preference_scope(),
+        second._ai_preference_scope(),
+        rebound_one._ai_preference_scope(),
+        rebound_two._ai_preference_scope(),
+    }
+
+    assert len(scopes) == 4
+    for scope in scopes:
+        assert scope.startswith("v1-") and len(scope) == 27
+        assert str(tmp_path).casefold() not in scope.casefold()
+        assert "customer" not in scope.casefold()
+        assert "analytics" not in scope.casefold()
 
 
 def test_manually_incoherent_trusted_allowlist_fails_closed(tmp_path):
@@ -570,3 +640,68 @@ def test_routed_open_returns_approved_route_without_legacy_guard(tmp_path, monke
         "profile_label": "Firm approved AI",
         "model": "approved-coder-fast",
     }
+    assert body["trusted_model"] == "approved-coder-fast"
+    assert body["routing_preference"] == "trusted"
+
+
+def test_routed_open_uses_server_defaults_when_request_omits_overrides(tmp_path, monkeypatch):
+    hub = _hub(
+        tmp_path,
+        coding_models=("approved-coder", "approved-coder-fast"),
+        trusted_model="approved-coder-fast",
+        routing_preference="auto",
+    )
+    child = _Child()
+    child.zone = GENERAL_ZONE
+    child.profile_label = "Firm approved AI"
+    child.trusted_model = "approved-coder-fast"
+    seen = {}
+    monkeypatch.setattr(hub, "_build_chat_context", lambda *a, **k: _bundle())
+
+    def make(*args, **kwargs):
+        seen.update(kwargs)
+        return child
+
+    monkeypatch.setattr(hub, "_make_routed_chat_session", make)
+
+    with TestClient(create_app(hub)) as client:
+        response = client.post("/api/ai/chat/open", json={"notebook": "nb.py"})
+
+    assert response.status_code == 200
+    assert seen["trusted_model"] == "approved-coder-fast"
+    assert seen["routing_preference"] == "auto"
+    assert response.json()["trusted_model"] == "approved-coder-fast"
+    assert response.json()["routing_preference"] == "auto"
+    assert response.json()["route"] == {"zone": GENERAL_ZONE}
+
+
+def test_routed_open_cannot_register_after_managed_profile_changes(tmp_path, monkeypatch):
+    hub = _hub(tmp_path, coding_models=("approved-coder", "approved-coder-fast"))
+    child = _Child()
+    child.zone = TRUSTED_ZONE
+    child.profile_label = "Firm approved AI"
+    child.trusted_model = "approved-coder"
+    monkeypatch.setattr(hub, "_build_chat_context", lambda *a, **k: _bundle())
+
+    def change_profile(*args, **kwargs):
+        changed_routing = replace(
+            hub.app_cfg.ai.routing,
+            classifier_model="replacement-inspector",
+        )
+        with hub._lock:
+            hub.app_cfg = replace(
+                hub.app_cfg,
+                ai=replace(hub.app_cfg.ai, routing=changed_routing),
+            )
+        hub._close_all_chats()
+        return child
+
+    monkeypatch.setattr(hub, "_make_routed_chat_session", change_profile)
+
+    with TestClient(create_app(hub)) as client:
+        response = client.post("/api/ai/chat/open", json={"notebook": "nb.py"})
+
+    assert response.status_code == 409
+    assert "sid" not in response.json()
+    assert hub._chats == {}
+    assert child._closed is True

@@ -69,13 +69,23 @@ back to the user's general OpenAI credential and never follows redirects. The br
 receives only a safe profile label, the approved model IDs, and their default: it never
 receives the endpoint, credential, API version, or classifier ID.
 
-The chat UI keeps the general and customer-data model choices separate. The latter can
-select only an exact member of the administrator's allowlist. **Automatic** lets the
+Settings may store a user's **default selection within** that managed profile: a
+customer-data model from the current allowlist and either **Automatic** or **Always use
+approved** routing. These are preferences, not trust designations. A hand-edited or
+stale model never reaches the provider; Mooring intersects it with the live allowlist
+and falls back to the administrator's approved default. An invalid hand-edited routing
+value fails upward to the approved route rather than silently becoming automatic.
+
+The chat UI keeps the general and customer-data model choices separate. Each notebook
+inherits Settings unless the user chooses **Override this notebook**. These personal
+overrides live only in browser storage, namespaced by an opaque repository identity and
+the normalized notebook path; they are not synced team policy. **Automatic** lets the
 classifier choose the route; **Always use approved** starts on the trusted route but
 still runs local secret checks and honours a classifier `block` decision. There is no
 control that can force content onto the general provider, and an upgraded conversation
-never moves back. Changing either model or the routing preference starts a fresh chat.
-See [configuration](configuration.md#deployment-managed-trusted-ai-routing).
+never moves back. Changing a model or routing preference starts a fresh chat; Settings
+changes affect newly opened chats. See
+[configuration](configuration.md#deployment-managed-trusted-ai-routing).
 
 For the first release, general routed sessions expose only the proposal tool. Mutable
 read tools become available after the conversation is on the trusted route, where each

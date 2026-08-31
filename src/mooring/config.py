@@ -418,6 +418,26 @@ class AppConfig:
         return self.ai.routing.profile_label.strip() or "Approved AI"
 
     @property
+    def ai_trusted_model_preference(self) -> str:
+        """The stored per-user preference; it does not itself confer trust."""
+        return self.ai.trusted_model
+
+    @property
+    def ai_default_trusted_model(self) -> str:
+        """The safe effective default, constrained to the admin allowlist."""
+        preferred = self.ai.trusted_model.strip()
+        allowed = self.ai_trusted_coding_models
+        if preferred and preferred in allowed:
+            return preferred
+        default = self.ai_trusted_coding_model.strip()
+        return default if default in allowed else ""
+
+    @property
+    def ai_routing_preference(self) -> str:
+        value = self.ai.routing_preference.strip().lower()
+        return value if value in {"auto", "trusted"} else "trusted"
+
+    @property
     def ai_chat_idle_timeout(self) -> int:
         return self.ai.chat_idle_timeout
 

@@ -236,6 +236,14 @@ or equivalent administrator-controlled deployment must supply the complete profi
 The approved endpoint receives the exact context first for classification and handles
 coding turns that contain, or may contain, customer information.
 
+Once that profile is available, **Settings → AI copilot** exposes safe user defaults:
+the general model, customer-data model, and **Automatic** / **Always use approved**
+routing preference. The latter two write only `ai.trusted_model` and
+`ai.routing_preference` to the per-machine `config.toml`. They select within the live
+managed profile; they cannot create one or change its endpoint, credential, classifier,
+API version, or allowlist. Defaults apply to newly opened chats, not sessions already
+in progress.
+
 Install a build that includes the official OpenAI SDK (`pip install "mooring[openai]"`),
 including when the general coding provider remains GitHub Copilot. For a packaged or
 frozen deployment, include that extra when building the artifact. The launcher must
@@ -262,13 +270,19 @@ If the plural allowlist is set, startup validation fails closed unless the defau
 model is included; model discovery from the endpoint is deliberately not used.
 
 When routing is available, the chat status bar shows separate **General model** and
-**Customer-data model** controls. A single approved customer-data model is shown as a
-fixed choice; a larger allowlist becomes a selector. Users can leave routing on
-**Automatic** or choose **Always use approved**. The latter can only move a conversation
-upward to the approved service: local secret blocking and the approved classifier's
-`block` decision still apply, and there is no “always general” bypass. Changing a
-selection starts a fresh chat. This release applies to interactive notebook chat;
-batch building is disabled while trusted routing is active, as is parallel investigate.
+**Customer-data model** controls. Each starts at **Use Settings default** and can be
+overridden for that notebook; the same inheritance applies to reasoning effort and
+routing preference. Notebook overrides are personal browser preferences, scoped by an
+opaque repository identity plus notebook path — they are not written to the repository
+or shared with teammates. A revoked/stale model is discarded and inherits the current
+safe default.
+
+A single approved customer-data model is shown as a fixed choice; a larger allowlist
+becomes a selector. **Always use approved** can only move a conversation upward to the
+approved service: local secret blocking and the approved classifier's `block` decision
+still apply, and there is no “always general” bypass. Changing a selection starts a
+fresh chat. This release applies to interactive notebook chat; batch building is
+disabled while trusted routing is active, as is parallel investigate.
 
 ### `[guard]` — in the synced `mooring.toml`, not here
 

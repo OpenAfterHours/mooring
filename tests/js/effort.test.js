@@ -1,10 +1,10 @@
 "use strict";
 
 // The reasoning-effort picker decides what every request CARRIES — and therefore what
-// it costs. It sits beside the model in the chat window and on the batch page, and both
-// take the decision from ChatCore.chooseEffort. These tests pin that decision, the
-// per-provider namespacing of the stored pick, and the one-time adoption of the old
-// un-namespaced key.
+// it costs. It sits beside the model in the chat window and on the batch page. Batch
+// remembers its last provider-level choice; interactive chat now treats a saved choice
+// as a workspace/notebook override over Settings. These tests pin both decisions, the
+// per-provider namespacing, and the one-time adoption of the old batch-era key.
 //
 // Zero dependencies: Node's built-in test runner + assert. Run with:  node --test tests/js/
 
@@ -180,10 +180,10 @@ test("populateEfforts is never called with an argument", () => {
   }
 });
 
-test("both pages take the selection from ChatCore.chooseEffort", () => {
-  for (const name of PAGES) {
-    assert.match(read(name), /chooseEffort\(/, `${name} must not re-implement the decision`);
-  }
+test("batch uses chooseEffort while chat validates an explicit notebook override", () => {
+  assert.match(read("batch.js"), /chooseEffort\(/);
+  assert.match(read("chat.js"), /chooseNotebookOverride\(/);
+  assert.match(read("chat.js"), /notebookPreferenceKey\(/);
 });
 
 test("the markup each page's effort path drives actually exists", () => {

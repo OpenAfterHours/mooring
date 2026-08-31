@@ -14,6 +14,8 @@ shutdown.
 from __future__ import annotations
 
 import contextlib
+import hashlib
+import os
 import threading
 import time
 import webbrowser
@@ -363,6 +365,83 @@ class Hub:
 
     def _close_chats_for_notebook(self, workspace: Path, notebook_rel: str) -> int:
         return self.chat.close_for_notebook(workspace, notebook_rel)
+
+    def _chat_open_policy_snapshot(self) -> tuple[object, ...]:
+        """Immutable security identity captured around slow chat construction.
+
+        User model/routing defaults are deliberately excluded: they affect newly
+        started chats but do not revoke one whose concrete choices were already
+        validated. Workspace identity, the routing boundary, and every managed
+        trusted-profile field are included because reusing a session constructed
+        across a change to any of those would cross a security boundary.
+        """
+        app_cfg = self.app_cfg
+        cfg = app_cfg.config_for(None)
+        workspace = os.path.normcase(str(cfg.workspace().resolve()))
+        routing_profile: tuple[object, ...] = ()
+        if app_cfg.ai_routing_enabled:
+            routing_profile = (
+                app_cfg.ai_trusted_base_url.strip(),
+                app_cfg.ai_trusted_api_version.strip(),
+                app_cfg.ai_trusted_classifier_model.strip(),
+                app_cfg.ai_trusted_coding_model.strip(),
+                app_cfg.ai_trusted_coding_models,
+                app_cfg.ai_trusted_profile_label,
+            )
+        return (
+            app_cfg.ai_enabled,
+            app_cfg.ai_routing_enabled,
+            workspace,
+            app_cfg.active_alias,
+            cfg.host.strip().casefold(),
+            cfg.owner.strip().casefold(),
+            cfg.repo.strip().casefold(),
+            cfg.branch,
+            routing_profile,
+        )
+
+    def _register_chat_if_policy_current(
+        self,
+        sid: str,
+        session,
+        workspace: Path,
+        notebook_rel: str,
+        *,
+        policy_snapshot: tuple[object, ...],
+        routing_enabled: bool,
+        trusted_model: str = "",
+        routing_preference: str = "auto",
+        profile_label: str = "",
+    ) -> str:
+        """Atomically re-check chat policy and register, or return a refusal code.
+
+        Config replacement takes ``_lock`` before closing the old registry. Taking
+        the same lock here gives the race a safe total order: registration first is
+        subsequently closed, while config replacement first makes this re-check
+        refuse the unregistered session.
+        """
+        with self._lock:
+            if self._chat_open_policy_snapshot() != policy_snapshot:
+                return "configuration_changed"
+            if policy.ai_disabled(workspace, notebook_rel):
+                return "notebook_disabled"
+            if routing_enabled:
+                try:
+                    selected, preference, label = self._trusted_chat_options(
+                        trusted_model, routing_preference
+                    )
+                except Exception:  # noqa: BLE001 - managed detail stays server-side
+                    return "configuration_changed"
+                if (selected, preference, label) != (
+                    trusted_model,
+                    routing_preference,
+                    profile_label,
+                ):
+                    return "configuration_changed"
+            # Lock order is Hub -> ChatService. Config reload never holds the
+            # ChatService lock while acquiring Hub._lock, so this cannot invert.
+            self.chat.register(sid, session, workspace, notebook_rel)
+        return ""
 
     def _disabled_block(self, sid: str) -> JSONResponse | None:
         """The per-notebook opt-out gate shared by send/apply/rollback: the service
@@ -723,6 +802,28 @@ class Hub:
             return False
         return True
 
+    def _validate_routing_default_setting(self, key: str, value: object) -> None:
+        """Validate one user default without granting or changing trust.
+
+        The Settings write path calls this before touching config.toml. Availability
+        and every model option come from the fully validated managed profile; this
+        function performs no notebook reads, classifier calls, or coding-model calls.
+        """
+        if key not in {"ai.trusted_model", "ai.routing_preference"}:
+            return
+        if not self.app_cfg.ai_routing_enabled:
+            raise ValueError("Approved customer-data routing is not enabled.")
+        metadata = self._trusted_routing_metadata()
+        if key == "ai.trusted_model":
+            selected = str(value or "").strip()
+            allowed = {str(row["id"]) for row in metadata["trusted_models"]}
+            if selected and selected not in allowed:
+                raise ValueError("The selected customer-data model is not approved.")
+            return
+        preference = str(value or "").strip().lower()
+        if preference not in {"auto", "trusted"}:
+            raise ValueError("The routing preference must be 'auto' or 'trusted'.")
+
     def _settings_payload(self) -> dict:
         """Value-free snapshot of every editable setting for the page: the EFFECTIVE
         value (read off the live app_cfg, so it reflects MOORING_* overrides — what the
@@ -732,9 +833,36 @@ class Hub:
 
         cfg = self.app_cfg
         pol = self.team_policy()
+        routing_settings = None
+        if cfg.ai_routing_enabled:
+            try:
+                routing_settings = self._trusted_routing_metadata()
+            except Exception:  # noqa: BLE001 - hide unavailable managed controls
+                routing_settings = None
         editable = []
         for spec in settings_schema.EDITABLE:
+            if spec.key in {"ai.trusted_model", "ai.routing_preference"}:
+                # A preference with no complete approved service cannot be used.
+                # Hide both rows instead of presenting a control whose options are
+                # stale or whose endpoint/credential is unavailable.
+                if routing_settings is None:
+                    continue
             value = getattr(cfg, spec.accessor)
+            default = spec.default
+            enum_options = self._enum_options(spec)
+            if spec.key == "ai.trusted_model":
+                allowed_ids = {row["id"] for row in routing_settings["trusted_models"]}
+                preferred = cfg.ai_trusted_model_preference.strip()
+                # Empty means "inherit the approved admin default". A stale or
+                # hand-edited unknown value is represented the same safe way; it
+                # never appears as a selectable model or gains trust by being stored.
+                value = preferred if preferred in allowed_ids else ""
+                enum_options = [
+                    {"value": row["id"], "label": row["name"]}
+                    for row in routing_settings["trusted_models"]
+                ]
+            elif spec.key == "ai.routing_preference":
+                value = routing_settings["default_routing_preference"]
             if isinstance(value, tuple):
                 value = list(value)
             # HONESTY: a policy-locked row says so, and says where the lock came
@@ -750,10 +878,10 @@ class Hub:
                     "type": spec.type,
                     "control": spec.control,
                     "value": value,
-                    "default": spec.default,
+                    "default": default,
                     "sensitivity": spec.sensitivity,
                     "weakens": spec.weaken_value is not None,
-                    "enum_options": self._enum_options(spec),
+                    "enum_options": enum_options,
                     "min": spec.minimum,
                     "max": spec.maximum,
                     "help": spec.help,
@@ -773,6 +901,23 @@ class Hub:
             "pii": self._pii_status(),
             "policy": self._policy_rows(pol),
             "ai_enabled": cfg.ai_enabled,
+            # Settings must be able to hydrate its approved controls even if the
+            # unrelated general provider cannot list models. This is the same
+            # value-free, fully validated metadata exposed by /api/ai/models.
+            "routing": routing_settings
+            or (
+                {
+                    "enabled": True,
+                    "profile_label": "Approved AI",
+                    "trusted_models": [],
+                    "managed_default_trusted_model": "",
+                    "default_trusted_model": "",
+                    "default_routing_preference": "trusted",
+                    "error": "The approved AI profile is unavailable.",
+                }
+                if cfg.ai_routing_enabled
+                else {"enabled": False}
+            ),
         }
 
     def _policy_rows(self, pol: policy.Policy) -> dict:
@@ -1092,13 +1237,34 @@ class Hub:
 
     def _trusted_routing_metadata(self) -> dict:
         """Safe picker metadata; never expose the endpoint, key, or classifier."""
-        default_model, allowed_models, profile_label = self._trusted_profile()
+        admin_default, allowed_models, profile_label = self._trusted_profile()
+        default_model = self.app_cfg.ai_default_trusted_model
+        if default_model not in allowed_models:
+            default_model = admin_default
         return {
             "enabled": True,
             "profile_label": profile_label,
             "trusted_models": [{"id": model, "name": model} for model in allowed_models],
+            "managed_default_trusted_model": admin_default,
             "default_trusted_model": default_model,
+            "default_routing_preference": self.app_cfg.ai_routing_preference,
         }
+
+    def _ai_preference_scope(self) -> str:
+        """Opaque stable identity for browser-local per-notebook preferences."""
+        cfg = self.cfg
+        # ``normcase`` respects the host filesystem: Windows paths are
+        # case-insensitive, while case-distinct POSIX workspaces remain distinct.
+        workspace = os.path.normcase(str(cfg.workspace().resolve()))
+        identity = "\0".join(
+            (
+                workspace,
+                cfg.host.strip().casefold(),
+                cfg.owner.strip().casefold(),
+                cfg.repo.strip().casefold(),
+            )
+        )
+        return "v1-" + hashlib.sha256(identity.encode("utf-8")).hexdigest()[:24]
 
     def _trusted_provider_for(self):
         """The deployment-pinned OpenAI-compatible provider for customer data."""

@@ -1605,6 +1605,67 @@ def test_chat_disabled_when_ai_off(tmp_path, monkeypatch):
         assert client.get("/api/state").json()["ai_chat"] is False
 
 
+def test_chat_open_cannot_register_after_ai_is_disabled_mid_open(
+    unconfigured_client, monkeypatch
+):
+    from dataclasses import replace
+
+    from mooring.ai.chat import StubChatSession
+
+    client, hub = unconfigured_client
+    made = StubChatSession(system_context="captured")
+
+    def disable_before_register(self, *args, **kwargs):
+        # Deterministic interleaving of _apply_setting_change: config replacement
+        # and close both land after construction began but before registration.
+        with self._lock:
+            self.app_cfg = replace(
+                self.app_cfg,
+                ai=replace(self.app_cfg.ai, enabled=False),
+            )
+        self._close_all_chats()
+        return made
+
+    monkeypatch.setattr(Hub, "_make_chat_session", disable_before_register)
+
+    response = _open_chat(client, hub)
+
+    assert response.status_code == 409
+    assert "sid" not in response.json()
+    assert hub._chats == {}
+    assert made._closed is True
+
+
+def test_chat_open_cannot_register_after_workspace_reload_mid_open(
+    unconfigured_client, monkeypatch, tmp_path
+):
+    from dataclasses import replace
+
+    from mooring.ai.chat import StubChatSession
+
+    client, hub = unconfigured_client
+    made = StubChatSession(system_context="captured")
+
+    def switch_before_register(self, *args, **kwargs):
+        changed = replace(
+            self.app_cfg.repos[0],
+            workspace_path=str(tmp_path / "different-workspace"),
+        )
+        with self._lock:
+            self.app_cfg = replace(self.app_cfg, repos=(changed,))
+        self._close_all_chats()
+        return made
+
+    monkeypatch.setattr(Hub, "_make_chat_session", switch_before_register)
+
+    response = _open_chat(client, hub)
+
+    assert response.status_code == 409
+    assert "sid" not in response.json()
+    assert hub._chats == {}
+    assert made._closed is True
+
+
 # -- per-notebook AI off-switch (synced mooring.toml) ----------------------------
 
 

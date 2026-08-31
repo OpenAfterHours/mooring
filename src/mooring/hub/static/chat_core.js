@@ -202,6 +202,127 @@ const ChatCore = (function () {
     return !(trustedRoutingAvailable(routing) && preference === "trusted");
   }
 
+  // Notebook chat choices are overrides, not a second set of machine defaults.
+  // Scope is an opaque, stable workspace id supplied by the server, so two
+  // workspaces with the same notebook path cannot inherit each other's browser
+  // preference. Normalising separators avoids contradictory overrides for the
+  // same notebook when a Windows path is later rendered with URL separators.
+  function notebookPreferenceKey(scope, notebook, field) {
+    const safeScope = typeof scope === "string" && scope.trim() ? scope.trim() : "local";
+    const safeNotebook = typeof notebook === "string"
+      ? notebook.replace(/\\/g, "/").replace(/^(\.\/)+/, "").replace(/\/{2,}/g, "/")
+      : "";
+    const safeField = typeof field === "string" ? field : "";
+    return (
+      "mooring.ai.notebook." +
+      encodeURIComponent(safeScope) + "." +
+      encodeURIComponent(safeNotebook) + "." +
+      encodeURIComponent(safeField)
+    );
+  }
+
+  function safeStorageGet(storage, key) {
+    try {
+      return storage?.getItem(key) ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  function safeStorageSet(storage, key, value) {
+    try {
+      if (value) storage?.setItem(key, value);
+      else storage?.removeItem(key);
+      return Boolean(storage);
+    } catch {
+      return false;
+    }
+  }
+
+  // A stale allowlist-backed override must be removed, not merely ignored. If
+  // it remained in storage it could silently spring back to life when a model
+  // with the same id was approved again later.
+  function readValidNotebookOverride(storage, key, choose) {
+    const saved = safeStorageGet(storage, key);
+    const selected = choose(saved);
+    if (saved && !selected) safeStorageSet(storage, key, "");
+    return selected;
+  }
+
+  function chooseNotebookOverride(allowedValues, saved) {
+    const allowed = new Set((allowedValues || []).filter((v) => typeof v === "string"));
+    return typeof saved === "string" && allowed.has(saved.trim()) ? saved.trim() : "";
+  }
+
+  function chooseNotebookTrustedOverride(routing, saved) {
+    const options = trustedModelOptions(routing);
+    // With only one approved model an explicit override cannot change behaviour;
+    // keep the control as a truthful fixed "Use global default" instead.
+    if (options.length <= 1) return "";
+    return chooseNotebookOverride(options.map((m) => m.id), saved);
+  }
+
+  function chooseNotebookRoutingOverride(routing, saved) {
+    if (!trustedRoutingAvailable(routing)) return "";
+    return chooseNotebookOverride(["auto", "trusted"], saved);
+  }
+
+  function effectiveRoutingPreference(routing, notebookOverride) {
+    const override = chooseNotebookRoutingOverride(routing, notebookOverride);
+    return override || chooseRoutingPreference(routing, routing?.default_routing_preference);
+  }
+
+  function routingSettingValueAllowed(routing, key, value) {
+    if (!trustedRoutingAvailable(routing) || typeof value !== "string") return false;
+    if (key === "ai.trusted_model") {
+      return value === "" || trustedModelOptions(routing).some((m) => m.id === value);
+    }
+    if (key === "ai.routing_preference") return value === "auto" || value === "trusted";
+    return true;
+  }
+
+  function resolvedRoutingValuesValid(routing, trustedModel, preference) {
+    return (
+      typeof trustedModel === "string" &&
+      trustedModel !== "" &&
+      trustedModelOptions(routing).some((m) => m.id === trustedModel) &&
+      (preference === "auto" || preference === "trusted")
+    );
+  }
+
+  function resolvedRoutingMatchesRequest(resolved, requested) {
+    const trustedModel = requested?.trusted_model;
+    const preference = requested?.routing_preference;
+    return (
+      (!trustedModel || resolved?.trusted_model === trustedModel) &&
+      (!preference || resolved?.routing_preference === preference)
+    );
+  }
+
+  function notebookOverridePayload(values) {
+    const out = {};
+    for (const key of ["model", "reasoning_effort", "trusted_model", "routing_preference"]) {
+      const value = values?.[key];
+      if (typeof value === "string" && value) out[key] = value;
+    }
+    return out;
+  }
+
+  function trustedModelsFromEnumOptions(enumOptions) {
+    const seen = new Set();
+    const models = [];
+    for (const option of Array.isArray(enumOptions) ? enumOptions : []) {
+      const id = typeof option?.value === "string" ? option.value.trim() : "";
+      if (!id || seen.has(id)) continue;
+      seen.add(id);
+      const name = typeof option.label === "string" && option.label.trim()
+        ? option.label.trim()
+        : id;
+      models.push({ id, name });
+    }
+    return models;
+  }
+
   // -- /explain: the handover walkthrough ------------------------------------
   // Fixed prompts for the "explain this notebook" flow. All three are pure
   // CONSTANTS — no user text, no dataset values, no interpolation — so the same
@@ -1322,6 +1443,7 @@ const ChatCore = (function () {
     filterCommands,
     isSlashTyping,
     trustedModelOptions,
+    trustedModelsFromEnumOptions,
     chooseTrustedModel,
     trustedRoutingAvailable,
     chooseRoutingPreference,
@@ -1331,6 +1453,18 @@ const ChatCore = (function () {
     latestRequestGate,
     routingExpectationMatches,
     generalModelRelevant,
+    notebookPreferenceKey,
+    safeStorageGet,
+    safeStorageSet,
+    readValidNotebookOverride,
+    chooseNotebookOverride,
+    chooseNotebookTrustedOverride,
+    chooseNotebookRoutingOverride,
+    effectiveRoutingPreference,
+    routingSettingValueAllowed,
+    resolvedRoutingValuesValid,
+    resolvedRoutingMatchesRequest,
+    notebookOverridePayload,
     explainPrompt,
     explainLabel,
     reviewPrompt,

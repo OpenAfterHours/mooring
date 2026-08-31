@@ -74,6 +74,15 @@ async def api_set_settings(request: Request) -> JSONResponse:
         value = settings_schema.coerce(spec, data["value"])
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
+    try:
+        hub._validate_routing_default_setting(key, value)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    except Exception:  # noqa: BLE001 - do not expose managed endpoint/key detail
+        return JSONResponse(
+            {"error": "The approved customer-data profile is unavailable."},
+            status_code=409,
+        )
     refusal = _policy_refusal(hub, key, value)
     if refusal is not None:
         return refusal

@@ -4,6 +4,7 @@ dataset+model listings, Copilot sign-in, and the per-notebook AI toggle."""
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import secrets
 import tomllib
 from pathlib import Path
@@ -31,7 +32,17 @@ async def api_chat_open(request: Request) -> JSONResponse:
     dataset = str(data.get("dataset", "")).strip()
     model = str(data.get("model", "")).strip()
     requested_trusted_model = str(data.get("trusted_model", "")).strip()
-    routing_preference = str(data.get("routing_preference", "auto")).strip().lower() or "auto"
+    requested_routing_preference = str(data.get("routing_preference", "")).strip().lower()
+    # Capture one coherent starting policy. The context/session work below can be
+    # slow; immediately before registration the same snapshot is checked again
+    # under this lock so reload/AI-off cannot strand a late stale session.
+    with hub._lock:
+        if not hub.app_cfg.ai_enabled:
+            return JSONResponse({"enabled": False}, status_code=404)
+        opening_app_cfg = hub.app_cfg
+        opening_policy = hub._chat_open_policy_snapshot()
+        workspace = hub.cfg.workspace()
+        routing_enabled = opening_app_cfg.ai_routing_enabled
     # An explicit pick from the effort picker wins; "" means the page had no picker
     # to offer (a model that takes no effort, or a provider that advertises none), so
     # the configured default stands in. A page WITH a picker always sends a concrete
@@ -39,16 +50,24 @@ async def api_chat_open(request: Request) -> JSONResponse:
     # because /api/ai/models offers the configured value in the list (see
     # _offer_configured_effort), so this fallback can no longer swallow it.
     reasoning_effort = (
-        str(data.get("reasoning_effort", "")).strip() or hub.app_cfg.ai_reasoning_effort
+        str(data.get("reasoning_effort", "")).strip()
+        or opening_app_cfg.ai_reasoning_effort
     )
-    routing_enabled = hub.app_cfg.ai_routing_enabled
     trusted_model = ""
+    routing_preference = "auto"
+    profile_label = ""
     try:
         if routing_enabled:
-            trusted_model, routing_preference, _profile_label = hub._trusted_chat_options(
-                requested_trusted_model, routing_preference
+            requested_trusted_model = (
+                requested_trusted_model or opening_app_cfg.ai_default_trusted_model
             )
-        elif routing_preference != "auto" or requested_trusted_model:
+            requested_routing_preference = (
+                requested_routing_preference or opening_app_cfg.ai_routing_preference
+            )
+            trusted_model, routing_preference, profile_label = hub._trusted_chat_options(
+                requested_trusted_model, requested_routing_preference
+            )
+        elif requested_routing_preference not in {"", "auto"} or requested_trusted_model:
             raise ValueError("Approved routing is not enabled; remove trusted routing options.")
     except ValueError as exc:
         # Browser-controlled values are rejected before the notebook context is
@@ -58,7 +77,6 @@ async def api_chat_open(request: Request) -> JSONResponse:
         return JSONResponse({"error": str(exc)}, status_code=502)
     if not notebook:
         return JSONResponse({"error": "A notebook is required."}, status_code=400)
-    workspace = hub.cfg.workspace()
     # Per-notebook opt-out (synced mooring.toml). 403 + reason distinguishes
     # this from the global-off 404 above, so the chat UI shows the right message.
     if policy.ai_disabled(workspace, notebook):
@@ -120,7 +138,30 @@ async def api_chat_open(request: Request) -> JSONResponse:
     # so name detection doesn't hang the first chat turn silently.
     session.prepare_pii_model()
     sid = secrets.token_urlsafe(9)
-    hub.chat.register(sid, session, workspace, notebook)
+    refusal = hub._register_chat_if_policy_current(
+        sid,
+        session,
+        workspace,
+        notebook,
+        policy_snapshot=opening_policy,
+        routing_enabled=routing_enabled,
+        trusted_model=trusted_model,
+        routing_preference=routing_preference,
+        profile_label=profile_label,
+    )
+    if refusal:
+        # The session was never registered, so lifecycle cleanup is ours. Keep
+        # provider/credential details out of the race response.
+        with contextlib.suppress(Exception):
+            session.close()
+        if refusal == "notebook_disabled":
+            return JSONResponse(
+                {"enabled": False, "reason": "notebook_disabled"}, status_code=403
+            )
+        return JSONResponse(
+            {"error": "AI configuration changed while this chat was opening. Retry."},
+            status_code=409,
+        )
     telemetry.log_event("ai_chat_open")
     if pii_banner:  # count only — never a kind/value reaches the central sink
         telemetry.log_event("ai_pii", findings=len(pii_banner))
@@ -148,6 +189,8 @@ async def api_chat_open(request: Request) -> JSONResponse:
                 if bundle is not None
                 else None
             ),
+            "trusted_model": trusted_model if bundle is not None else None,
+            "routing_preference": routing_preference if bundle is not None else None,
             # Whether the chat is usable NOW. A backgrounded provider session is
             # still starting (Copilot handshake) — the UI shows "connecting…" and
             # waits for the "ready"/"fail" event on the stream. The stub/already-
@@ -443,6 +486,7 @@ async def api_chat_models(request: Request) -> JSONResponse:
         # words mean different money on different backends, so a pick made under one
         # must never select under another (chat.js/batch.js -> ChatCore.effortKey).
         "provider": getattr(provider, "name", "") or hub.app_cfg.ai_provider or "",
+        "preference_scope": hub._ai_preference_scope(),
         "routing": {"enabled": False},
     }
     if hub.app_cfg.ai_routing_enabled:
@@ -456,7 +500,9 @@ async def api_chat_models(request: Request) -> JSONResponse:
                 "enabled": True,
                 "profile_label": "Approved AI",
                 "trusted_models": [],
+                "managed_default_trusted_model": "",
                 "default_trusted_model": "",
+                "default_routing_preference": "trusted",
                 "error": "The approved AI profile is unavailable.",
             }
     # When the list is empty because the provider REJECTED the request (e.g. a

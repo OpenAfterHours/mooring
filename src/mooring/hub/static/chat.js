@@ -14,16 +14,48 @@ const NOTEBOOK = new URLSearchParams(location.search).get("notebook") || "";
 // opens the same window with &review=1 and auto-runs /review the same way.
 const EXPLAIN = new URLSearchParams(location.search).get("explain") === "1";
 const REVIEW = new URLSearchParams(location.search).get("review") === "1";
-const LS_MODEL = "mooring.ai.model";
-const LS_TRUSTED_MODEL = "mooring.ai.trusted_model";
-const LS_ROUTING_PREFERENCE = "mooring.ai.routing_preference";
-// The effort pick is stored PER PROVIDER (ChatCore.effortKey) — see chat_core.js.
-// PROVIDER and DEFAULT_EFFORT are both learned from /api/ai/models and kept for the
-// life of the window: populateEfforts re-runs on every model switch, and without the
-// remembered default each switch would drop the configured effort.
+// Notebook choices are browser-local overrides, scoped by the server's opaque
+// workspace id and the normalised notebook path. Empty means "inherit Settings";
+// PROVIDER keeps each notebook's effort override distinct across providers.
 let PROVIDER = "";
+let PREFERENCE_SCOPE = "local";
+let DEFAULT_MODEL = "";
 let DEFAULT_EFFORT = "";
-const effortStore = () => ChatCore.effortKey(PROVIDER);
+const notebookStore = (field) => ChatCore.notebookPreferenceKey(PREFERENCE_SCOPE, NOTEBOOK, field);
+const modelStore = () => notebookStore("general_model");
+const trustedModelStore = () => notebookStore("trusted_model");
+const routingStore = () => notebookStore("routing_preference");
+const effortStore = () => notebookStore(ChatCore.effortKey(PROVIDER));
+
+function browserStorage() {
+  try {
+    return window.localStorage;
+  } catch {
+    return null;
+  }
+}
+
+function saveNotebookOverride(key, value) {
+  return ChatCore.safeStorageSet(browserStorage(), key, value);
+}
+
+function readNotebookOverride(key) {
+  return ChatCore.safeStorageGet(browserStorage(), key);
+}
+
+function readValidNotebookOverride(key, choose) {
+  const saved = readNotebookOverride(key);
+  const selected = choose(saved);
+  if (saved && !selected) saveNotebookOverride(key, "");
+  return selected;
+}
+
+function rememberNotebookOverride(key, value, select) {
+  if (saveNotebookOverride(key, value)) return value;
+  select.value = "";
+  addSysRow("Browser storage is unavailable; this chat will use the Settings default.");
+  return "";
+}
 // Appearance is owned by the shared theme.js module (loaded before this file):
 // it follows the hub's /api/state theme and re-themes this window live on a
 // cross-tab change. Alias applyTheme for the /api/state follow below.
@@ -1009,7 +1041,7 @@ function setTurnState(state) {
   $("chat-input").disabled = busy;
   const generalRelevant = ChatCore.generalModelRelevant(
     ROUTING,
-    $("chat-routing-preference").value,
+    ChatCore.effectiveRoutingPreference(ROUTING, $("chat-routing-preference").value),
   );
   $("chat-model").disabled = busy || !generalRelevant;
   $("chat-effort").disabled = busy || !generalRelevant;
@@ -1073,11 +1105,13 @@ async function openChat() {
   setTurnState("connecting");
   const model = $("chat-model").value;
   const reasoning_effort = selectedEffort();
-  const body = { notebook: NOTEBOOK, model, reasoning_effort };
-  if (ROUTING?.enabled === true) {
-    body.trusted_model = $("chat-trusted-model").value;
-    body.routing_preference = $("chat-routing-preference").value;
-  }
+  const overrides = ChatCore.notebookOverridePayload({
+    model,
+    reasoning_effort,
+    trusted_model: ROUTING?.enabled === true ? $("chat-trusted-model").value : "",
+    routing_preference: ROUTING?.enabled === true ? $("chat-routing-preference").value : "",
+  });
+  const body = { notebook: NOTEBOOK, ...overrides };
   if (ROUTING && !ChatCore.trustedRoutingAvailable(ROUTING)) {
     openController = null;
     showError("Approved customer-data routing is unavailable. Reload or contact your administrator.");
@@ -1106,13 +1140,24 @@ async function openChat() {
     setTurnState(ROUTING ? "unavailable" : "error");
     return;
   }
-  if (!ChatCore.routingExpectationMatches(ROUTING, data.route)) {
+  const resolvedRoutingInvalid = ROUTING && !ChatCore.resolvedRoutingValuesValid(
+    ROUTING,
+    data.trusted_model,
+    data.routing_preference,
+  );
+  const explicitRoutingMismatch = ROUTING && !ChatCore.resolvedRoutingMatchesRequest(data, overrides);
+  if (
+    !ChatCore.routingExpectationMatches(ROUTING, data.route) ||
+    resolvedRoutingInvalid ||
+    explicitRoutingMismatch
+  ) {
     showError("Approved routing changed while this chat was opening. Reload before sending anything.");
     setPrivacyChrome({ enabled: true, trusted_models: [], error: true });
     addSysRow("Approved routing changed; the earlier privacy guidance is no longer current. Reload this chat.");
     setTurnState("unavailable");
     return;
   }
+  applyResolvedRoutingDefaults(data);
   sid = data.sid;
   source = new EventSource(`/api/ai/chat/stream/${sid}`);
   source.addEventListener("delta", (e) => {
@@ -1586,11 +1631,13 @@ function handleModelCommand(arg) {
     return;
   }
   const sel = $("chat-model");
-  sel.value = hit.id;
-  localStorage.setItem(LS_MODEL, hit.id);
+  let selected = hit.id;
+  sel.value = selected;
+  selected = rememberNotebookOverride(modelStore(), selected, sel);
   populateEfforts();
-  addSysRow(`— switching to ${hit.id} (reopening session) —`);
-  openChat();
+  reopenForRoutingChange(
+    selected ? `general model overridden for this notebook: ${selected}` : "general model now uses Settings",
+  );
 }
 
 function printBanner() {
@@ -1733,6 +1780,7 @@ function populateTrustedRouting(routing) {
   const modelSelect = $("chat-trusted-model");
   const preferenceSelect = $("chat-routing-preference");
   modelSelect.innerHTML = "";
+  preferenceSelect.innerHTML = "";
   if (!ROUTING) {
     modelWrap.classList.add("hidden");
     preferenceWrap.classList.add("hidden");
@@ -1746,10 +1794,16 @@ function populateTrustedRouting(routing) {
   const profile = typeof ROUTING.profile_label === "string" ? ROUTING.profile_label.trim() : "";
   profileLabel.textContent = profile ? `(${profile})` : "";
   profileLabel.classList.toggle("hidden", !profile);
+  if (options.length) {
+    const inherit = document.createElement("option");
+    inherit.value = "";
+    inherit.textContent = `Use Settings default (${ROUTING.default_trusted_model})`;
+    modelSelect.appendChild(inherit);
+  }
   for (const model of options) {
     const option = document.createElement("option");
     option.value = model.id;
-    option.textContent = model.name;
+    option.textContent = `Override this notebook: ${model.name}`;
     modelSelect.appendChild(option);
   }
   if (!options.length) {
@@ -1758,13 +1812,28 @@ function populateTrustedRouting(routing) {
     option.textContent = "Not configured";
     modelSelect.appendChild(option);
   }
-  modelSelect.value = ChatCore.chooseTrustedModel(
-    ROUTING,
-    localStorage.getItem(LS_TRUSTED_MODEL),
+  modelSelect.value = readValidNotebookOverride(
+    trustedModelStore(),
+    (saved) => ChatCore.chooseNotebookTrustedOverride(ROUTING, saved),
   );
-  preferenceSelect.value = ChatCore.chooseRoutingPreference(
+  const inheritRouting = document.createElement("option");
+  inheritRouting.value = "";
+  const globalRouting = ChatCore.chooseRoutingPreference(
     ROUTING,
-    localStorage.getItem(LS_ROUTING_PREFERENCE),
+    ROUTING.default_routing_preference,
+  );
+  inheritRouting.textContent =
+    `Use Settings default (${globalRouting === "trusted" ? "Always use approved" : "Automatic"})`;
+  preferenceSelect.appendChild(inheritRouting);
+  for (const [value, label] of [["auto", "Override this notebook: Automatic"], ["trusted", "Override this notebook: Always use approved"]]) {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = label;
+    preferenceSelect.appendChild(option);
+  }
+  preferenceSelect.value = readValidNotebookOverride(
+    routingStore(),
+    (saved) => ChatCore.chooseNotebookRoutingOverride(ROUTING, saved),
   );
   const selectable = options.length > 1;
   modelSelect.title = selectable
@@ -1776,6 +1845,26 @@ function populateTrustedRouting(routing) {
   preferenceSelect.disabled = !available;
   modelWrap.classList.remove("hidden");
   preferenceWrap.classList.remove("hidden");
+}
+
+function applyResolvedRoutingDefaults(data) {
+  if (!ROUTING) return;
+  const trustedModel = typeof data.trusted_model === "string" ? data.trusted_model.trim() : "";
+  const preference = typeof data.routing_preference === "string"
+    ? data.routing_preference.trim().toLowerCase()
+    : "";
+  if (!ChatCore.resolvedRoutingValuesValid(ROUTING, trustedModel, preference)) return;
+  const trustedSelect = $("chat-trusted-model");
+  const routingSelect = $("chat-routing-preference");
+  if (!trustedSelect.value) {
+    ROUTING = { ...ROUTING, default_trusted_model: trustedModel };
+    trustedSelect.options[0].textContent = `Use Settings default (${trustedModel})`;
+  }
+  if (!routingSelect.value) {
+    ROUTING = { ...ROUTING, default_routing_preference: preference };
+    const label = preference === "trusted" ? "Always use approved" : "Automatic";
+    routingSelect.options[0].textContent = `Use Settings default (${label})`;
+  }
 }
 
 function setPrivacyChrome(routing = ROUTING) {
@@ -1798,7 +1887,9 @@ function reopenForRoutingChange(message) {
 // Takes no argument on purpose: the configured default is remembered in
 // DEFAULT_EFFORT, so a model switch (/model, the dropdown) can't lose it.
 function populateEfforts() {
-  const model = MODELS.find((m) => m.id === $("chat-model").value);
+  const selectedModel = $("chat-model").value;
+  const effectiveModel = selectedModel || DEFAULT_MODEL || MODELS[0]?.id || "";
+  const model = MODELS.find((m) => m.id === effectiveModel);
   const sel = $("chat-effort");
   sel.innerHTML = "";
   const efforts = model?.efforts || [];
@@ -1807,17 +1898,19 @@ function populateEfforts() {
     return;
   }
   $("effort-wrap").classList.remove("hidden");
+  const inherit = document.createElement("option");
+  inherit.value = "";
+  inherit.textContent = `Use Settings default (${DEFAULT_EFFORT || "provider default"})`;
+  sel.appendChild(inherit);
   for (const e of efforts) {
     const o = document.createElement("option");
     o.value = e;
     o.textContent = e;
     sel.appendChild(o);
   }
-  sel.value = ChatCore.chooseEffort(
-    efforts,
-    localStorage.getItem(effortStore()),
-    DEFAULT_EFFORT,
-    model?.default_effort,
+  sel.value = readValidNotebookOverride(
+    effortStore(),
+    (saved) => ChatCore.chooseNotebookOverride(efforts, saved),
   );
 }
 
@@ -1825,6 +1918,10 @@ async function loadModels() {
   const { data } = await api("/api/ai/models");
   MODELS = data.models || [];
   PROVIDER = data.provider || "";
+  PREFERENCE_SCOPE = typeof data.preference_scope === "string" && data.preference_scope.trim()
+    ? data.preference_scope.trim()
+    : "local";
+  DEFAULT_MODEL = data.default_model || "";
   DEFAULT_EFFORT = data.default_effort || "";
   populateTrustedRouting(data.routing);
   setPrivacyChrome();
@@ -1841,17 +1938,20 @@ async function loadModels() {
     return;
   }
   wrap.classList.remove("hidden");
+  const inherit = document.createElement("option");
+  inherit.value = "";
+  inherit.textContent = `Use Settings default (${DEFAULT_MODEL || "provider default"})`;
+  sel.appendChild(inherit);
   for (const m of MODELS) {
     const o = document.createElement("option");
     o.value = m.id;
     o.textContent = m.name + (m.multiplier && m.multiplier > 1 ? ` · ${m.multiplier}×` : "");
     sel.appendChild(o);
   }
-  const saved = localStorage.getItem(LS_MODEL);
-  const wanted = [saved, data.default_model, MODELS[0].id].find((id) =>
-    MODELS.some((m) => m.id === id),
+  sel.value = readValidNotebookOverride(
+    modelStore(),
+    (saved) => ChatCore.chooseNotebookOverride(MODELS.map((m) => m.id), saved),
   );
-  sel.value = wanted;
   populateEfforts();
 }
 
@@ -1884,34 +1984,66 @@ async function init() {
   // fire-and-forget and hydrates after the chat is already usable — it no longer
   // sits in front of the open.
   loadDatasets();
-  // One-time: hand the old un-namespaced effort pick to the provider that made it.
-  ChatCore.adoptLegacyEffort(localStorage);
   await loadModels();
   printBanner();
 
   $("chat-model").addEventListener("change", () => {
-    localStorage.setItem(LS_MODEL, $("chat-model").value);
+    const selected = ChatCore.chooseNotebookOverride(
+      MODELS.map((m) => m.id),
+      $("chat-model").value,
+    );
+    $("chat-model").value = selected;
+    const remembered = rememberNotebookOverride(modelStore(), selected, $("chat-model"));
     populateEfforts();
-    openChat();
+    reopenForRoutingChange(
+      remembered
+        ? `general model overridden for this notebook: ${remembered}`
+        : "general model now uses Settings",
+    );
   });
   $("chat-effort").addEventListener("change", () => {
-    localStorage.setItem(effortStore(), $("chat-effort").value);
-    openChat();
+    const select = $("chat-effort");
+    const allowed = Array.from(select.options, (option) => option.value).filter(Boolean);
+    const selected = ChatCore.chooseNotebookOverride(allowed, select.value);
+    select.value = selected;
+    const remembered = rememberNotebookOverride(effortStore(), selected, select);
+    reopenForRoutingChange(
+      remembered ? `effort overridden for this notebook: ${remembered}` : "effort now uses Settings",
+    );
   });
   $("chat-trusted-model").addEventListener("change", () => {
-    const selected = ChatCore.chooseTrustedModel(ROUTING, $("chat-trusted-model").value);
-    if (!selected) return;
-    localStorage.setItem(LS_TRUSTED_MODEL, selected);
-    reopenForRoutingChange(`customer-data model changed to ${selected}`);
+    const selected = ChatCore.chooseNotebookTrustedOverride(
+      ROUTING,
+      $("chat-trusted-model").value,
+    );
+    $("chat-trusted-model").value = selected;
+    const remembered = rememberNotebookOverride(
+      trustedModelStore(),
+      selected,
+      $("chat-trusted-model"),
+    );
+    reopenForRoutingChange(
+      remembered
+        ? `customer-data model overridden for this notebook: ${remembered}`
+        : "customer-data model now uses Settings",
+    );
   });
   $("chat-routing-preference").addEventListener("change", () => {
-    const preference = ChatCore.chooseRoutingPreference(
+    const preference = ChatCore.chooseNotebookRoutingOverride(
       ROUTING,
       $("chat-routing-preference").value,
     );
     $("chat-routing-preference").value = preference;
-    localStorage.setItem(LS_ROUTING_PREFERENCE, preference);
-    const label = preference === "trusted" ? "routing set to Always use approved" : "routing set to Automatic";
+    const remembered = rememberNotebookOverride(
+      routingStore(),
+      preference,
+      $("chat-routing-preference"),
+    );
+    const label = remembered === "trusted"
+      ? "routing overridden for this notebook: Always use approved"
+      : remembered === "auto"
+        ? "routing overridden for this notebook: Automatic"
+        : "routing now uses Settings";
     reopenForRoutingChange(label);
   });
   $("messages").addEventListener("scroll", () => {

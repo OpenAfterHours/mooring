@@ -68,6 +68,9 @@ def test_ai_routing_defaults_off_with_no_credentials_in_config(tmp_path):
     assert app.ai_trusted_base_url == ""
     assert app.ai_trusted_coding_models == ()
     assert app.ai_trusted_profile_label == "Approved AI"
+    assert app.ai_trusted_model_preference == ""
+    assert app.ai_default_trusted_model == ""
+    assert app.ai_routing_preference == "auto"
     assert not hasattr(app.ai.routing, "api_key")
 
 
@@ -127,6 +130,43 @@ def test_ai_trusted_model_allowlist_is_trimmed_deduped_and_exact(tmp_path):
     )
     assert app.ai_trusted_coding_models == app.ai.routing.coding_models
     assert app.ai_trusted_profile_label == "Firm Azure OpenAI"
+
+
+def test_user_trusted_defaults_are_constrained_by_the_managed_allowlist(tmp_path):
+    user = tmp_path / "config.toml"
+    user.write_text(
+        '[ai]\ntrusted_model = "coder-fast"\nrouting_preference = "trusted"\n',
+        "utf-8",
+    )
+    env = {
+        "MOORING_AI_TRUSTED_CODING_MODEL": "coder-default",
+        "MOORING_AI_TRUSTED_CODING_MODELS": "coder-default,coder-fast",
+    }
+
+    app = load_app_config(user_config_path=user, env=env)
+
+    assert app.ai_trusted_model_preference == "coder-fast"
+    assert app.ai_default_trusted_model == "coder-fast"
+    assert app.ai_routing_preference == "trusted"
+
+
+def test_stale_user_trusted_model_falls_back_and_bad_routing_fails_upward(tmp_path):
+    user = tmp_path / "config.toml"
+    user.write_text(
+        '[ai]\ntrusted_model = "removed-model"\nrouting_preference = "general"\n',
+        "utf-8",
+    )
+    app = load_app_config(
+        user_config_path=user,
+        env={
+            "MOORING_AI_TRUSTED_CODING_MODEL": "coder-default",
+            "MOORING_AI_TRUSTED_CODING_MODELS": "coder-default,coder-fast",
+        },
+    )
+
+    assert app.ai_trusted_model_preference == "removed-model"
+    assert app.ai_default_trusted_model == "coder-default"
+    assert app.ai_routing_preference == "trusted"
 
 
 @pytest.mark.parametrize("models", ["", "other-coder, another-coder"])

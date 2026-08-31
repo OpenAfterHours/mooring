@@ -29,8 +29,31 @@ function showError(msg) {
 }
 
 let MODELS = []; // [{id, name, multiplier}] from /api/ai/models (empty if AI off)
-let modelsLoaded = false; // did the last /api/ai/models call succeed (AI on)?
+let ROUTING = null; // safe approved-model metadata only; never endpoint/key/classifier
+let modelsLoaded = false; // has the best-effort general-model load completed?
+let modelsLoading = false;
+let lastPayload = null;
 let modelsError = ""; // why the list is empty (e.g. a 403 "not authorized") — shown on the row
+
+function isRoutingSetting(spec) {
+  return spec.key === "ai.trusted_model" || spec.key === "ai.routing_preference";
+}
+
+function trustedModelsForSpec(spec) {
+  if (spec.key !== "ai.trusted_model" || !Array.isArray(spec.enum_options)) {
+    return ChatCore.trustedModelOptions(ROUTING);
+  }
+  return ChatCore.trustedModelsFromEnumOptions(spec.enum_options);
+}
+
+function routingForSpec(spec) {
+  if (!ROUTING || spec.key !== "ai.trusted_model") return ROUTING;
+  return { ...ROUTING, trusted_models: trustedModelsForSpec(spec) };
+}
+
+function routingSettingUnavailable(spec) {
+  return isRoutingSetting(spec) && !ChatCore.trustedRoutingAvailable(routingForSpec(spec));
+}
 
 // Build the value to send for a control, reading its DOM element. An emptied
 // number field yields null, which the caller treats as a no-op (not a bad write).
@@ -63,6 +86,27 @@ function makeControl(spec) {
         el.add(new Option(spec.value, spec.value));
       }
       el.value = spec.value || "";
+    } else if (spec.key === "ai.trusted_model") {
+      const safeRouting = routingForSpec(spec);
+      const options = ChatCore.trustedModelOptions(safeRouting);
+      // Settings' empty value resets to the managed profile default. The chat
+      // page intentionally uses default_trusted_model instead: there it means
+      // the effective user-level Settings choice.
+      const approvedDefault = safeRouting?.managed_default_trusted_model ||
+        safeRouting?.default_trusted_model ||
+        "approved model";
+      el.add(new Option(`Use approved default (${approvedDefault})`, ""));
+      for (const model of options) el.add(new Option(model.name, model.id));
+      // A revoked model is never preserved as a selectable custom value.
+      el.value = ChatCore.routingSettingValueAllowed(safeRouting, spec.key, spec.value || "")
+        ? (spec.value || "")
+        : "";
+    } else if (spec.key === "ai.routing_preference") {
+      el.add(new Option("Automatic", "auto"));
+      el.add(new Option("Always use approved", "trusted"));
+      el.value = ChatCore.routingSettingValueAllowed(ROUTING, spec.key, spec.value)
+        ? spec.value
+        : "auto";
     } else {
       for (const opt of spec.enum_options || []) el.add(new Option(opt.label, opt.value));
       el.value = spec.value;
@@ -87,7 +131,7 @@ function makeControl(spec) {
   // A policy-locked control is disabled as well as annotated: the server refuses
   // the write with a 409 either way, but a click that appears to work and then
   // snaps back is exactly the "silently ignored" experience the lock must avoid.
-  if (spec.env_overridden || spec.locked) el.disabled = true;
+  if (spec.env_overridden || spec.locked || routingSettingUnavailable(spec)) el.disabled = true;
   el.addEventListener("change", () => save(spec, el));
   if (spec.control === "toggle") {
     // Wrap the checkbox as a sliding on/off switch (the input keeps its id, so the
@@ -139,6 +183,21 @@ function renderRow(spec) {
     note.textContent = "Couldn’t load models — " + modelsError;
     left.appendChild(note);
   }
+  if (isRoutingSetting(spec)) {
+    const note = document.createElement("div");
+    note.className = "settings-help env-note";
+    if (routingSettingUnavailable(spec)) {
+      note.textContent = "Approved routing is unavailable. Ask your administrator to check its managed profile.";
+    } else if (spec.key === "ai.trusted_model") {
+      const profile = typeof ROUTING?.profile_label === "string" ? ROUTING.profile_label.trim() : "";
+      note.textContent = profile
+        ? `Approved service: ${profile}`
+        : "Choose only from administrator-approved models.";
+    } else {
+      note.textContent = "This default applies to newly opened interactive notebook chats.";
+    }
+    left.appendChild(note);
+  }
   if (spec.locked) {
     // Honesty: say WHERE the lock came from, not just that the control is dead.
     const note = document.createElement("div");
@@ -160,7 +219,7 @@ function renderRow(spec) {
   reset.className = "small ghost";
   reset.textContent = "Reset";
   reset.title = spec.locked ? "Set by your team's policy" : "Reset to the default";
-  reset.disabled = spec.env_overridden || spec.locked;
+  reset.disabled = spec.env_overridden || spec.locked || routingSettingUnavailable(spec);
   reset.addEventListener("click", () => resetKey(spec));
   right.appendChild(reset);
 
@@ -284,14 +343,37 @@ function renderMeta(payload) {
 // this in refresh(), and without the same step here the page that OWNS the theme
 // control could sit there dark with its own select reading "Light".
 async function show(payload) {
+  lastPayload = payload;
   const theme = (payload.editable || []).find((s) => s.key === "ui.theme");
   if (theme && theme.value) applyTheme(theme.value);
-  if (payload.ai_enabled && !modelsLoaded) await loadModels();
+  // Approved routing metadata is part of the Settings payload so these controls
+  // remain usable even when the unrelated general provider cannot list models.
+  // Never retain earlier allowlist metadata across a failed/disabled refresh.
+  if (Object.prototype.hasOwnProperty.call(payload, "routing")) {
+    ROUTING = payload.routing?.enabled === true ? payload.routing : null;
+  }
   render(payload);
+  if (payload.ai_enabled && !modelsLoaded && !modelsLoading) {
+    modelsLoading = true;
+    // General-model discovery is deliberately out of the approved controls'
+    // critical path. Re-render this same server snapshot when it completes.
+    void loadModels().finally(() => {
+      modelsLoading = false;
+      if (lastPayload) render(lastPayload);
+    });
+  }
 }
 
 async function save(spec, el) {
   const value = readControl(spec, el);
+  if (
+    isRoutingSetting(spec) &&
+    !ChatCore.routingSettingValueAllowed(routingForSpec(spec), spec.key, value)
+  ) {
+    await reload();
+    showError("That approved AI choice is no longer available. Reload and choose again.");
+    return;
+  }
   // An emptied number field is a no-op, not a bad write — restore the prior value.
   if ((spec.type === "int" || spec.type === "float") && value === null) return reload();
   // The theme reuses the proven hub endpoint so editors + an open hub/chat re-theme.
@@ -352,16 +434,20 @@ async function reload() {
 }
 
 async function loadModels() {
-  const { ok, data } = await api("/api/ai/models");
-  MODELS = ok && data.models ? data.models : [];
-  modelsError = ok && data.error ? data.error : "";
-  modelsLoaded = ok;
+  try {
+    const { ok, data } = await api("/api/ai/models");
+    MODELS = ok && data.models ? data.models : [];
+    modelsError = ok && data.error ? data.error : (ok ? "" : "Could not load models.");
+  } catch {
+    MODELS = [];
+    modelsError = "Could not load models.";
+  }
+  modelsLoaded = true;
 }
 
 // Cross-tab theme sync (following the hub / another tab) is handled by the
 // shared theme.js module.
 
 (async function init() {
-  await loadModels(); // best-effort; empty when AI is off (the model row falls back)
-  await reload();
+  await reload(); // approved controls render before general models hydrate
 })();

@@ -201,6 +201,11 @@ class AiConfig:
     # Append new nested configuration to preserve the positional layout for any
     # third-party callers that constructed older AiConfig versions positionally.
     routing: RoutingConfig = field(default_factory=RoutingConfig)
+    # Per-user defaults only. These never designate trust: the runtime intersects
+    # ``trusted_model`` with RoutingConfig.coding_models before using it, while the
+    # endpoint, classifier, credential, and approval set remain env-only above.
+    trusted_model: str = ""
+    routing_preference: str = "auto"
 
 
 def _as_bool(value: object, default: bool) -> bool:
@@ -255,6 +260,14 @@ def _csv_list(raw: object) -> tuple[str, ...]:
             seen.add(value)
             values.append(value)
     return tuple(values)
+
+
+def _routing_preference(raw: object) -> str:
+    """Normalise the upward-only per-user routing preference, failing safe."""
+    if raw is None:
+        return "auto"
+    value = str(raw).strip().lower()
+    return value if value in {"auto", "trusted"} else "trusted"
 
 
 def load_ai_config(ai: Mapping, env: Mapping[str, str]) -> AiConfig:
@@ -386,6 +399,8 @@ def load_ai_config(ai: Mapping, env: Mapping[str, str]) -> AiConfig:
             "MOORING_AI_OPENAI_API_VERSION", str(ai.get("openai_api_version", ""))
         ),
         routing=routing,
+        trusted_model=str(ai.get("trusted_model", "")).strip(),
+        routing_preference=_routing_preference(ai.get("routing_preference", "auto")),
         pii=pii,
         batch=batch,
         investigate=investigate,
