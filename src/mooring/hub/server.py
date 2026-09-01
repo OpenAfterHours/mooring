@@ -1249,14 +1249,18 @@ class Hub:
         monkeypatches ``mooring.ai.get_provider`` still takes effect."""
         from mooring.ai import get_provider
 
-        # Keyed on everything that shapes the provider — provider + model, and the
-        # OpenAI-compatible endpoint (base_url/api_version) — so changing the endpoint
-        # in Settings rebuilds the provider live instead of reusing a stale client.
+        # Keyed on everything that shapes the provider — provider + model, the
+        # OpenAI-compatible endpoint (base_url/api_version), and the request timeout —
+        # so changing any of them in Settings rebuilds the provider live instead of
+        # reusing a stale client. The timeout is baked into the client at build time,
+        # so leaving it out would make raising it in Settings look like a no-op until
+        # the hub restarted.
         key = (
             self.app_cfg.ai_provider,
             self.app_cfg.ai_model,
             self.app_cfg.ai_openai_base_url,
             self.app_cfg.ai_openai_api_version,
+            self.app_cfg.ai_openai_timeout_sec,
         )
         with self._provider_lock:
             if self._provider is None or self._provider_key != key:
@@ -1416,6 +1420,8 @@ class Hub:
             self.app_cfg.ai_trusted_api_version.strip(),
             classifier_model,
             coding_model,
+            # Baked into the client, so it belongs in the identity — see _provider_for.
+            self.app_cfg.ai_openai_timeout_sec,
         )
         allow_keyring = source != "managed"
         with self._provider_lock:
@@ -1429,6 +1435,11 @@ class Hub:
                     ),
                     require_api_key=True,
                     follow_redirects=False,
+                    # The SAME budget as the general provider (ai.openai_timeout_sec).
+                    # A customer-data route is if anything MORE likely to sit behind a
+                    # buffering corporate gateway, so it must not silently keep the
+                    # old 30-second client while the general route gets the fix.
+                    timeout=self.app_cfg.ai_openai_timeout_sec,
                     name="trusted-openai",
                 )
                 self._trusted_provider_key = key

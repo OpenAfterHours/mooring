@@ -303,6 +303,28 @@ EDITABLE: tuple[SettingSpec, ...] = (
         "selects the Azure client; leave empty for OpenAI or a non-Azure endpoint.",
     ),
     SettingSpec(
+        key="ai.openai_timeout_sec",
+        accessor="ai_openai_timeout_sec",
+        label="AI request timeout (seconds)",
+        group="ai",
+        type="int",
+        control="number",
+        # This module is a pure leaf and cannot import ai_config, so the loader's floor,
+        # ceiling and default are written a second time here. test_settings pins them to
+        # OPENAI_TIMEOUT_DEFAULT / OPENAI_TIMEOUT_CEILING so raising one later cannot
+        # leave this page 400-ing a value the loader would happily accept.
+        minimum=1,
+        maximum=3600,
+        default=300,
+        env_var="MOORING_AI_OPENAI_TIMEOUT_SEC",
+        help="Only for the OpenAI-compatible backend: how long to wait for a reply. "
+        "Replies stream, so this is really the longest SILENCE allowed — a reasoning "
+        "model sends nothing while it thinks, and a gateway that buffers the response "
+        "holds it all back until the model has finished. Raise it if long answers fail "
+        "with a timeout. Connecting, and checking the endpoint, are bounded separately "
+        "and are not affected.",
+    ),
+    SettingSpec(
         key="ai.chat_idle_timeout_sec",
         accessor="ai_chat_idle_timeout",
         label="Chat idle timeout (seconds)",

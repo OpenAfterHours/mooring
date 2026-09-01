@@ -107,6 +107,8 @@ let DATASETS = []; // value-free dataset paths, for @-mentions (from /api/state)
 let asstRow = null; // the assistant row currently being streamed
 let asstRaw = ""; // accumulated raw text for that row
 let thinkRow = null; // the intent "thinking" line for this turn
+let reasonRow = null; // the model's streamed THINKING block, when a gateway sends one
+let reasonRaw = ""; // accumulated raw thinking for that row — never joins `asstRaw`
 let pendingRow = null; // transient "· thinking▋" indicator until real content
 let toolStack = []; // open tool-call rows in this turn
 
@@ -292,6 +294,11 @@ function clearPending() {
 }
 
 function streamingRow() {
+  // The answer has started, so the think that preceded it is over — fold it away here
+  // rather than at each of the several call sites that can start an answer row. This
+  // also settles the ORDER: endReasoning drops the answer row below the think it just
+  // closed, so the reply is never rendered above the thinking that produced it.
+  endReasoning();
   if (!asstRow) {
     asstRow = addRow("row-assistant streaming stream-cursor", "");
     asstRaw = "";
@@ -306,6 +313,67 @@ function appendDelta(text) {
   maybeScroll();
 }
 
+// -- the model's thinking (display-only) ------------------------------------
+// Some OpenAI-compatible gateways stream a reasoning model's THINKING ahead of its
+// answer, flagged `reasoning` on the delta frame. It gets its own row — dim, folded
+// into a <details>, labelled — for two reasons: without it the window is dead for the
+// whole think (the bug this fixes), and rendered as prose it would be indistinguishable
+// from the reply. It is never part of `asstRaw`, so it can never be finalised as the
+// assistant's message.
+
+function appendReasoning(text) {
+  if (!reasonRow) {
+    reasonRaw = "";
+    reasonRow = addRow("row-reasoning streaming", (el) => {
+      const d = document.createElement("details");
+      d.open = true; // open WHILE thinking — a folded block would be a dead window again
+      const s = document.createElement("summary");
+      s.textContent = ChatCore.reasoningSummary(true);
+      // Once the reader has touched the fold it is theirs. Without this, opening a live
+      // think to read it means having it slammed shut under you the instant the answer
+      // starts — the one moment you were most likely to be mid-sentence in it.
+      s.addEventListener("click", () => {
+        d.dataset.pinned = "1";
+      });
+      const body = document.createElement("div");
+      body.className = "reasoning-text";
+      d.append(s, body);
+      el.append(d);
+    });
+  }
+  reasonRaw += text;
+  const body = reasonRow.querySelector(".reasoning-text");
+  body.textContent = reasonRaw; // textContent — safe, and fast while streaming
+  // The block is height-capped so a long think cannot bury the transcript; follow its
+  // own bottom, or the cap would freeze the view on the first few lines and the window
+  // would look dead again — the exact bug this whole thing exists to fix.
+  body.scrollTop = body.scrollHeight;
+  maybeScroll();
+}
+
+// Close the live reasoning block: stop claiming to be thinking, and fold it so the
+// answer below it is what the eye lands on. Idempotent — every "the turn moved on"
+// path can call it blind.
+function endReasoning() {
+  if (!reasonRow) return;
+  const el = reasonRow;
+  reasonRow = null;
+  reasonRaw = "";
+  el.classList.remove("streaming");
+  const d = el.querySelector("details");
+  const s = el.querySelector("summary");
+  if (s) s.textContent = ChatCore.reasoningSummary(false);
+  if (d && d.dataset.pinned !== "1") d.open = false; // …unless the reader opened it
+  // A think that STARTED after the answer had already begun leaves the transcript out
+  // of order: the answer row is above it, and the rest of the reply would land there
+  // too — reading as if the model answered before it thought. Move the answer row down
+  // past the think instead of starting a second one. It has to be a move, not a split:
+  // the row holds the whole assistant message and the closing `message` frame rewrites
+  // it with the full text, so a second row would print the first half twice. In the
+  // ordinary shape (think, then answer) there is no answer row yet and this is a no-op.
+  if (asstRow && asstRow.parentNode) asstRow.parentNode.appendChild(asstRow);
+}
+
 function finalizeAssistant(text) {
   const el = streamingRow();
   asstRaw = text || asstRaw;
@@ -315,6 +383,34 @@ function finalizeAssistant(text) {
   else el.innerHTML = html;
   asstRow = null; // next delta/message starts a new row
   maybeScroll();
+}
+
+// One `delta` frame, carrying either of TWO channels. A frame flagged `reasoning` is
+// the model THINKING — display-only, its own dim block, and the turn state stays
+// "thinking" because that is exactly what is happening; nothing of the answer has
+// arrived. An ordinary frame is the answer and behaves precisely as it always has.
+// A named handler like `onTool`/`onIntent` rather than an inline listener so the
+// two-channel decision is testable (tests/js/reasoning_rows.test.js).
+function onDelta(d) {
+  const text = typeof d.text === "string" ? d.text : "";
+  if (ChatCore.deltaChannel(d) === "reasoning") {
+    // An EMPTY think frame is nothing to show, and it must not reach across into the
+    // answer channel: clearing the pending row or flipping the turn state off
+    // "thinking" would announce a reply that has not started.
+    if (!text) return;
+    clearPending();
+    appendReasoning(text);
+    return;
+  }
+  // The answer channel behaves exactly as it did before the reasoning channel existed,
+  // empty deltas INCLUDED. The Copilot provider (the default) emits `delta_content`
+  // frames that can be "", and such a frame has always been what clears the
+  // "· thinking▋" row and flips the turn state to "streaming"; swallowing it left the
+  // transcript stuck saying thinking after the turn had moved on. Only the `text`
+  // coercion above is new, so an undefined payload no longer appends "undefined".
+  if (turnState === "thinking") setTurnState("streaming");
+  clearPending();
+  appendDelta(text);
 }
 
 function onIntent(text) {
@@ -336,6 +432,7 @@ function onIntent(text) {
 
 function onTool(d) {
   clearPending();
+  endReasoning(); // the think produced a tool call — fold it, the turn has moved on
   // Distinguish a tool START (carries a "name" key, possibly "") from a PROGRESS
   // (carries "progress"). A START must ALWAYS push a row — even with an empty
   // name — so the matching tool_done pops the right one instead of finalizing a
@@ -1124,6 +1221,7 @@ function startTurn() {
   asstRow = null;
   asstRaw = "";
   thinkRow = null;
+  endReasoning(); // a previous turn's think never bleeds into this one
   toolStack = [];
   startTurnState();
 }
@@ -1178,6 +1276,7 @@ function setTurnState(state) {
   renderStopControl(); // the composer's stop follows the turn state from one place
   if (state === "idle" || state === "error") {
     clearPending();
+    endReasoning(); // the turn is over however it ended — stop saying "thinking…"
     if (state === "idle") $("chat-input").focus();
   }
 }
@@ -1345,6 +1444,13 @@ function addReceipt(d) {
   // `message` per assistant message (not per turn), so finalising here cannot orphan or
   // duplicate the reply that follows.
   if (asstRow) finalizeAssistant();
+  // …and the twin of the `message` handler's own guard: with no answer row to close,
+  // a live think still has to be folded. Not reachable in live ordering (the `applied`
+  // event is broadcast from inside the write tool, so a `tool` event folded it first),
+  // but `sse.applied_replay` replays these frames on an EventSource reconnect with no
+  // preceding tool — and a receipt drawn under a block still saying "thinking…" is
+  // exactly the dead window this whole path exists to prevent.
+  else endReasoning();
 
   const group = receiptGroupFor(d?.turn_id);
   const row = document.createElement("div");
@@ -1583,11 +1689,9 @@ async function openChat() {
   applyResolvedRoutingDefaults(data);
   sid = data.sid;
   source = new EventSource(`/api/ai/chat/stream/${sid}`);
-  source.addEventListener("delta", (e) => {
-    if (turnState === "thinking") setTurnState("streaming");
-    clearPending();
-    appendDelta(JSON.parse(e.data).text);
-  });
+  // Two channels on one event — see `onDelta`. Wrapped in `parseEventData` because a
+  // frame this client cannot read must not throw out of the listener.
+  source.addEventListener("delta", (e) => onDelta(parseEventData(e)));
   // `notice: true` marks mooring's OWN aside — the stop's fixed line, the tool-ceiling
   // line — not something the assistant said. Rendering those as assistant prose put
   // mooring's words in the model's mouth, and in the stop's case announced the stop a
@@ -1598,6 +1702,7 @@ async function openChat() {
     if (action === "drop") return;
     if (action === "sys") {
       if (asstRow) finalizeAssistant();
+      else endReasoning(); // mooring's aside ends the think too (finalize does its own)
       addSysRow(d.text || "");
       return;
     }
@@ -2109,6 +2214,10 @@ function runCommand(cmd) {
       break;
     case "clear":
       $("messages").innerHTML = "";
+      // The reasoning block's row is gone with the rest, so drop the reference: kept,
+      // the next thinking delta would append into a detached element and show nothing.
+      reasonRow = null;
+      reasonRaw = "";
       latestProposal = null;
       undoControl = null; // the transcript (and its Undo/Revert button) is gone
       // …and so is the receipt group this turn was numbering. Dropping the reference

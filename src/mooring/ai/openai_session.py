@@ -330,7 +330,10 @@ class OpenAIChatSession(ChatBroadcaster):
         except BaseException as exc:  # noqa: BLE001 - surfaced via start()/the stream
             from mooring.ai.openai_provider import friendly_error
 
-            err = AIError(friendly_error(str(exc)))
+            # The EXCEPTION goes too, not just its text. A connect/read timeout — the
+            # common failure when the endpoint is a slow gateway — often stringifies to
+            # "", and str-only left the analyst an error line that stopped at the colon.
+            err = AIError(friendly_error(str(exc), exc))
             self._start_error = err
             self._mark_start_error(str(err))
             self._ready.set()
@@ -346,7 +349,11 @@ class OpenAIChatSession(ChatBroadcaster):
             except Exception as exc:  # noqa: BLE001 - surface to the chat, don't crash the worker
                 from mooring.ai.openai_provider import friendly_error
 
-                self._broadcast(ChatEvent("fail", {"text": friendly_error(str(exc))}))
+                # The exception object, not only its text: a mid-stream httpx.ReadTimeout
+                # — exactly what a reasoning model behind a slow gateway produces —
+                # stringifies to "", so str-only put "OpenAI request failed: " in the
+                # transcript with nothing after the colon.
+                self._broadcast(ChatEvent("fail", {"text": friendly_error(str(exc), exc)}))
         close = getattr(self._client, "close", None)
         if callable(close):
             try:
@@ -463,7 +470,11 @@ class OpenAIChatSession(ChatBroadcaster):
         ``(assistant_text, tool_calls, cancelled)`` — ``tool_calls`` is non-empty only
         when the model finished asking for tools, and ``cancelled`` says the analyst
         stopped the turn part-way through the stream (in which case any half-accumulated
-        tool calls are dropped, never returned half-built)."""
+        tool calls are dropped, never returned half-built).
+
+        Some deltas carry the model's THINKING rather than its answer (see
+        :func:`_reasoning_text`). Those are broadcast flagged ``reasoning`` and then
+        DROPPED — they are display-only, and never join ``text_parts``."""
         kwargs: dict[str, Any] = {
             "model": self._model or _DEFAULT_MODEL,
             "messages": self._messages,
@@ -502,9 +513,25 @@ class OpenAIChatSession(ChatBroadcaster):
                 continue
             choice = chunk.choices[0]
             delta = getattr(choice, "delta", None)
-            if delta is not None and getattr(delta, "content", None):
-                text_parts.append(delta.content)
-                self._broadcast(ChatEvent("delta", {"text": delta.content}))
+            if delta is not None:
+                # THINKING first, then the answer — the order a chunk carrying both
+                # means. Emitted live so a reasoning model's long think is not a dead
+                # window, then thrown away: `thinking` is a chunk-scoped local that is
+                # never appended to `text_parts`, so it cannot reach the returned
+                # assistant_text, `self._messages`, the next request's payload, or a
+                # tool argument. The conversation the API sees is byte-for-byte what it
+                # was before this existed.
+                #
+                # It does NOT cross the egress guard, and must not: egress scans text
+                # leaving the WORKSPACE for the model (schema, source, pasted
+                # tracebacks). This is inbound model output travelling one hop to the
+                # local UI, so there is nothing of the analyst's in it to guard.
+                thinking = _reasoning_text(delta)
+                if thinking:
+                    self._broadcast(ChatEvent("delta", {"text": thinking, "reasoning": True}))
+                if getattr(delta, "content", None):
+                    text_parts.append(delta.content)
+                    self._broadcast(ChatEvent("delta", {"text": delta.content}))
             for tc in (getattr(delta, "tool_calls", None) or []) if delta is not None else []:
                 slot = acc.setdefault(tc.index, {"id": "", "name": "", "args": ""})
                 if getattr(tc, "id", None):
@@ -668,6 +695,32 @@ class OpenAIChatSession(ChatBroadcaster):
     def close(self) -> None:
         super().close()  # broadcast "closed" (idempotent); clears any held prompt
         self._queue.put(_STOP)
+
+
+def _reasoning_text(delta: Any) -> str:
+    """The model's THINKING carried by one stream chunk, or ``""``.
+
+    Not part of the OpenAI Chat Completions schema: it is a gateway/model EXTENSION.
+    LiteLLM, DeepSeek, Qwen, vLLM and others put it on ``delta.reasoning_content``; a
+    few front-ends use ``delta.reasoning``. Mooring used to read neither, so with a
+    reasoning model behind a custom ``base_url`` the whole think — often the majority
+    of the wall-clock time — arrived, was dropped, and the chat window sat dead.
+
+    Read defensively on BOTH names, in that order, because the injected client may be
+    any OpenAI-compatible stand-in: the attribute is usually ABSENT, is commonly
+    present-but-``None`` on the chunks that carry ordinary content, and a couple of
+    front-ends send a structured block rather than a string. Only a non-empty ``str``
+    is ever returned, so a surprising shape degrades to "no reasoning this chunk"
+    rather than putting a repr on screen or raising mid-stream.
+
+    Display-only by construction: the caller broadcasts what this returns and keeps no
+    reference to it. See :meth:`OpenAIChatSession._stream_once`.
+    """
+    for attr in ("reasoning_content", "reasoning"):
+        value = getattr(delta, attr, None)
+        if isinstance(value, str) and value:
+            return value
+    return ""
 
 
 def _is_reasoning_model(model: str) -> bool:

@@ -228,6 +228,11 @@ because they gate what the copilot may *read*:
 | `notebook_catalog` | `false` | **Opt-in.** Let the copilot search **every notebook in the repo** — each one's `# H1` title, its imports, and the inputs/checks/SQL tables its *source declares* — so it can point at work a teammate already did. Never another notebook's code, a markdown paragraph, a cell output, or a `.mooring/` run receipt; a notebook in `disabled_notebooks` is left out. Off by default because it widens the assistant's view from the one open notebook to the whole repo, and the title is authored prose. The hub's own search box uses the same index locally and is not gated by this. Env override: `MOORING_AI_NOTEBOOK_CATALOG`. Preview with `mooring catalog`. See [the notebook catalog](ai-privacy.md#notebook-catalog). |
 | `live_schema` | `true` | Read dataframe schemas (names + types only) live from the running kernel. See [live dataframe schemas](ai-privacy.md#live-dataframe-schemas-data-outside-the-workspace). |
 
+Pointing `provider = "openai"` at your own endpoint uses `openai_base_url` /
+`openai_api_version`, and `openai_timeout_sec` says how long to wait for it — raise
+that one if long, thoughtful answers reliably time out behind a gateway. See
+[pointing at your own endpoint](ai-privacy.md#pointing-at-your-own-endpoint).
+
 #### Trusted AI routing
 
 Trusted AI routing is off by default. The approved endpoint receives the exact context

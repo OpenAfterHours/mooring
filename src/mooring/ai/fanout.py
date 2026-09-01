@@ -136,7 +136,15 @@ def drive_to_finding(session, brief: str, *, deadline: float, abort) -> BranchOu
         kind = getattr(event, "kind", "")
         data = getattr(event, "data", {}) or {}
         if kind == "delta":
-            deltas.append(str(data.get("text", "")))
+            # A delta flagged ``reasoning`` is the model THINKING out loud — some
+            # gateways stream it (see openai_session._reasoning_text) and it exists
+            # only to keep the human's window alive. It is NOT the sub-agent's answer
+            # and must never become a finding: a finding is merged and handed BACK to
+            # the parent model as a tool result, which is the one path by which
+            # display-only reasoning could re-enter a conversation. Same rule, and the
+            # same reason, as the ``notice`` message just below.
+            if not data.get("reasoning"):
+                deltas.append(str(data.get("text", "")))
         elif kind == "message":
             # A "notice" message is mooring's own aside to the human (e.g. the OpenAI
             # session telling them its reasoning-effort setting was refused), NOT the

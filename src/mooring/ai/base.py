@@ -141,5 +141,9 @@ def get_provider(app_cfg: "AppConfig") -> AIProvider:
             model=app_cfg.ai_model,
             base_url=app_cfg.ai.openai_base_url,
             api_version=app_cfg.ai.openai_api_version,
+            # Threaded here AND at the hub's trusted-route construction site
+            # (hub/server.py::_trusted_provider_for). A timeout honoured on only one
+            # of the two paths is exactly the bug the knob exists to fix.
+            timeout=app_cfg.ai.openai_timeout_sec,
         )
     raise AIError(f"Unknown AI provider {name!r}. Known: copilot, openai.")

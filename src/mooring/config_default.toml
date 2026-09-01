@@ -97,6 +97,22 @@ reasoning_effort = ""       # default reasoning effort; empty = the model's defa
 trusted_model = ""          # preferred customer-data model; used only when it is in the admin allowlist
 routing_preference = "auto" # "auto" or upward-only "trusted"; cannot force customer data to general AI
 chat_idle_timeout_sec = 900 # close an idle chat session after this many seconds
+openai_timeout_sec = 300    # provider = "openai" only: how many seconds to wait on the
+                            # endpoint for a reply. Replies STREAM, so this is really the
+                            # longest SILENCE allowed — how long the model may think before
+                            # it says anything. Raise it if you reach the model through a
+                            # GATEWAY (LiteLLM, Azure APIM, nginx, Cloudflare, a
+                            # non-streaming shim) that BUFFERS the response instead of
+                            # passing chunks straight through: nothing arrives until the
+                            # whole reply has been generated, so a slow reasoning model
+                            # trips the clock while working perfectly. (Turning buffering
+                            # off at the gateway is the better fix where you can.) Bounding
+                            # the CONNECT attempt is separate and not affected by this, and
+                            # so is checking the endpoint / listing its models.
+                            # WHOLE SECONDS. Anything above 3600 is capped to 3600; anything
+                            # else unusable — below 1, a fraction like 600.5, or a value that
+                            # is not a whole number at all — is DROPPED and 300 is used. It
+                            # is not rounded: write 600, not 600.5. Same for the env var.
 live_schema = true          # read the schema of dataframes live in the running notebook
                             # kernel (covers data loaded from OUTSIDE the workspace, and
                             # derived frames), refreshed on each chat turn so frames you

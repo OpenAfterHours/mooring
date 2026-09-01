@@ -171,6 +171,16 @@ class RoutingConfig:
     local_coding_models: tuple[str, ...] = ()
 
 
+# Default and ceiling for [ai] openai_timeout_sec (see AiConfig.openai_timeout_sec).
+# Defined ABOVE the dataclass so the field default and the loader read one number, and
+# imported by mooring.ai.openai_provider so "how long mooring waits" has exactly one
+# definition. The ceiling exists because past an hour a timeout stops bounding
+# anything, and this one is what keeps a stalled read from wedging a chat turn (the
+# stream is consumed on a worker thread that cannot check its cancel flag mid-read).
+OPENAI_TIMEOUT_DEFAULT = 300
+OPENAI_TIMEOUT_CEILING = 3600
+
+
 @dataclass(frozen=True)
 class AiConfig:
     enabled: bool = True
@@ -269,6 +279,24 @@ class AiConfig:
     # silently kill EVERY turn, which looks like a broken copilot, not a setting.
     # Deliberately NOT policy-governed — see :data:`mooring.policy.KNOBS`.
     max_tool_iters: int = 200
+    # How long (seconds) the OpenAI-compatible endpoint may take to answer: the
+    # read/write/pool budget, NOT the connect leg (which the provider pins short on
+    # its own — see mooring.ai.openai_provider._CONNECT_TIMEOUT). Belongs with
+    # ``openai_base_url``/``openai_api_version`` above and is appended here only to
+    # keep this dataclass's positional layout stable for older callers.
+    #
+    # On a STREAMING request this is the longest silence allowed BETWEEN chunks, so
+    # it is really "how long the model may think before saying anything". It matters
+    # most behind a GATEWAY that buffers the response instead of passing chunks
+    # through: nothing arrives until the whole reply exists, so a slow reasoning model
+    # trips the clock while working perfectly. Clamped on load (see
+    # :func:`_as_positive_int`) — a 0 or a negative would time out every request
+    # instantly, which reads as a broken endpoint rather than as a setting. WHOLE
+    # seconds only: ``_as_int`` parses an integer literal, so a fraction (``600.5``)
+    # is not truncated, it is dropped for the default like any other unparseable
+    # value. Bounding the CONNECT leg, and the endpoint/model-listing probes, is
+    # separate and unaffected (mooring.ai.openai_provider._PROBE_TIMEOUT).
+    openai_timeout_sec: int = OPENAI_TIMEOUT_DEFAULT
 
 
 # Upper bound for [ai] max_tool_iters. A ceiling is not a target: anything past this
@@ -532,6 +560,15 @@ def load_ai_config(ai: Mapping, env: Mapping[str, str]) -> AiConfig:
         ),
         openai_api_version=env.get(
             "MOORING_AI_OPENAI_API_VERSION", str(ai.get("openai_api_version", ""))
+        ),
+        openai_timeout_sec=_as_positive_int(
+            env.get("MOORING_AI_OPENAI_TIMEOUT_SEC"),
+            _as_positive_int(
+                ai.get("openai_timeout_sec"),
+                OPENAI_TIMEOUT_DEFAULT,
+                maximum=OPENAI_TIMEOUT_CEILING,
+            ),
+            maximum=OPENAI_TIMEOUT_CEILING,
         ),
         routing=routing,
         trusted_model=str(ai.get("trusted_model", "")).strip(),

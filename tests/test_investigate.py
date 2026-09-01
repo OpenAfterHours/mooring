@@ -362,6 +362,31 @@ def test_a_notice_does_not_suppress_a_branchs_streamed_analysis():
     assert r.finding == "orders joins customers on customer_id"
 
 
+def test_a_reasoning_delta_is_never_collected_as_a_finding():
+    # A delta flagged `reasoning` is the model THINKING out loud — a display-only aside
+    # some gateways stream so the human's window is not dead. A finding is merged and
+    # handed BACK to the parent model as a tool result, so counting the think as one
+    # would feed display-only text into the conversation and pad the merged block with
+    # a monologue that is not an answer. Same rule as the `notice` message channel.
+    events = [
+        ("delta", {"text": "Let me check the join key… ", "reasoning": True}),
+        ("delta", {"text": "orders joins customers "}),
+        ("delta", {"text": "on customer_id"}),
+        ("idle", {}),
+    ]
+    [r] = _planner([ScriptedSession(events)]).run([BranchJob(question="q")])
+    assert r.status == "finding"
+    assert r.finding == "orders joins customers on customer_id"
+
+
+def test_a_branch_that_only_thought_is_empty_not_a_finding():
+    # Nothing but reasoning means the branch answered nothing. It must report EMPTY, or
+    # the planner's "found" count is inflated by branches that never concluded.
+    events = [("delta", {"text": "thinking out loud", "reasoning": True}), ("idle", {})]
+    [r] = _planner([ScriptedSession(events)]).run([BranchJob(question="q")])
+    assert r.status == "empty" and r.finding == ""
+
+
 def test_a_notice_does_not_replace_a_cut_short_branchs_partial_answer():
     # Same suppression, on the path where it costs most: a branch cut off by a close
     # (or a deadline) returns whatever it streamed, flagged incomplete — not the notice.
