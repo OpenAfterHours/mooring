@@ -1006,6 +1006,42 @@ pre {
 /* intent "thinking" line (free: reuses the existing intent SSE event) */
 .chat-body .row-think { color: var(--term-dim); font-style: italic; }
 .chat-body .row-think::before { content: "· "; }
+/* the model THINKING out loud — `delta` frames flagged `reasoning`, which some
+   OpenAI-compatible gateways stream ahead of the answer. Deliberately quieter than
+   assistant prose and shaped differently from it (dim, smaller, a DASHED left rule
+   against the assistant row's solid one, folded behind a label), because the one thing
+   it must never be is mistakable for the reply. Every colour is a --term-* token, so
+   it follows the light and dark themes with the rest of the transcript. */
+.chat-body .row-reasoning {
+  color: var(--term-dim);
+  font-size: 12px;
+  border-left: 2px dashed var(--term-rule);
+  padding-left: 0.6rem;
+  margin: 0.15rem 0 0.3rem;
+}
+.chat-body .row-reasoning summary {
+  cursor: pointer;
+  font-style: italic;
+  list-style: none; /* the native triangle is replaced below, so both themes match */
+  user-select: none;
+}
+.chat-body .row-reasoning summary::-webkit-details-marker { display: none; }
+.chat-body .row-reasoning summary::before { content: "▸ "; }
+.chat-body .row-reasoning details[open] > summary::before { content: "▾ "; }
+.chat-body .row-reasoning .reasoning-text {
+  margin-top: 0.15rem;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  /* a long think scrolls INSIDE its own block rather than burying the transcript */
+  max-height: 14rem;
+  overflow-y: auto;
+}
+/* while it is live the block says so, with the same blinking caret the answer uses */
+.chat-body .row-reasoning.streaming .reasoning-text::after {
+  content: "▋";
+  color: var(--term-dim);
+  animation: term-blink 1s step-end infinite;
+}
 /* dim system lines: banner / help / cleared */
 .chat-body .row-sys { color: var(--term-dim); white-space: pre-wrap; }
 .chat-body .row-sys b { color: var(--term-ink); }

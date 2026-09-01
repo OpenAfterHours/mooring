@@ -29,10 +29,16 @@ VALID_CARD = "4012888888881881"  # Luhn-valid (shared with test_egress/test_pii)
 # -- a scriptable fake of the OpenAI streaming client ---------------------------
 
 
-def _chunk(content=None, tool_calls=None, finish=None, empty=False):
+def _chunk(content=None, tool_calls=None, finish=None, empty=False, **delta_extra):
+    """One streamed chunk. ``delta_extra`` sets EXTRA attributes on the delta —
+    ``reasoning_content=...`` / ``reasoning=...``, the non-standard fields LiteLLM,
+    DeepSeek, Qwen and vLLM stream a model's thinking on. Passed through as **kwargs
+    rather than named parameters on purpose: a plain ``_chunk()`` then leaves those
+    attributes ABSENT (not None), which is what a canonical OpenAI chunk looks like and
+    what every other test in this file keeps exercising."""
     if empty:  # Azure's leading content-filter chunk / a usage-only final chunk
         return types.SimpleNamespace(choices=[])
-    delta = types.SimpleNamespace(content=content, tool_calls=tool_calls)
+    delta = types.SimpleNamespace(content=content, tool_calls=tool_calls, **delta_extra)
     return types.SimpleNamespace(choices=[types.SimpleNamespace(delta=delta, finish_reason=finish)])
 
 
@@ -349,6 +355,265 @@ def test_reasoning_effort_only_for_reasoning_models(ws):
     _drain(q, until="idle")
     reasoning.close()
     assert reasoning_calls.calls[0]["reasoning_effort"] == "high"
+
+
+# -- streamed reasoning: shown to the human, never part of the conversation -----
+# Behind a custom base_url (LiteLLM / Azure APIM / OpenRouter / vLLM / Ollama) a
+# reasoning model streams its THINKING on `delta.reasoning_content` — a gateway
+# extension, not OpenAI's schema — and mooring used to drop it, so the window sat dead
+# for the whole think. It is now forwarded as a delta flagged `reasoning`. The invariant
+# these tests exist to pin: it is DISPLAY-ONLY. It never joins the assistant's text,
+# never reaches self._messages, and so never rides back out on the next request.
+
+REASONING = "REASONING_TRACE_DO_NOT_KEEP"
+
+
+def _texts(events, *, reasoning):
+    """The delta text on ONE channel: the reasoning asides, or the answer."""
+    return "".join(
+        e.data["text"]
+        for e in events
+        if e.kind == "delta" and (e.data.get("reasoning") is True) == reasoning
+    )
+
+
+def test_reasoning_deltas_are_broadcast_flagged_and_never_join_the_answer(ws):
+    scripted = [
+        [
+            _chunk(reasoning_content="Let me "),
+            _chunk(reasoning_content=REASONING),
+            _chunk(content="The answer "),
+            _chunk(content="is 42."),
+            _chunk(finish="stop"),
+        ]
+    ]
+    session, completions = _session(ws, scripted)
+    q = session.subscribe()
+    session.send("think about it")
+    events = _drain(q, until="idle")
+    session.close()
+
+    # It reached the UI, on its own channel...
+    assert _texts(events, reasoning=True) == "Let me " + REASONING
+    # ...and the answer channel is exactly what it was before this existed. Ordinary
+    # content deltas carry NO `reasoning` key at all, so a consumer that never heard of
+    # the flag is untouched.
+    answer_deltas = [e for e in events if e.kind == "delta" and "reasoning" not in e.data]
+    assert "".join(e.data["text"] for e in answer_deltas) == "The answer is 42."
+
+    # The final message the UI swaps in is the answer, with no trace of the think.
+    [msg] = [e for e in events if e.kind == "message"]
+    assert msg.data["text"] == "The answer is 42."
+    assert REASONING not in msg.data["text"]
+
+    # And nothing of it is on the wire — not this request, and not a later one.
+    assert REASONING not in json.dumps(completions.calls)
+
+
+def test_reasoning_never_enters_the_conversation_sent_on_the_next_request(ws):
+    """After a turn that streamed reasoning, the conversation this session carries
+    forward — the exact payload of the NEXT request — is byte-for-byte what it would
+    have been had the gateway streamed no thinking at all.
+
+    The tool call in turn 1 is load-bearing, not scene-dressing. ``_run_turn`` appends an
+    assistant message **only** on the tool-call branch: a plain question-and-answer
+    completion is never recorded (OpenAI is stateless, so mooring re-sends only what it
+    must). Compared across two no-tool turns this assertion has nothing to compare — both
+    payloads are ``['system', 'user', 'user']`` no matter what the model said, so even a
+    TOTAL leak of the assistant's own text passes it. That was the first shape of this
+    test, and it was vacuous. The role assertion below is what keeps it honest: if the
+    assistant turn ever stops being recorded, this fails loudly instead of going quiet.
+    """
+
+    def script(*, thinking):
+        think = [_chunk(reasoning_content=REASONING)] if thinking else []
+        return [
+            [
+                *think,
+                _chunk(content="Reading the schema first."),
+                _chunk(
+                    tool_calls=[
+                        _tc(
+                            0,
+                            tc_id="call_1",
+                            name="mooring_get_schema",
+                            args='{"dataset": "data/sales.parquet"}',
+                        )
+                    ]
+                ),
+                _chunk(finish="tool_calls"),
+            ],
+            [_chunk(content="Two columns."), _chunk(finish="stop")],
+        ]
+
+    payloads = []
+    for thinking in (True, False):
+        session, completions = _session(ws, script(thinking=thinking))
+        q = session.subscribe()
+        session.send("what columns?")
+        _drain(q, until="idle")
+        session.close()
+        # The SECOND request carries the whole recorded conversation: the assistant's
+        # tool-call turn and the tool reply that answers it.
+        payloads.append(completions.calls[1]["messages"])
+
+    # Anti-vacuity, first: the assistant's own words really are in what we compare.
+    assert [m["role"] for m in payloads[0]] == ["system", "user", "assistant", "tool"]
+    assert payloads[0][2]["content"] == "Reading the schema first."
+    # …and now the comparison means something.
+    assert payloads[0] == payloads[1]
+    assert REASONING not in json.dumps(payloads[0])
+
+
+def test_a_reasoning_field_that_is_none_or_absent_is_tolerated(ws):
+    # Gateways vary: most chunks carry neither field, many carry it explicitly None
+    # alongside real content, and a couple send a structured block instead of a string.
+    # None of those may raise, and none may be rendered.
+    scripted = [
+        [
+            _chunk(content=None, reasoning_content=None),  # present-but-None
+            _chunk(content="ok", reasoning_content=None),  # None beside real content
+            _chunk(content="!", reasoning=[{"type": "thinking"}]),  # not a string
+            _chunk(finish="stop"),  # the field absent entirely
+        ]
+    ]
+    session, _ = _session(ws, scripted)
+    q = session.subscribe()
+    session.send("hi")
+    events = _drain(q, until="idle")
+    session.close()
+
+    assert _texts(events, reasoning=True) == ""  # nothing to show, nothing shown
+    [msg] = [e for e in events if e.kind == "message"]
+    assert msg.data["text"] == "ok!"
+
+
+def test_the_reasoning_field_fallback_name_is_read_too(ws):
+    # A few front-ends spell it `reasoning`. `reasoning_content` wins where both are
+    # sent (it is the more common and the more specific), so this pins the fallback.
+    scripted = [
+        [
+            _chunk(reasoning="via the fallback name"),
+            _chunk(reasoning_content="preferred", reasoning="ignored"),
+            _chunk(content="done"),
+            _chunk(finish="stop"),
+        ]
+    ]
+    session, _ = _session(ws, scripted)
+    q = session.subscribe()
+    session.send("hi")
+    events = _drain(q, until="idle")
+    session.close()
+
+    assert _texts(events, reasoning=True) == "via the fallback namepreferred"
+    assert _texts(events, reasoning=False) == "done"
+
+
+def test_reasoning_interleaved_with_a_tool_call_leaves_the_call_intact(ws):
+    # A reasoning model thinks, calls a tool, thinks again, then answers. The tool-call
+    # accumulator keys on chunk index and must not be disturbed by chunks that carry
+    # thinking and nothing else — including one arriving mid-arguments.
+    scripted = [
+        [
+            _chunk(reasoning_content="I should look at the schema. "),
+            _chunk(tool_calls=[_tc(0, tc_id="call_1", name="mooring_get_schema", args='{"dataset"')]),
+            _chunk(reasoning_content=REASONING),  # thinking BETWEEN argument fragments
+            _chunk(tool_calls=[_tc(0, args=': "data/sales.parquet"}')]),
+            _chunk(finish="tool_calls"),
+        ],
+        [
+            _chunk(reasoning_content="Now I can answer. "),
+            _chunk(content="Two columns."),
+            _chunk(finish="stop"),
+        ],
+    ]
+    session, completions = _session(ws, scripted)
+    q = session.subscribe()
+    session.send("what columns?")
+    events = _drain(q, until="idle")
+    session.close()
+
+    tool_ev = next(e for e in events if e.kind == "tool")
+    assert tool_ev.data["name"] == "mooring_get_schema"
+    tool_msgs = [m for m in completions.calls[1]["messages"] if m.get("role") == "tool"]
+    assert tool_msgs and tool_msgs[0]["tool_call_id"] == "call_1"
+    assert "region" in tool_msgs[0]["content"]  # the arguments reassembled correctly
+
+    [msg] = [e for e in events if e.kind == "message"]
+    assert msg.data["text"] == "Two columns."
+    # The assistant tool-call turn records content=None, not the think that preceded it.
+    assistant = [
+        m for m in completions.calls[1]["messages"] if m.get("role") == "assistant"
+    ][0]
+    assert assistant["content"] is None
+    assert REASONING not in json.dumps(completions.calls)
+
+
+class _AgingCompletions:
+    """A stream that ages the session's idle clock BEFORE its first chunk, standing in
+    for the long silence a reasoning model spends thinking behind a gateway."""
+
+    def __init__(self, box, chunks, aged_by):
+        self._box = box
+        self._chunks = list(chunks)
+        self._aged_by = aged_by
+        self.calls: list[dict] = []
+
+    def create(self, **kwargs):
+        self.calls.append(kwargs)
+
+        def gen():
+            self._box[0]._last_active = time.monotonic() - self._aged_by
+            yield from self._chunks
+
+        return gen()
+
+
+def _aging_session(ws, chunks, aged_by=10_000.0):
+    box: list = [None]
+    completions = _AgingCompletions(box, chunks, aged_by)
+    client = types.SimpleNamespace(chat=types.SimpleNamespace(completions=completions))
+    session = OpenAIChatSession(
+        model="gpt-4o",
+        system_context="SYSTEM CONTEXT: schema + source only.",
+        workspace=ws,
+        folders=("data",),
+        notebook_rel="nb.py",
+        client_factory=lambda: client,
+    )
+    box[0] = session
+    session.start(block=True)
+    return session
+
+
+def test_a_streamed_delta_keeps_the_turn_from_being_idle_reaped(ws):
+    # The hub reaps idle chats when a chat is opened (`hub/routes/chat.py`), on
+    # `ai.chat_idle_timeout_sec` (900s by default). Only send / tool progress / proposals
+    # used to touch the clock, so a turn whose whole output is STREAMED TEXT — a long
+    # think behind a gateway is the extreme case, and the timeout knob's help invites
+    # raising the request budget past 900s — aged as if nothing were happening, and
+    # opening a second chat could close it mid-answer. A delta is activity; it touches.
+    #
+    # This is a `ChatBroadcaster` behaviour, so it holds for every provider; it is driven
+    # through the OpenAI session because that is the one with an injectable client.
+    session = _aging_session(ws, [_chunk(content="the answer"), _chunk(finish="stop")])
+    q = session.subscribe()
+    session.send("hi")
+    _drain(q, until="idle")
+    idle_after_deltas = session.idle_seconds()
+    session.close()
+
+    # The teeth: a completion carrying NO delta leaves the aged clock exactly as it was,
+    # so the assertion above is measuring the delta and nothing else.
+    silent = _aging_session(ws, [_chunk(finish="stop")])
+    q2 = silent.subscribe()
+    silent.send("hi")
+    _drain(q2, until="idle")
+    idle_without_deltas = silent.idle_seconds()
+    silent.close()
+
+    assert idle_after_deltas < 60
+    assert idle_without_deltas > 9_000
 
 
 # -- the reasoning-effort ladder: the SERVER settles it, not the model name -----
@@ -794,6 +1059,42 @@ def test_cancel_stops_an_in_flight_turn_and_the_session_takes_the_next_message(w
         assert session.cancel_requested() is False  # re-armed at the start of that turn
     finally:
         session.close()
+
+
+def test_a_stop_during_a_think_keeps_the_reasoning_out_of_the_partial_answer(ws):
+    # A cancel mid-stream KEEPS whatever the model had already said and replays it as
+    # the turn's partial `message`. Reasoning is not part of that: a stop must not be
+    # the side door through which display-only thinking lands in the transcript as the
+    # assistant's own words (and, from there, in front of whoever reads the notebook).
+    opened, release = threading.Event(), threading.Event()
+    blocking = _BlockingStream(
+        # One chunk carrying BOTH, which is what a gateway sends on the hand-over from
+        # thinking to answering — and the only shape that puts the two in the partial.
+        [
+            _chunk(content="working", reasoning_content=REASONING),
+            _chunk(content=" on it"),
+            _chunk(finish="stop"),
+        ],
+        opened,
+        release,
+    )
+    session, _ = _stream_session(ws, [blocking])
+    q = session.subscribe()
+    try:
+        session.send("think hard")
+        assert opened.wait(timeout=5), "the worker never reached the stream"
+        session.request_cancel()
+        release.set()
+        events = _drain(q, until="idle")
+    finally:
+        session.close()
+
+    texts = [e.data.get("text", "") for e in events if e.kind == "message"]
+    assert "working" in texts  # the answer so far is kept, exactly as before
+    assert not any(REASONING in t for t in texts)
+    # The think DID reach the UI on its own channel — it is dropped from the answer,
+    # not swallowed. (The stop lands after the first chunk, so exactly one arrives.)
+    assert _texts(events, reasoning=True) == REASONING
 
 
 def test_a_stop_pressed_while_a_turn_waits_in_the_queue_still_stops_it(ws):

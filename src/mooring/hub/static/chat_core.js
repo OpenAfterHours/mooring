@@ -1343,6 +1343,27 @@ const ChatCore = (function () {
     return stopped === true ? "drop" : "sys";
   }
 
+  // Which channel a `delta` frame belongs to. A frame flagged `reasoning: true` is the
+  // model THINKING out loud — some OpenAI-compatible gateways (LiteLLM, DeepSeek, Qwen,
+  // vLLM) stream that ahead of the answer, and mooring forwards it so a long think is
+  // not a dead window. It is display-only: it never reaches the transcript's answer row,
+  // and the server never puts it in the conversation it sends back to the model. Exactly
+  // the `notice: true` idea one function up, applied to the streaming channel.
+  //
+  // Defaults to "prose" for ANY other shape, so a frame from an older/other provider —
+  // or one this client could not parse — still renders as the answer it has always been.
+  function deltaChannel(frame) {
+    const d = frame && typeof frame === "object" ? frame : {};
+    return d.reasoning === true ? "reasoning" : "prose";
+  }
+
+  // The label on the reasoning block's fold. While the think is live it must read as
+  // ACTIVITY (that is the whole point — the window was dead); once the answer starts it
+  // folds away and reads as a thing you may open, never as part of the reply.
+  function reasoningSummary(streaming) {
+    return streaming === true ? "thinking…" : "reasoning";
+  }
+
   // How a finished tool line is marked. Under a stop every remaining call in the batch
   // comes back as the terminal refusal, so the ✗ that follows would blame the assistant
   // for the analyst's own decision. Those close as stopped — neither ✓ nor ✗ — which is
@@ -2068,6 +2089,8 @@ const ChatCore = (function () {
     cancelledNotice,
     cancelEventAction,
     noticeMessageAction,
+    deltaChannel,
+    reasoningSummary,
     toolDoneMark,
     autoApplyBanner,
     helpRows,

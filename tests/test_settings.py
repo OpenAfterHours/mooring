@@ -24,6 +24,7 @@ _AI_ENV = [
     "MOORING_AI_REASONING_EFFORT",
     "MOORING_AI_OPENAI_BASE_URL",
     "MOORING_AI_OPENAI_API_VERSION",
+    "MOORING_AI_OPENAI_TIMEOUT_SEC",
     "MOORING_AI_ROUTING",
     "MOORING_AI_TRUSTED_BASE_URL",
     "MOORING_AI_TRUSTED_API_VERSION",
@@ -433,6 +434,34 @@ def test_the_tool_call_ceiling_is_editable_and_range_checked(client):
     spec = settings_schema.by_key("ai.max_tool_iters")
     assert spec.maximum == MAX_TOOL_ITERS_CEILING
     assert spec.default == AiConfig().max_tool_iters
+
+
+def test_the_ai_request_timeout_is_editable_and_range_checked(client):
+    c, hub = client
+    assert hub.app_cfg.ai_openai_timeout_sec == 300
+    ok = c.post("/api/settings", json={"key": "ai.openai_timeout_sec", "value": 900})
+    assert ok.status_code == 200 and hub.app_cfg.ai_openai_timeout_sec == 900
+    # A 0 would time out every request before the model had said anything, so it is
+    # refused at the door rather than written and silently ignored on load.
+    for bad in (0, 3601, True, 600.5):
+        resp = c.post("/api/settings", json={"key": "ai.openai_timeout_sec", "value": bad})
+        assert resp.status_code == 400, bad
+    assert hub.app_cfg.ai_openai_timeout_sec == 900
+
+
+def test_the_ai_request_timeout_page_range_is_the_loaders_range():
+    """The page's range is the loader's range. settings_schema is a pure leaf and
+    cannot import ai_config, so the floor, the ceiling and the default are written
+    twice — pin them together, or raising OPENAI_TIMEOUT_CEILING later would leave
+    the Settings page 400-ing a value the loader would happily accept."""
+    from mooring.ai_config import OPENAI_TIMEOUT_CEILING, OPENAI_TIMEOUT_DEFAULT, AiConfig
+
+    spec = settings_schema.by_key("ai.openai_timeout_sec")
+    assert spec.maximum == OPENAI_TIMEOUT_CEILING
+    assert spec.default == OPENAI_TIMEOUT_DEFAULT == AiConfig().openai_timeout_sec
+    # The loader's floor: ``_as_positive_int`` drops anything below 1 for the default,
+    # so the page must not accept one either.
+    assert spec.minimum == 1
 
 
 def test_non_weakening_direction_needs_no_confirm(client):

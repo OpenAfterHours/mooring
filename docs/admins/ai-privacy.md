@@ -102,6 +102,13 @@ OpenAI credential and never follows redirects. The browser receives only a safe 
 label, its source, the approved model IDs, and their default: it never receives the
 endpoint, credential, API version, or classifier ID.
 
+Model text reaching your window on this route is not only the reply. If the approved
+endpoint streams the customer-data model's **thinking**, mooring displays that too, in
+the same folded block as any other model's — you are cleared for the content the model is
+reasoning over, so there is nothing to withhold from you — and it is display-only there
+in exactly the way [described below](#streamed-reasoning): it joins no request, is never
+re-sent, and is never persisted.
+
 Settings may store a user's **default selection within** the live profile: a
 customer-data model from the current allowlist and either **Automatic** or **Always use
 approved** routing. These are preferences, not trust designations. A hand-edited or
@@ -250,6 +257,13 @@ routing is enabled.
 
 Nothing about a conversation is persisted: the session store, telemetry, config
 discovery, skills, file hooks, and host-git access are all switched off.
+
+One thing you may see on screen is not part of the conversation at all. When a gateway
+streams a reasoning model's **thinking**, mooring shows it in its own folded block and
+then drops it: display-only, never joined to the assistant's answer, never added to the
+message list, never re-sent on the next request, never persisted — and deliberately
+**not** scanned by the outbound guards, because it is inbound model output rather than
+anything of yours leaving. See [the model's thinking](#streamed-reasoning).
 
 ## Applying a cell: the check, and whether it runs { #apply-gate }
 
@@ -539,6 +553,88 @@ openai_api_version = "2024-10-21"               # set → the AzureOpenAI client
 
 Value-blindness is unchanged for every one of these — only the value-free schema,
 source, and DAX ever leave, to whichever endpoint you configure.
+
+#### "It timed out" behind a gateway — `openai_timeout_sec`
+
+**Symptom.** Short questions work. Anything the model has to *think* about fails after
+a fixed wait with a timeout — reliably, not intermittently. It only happens when
+`openai_base_url` points at something other than OpenAI itself (LiteLLM, an Azure APIM
+front door, nginx, Cloudflare, a local server, a non-streaming translation shim).
+
+**Why.** Replies **stream**, so the timeout that matters is not "how long the whole
+answer may take" — it is the longest gap allowed *between* chunks, including the gap
+before the first one. A reasoning model sends nothing at all while it reasons, and a
+gateway that **buffers** the response rather than passing chunks straight through holds
+the entire reply back until the model has finished. From mooring's side the connection
+simply goes quiet, and a long think looks identical to a dead endpoint. Against
+`api.openai.com` you rarely see it: it emits a first chunk immediately and keeps the
+stream fed, which is why this correlates with a custom endpoint.
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `openai_timeout_sec` | `300` | Seconds mooring will wait on the endpoint — the read/write/pool budget, i.e. **how long the model may stay silent**. Env override: `MOORING_AI_OPENAI_TIMEOUT_SEC`. Editable in **Settings → AI copilot → AI request timeout**. Values below 1 are ignored and anything above 3600 is capped; a fractional value such as `600.5` is dropped rather than rounded, so the default applies. |
+
+```toml
+[ai]
+provider = "openai"
+openai_base_url = "https://gateway.internal.example/v1"
+openai_timeout_sec = 600     # a slow reasoning model behind a buffering gateway
+```
+
+Connecting is bounded **separately** by a short fixed budget, so raising this never
+lets an unreachable endpoint hang the app — it only gives a reachable one longer to
+think. It applies to the general provider and to the trusted customer-data route
+alike.
+
+**The better fix, where you own the gateway,** is to stop it buffering — nginx
+`proxy_buffering off`, or the equivalent pass-through setting — so chunks reach mooring
+as the model produces them. Then the model's silence never exceeds the gap between two
+tokens and the budget stops mattering. Raising `openai_timeout_sec` is the remedy when
+the buffering layer is not yours to change.
+
+Two supporting behaviours are deliberate rather than configurable. Mooring **retries a
+failed chat request once**, not the SDK's default of twice: a streaming completion that
+timed out has already made the model generate, so each further retry re-bills a full
+reasoning generation and multiplies the wait. The cheap metadata calls behind the
+connection check and the model list are the opposite case — nothing is generating, so
+they keep two retries on a fixed 30-second budget of their own, unaffected by the
+setting above. And the ceiling above exists because mooring reads
+the stream on a worker thread that cannot check the chat's **Stop** button mid-read — an
+unbounded budget would let a stalled endpoint wedge a chat turn with no way out but
+restarting.
+
+#### The model's thinking: shown to you, sent to no-one { #streamed-reasoning }
+
+The other half of the same silence is what mooring can *show* you while it lasts. Some
+OpenAI-compatible gateways stream a reasoning model's working-out ahead of its reply —
+LiteLLM, DeepSeek, Qwen and vLLM put it on a non-standard `delta.reasoning_content`
+field, outside OpenAI's own schema. Mooring reads it and renders it in the chat, dim and
+folded behind a *thinking…* label, because the alternative is a window that sits dead for
+the whole think and is indistinguishable from a broken endpoint.
+
+It is the **only** text in the transcript that travels inwards and never outwards, which
+makes it worth stating precisely:
+
+- **Display-only, by construction.** The think never joins the assistant's answer text,
+  never enters the message list mooring keeps for the conversation, and so is never sent
+  back on the next request. The payload the API sees is byte-for-byte what it would have
+  been had the gateway streamed no thinking at all. Nothing persists it: like the rest of
+  a conversation it lives in the browser tab until you close it, and **Clear** removes it.
+- **Not scanned by the [outbound PII guard](#structured-pii-pre-flight-scan-opt-in-best-effort),
+  and it should not be.** That guard checks what leaves *your workspace* for the model —
+  schema, notebook source, your own chat turns, a pasted traceback. This is the model's
+  own output making one hop to your screen; there is nothing of yours in it to withhold,
+  and holding it would only re-create the dead window.
+- **Never merged into a finding.** A [parallel investigate](#investigate) branch's answer
+  goes back to the main copilot as a tool result — the one path by which display-only text
+  could re-enter a conversation — so `ai/fanout.py` collects the answer channel only and
+  drops a branch that did nothing but think.
+- **It is scratch working, not a statement of fact.** Read it as you read the reply: as
+  the model's own words, not mooring's, and not a record of what happened.
+
+`tests/test_openai_session.py` pins the invariant rather than asserting it: a turn that
+streamed thinking and one that did not produce an **identical** next request, and a
+marker planted in the think appears on no request at all.
 
 ## Turning the copilot off for a notebook
 
@@ -1265,6 +1361,13 @@ prose — so the rule stands regardless.
   would hold it, that whatever it does send appears in your transcript verbatim, that a
   staged (`apply_runs = false`) or unobserved change never starts one at all, and that
   the model's own Apply fills the same telemetry and activity ledgers your click does.
+- **Expect one thing on screen that is on no request.** If you compare your wire
+  traffic against the transcript, a reasoning model's *thinking…* block appears in the
+  window and in nothing mooring sent. That is [by design](#streamed-reasoning) — it is
+  inbound model output, not egress — and
+  `tests/test_openai_session.py::test_reasoning_never_enters_the_conversation_sent_on_the_next_request`
+  proves the conversation carried forward is identical with and without it. Everything
+  else in the transcript that came from you *is* on a request.
 - **Live spike.** `scripts/spike_copilot_chat.py` opens a real session and asks
   the agent to read a file; it has no tool to do so.
 

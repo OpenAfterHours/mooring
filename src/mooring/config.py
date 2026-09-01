@@ -380,6 +380,10 @@ class AppConfig:
         return self.ai.openai_api_version
 
     @property
+    def ai_openai_timeout_sec(self) -> int:
+        return self.ai.openai_timeout_sec
+
+    @property
     def ai_routing_source(self) -> str:
         """Which trusted profile is live: ``"managed"``, ``"local"``, or ``"off"``.
 

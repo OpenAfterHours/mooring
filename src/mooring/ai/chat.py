@@ -188,6 +188,18 @@ class ChatBroadcaster:
             self._subs.discard(q)
 
     def _broadcast(self, event: ChatEvent) -> None:
+        # A streamed delta IS activity, so it resets the idle clock. Without this a turn
+        # that is visibly producing text still ages toward `ai.chat_idle_timeout_sec`,
+        # because only send / tool progress / proposals touched — and the reaper
+        # (`hub/routes/chat.py`, on chat open) would then close a session mid-answer.
+        # A reasoning model behind a gateway makes that reachable rather than theoretical:
+        # its whole think arrives as deltas and nothing else, and the timeout knob's own
+        # help text invites raising the request budget past the 900s idle default.
+        # Deliberately the `delta` kind only: "text is arriving" is the one event that
+        # means the model is working. Cheap enough to sit on the hot path — one clock
+        # read, outside the subscriber lock.
+        if event.kind == "delta":
+            self.touch()
         with self._lock:
             subs = list(self._subs)
         for q in subs:
